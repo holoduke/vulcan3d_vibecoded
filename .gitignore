@@ -1,0 +1,45 @@
+build/
+out/
+.cache/
+.vs/
+.vscode/
+*.user
+CMakeUserPresets.json
+
+# runtime-generated files
+qlike.log
+qlike_pipeline.cache
+qlike_settings.cfg
+
+# crash dump / temp logs
+*.dmp
+*.tmp
+
+# imgui's per-user window layout state, ad-hoc stdout captures
+imgui.ini
+stdout.txt
+
+# stray local logs / screenshots / scratch outputs
+*.log
+*.ppm
+!shaders/**/*.log
+
+# asset zips (the unzipped content is what the engine reads — zips are
+# the original download archives, no reason to ship them in a repo)
+assets/**/*.zip
+
+# unused asset variants — engine only samples Color + NormalGL (see
+# texture loader). The other maps + DCC source files come bundled with
+# the AmbientCG / Poly Haven download packs.
+assets/**/*_AmbientOcclusion*
+assets/**/*_Displacement*
+assets/**/*_NormalDX*
+assets/**/*_Roughness*
+assets/**/*_TONEMAPPED*
+assets/**/*.blend
+assets/**/*.usdc
+assets/**/*.tres
+assets/**/*.mtlx
+assets/**/MorningSkyHDRI002B.png
+assets/tex/**/*.png
+

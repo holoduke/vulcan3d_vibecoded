@@ -1,0 +1,358 @@
+// Combat: projectile spawn / update / impact, hit-spark particle physics +
+// trail draw, hitscan ray test, and the "player walking pushes boxes"
+// horizontal-impulse loop. All depend on `physics_` (Jolt) being live.
+
+#include "engine/vk_engine/internal.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+
+namespace qlike {
+
+void VulkanEngine::apply_player_pushes(glm::vec3 pre_velocity) {
+    if (!physics_) return;
+    // We push horizontally only; vertical pushes from walking would lift boxes
+    // when the player walks "up against" them, which feels wrong.
+    glm::vec3 horiz_vel(pre_velocity.x, 0.0f, pre_velocity.z);
+    if (glm::dot(horiz_vel, horiz_vel) < 0.04f) return;  // below 0.2 m/s — skip
+
+    // Player-AABB in world space, slightly inflated so we still register a
+    // push when slide_move has parked the player a few cm short of the box.
+    constexpr float kSkin = 0.06f;
+    glm::vec3 phe = game::Player::kHalfExtents + glm::vec3(kSkin);
+    glm::vec3 p_min = player_.position - phe;
+    glm::vec3 p_max = player_.position + phe;
+
+    // Effective player "mass" for the impulse equation. Real mass would be
+    // ~70 kg; we use a higher figure so pushes feel meaty (a 1 m³ crate at
+    // 1000 kg gets a noticeable shove rather than a polite nudge).
+    constexpr float kPlayerMass = 320.0f;
+
+    for (const auto& dp : dyn_props_) {
+        glm::mat4 m;
+        if (!physics_->get_body_world_matrix(dp.body_id, m)) continue;
+
+        glm::vec3 he = dp.full_size * 0.5f;
+        glm::vec3 b_min(std::numeric_limits<float>::max());
+        glm::vec3 b_max(std::numeric_limits<float>::lowest());
+        for (int i = 0; i < 8; ++i) {
+            glm::vec4 c((i & 1) ? he.x : -he.x,
+                        (i & 2) ? he.y : -he.y,
+                        (i & 4) ? he.z : -he.z, 1.0f);
+            glm::vec3 wc(m * c);
+            b_min = glm::min(b_min, wc);
+            b_max = glm::max(b_max, wc);
+        }
+
+        bool overlap = p_max.x > b_min.x && p_min.x < b_max.x &&
+                       p_max.y > b_min.y && p_min.y < b_max.y &&
+                       p_max.z > b_min.z && p_min.z < b_max.z;
+        if (!overlap) continue;
+
+        // Direction from player toward the box center, projected to the
+        // horizontal plane (no boost-jumping by walking into stuff).
+        glm::vec3 box_center = (b_min + b_max) * 0.5f;
+        glm::vec3 dir(box_center.x - player_.position.x,
+                      0.0f,
+                      box_center.z - player_.position.z);
+        float d_len = glm::length(dir);
+        if (d_len < 1e-3f) continue;
+        dir /= d_len;
+
+        // Speed at which the player WAS heading into the box.
+        float into_box = glm::dot(horiz_vel, dir);
+        if (into_box <= 0.1f) continue;
+
+        // Impulse = effective_player_mass * speed_into_box. Jolt then divides
+        // by the body's mass internally, so heavier crates accelerate less
+        // for the same impulse — bigger boxes are stiffer.
+        glm::vec3 impulse = dir * (into_box * kPlayerMass);
+        physics_->apply_impulse(dp.body_id, impulse);
+    }
+}
+
+void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
+    if (!physics_) return;
+    glm::vec3 dir = glm::normalize(direction);
+
+    // Orientation: rotate the local +Y axis (cylinder mesh + Jolt cylinder both
+    // align along Y) onto the firing direction so the bullet visually points
+    // along its motion.
+    glm::quat orient;
+    {
+        glm::vec3 from(0.0f, 1.0f, 0.0f);
+        float dotp = glm::dot(from, dir);
+        if (dotp > 0.99999f) {
+            orient = glm::quat(1, 0, 0, 0);
+        } else if (dotp < -0.99999f) {
+            orient = glm::angleAxis(3.14159265f, glm::vec3(1, 0, 0));
+        } else {
+            glm::vec3 axis = glm::normalize(glm::cross(from, dir));
+            orient = glm::angleAxis(std::acos(dotp), axis);
+        }
+    }
+
+    // Muzzle: a short distance ahead of the eye so the bullet is immediately
+    // visible and doesn't spawn inside the player capsule.
+    glm::vec3 spawn = origin + dir * 0.5f;
+
+    float speed = std::max(10.0f, game_.bullet_speed);
+    uint32_t id = physics_->add_dynamic_cylinder_ccd(
+        spawn, kProjectileRad, kProjectileHalf, orient,
+        dir * speed, std::max(0.1f, game_.bullet_mass));
+    if (id == 0) return;
+
+    muzzle_flash_timer_ = kMuzzleFlashDuration;
+    recoil_timer_       = kRecoilDuration;
+
+    Projectile p{};
+    p.body_id = id;
+    p.radius = kProjectileRad;
+    p.half_length = kProjectileHalf;
+    p.ttl = kProjectileTtl;
+    p.initial_speed = speed;
+    p.initial_dir = dir;
+    p.color = glm::vec4(1.0f, 0.78f, 0.30f, 1.0f);   // warm tracer
+    // Stay just below the bloom threshold so the bullet reads as a hot line
+    // rather than a star-shaped halo.
+    p.emissive = glm::vec3(0.95f, 0.70f, 0.25f);
+    projectiles_.push_back(p);
+}
+
+void VulkanEngine::update_projectiles(float dt) {
+    if (!physics_) return;
+    for (auto it = projectiles_.begin(); it != projectiles_.end(); ) {
+        it->ttl -= dt;
+        bool drop = it->ttl <= 0.0f;
+        bool was_impact = false;
+        glm::vec3 hit_pos(0.0f);
+
+        if (!drop) {
+            glm::mat4 m;
+            if (!physics_->get_body_world_matrix(it->body_id, m)) {
+                drop = true;
+            } else if (m[3].y < -100.0f) {
+                drop = true;     // fell out of the world
+            } else {
+                // Impact detection. After Jolt's step the bullet's velocity
+                // tells us what happened. We remove on first impact — no bounce.
+                glm::vec3 v = physics_->get_linear_velocity(it->body_id);
+                float along = glm::dot(v, it->initial_dir);
+                float speed = glm::length(v);
+                float min_speed = std::max(20.0f, it->initial_speed * 0.5f);
+                if (along < min_speed || speed < min_speed) {
+                    drop = true;
+                    was_impact = true;
+                    hit_pos = glm::vec3(m[3]);
+                }
+            }
+        }
+
+        if (drop) {
+            if (was_impact) {
+                // Use the bullet's post-impact velocity as the spark spray
+                // axis — that's the actual reflection direction.
+                glm::vec3 post_vel = physics_->get_linear_velocity(it->body_id);
+                glm::vec3 reflect = glm::length(post_vel) > 0.5f
+                                         ? glm::normalize(post_vel)
+                                         : -it->initial_dir;
+                spawn_hit_particles(hit_pos, reflect, it->initial_dir);
+            }
+            physics_->remove_body(it->body_id);
+            it = projectiles_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void VulkanEngine::spawn_hit_particles(glm::vec3 pos, glm::vec3 reflect_dir,
+                                       glm::vec3 incoming_dir) {
+    if (!physics_) return;
+    if (static_cast<int>(particles_.size()) >= kMaxParticles) return;
+
+    // Spray axis = reflection direction. Build an orthonormal basis so we
+    // can sample the cone around it.
+    glm::vec3 fwd = glm::length(reflect_dir) > 1e-3f
+                        ? glm::normalize(reflect_dir)
+                        : glm::vec3(0, 1, 0);
+    glm::vec3 ref = std::abs(fwd.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+    glm::vec3 right = glm::normalize(glm::cross(ref, fwd));
+    glm::vec3 up    = glm::cross(fwd, right);
+
+    glm::vec3 incoming = glm::length(incoming_dir) > 1e-3f
+                             ? glm::normalize(incoming_dir)
+                             : -fwd;
+    glm::vec3 back_to_shooter = -incoming;
+    float head_on = glm::clamp(glm::dot(fwd, back_to_shooter), 0.0f, 1.0f);
+
+    const float scale = std::max(0.05f, game_.spark_scale);
+    int count = std::max(1, static_cast<int>(kParticlesPerHit * scale + 0.5f));
+    for (int i = 0; i < count; ++i) {
+        if (static_cast<int>(particles_.size()) >= kMaxParticles) break;
+
+        bool wide = frand(spawn_rng_state_) < 0.15f;
+        float cone_lo = wide ? -0.2f : 0.30f;
+        float u = frand(spawn_rng_state_);
+        float v = frand(spawn_rng_state_);
+        float cone_cos = cone_lo + (1.0f - cone_lo) * (1.0f - u);
+        float ang = 6.28318531f * v;
+        float r = std::sqrt(std::max(0.0f, 1.0f - cone_cos * cone_cos));
+        glm::vec3 dir = glm::normalize(fwd * cone_cos +
+                                       right * (std::cos(ang) * r) +
+                                       up    * (std::sin(ang) * r));
+
+        float aligned = glm::clamp(cone_cos, 0.0f, 1.0f);
+        float backward = glm::clamp(glm::dot(dir, back_to_shooter), 0.0f, 1.0f);
+        float speed_envelope = (1.0f - 0.6f * head_on) *
+                               (0.55f + 0.45f * aligned) *
+                               (1.0f - 0.35f * backward);
+        float jitter = frand_range(spawn_rng_state_, 0.85f, 1.15f);
+        float speed = frand_range(spawn_rng_state_, 4.5f, 11.0f) *
+                      speed_envelope * jitter * scale;
+
+        glm::vec3 vel = dir * speed;
+        vel.y += frand_range(spawn_rng_state_, 0.6f, 2.2f) * speed_envelope * scale;
+
+        float spawn_dist = frand_range(spawn_rng_state_, 0.05f, 0.18f);
+        glm::vec3 spawn = pos + dir * spawn_dist;
+
+        // Low restitution: sparks land with a small hop and stop, instead
+        // of bouncing all over the room. Friction also bumped a little so
+        // they don't slide on the floor.
+        uint32_t id = physics_->add_dynamic_sphere(
+            spawn, kParticleColRad, vel, /*mass*/ 0.02f,
+            /*restitution*/ 0.20f, /*friction*/ 0.45f);
+        if (id == 0) continue;
+
+        Particle pa{};
+        pa.body_id = id;
+        float ttl_jitter = frand_range(spawn_rng_state_, 0.75f, 1.25f);
+        pa.ttl_max = kParticleTtl * ttl_jitter;
+        pa.ttl = pa.ttl_max;
+        pa.vis_radius = kParticleVisRad;
+        pa.vis_base_half = kParticleVisBase;
+        particles_.push_back(pa);
+    }
+}
+
+void VulkanEngine::draw_spark_trails(VkCommandBuffer cmd, const glm::mat4& vp) {
+    if (!physics_) return;
+
+    auto draw_segment = [&](glm::vec3 a, glm::vec3 b, float radius,
+                            const glm::vec3& emissive) {
+        glm::vec3 mid = (a + b) * 0.5f;
+        glm::vec3 d = b - a;
+        float len = glm::length(d);
+        if (len < 1e-4f) return;
+        glm::vec3 dir = d / len;
+        glm::mat4 model = align_local_y_to(mid, dir) *
+                          glm::scale(glm::mat4(1.0f),
+                                     glm::vec3(radius, len * 0.5f, radius));
+        PushConstants pc{};
+        pc.mvp = vp * model;
+        pc.model = model;
+        // Spark trails are sub-pixel emissive cylinders — zero-motion approx.
+        pc.prev_mvp = pc.mvp;
+        pc.color = glm::vec4(glm::min(emissive, glm::vec3(1.0f)), 1.0f);
+        pc.emissive = glm::vec4(emissive, 1.0f);    // full_emissive
+        vkCmdPushConstants(cmd, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
+    };
+
+    for (auto& pa : particles_) {
+        // Reuse the world matrix update_particles already cached this frame.
+        // Falling back to a Jolt query here would re-acquire the body mutex
+        // for every particle every frame — the dominant CPU cost when sparks
+        // are dense.
+        if (!pa.valid_world) continue;
+        glm::vec3 pos(pa.world[3]);
+
+        // Push current position into the history ring (newest at end).
+        if (pa.trail_count < kSparkTrailLen) {
+            pa.trail[pa.trail_count++] = pos;
+        } else {
+            for (int i = 0; i < kSparkTrailLen - 1; ++i) {
+                pa.trail[i] = pa.trail[i + 1];
+            }
+            pa.trail[kSparkTrailLen - 1] = pos;
+        }
+
+        if (pa.trail_count < 2) continue;
+        const float life_t = pa.ttl_max > 0.0f ? (pa.ttl / pa.ttl_max) : 0.0f;
+        const float thin_factor = 0.7f;
+        const float spark_bloom = std::max(0.0f, rt_.spark_bloom);
+        // Scale visual radius by sqrt(spark_bloom). Bloom halo width is
+        // limited by source spatial footprint — a 1-pixel emissive vanishes
+        // by mip 2, so cranking emissive alone only brightens the center,
+        // never widens the halo. Growing the cylinder gives the bloom
+        // prefilter a 4–6 px source at high settings, which survives 3–4
+        // mip levels and produces the wide soft glow the user expected.
+        // sqrt keeps the slider feel linear (5x bloom ≈ 2.2x width).
+        const float radius = pa.vis_radius * thin_factor *
+                             std::max(1.0f, std::sqrt(spark_bloom));
+
+        for (int i = 0; i < pa.trail_count - 1; ++i) {
+            float u = static_cast<float>(i) / static_cast<float>(kSparkTrailLen - 1);
+            float temp = std::max(0.0f, life_t * (0.30f + 0.70f * u));
+            glm::vec3 emi = spark_blackbody(temp) * spark_bloom;
+            draw_segment(pa.trail[i], pa.trail[i + 1], radius, emi);
+        }
+    }
+}
+
+void VulkanEngine::update_particles(float dt) {
+    if (!physics_) return;
+    for (auto it = particles_.begin(); it != particles_.end(); ) {
+        it->ttl -= dt;
+        bool drop = it->ttl <= 0.0f;
+        // Cache the body's world matrix once per frame. rebuild_tlas (now
+        // skips particles for TLAS) and draw_spark_trails both read from
+        // it->world afterward instead of re-querying Jolt — saves two body-
+        // mutex locks per particle per frame.
+        it->valid_world = false;
+        if (!drop) {
+            if (!physics_->get_body_world_matrix(it->body_id, it->world)) {
+                drop = true;
+            } else if (it->world[3].y < -100.0f) {
+                drop = true;
+            } else {
+                it->valid_world = true;
+            }
+        }
+        if (drop) {
+            physics_->remove_body(it->body_id);
+            it = particles_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void VulkanEngine::try_fire_hitscan(glm::vec3 origin, glm::vec3 direction) {
+    if (!physics_) return;
+    auto hit = physics_->raycast(origin, glm::normalize(direction), 200.0f);
+    if (!hit.hit) {
+        log::infof("[shoot] miss origin=(%.2f,%.2f,%.2f) dir=(%.2f,%.2f,%.2f)",
+                   origin.x, origin.y, origin.z, direction.x, direction.y, direction.z);
+        return;
+    }
+    if (hit.dynamic && hit.body_id != 0) {
+        // ~3 kg·m/s impulse along ray + a bit upward for satisfying flips.
+        glm::vec3 imp = direction * 6.0f + glm::vec3(0.0f, 2.5f, 0.0f);
+        physics_->apply_impulse(hit.body_id, imp);
+        ++score_;
+        log::infof("[shoot] HIT dyn body=%u dist=%.2f pos=(%.2f,%.2f,%.2f) score=%d",
+                   hit.body_id, hit.distance,
+                   hit.position.x, hit.position.y, hit.position.z, score_);
+    } else {
+        log::infof("[shoot] static dist=%.2f pos=(%.2f,%.2f,%.2f)",
+                   hit.distance, hit.position.x, hit.position.y, hit.position.z);
+    }
+}
+
+} // namespace qlike
