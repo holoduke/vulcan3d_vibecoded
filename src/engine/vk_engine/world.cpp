@@ -421,9 +421,28 @@ void VulkanEngine::rebuild_tick_aabbs() {
     tick_aabbs_.reserve(world_.aabbs.size() + dyn_props_.size());
     for (const auto& a : world_.aabbs) tick_aabbs_.push_back(a);
     if (!physics_) return;
-    for (const auto& dp : dyn_props_) {
+    // Sync cache size to dyn_props_; previously valid entries stay valid as
+    // long as the slot still indexes into the same body. Caller (spawn /
+    // remove) is responsible for invalidating slots that change identity —
+    // we conservatively recheck via is_body_active here.
+    if (dyn_tick_aabb_cache_.size() != dyn_props_.size()) {
+        dyn_tick_aabb_cache_.resize(dyn_props_.size());
+        dyn_tick_aabb_valid_.assign(dyn_props_.size(), false);
+    }
+    for (size_t idx = 0; idx < dyn_props_.size(); ++idx) {
+        const auto& dp = dyn_props_[idx];
+        // If we already have a cache entry AND Jolt put the body to sleep,
+        // its world-space AABB hasn't changed since last compute — reuse.
+        const bool active = physics_->is_body_active(dp.body_id);
+        if (!active && dyn_tick_aabb_valid_[idx]) {
+            tick_aabbs_.push_back(dyn_tick_aabb_cache_[idx]);
+            continue;
+        }
         glm::mat4 m;
-        if (!physics_->get_body_world_matrix(dp.body_id, m)) continue;
+        if (!physics_->get_body_world_matrix(dp.body_id, m)) {
+            dyn_tick_aabb_valid_[idx] = false;
+            continue;
+        }
         glm::vec3 he = dp.full_size * 0.5f;
         glm::vec3 mn(std::numeric_limits<float>::max());
         glm::vec3 mx(std::numeric_limits<float>::lowest());
@@ -435,7 +454,10 @@ void VulkanEngine::rebuild_tick_aabbs() {
             mn = glm::min(mn, wc);
             mx = glm::max(mx, wc);
         }
-        tick_aabbs_.push_back({mn, mx});
+        collision::AABB ab{mn, mx};
+        dyn_tick_aabb_cache_[idx] = ab;
+        dyn_tick_aabb_valid_[idx] = true;
+        tick_aabbs_.push_back(ab);
     }
 }
 

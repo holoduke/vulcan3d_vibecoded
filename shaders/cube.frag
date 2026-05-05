@@ -253,11 +253,16 @@ void main() {
 
     float n_dot_l = max(dot(N, L), 0.0);
 
-    // Per-pixel seed *without* the frame counter — keeps the per-pixel sample
-    // pattern stable across frames so the noise doesn't shimmer. Spatial
-    // dither still exists but is now a fixed pattern, much less distracting
-    // than per-frame churn.
-    uvec3 seed_base = uvec3(uint(gl_FragCoord.x), uint(gl_FragCoord.y), 0u);
+    // Per-pixel seed WITH the frame counter — TAA accumulates over ~8
+    // frames, so animating the noise lets temporal averaging resolve the
+    // residual dither into a clean signal. We tried a frame-stable seed
+    // earlier (less moment-to-moment shimmer) but it left a fixed dither
+    // pattern visible on flat surfaces; with TAA on (default) the temporal
+    // average wins. We mod the frame counter by a small power-of-two so
+    // the cycle is short and TAA always reaches steady state quickly.
+    uvec3 seed_base = uvec3(uint(gl_FragCoord.x),
+                            uint(gl_FragCoord.y),
+                            uint(scene.rt_flags.w) & 7u);
 
     // Distance-from-camera used for sample LOD across all RT effects.
     float cam_dist = distance(vWorldPos, scene.camera_pos.xyz);

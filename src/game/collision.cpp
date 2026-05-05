@@ -137,6 +137,7 @@ MoveResult slide_move(const AABB& player, glm::vec3 position, glm::vec3 velocity
     glm::vec3 remaining = velocity * dt;
     glm::vec3 pos = position;
     bool grounded = false;
+    float step_amount = 0.0f;
 
     for (int iter = 0; iter < max_iterations; ++iter) {
         if (glm::dot(remaining, remaining) < kEpsilon * kEpsilon) break;
@@ -176,9 +177,11 @@ MoveResult slide_move(const AABB& player, glm::vec3 position, glm::vec3 velocity
                     auto drop = best_sweep(stepped_box,
                                             glm::vec3(0.0f, -kStepHeight, 0.0f));
                     float drop_t = drop.first;
-                    pos = stepped + glm::vec3(
+                    glm::vec3 final_pos = stepped + glm::vec3(
                         0.0f, -kStepHeight * std::max(0.0f, drop_t - kEpsilon),
                         0.0f);
+                    step_amount += final_pos.y - pos.y;
+                    pos = final_pos;
                     grounded = true;
                     remaining = glm::vec3(0.0f);
                     break;
@@ -204,7 +207,7 @@ MoveResult slide_move(const AABB& player, glm::vec3 position, glm::vec3 velocity
         if (vel_into < 0.0f) velocity -= hit_normal * vel_into;
     }
 
-    return { pos, velocity, grounded };
+    return { pos, velocity, grounded, step_amount };
 }
 
 } // namespace qlike::collision

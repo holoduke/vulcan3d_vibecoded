@@ -1,5 +1,7 @@
 #include "game/level.h"
 
+#include <glm/vec2.hpp>
+
 namespace qlike::game {
 
 namespace {
@@ -89,106 +91,144 @@ Level make_arena(float r, float wh) {
         T(0.95f, 0.95f, 0.85f), kBrick, kBrick, 0.45f,
         T(0.55f, 0.55f, 0.30f));
 
-    // A few obstacle pillars in the outer arena (between castle and outer
-    // walls), useful as cover and for testing RT shadows / GI off objects
-    // away from the castle.
-    add(lv, glm::vec3( 18.0f, 1.0f,   0.0f), glm::vec3(2.0f, 2.0f, 2.0f),
-        T(0.55f, 0.75f, 0.95f), kPaint, kPaint, 1.0f,
-        T(0.20f, 0.55f, 0.85f));
-    add(lv, glm::vec3(-18.0f, 1.0f,   0.0f), glm::vec3(2.0f, 2.0f, 2.0f),
-        T(0.95f, 0.65f, 0.75f), kPaint, kPaint, 1.0f,
-        T(0.85f, 0.30f, 0.55f));
-    add(lv, glm::vec3(  0.0f, 0.5f, -22.0f), glm::vec3(4.0f, 1.0f, 1.0f),
-        T(0.85f, 0.85f, 0.65f), kPaint, kPaint, 1.0f,
-        T(0.70f, 0.70f, 0.30f));
-
     // -----------------------------------------------------------------
-    // Castle (centered at origin). 18×18 m footprint, 4.5 m walls, two
-    // square towers flanking the south-facing entrance, a stairway up to
-    // the wall walkway, and a small inner keep.
+    // Castle (centered at origin). 22×22 m footprint, 5 m walls, four
+    // corner towers (2.4 m square × 10 m tall), a north-facing entrance,
+    // a stairway up to the wall walkway, full-perimeter wall-top walk,
+    // crenelations along all 4 walls, and an inner keep with a doorway.
     // -----------------------------------------------------------------
     {
-        const float cr      = 9.0f;   // half-extent of outer wall (18 m wide)
-        const float wh      = 4.5f;   // wall height
+        const float cr      = 11.0f;  // half-extent of outer wall (22 m wide)
+        const float wh      = 5.0f;   // wall height
         const float wt      = 0.6f;   // wall thickness
-        const float ent_w   = 3.0f;   // south-entrance opening width
-        const float arch_h  = 1.2f;   // arch lintel height (sits above the gap)
+        const float ent_w   = 3.2f;   // entrance opening width (north)
+        const float arch_h  = 1.4f;   // arch lintel height (sits above the gap)
 
         const auto castle_tint  = T(0.95f, 0.92f, 0.86f);  // warm sandstone
         const auto castle_proto = T(0.55f, 0.50f, 0.42f);
         const auto stair_tint   = T(0.92f, 0.85f, 0.75f);
         const auto stair_proto  = T(0.50f, 0.35f, 0.20f);
+        const auto crenel_proto = T(0.45f, 0.42f, 0.35f);
 
-        // South wall (continuous; back of castle, away from spawn).
-        add(lv, glm::vec3(0.0f, wh * 0.5f, -cr),
-            glm::vec3(2.0f * cr, wh, wt),
-            castle_tint, kBrick, kBrick, 0.7f, castle_proto);
-        // East and west walls (continuous).
-        add(lv, glm::vec3( cr, wh * 0.5f, 0.0f),
-            glm::vec3(wt, wh, 2.0f * cr),
-            castle_tint, kBrick, kBrick, 0.7f, castle_proto);
-        add(lv, glm::vec3(-cr, wh * 0.5f, 0.0f),
-            glm::vec3(wt, wh, 2.0f * cr),
-            castle_tint, kBrick, kBrick, 0.7f, castle_proto);
-
-        // North wall (player-facing) — split around the entrance gap.
+        // Helper: add a continuous 4-side wall ring with one wall split
+        // around an entrance gap. North wall (player-facing) gets the gap.
+        auto add_wall = [&](float cx, float cz, float sx, float sz) {
+            add(lv, glm::vec3(cx, wh * 0.5f, cz), glm::vec3(sx, wh, sz),
+                castle_tint, kBrick, kBrick, 0.7f, castle_proto);
+        };
+        add_wall(0.0f, -cr, 2.0f * cr, wt);                 // south
+        add_wall( cr, 0.0f, wt, 2.0f * cr);                 // east
+        add_wall(-cr, 0.0f, wt, 2.0f * cr);                 // west
+        // North split:
         const float seg_w = (2.0f * cr - ent_w) * 0.5f;
         const float seg_x = (cr + ent_w * 0.5f) * 0.5f;
-        add(lv, glm::vec3(-seg_x, wh * 0.5f,  cr),
-            glm::vec3(seg_w, wh, wt),
-            castle_tint, kBrick, kBrick, 0.7f, castle_proto);
-        add(lv, glm::vec3( seg_x, wh * 0.5f,  cr),
-            glm::vec3(seg_w, wh, wt),
-            castle_tint, kBrick, kBrick, 0.7f, castle_proto);
+        add_wall(-seg_x,  cr, seg_w, wt);
+        add_wall( seg_x,  cr, seg_w, wt);
         // Arch lintel above the entrance: top of the gap, still lets the
-        // player walk through (clearance ≈ wh - arch_h = 3.3 m).
+        // player walk through (clearance = wh - arch_h ≈ 3.6 m).
         add(lv, glm::vec3(0.0f, wh - arch_h * 0.5f,  cr),
             glm::vec3(ent_w, arch_h, wt),
             castle_tint, kBrick, kBrick, 0.7f, castle_proto);
 
-        // Two flanking towers at the north (player-facing) corners. Twice
-        // as tall as the walls so they read as proper towers, with a small
-        // crenelation ring at the top.
-        const float tw_s = 2.4f;          // tower side length
-        const float tw_h = 9.0f;          // tower height
-        glm::vec3 tower_centers[2] = {
-            glm::vec3( cr,  tw_h * 0.5f,  cr),
-            glm::vec3(-cr,  tw_h * 0.5f,  cr),
+        // Crenelations along all 4 walls — small merlons every ~1.4 m on
+        // each wall's outer edge, sitting on top of the wall.
+        const float merlon_s   = 0.45f;
+        const float merlon_h   = 0.7f;
+        const float merlon_gap = 1.4f;   // step between merlons (centre-to-centre)
+        const float wall_top_y = wh + merlon_h * 0.5f;
+        // Span along a wall, in the wall's tangent dimension. crenelations
+        // skip the corner tower zones since towers carry their own tops.
+        const float corner_keep = 1.5f;  // metres from each corner to skip
+        auto add_merlons_along_x = [&](float cz_outer) {
+            for (float x = -cr + corner_keep + 0.6f;
+                 x <  cr - corner_keep;
+                 x += merlon_gap) {
+                add(lv, glm::vec3(x, wall_top_y, cz_outer),
+                    glm::vec3(merlon_s, merlon_h, merlon_s),
+                    castle_tint, kBrick, kBrick, 1.0f, crenel_proto);
+            }
         };
-        for (int i = 0; i < 2; ++i) {
-            // Solid tower body. Slightly different proto color per side so
-            // they're visually distinguishable.
-            glm::vec3 proto = (i == 0) ? T(0.50f, 0.40f, 0.30f)
-                                       : T(0.40f, 0.40f, 0.45f);
+        auto add_merlons_along_z = [&](float cx_outer) {
+            for (float z = -cr + corner_keep + 0.6f;
+                 z <  cr - corner_keep;
+                 z += merlon_gap) {
+                add(lv, glm::vec3(cx_outer, wall_top_y, z),
+                    glm::vec3(merlon_s, merlon_h, merlon_s),
+                    castle_tint, kBrick, kBrick, 1.0f, crenel_proto);
+            }
+        };
+        add_merlons_along_x(-(cr - wt * 0.5f));  // south outer edge (z = -cr + wt/2)
+        add_merlons_along_x( (cr - wt * 0.5f));  // north outer edge — stops short of entrance gap automatically
+        add_merlons_along_z(-(cr - wt * 0.5f));  // west outer edge
+        add_merlons_along_z( (cr - wt * 0.5f));  // east outer edge
+
+        // Four corner towers — taller than the walls so they read as proper
+        // towers, with crenelated tops.
+        const float tw_s = 2.4f;
+        const float tw_h = 10.0f;
+        glm::vec3 tower_centers[4] = {
+            glm::vec3( cr,  tw_h * 0.5f,  cr),  // NE
+            glm::vec3(-cr,  tw_h * 0.5f,  cr),  // NW
+            glm::vec3( cr,  tw_h * 0.5f, -cr),  // SE
+            glm::vec3(-cr,  tw_h * 0.5f, -cr),  // SW
+        };
+        for (int i = 0; i < 4; ++i) {
             add(lv, tower_centers[i],
                 glm::vec3(tw_s, tw_h, tw_s),
-                castle_tint, kBrick, kBrick, 0.7f, proto);
-            // Crenelations: 4 small caps at the corners of the tower top.
-            const float c_s = 0.35f;
-            const float c_h = 0.6f;
+                castle_tint, kBrick, kBrick, 0.7f, castle_proto);
+            // Crenelations around the tower top: 8 merlons (corners + mid-
+            // edges) form a battlement ring.
+            const float c_s = 0.4f;
+            const float c_h = 0.7f;
             const float c_y = tw_h + c_h * 0.5f;
             const float c_o = (tw_s - c_s) * 0.5f;
             glm::vec3 base = tower_centers[i];
             base.y = c_y;
-            for (int dx = -1; dx <= 1; dx += 2) {
-                for (int dz = -1; dz <= 1; dz += 2) {
-                    add(lv, base + glm::vec3(dx * c_o, 0.0f, dz * c_o),
-                        glm::vec3(c_s, c_h, c_s),
-                        castle_tint, kBrick, kBrick, 1.0f, proto);
-                }
+            // 4 corners + 4 mid-edges
+            const glm::vec2 offs[8] = {
+                glm::vec2(-1,-1), glm::vec2(-1, 1),
+                glm::vec2( 1,-1), glm::vec2( 1, 1),
+                glm::vec2(-1, 0), glm::vec2( 1, 0),
+                glm::vec2( 0,-1), glm::vec2( 0, 1),
+            };
+            for (int k = 0; k < 8; ++k) {
+                const glm::vec2& o = offs[k];
+                add(lv, base + glm::vec3(o.x * c_o, 0.0f, o.y * c_o),
+                    glm::vec3(c_s, c_h, c_s),
+                    castle_tint, kBrick, kBrick, 1.0f, crenel_proto);
             }
         }
 
-        // Stairway up to the wall-walkway. Sits along the inside of the
-        // east wall, climbing south-to-north. n_steps × step_h reaches wh,
-        // and step_h stays under collision::kStepHeight (0.45) so the
+        // Wall-top walkway: a thin platform along the inside of all four
+        // walls, forming a square ring at y = wh. Built from 4 strips,
+        // slightly inset so it doesn't conflict with the merlons.
+        const float walk_w = 1.2f;
+        const float walk_in = wt + walk_w * 0.5f;
+        const float walk_y  = wh + 0.05f;
+        // North + south strips (full inside length minus tower bases)
+        add(lv, glm::vec3(0.0f, walk_y,  cr - walk_in),
+            glm::vec3(2.0f * cr - 2.0f * tw_s, 0.1f, walk_w),
+            stair_tint, kBrick, kBrick, 0.6f, stair_proto);
+        add(lv, glm::vec3(0.0f, walk_y, -cr + walk_in),
+            glm::vec3(2.0f * cr - 2.0f * tw_s, 0.1f, walk_w),
+            stair_tint, kBrick, kBrick, 0.6f, stair_proto);
+        // East + west strips
+        add(lv, glm::vec3( cr - walk_in, walk_y, 0.0f),
+            glm::vec3(walk_w, 0.1f, 2.0f * cr - 2.0f * tw_s),
+            stair_tint, kBrick, kBrick, 0.6f, stair_proto);
+        add(lv, glm::vec3(-cr + walk_in, walk_y, 0.0f),
+            glm::vec3(walk_w, 0.1f, 2.0f * cr - 2.0f * tw_s),
+            stair_tint, kBrick, kBrick, 0.6f, stair_proto);
+
+        // Stairway up to the walkway. East wall inside, climbing south to
+        // north. step_h stays under collision::kStepHeight (0.45) so the
         // player walks up smoothly without jumping.
-        const int   n_steps = 12;
-        const float step_h  = wh / float(n_steps);   // 0.375 m per step
+        const int   n_steps = 13;
+        const float step_h  = wh / float(n_steps);
         const float step_d  = 0.55f;
         const float stair_w = 2.4f;
-        const float stair_x = cr - wt - 0.5f - stair_w * 0.5f;  // hugs east wall
-        const float stair_z0 = -(float(n_steps) * 0.5f) * step_d;  // centered
+        const float stair_x = cr - wt - walk_w - 0.6f - stair_w * 0.5f;
+        const float stair_z0 = -(float(n_steps) * 0.5f) * step_d;
         for (int i = 0; i < n_steps; ++i) {
             float h = step_h * float(i + 1);
             float z = stair_z0 + float(i) * step_d;
@@ -197,41 +237,64 @@ Level make_arena(float r, float wh) {
                 stair_tint, kBrick, kBrick, 0.6f, stair_proto);
         }
 
-        // Wall walkway — thin platform on top of the south wall (the back
-        // wall, away from the entrance), reachable from the top of the
-        // stairs by walking along the inside-east-wall edge at wh height.
-        // Connects via a short ledge on the east wall too so the path
-        // top-of-stairs → east ledge → south walkway works.
-        const float walk_w = 1.2f;
-        add(lv, glm::vec3(0.0f, wh + 0.05f, -cr + wt + walk_w * 0.5f),
-            glm::vec3(2.0f * cr - 2.0f * wt, 0.1f, walk_w),
-            stair_tint, kBrick, kBrick, 0.6f, stair_proto);
-        add(lv, glm::vec3(cr - wt - walk_w * 0.5f, wh + 0.05f, 0.0f),
-            glm::vec3(walk_w, 0.1f, 2.0f * cr - 2.0f * wt),
-            stair_tint, kBrick, kBrick, 0.6f, stair_proto);
+        // Inner keep / house — 6×6 m footprint × 4 m tall, centered in the
+        // back half of the courtyard. Has a doorway on the north face so
+        // the player can step inside.
+        const float kp_cx = 0.0f;
+        const float kp_cz = -4.5f;
+        const float kp_sx = 6.0f;
+        const float kp_sz = 6.0f;
+        const float kp_h  = 4.0f;
+        const float door_w = 1.2f;
+        const float door_h = 2.4f;
+        const auto  keep_tint  = T(0.92f, 0.84f, 0.72f);
+        const auto  keep_proto = T(0.55f, 0.40f, 0.25f);
+        // Three solid walls + the north wall split around a door gap.
+        add(lv, glm::vec3(kp_cx, kp_h * 0.5f, kp_cz - kp_sz * 0.5f + wt * 0.5f),
+            glm::vec3(kp_sx, kp_h, wt),
+            keep_tint, kPaint, kPaint, 1.0f, keep_proto);                  // south
+        add(lv, glm::vec3(kp_cx + kp_sx * 0.5f - wt * 0.5f, kp_h * 0.5f, kp_cz),
+            glm::vec3(wt, kp_h, kp_sz),
+            keep_tint, kPaint, kPaint, 1.0f, keep_proto);                  // east
+        add(lv, glm::vec3(kp_cx - kp_sx * 0.5f + wt * 0.5f, kp_h * 0.5f, kp_cz),
+            glm::vec3(wt, kp_h, kp_sz),
+            keep_tint, kPaint, kPaint, 1.0f, keep_proto);                  // west
+        // North wall split for the door.
+        const float kp_seg_w = (kp_sx - door_w) * 0.5f;
+        const float kp_seg_x = (kp_sx * 0.5f + door_w * 0.5f) * 0.5f;
+        add(lv, glm::vec3(kp_cx - kp_seg_x, kp_h * 0.5f, kp_cz + kp_sz * 0.5f - wt * 0.5f),
+            glm::vec3(kp_seg_w, kp_h, wt),
+            keep_tint, kPaint, kPaint, 1.0f, keep_proto);
+        add(lv, glm::vec3(kp_cx + kp_seg_x, kp_h * 0.5f, kp_cz + kp_sz * 0.5f - wt * 0.5f),
+            glm::vec3(kp_seg_w, kp_h, wt),
+            keep_tint, kPaint, kPaint, 1.0f, keep_proto);
+        // Lintel above keep door — sits between door_h and kp_h, fills
+        // the gap above the door so a clean rectangle door is visible.
+        const float lintel_h = kp_h - door_h;
+        add(lv, glm::vec3(kp_cx, door_h + lintel_h * 0.5f,
+                          kp_cz + kp_sz * 0.5f - wt * 0.5f),
+            glm::vec3(door_w, lintel_h, wt),
+            keep_tint, kPaint, kPaint, 1.0f, keep_proto);
+        // Roof slab so the keep is visually capped.
+        add(lv, glm::vec3(kp_cx, kp_h + 0.05f, kp_cz),
+            glm::vec3(kp_sx, 0.1f, kp_sz),
+            keep_tint, kPaint, kPaint, 1.0f, keep_proto);
 
-        // Small inner keep — 4×4 m, 6 m tall in the back of the courtyard.
-        // No door (decorative). Gives the courtyard a landmark and breaks
-        // line of sight from the entrance to the back walkway.
-        add(lv, glm::vec3(0.0f, 3.0f, -4.0f),
-            glm::vec3(4.0f, 6.0f, 4.0f),
-            T(0.90f, 0.78f, 0.65f), kPaint, kPaint, 1.0f,
-            T(0.55f, 0.40f, 0.25f));
-
-        // Lanterns flanking the inside of the entrance and along the back
-        // give the courtyard atmospheric warm pools of light at dusk.
-        add_lantern(lv, glm::vec3( ent_w * 0.5f + 0.7f, 0.0f, cr - wt - 1.0f));
-        add_lantern(lv, glm::vec3(-ent_w * 0.5f - 0.7f, 0.0f, cr - wt - 1.0f));
-        add_lantern(lv, glm::vec3( 3.0f, 0.0f, -7.0f));
-        add_lantern(lv, glm::vec3(-3.0f, 0.0f, -7.0f));
+        // Lanterns: pair flanking the entrance + pair near the keep door,
+        // and one inside the keep so the interior isn't pitch-black.
+        add_lantern(lv, glm::vec3( ent_w * 0.5f + 0.9f, 0.0f, cr - wt - 1.0f));
+        add_lantern(lv, glm::vec3(-ent_w * 0.5f - 0.9f, 0.0f, cr - wt - 1.0f));
+        add_lantern(lv, glm::vec3( door_w * 0.5f + 0.6f, 0.0f, kp_cz + kp_sz * 0.5f + 0.6f));
+        add_lantern(lv, glm::vec3(-door_w * 0.5f - 0.6f, 0.0f, kp_cz + kp_sz * 0.5f + 0.6f));
+        add_lantern(lv, glm::vec3(kp_cx, 0.0f, kp_cz - 1.0f));    // inside keep, near south wall
     }
 
-    // Outer arena lantern posts, kept further out so the castle doesn't
-    // overlap them. Two at each "edge" of the arena, off the castle axis.
-    add_lantern(lv, glm::vec3( 18.0f, 0.0f,  18.0f));
-    add_lantern(lv, glm::vec3(-18.0f, 0.0f,  18.0f));
-    add_lantern(lv, glm::vec3( 18.0f, 0.0f, -18.0f));
-    add_lantern(lv, glm::vec3(-18.0f, 0.0f, -18.0f));
+    // Outer arena lanterns at the four arena-corner zones, well clear of
+    // the castle footprint (cr=11, lanterns at radius 22 from origin).
+    add_lantern(lv, glm::vec3( 22.0f, 0.0f,  22.0f));
+    add_lantern(lv, glm::vec3(-22.0f, 0.0f,  22.0f));
+    add_lantern(lv, glm::vec3( 22.0f, 0.0f, -22.0f));
+    add_lantern(lv, glm::vec3(-22.0f, 0.0f, -22.0f));
 
     return lv;
 }

@@ -343,6 +343,13 @@ private:
     // Reused buffer of "static brush AABBs + per-tick dynamic-box AABBs" so
     // the player can't walk through Jolt-driven boxes.
     std::vector<collision::AABB> tick_aabbs_;
+    // Per-dyn-prop AABB cache. Sleeping bodies reuse their last-computed
+    // AABB instead of re-running the 8-corner mat-vec each physics tick.
+    // At 200 dyn props × 6 ticks/frame × 8 corners that was 9600 mat-vec
+    // per frame; now most of those are skipped once the bodies settle.
+    // Indexing matches dyn_props_; resized in rebuild_tick_aabbs.
+    std::vector<collision::AABB> dyn_tick_aabb_cache_;
+    std::vector<bool>            dyn_tick_aabb_valid_;
     void rebuild_tick_aabbs();
 
     // Per-frame cache of dynamic-box render state. Computed once at the top of

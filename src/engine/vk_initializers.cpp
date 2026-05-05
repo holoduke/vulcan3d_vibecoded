@@ -128,6 +128,34 @@ VkRenderingInfo rendering_info(VkExtent2D extent,
     };
 }
 
+// Access mask for a target image layout. The Vulkan validation layer warns
+// when a barrier passes generic MEMORY_READ/MEMORY_WRITE for a layout that
+// has a more specific allowed access set — the warnings aren't bugs (the
+// generic masks are spec-legal), but they crowd the log and hide real
+// problems. Mapping each layout to its canonical mask kills the noise.
+static VkAccessFlags2 access_for_layout(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_UNDEFINED:
+        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            return 0;
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            return VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
+            return VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                   VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return VK_ACCESS_2_SHADER_READ_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            return VK_ACCESS_2_TRANSFER_READ_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        default:
+            return VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    }
+}
+
 void transition_image_aspect(VkCommandBuffer cmd, VkImage image,
                              VkImageLayout from, VkImageLayout to,
                              VkImageAspectFlags aspect) {
@@ -135,9 +163,9 @@ void transition_image_aspect(VkCommandBuffer cmd, VkImage image,
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .pNext = nullptr,
         .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .srcAccessMask = access_for_layout(from),
         .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT,
+        .dstAccessMask = access_for_layout(to),
         .oldLayout = from, .newLayout = to,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -171,9 +199,9 @@ void transition_image_mip(VkCommandBuffer cmd, VkImage image,
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .pNext = nullptr,
         .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .srcAccessMask = access_for_layout(from),
         .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT,
+        .dstAccessMask = access_for_layout(to),
         .oldLayout = from, .newLayout = to,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,

@@ -100,6 +100,15 @@ void update_player(Player& p, const PlayerInput& in,
     p.position = move.position;
     p.velocity = move.velocity;
     p.on_ground = move.grounded;
+
+    // Step-up smoothing — the renderer subtracts step_smooth_offset from the
+    // eye y, so an instant physics jump up a stair reads as a smooth ramp.
+    // Add this tick's step amount, then decay exponentially. Half-life
+    // ~70 ms (decay rate 10/s) feels natural without lagging perceptibly.
+    p.step_smooth_offset += move.step_amount;
+    p.step_smooth_offset *= std::max(0.0f, 1.0f - 10.0f * dt);
+    // Cap so a chain of steps within one tick can't accumulate runaway.
+    p.step_smooth_offset = std::clamp(p.step_smooth_offset, -0.6f, 0.6f);
 }
 
 } // namespace qlike::game

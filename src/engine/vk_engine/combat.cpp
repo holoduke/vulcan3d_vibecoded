@@ -30,20 +30,31 @@ void VulkanEngine::apply_player_pushes(glm::vec3 pre_velocity) {
     // 1000 kg gets a noticeable shove rather than a polite nudge).
     constexpr float kPlayerMass = 320.0f;
 
-    for (const auto& dp : dyn_props_) {
-        glm::mat4 m;
-        if (!physics_->get_body_world_matrix(dp.body_id, m)) continue;
-
-        glm::vec3 he = dp.full_size * 0.5f;
-        glm::vec3 b_min(std::numeric_limits<float>::max());
-        glm::vec3 b_max(std::numeric_limits<float>::lowest());
-        for (int i = 0; i < 8; ++i) {
-            glm::vec4 c((i & 1) ? he.x : -he.x,
-                        (i & 2) ? he.y : -he.y,
-                        (i & 4) ? he.z : -he.z, 1.0f);
-            glm::vec3 wc(m * c);
-            b_min = glm::min(b_min, wc);
-            b_max = glm::max(b_max, wc);
+    // Use the cached per-body AABB built by rebuild_tick_aabbs this tick —
+    // saves a Jolt body-mutex acquire + 8-corner mat-vec per dyn prop.
+    // Falls back to a fresh query if the cache isn't populated yet.
+    const bool have_cache = dyn_tick_aabb_valid_.size() == dyn_props_.size() &&
+                             dyn_tick_aabb_cache_.size() == dyn_props_.size();
+    for (size_t i = 0; i < dyn_props_.size(); ++i) {
+        const auto& dp = dyn_props_[i];
+        glm::vec3 b_min, b_max;
+        if (have_cache && dyn_tick_aabb_valid_[i]) {
+            b_min = dyn_tick_aabb_cache_[i].min;
+            b_max = dyn_tick_aabb_cache_[i].max;
+        } else {
+            glm::mat4 m;
+            if (!physics_->get_body_world_matrix(dp.body_id, m)) continue;
+            glm::vec3 he = dp.full_size * 0.5f;
+            b_min = glm::vec3(std::numeric_limits<float>::max());
+            b_max = glm::vec3(std::numeric_limits<float>::lowest());
+            for (int j = 0; j < 8; ++j) {
+                glm::vec4 c((j & 1) ? he.x : -he.x,
+                            (j & 2) ? he.y : -he.y,
+                            (j & 4) ? he.z : -he.z, 1.0f);
+                glm::vec3 wc(m * c);
+                b_min = glm::min(b_min, wc);
+                b_max = glm::max(b_max, wc);
+            }
         }
 
         bool overlap = p_max.x > b_min.x && p_min.x < b_max.x &&

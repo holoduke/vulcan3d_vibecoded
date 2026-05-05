@@ -28,6 +28,11 @@ struct MoveResult {
     glm::vec3 position;
     glm::vec3 velocity;
     bool grounded;
+    // Vertical distance the auto step-up logic boosted us this frame, in
+    // metres. 0 when no step occurred. The renderer subtracts a decaying
+    // copy of this from the eye height so a flight of stairs reads as a
+    // smooth ramp rather than a per-step zigsaw.
+    float step_amount;
 };
 
 // Slide-move: given a player AABB at `position`, attempt to move by `velocity * dt`

@@ -39,6 +39,12 @@ struct Player {
     // Hitbox is intentionally NOT scaled — avoids the "uncrouch into a low
     // ceiling" trap that needs explicit clearance checks to handle safely.
     float crouch_factor = 0.0f;
+    // Smoothing offset for stair step-ups. When slide_move snaps the player
+    // up by a step's height, the physics position jumps instantly but the
+    // eye is rendered at `position.y + eye_offset_y - step_smooth_offset`
+    // — so it keeps its old height for a frame and rises smoothly back as
+    // step_smooth_offset decays toward zero.
+    float step_smooth_offset = 0.0f;
 
     // 0.6 m wide, 1.8 m tall — narrower than the previous 0.8 m so the player
     // can fit between closer obstacles (settled boxes, lantern posts, etc.).
@@ -57,7 +63,9 @@ struct Player {
     }
 
     glm::vec3 eye_position() const {
-        return position + glm::vec3(0.0f, eye_offset_y(), 0.0f);
+        return position + glm::vec3(0.0f,
+                                     eye_offset_y() - step_smooth_offset,
+                                     0.0f);
     }
 
     glm::vec3 forward() const;  // unit vector in look direction
