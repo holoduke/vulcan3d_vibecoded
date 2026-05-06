@@ -169,21 +169,12 @@ void main() {
     float fade = 1.0 - smoothstep(fade_start, pc.grass_params.x, view_dist_base);
     lp.y *= fade;
 
-    // ---- Distance-based density thinning ----
-    // Far blades get progressively dropped so dense fields don't form
-    // an overpacked carpet at distance. Per-blade rank is a stable
-    // hash on world XZ. Instead of a hard if-cull (caused popping
-    // flashes as the player moved across the rank/density boundary),
-    // we use a smoothstep height multiplier — blades on the edge of
-    // being culled shrink smoothly to zero so the cut is invisible.
-    float dist_norm = clamp(view_dist_base / pc.grass_params.x, 0.0, 1.0);
-    float dist_density = mix(1.0, 0.40, smoothstep(0.25, 1.0, dist_norm));
-    float blade_rank = fract(sin(dot(base_world.xz,
-                                      vec2(12.9898, 78.233))) * 43758.5453);
-    float density_keep = 1.0 - smoothstep(dist_density - 0.04,
-                                           dist_density + 0.04,
-                                           blade_rank);
-    lp.y *= density_keep;
+    // (Distance-based density falloff was removed: it produced
+    // visible "flashes" as blades crossed the density threshold while
+    // the player moved, and reportedly correlated with intermittent
+    // crashes. If we want it back later, do it in a way that doesn't
+    // cause per-frame visibility flips — e.g. distance only changing
+    // the shader's draw-call instance offset, not per-blade fade.)
 
     // Slope fade — blades whose stored heightmap-normal Y is below
     // the user threshold shrink toward 0 height. Smoothstep makes

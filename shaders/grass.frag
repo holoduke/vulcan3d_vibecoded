@@ -70,13 +70,16 @@ void main() {
     float sun_amt = scene.sun_color.a * 0.10 * n_dot_l;
     float sky_amt = 0.30;
 
-    // Shadow factor — separate from lum. cube.frag's terrain in
-    // shadow drops to ~10% of its sunlit value; we match that here
-    // so grass in a cast shadow visibly tracks the terrain beneath
-    // it. Earlier formulation (sun_amt = 0 in shadow, sky_amt = 0.30
-    // always) only got a 50% drop, which read as "barely darker".
+    // Shadow factor. Only fired for blades inside `kShadowDist` of the
+    // camera — at high density (2M placed, 4× slider) firing two rays
+    // per blade across the whole field was a measurable slice of frame
+    // time and is suspected to push some hardware into TDR. Distant
+    // blades are tiny on screen anyway; not having shadow on them is
+    // not visually noticeable.
+    const float kShadowDist = 45.0;
+    float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
     float shadow_factor = 1.0;
-    if (scene.rt_flags.x != 0) {
+    if (scene.rt_flags.x != 0 && dist_to_cam < kShadowDist) {
         vec3 origin = vWorldPos + vec3(0.0, 0.5, 0.0);
         if (sun_blocked(origin, normalize(scene.sun_direction.xyz))) {
             shadow_factor *= 0.18;     // sun blocked: 82% darker
