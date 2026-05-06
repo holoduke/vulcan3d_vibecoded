@@ -1,4 +1,5 @@
 #version 460
+#extension GL_EXT_ray_query : require
 
 // Per-vertex blade-mesh attributes (5-vert ribbon).
 layout(location = 0) in vec3 inPos;       // local-space (y in [0, blade_h])
@@ -28,7 +29,8 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  terrain_params;
     vec4  terrain_h_low;
     vec4  terrain_h_high;
-    vec4  grass_extra;   // x: height_scale, y: alpha_cutoff
+    vec4  grass_extra;   // x: height_scale, y: alpha_cutoff, z: slope_n_min, w: distance_density
+    vec4  grass_extra2;  // x: alt_min, y: alt_max
 } scene;
 
 layout(push_constant) uniform PC {
@@ -52,6 +54,21 @@ layout(location = 2) out vec2 vUv;
 layout(location = 3) out float vHeightRatio;
 layout(location = 4) out float vCullKill;
 layout(location = 5) out vec3 vWorldPos;
+layout(location = 6) out float vSunShadow;   // 0 = lit, 1 = sun-blocked
+layout(location = 7) out float vDistToCam;
+
+layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
+
+bool sun_blocked_v(vec3 origin, vec3 dir) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, topLevelAS,
+                          gl_RayFlagsTerminateOnFirstHitEXT |
+                          gl_RayFlagsOpaqueEXT,
+                          0x01, origin, 0.001, dir, 200.0);
+    while (rayQueryProceedEXT(rq)) {}
+    return rayQueryGetIntersectionTypeEXT(rq, true) ==
+           gl_RayQueryCommittedIntersectionTriangleEXT;
+}
 
 mat3 rotY(float a) {
     float c = cos(a), s = sin(a);
@@ -203,6 +220,16 @@ void main() {
     float slope_fade = smoothstep(slope_th - 0.10, slope_th + 0.05, slope_n);
     lp.y *= slope_fade;
 
+    // Altitude band fade — blade stays full height inside [alt_min,
+    // alt_max], then smoothsteps to zero outside. 2m soft edges on
+    // each side so the band boundary isn't a sharp horizontal line.
+    float alt_min = scene.grass_extra2.x;
+    float alt_max = scene.grass_extra2.y;
+    float alt_fade =
+        smoothstep(alt_min - 2.0, alt_min + 2.0, base_world.y) *
+        (1.0 - smoothstep(alt_max - 2.0, alt_max + 2.0, base_world.y));
+    lp.y *= alt_fade;
+
     vec3 world = R * lp + base_world;
 
     // Hard cull: well beyond max distance, collapse to NaN clip space
@@ -215,8 +242,29 @@ void main() {
         vUv     = vec2(0.0);
         vHeightRatio = 0.0;
         vWorldPos = vec3(0.0);
+        vSunShadow = 0.0;
+        vDistToCam = 0.0;
         return;
     }
+
+    // ---- Per-blade sun shadow (vertex-shader ray) ----
+    // Old code fired the shadow ray PER FRAGMENT, which on close
+    // blades meant hundreds of rays per blade. Now we fire ONE ray
+    // per vertex (5 rays per blade) and pass the result through a
+    // varying — the fragment just multiplies. Net cost on close
+    // grass drops by orders of magnitude; far grass picks up the
+    // shadow at marginal extra cost. Visually a single per-blade
+    // shadow value is fine: blades are tiny, fragment-level shadow
+    // resolution wasn't earning its cost.
+    vSunShadow = 0.0;
+    if (scene.rt_flags.x != 0) {
+        vec3 origin = base_world + vec3(0.0, 0.5, 0.0);
+        vec3 sun_dir = normalize(scene.sun_direction.xyz);
+        if (sun_blocked_v(origin, sun_dir)) {
+            vSunShadow = 1.0;
+        }
+    }
+    vDistToCam = view_dist_base;
 
     gl_Position = pc.mvp * vec4(world, 1.0);
 

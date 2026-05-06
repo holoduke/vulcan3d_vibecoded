@@ -254,8 +254,11 @@ void VulkanEngine::init_world() {
         // courtyard around the castle. Castle stones are excluded by
         // the keep-out rectangle below so blades never poke through
         // the brushes themselves.
-        gp.height_min = -2.0f;
-        gp.height_max = hp.plateau_height + 8.0f;
+        // Placement bounds are GENEROUS — the runtime altitude
+        // sliders (rt_.grass_alt_min/max) shape the visible band
+        // without re-baking. Cover most reasonable terrain heights.
+        gp.height_min = -20.0f;
+        gp.height_max = 200.0f;
         // Concentrate blades in a 200m square around the castle so the
         // density is high (~12 blades/m²) where the player actually
         // sees grass. Spreading them across the full 1km map gave

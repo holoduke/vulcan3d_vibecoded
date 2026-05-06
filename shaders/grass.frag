@@ -7,6 +7,8 @@ layout(location = 2) in vec2 vUv;
 layout(location = 3) in float vHeightRatio;
 layout(location = 4) in float vCullKill;
 layout(location = 5) in vec3 vWorldPos;
+layout(location = 6) in float vSunShadow;
+layout(location = 7) in float vDistToCam;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
@@ -28,7 +30,8 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  terrain_params;
     vec4  terrain_h_low;
     vec4  terrain_h_high;
-    vec4  grass_extra;   // x: height_scale, y: alpha_cutoff
+    vec4  grass_extra;   // x: height_scale, y: alpha_cutoff, z: slope_n_min, w: distance_density
+    vec4  grass_extra2;  // x: alt_min, y: alt_max
 } scene;
 
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
@@ -70,26 +73,19 @@ void main() {
     float sun_amt = scene.sun_color.a * 0.10 * n_dot_l;
     float sky_amt = 0.30;
 
-    // Shadow factor. Two rays:
-    //   - sun ray: fires for ALL grass regardless of distance, so far-
-    //     distance grass also picks up the castle/mountain shadow.
-    //     This is the visually important one — you can read the shadow
-    //     of the castle wall stretching across the field at distance.
-    //   - sky-up ray: only inside `kSkyShadowDist`. It tests "am I
-    //     under a roof?" which is only relevant within a few tens of
-    //     metres (inside the keep). Skipping it at distance halves
-    //     the per-fragment ray cost on the far field, where nothing
-    //     overhead would have been hit anyway.
+    // Shadow factor:
+    //   - Sun shadow comes from a per-vertex ray result (vSunShadow,
+    //     interpolated as flat varying — see grass.vert). One ray
+    //     per blade vertex, vs the previous per-pixel ray which on
+    //     dense close-up grass was hundreds of rays per blade.
+    //   - Sky-up "is roofed" ray still runs per fragment for blades
+    //     within kSkyShadowDist (only relevant inside the keep).
     const float kSkyShadowDist = 45.0;
-    float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
     float shadow_factor = 1.0;
-    if (scene.rt_flags.x != 0) {
+    if (vSunShadow > 0.5) shadow_factor *= 0.18;
+    if (scene.rt_flags.x != 0 && vDistToCam < kSkyShadowDist) {
         vec3 origin = vWorldPos + vec3(0.0, 0.5, 0.0);
-        if (sun_blocked(origin, normalize(scene.sun_direction.xyz))) {
-            shadow_factor *= 0.18;
-        }
-        if (dist_to_cam < kSkyShadowDist &&
-            sun_blocked(origin, vec3(0.0, 1.0, 0.0))) {
+        if (sun_blocked(origin, vec3(0.0, 1.0, 0.0))) {
             shadow_factor *= 0.45;
         }
     }

@@ -199,6 +199,9 @@ void VulkanEngine::update_scene_ubo() {
                                  rt_.grass_alpha_cutoff,
                                  rt_.grass_slope_n_min,
                                  rt_.grass_distance_density);
+    data.grass_extra2 = glm::vec4(rt_.grass_alt_min,
+                                  rt_.grass_alt_max,
+                                  0.0f, 0.0f);
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

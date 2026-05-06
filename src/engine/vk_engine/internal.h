@@ -102,6 +102,11 @@ struct SceneUBO {
     //   z: slope_n_min  (blade fades to 0 below this stored n.y)
     //   w: distance_density (0..1, 0 = uniform, 1 = strong far falloff)
     glm::vec4  grass_extra;
+    // More grass knobs:
+    //   x: alt_min (blade fades to 0 below this world Y)
+    //   y: alt_max (blade fades to 0 above this world Y)
+    //   z, w: unused
+    glm::vec4  grass_extra2;
 };
 
 // ---- KHR ray tracing entry points ----

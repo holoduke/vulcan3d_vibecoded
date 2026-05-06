@@ -195,6 +195,8 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("distance density falloff",
                            &rt_.grass_distance_density, 0.0f, 1.0f,
                            "%.2f (0=uniform, 1=thin far)");
+        ImGui::SliderFloat("altitude min (m)", &rt_.grass_alt_min, -20.0f, 200.0f);
+        ImGui::SliderFloat("altitude max (m)", &rt_.grass_alt_max, -20.0f, 200.0f);
     }
 
     ImGui::Spacing();

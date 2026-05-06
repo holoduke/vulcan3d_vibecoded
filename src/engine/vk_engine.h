@@ -822,6 +822,11 @@ private:
         // driven threshold with a wide smoothstep so blades don't
         // flicker as the player walks.
         float grass_distance_density = 0.6f;
+        // Altitude band: blades fade to 0 height outside [alt_min,
+        // alt_max]. Placement covers a generous superset (-10..200m)
+        // so the slider can reshape the band live without rebake.
+        float grass_alt_min = -2.0f;
+        float grass_alt_max = 35.0f;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;
