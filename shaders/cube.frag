@@ -307,23 +307,46 @@ void main() {
         // Slope: 0 = flat (normal up), 1 = vertical wall.
         float slope = 1.0 - clamp(N.y, 0.0, 1.0);
 
-        // Smoothstep-driven layer transitions. Centres + widths chosen
-        // empirically — tweak per-level if the height_scale changes.
-        float t_sand  = smoothstep(scene.terrain_h_low.x,  scene.terrain_h_low.y,  h);
-        float t_dirt  = smoothstep(scene.terrain_h_low.z,  scene.terrain_h_low.w,  h);
-        float t_rock  = smoothstep(scene.terrain_h_high.x, scene.terrain_h_high.y, h);
-        float t_snow  = smoothstep(scene.terrain_h_high.z, scene.terrain_h_high.w, h);
+        // ---- Layer-transition break-up ----
+        // Without a per-pixel offset, layer boundaries form perfectly
+        // horizontal contour lines that read as obvious "stripes" on
+        // gentle slopes. We jitter each transition's effective height
+        // by a low-frequency hash on world XZ — same as how natural
+        // soils don't change at exactly the same elevation everywhere.
+        // The jitter is in metres and matched to ~half the smoothstep
+        // width so it breaks up the line without erasing the gradient.
+        float n0 = ign(vWorldPos.xz * 0.04) - 0.5;   // ±0.5 noise
+        float n1 = ign(vWorldPos.xz * 0.13 + vec2(13.7, 41.3)) - 0.5;
+        float jitter = (n0 + 0.5 * n1);              // ~±0.75
+        float jh = h + jitter * 4.0;                 // ±3m offset
+        float t_sand = smoothstep(scene.terrain_h_low.x,  scene.terrain_h_low.y,  jh);
+        float t_dirt = smoothstep(scene.terrain_h_low.z,  scene.terrain_h_low.w,  jh);
+        float t_rock = smoothstep(scene.terrain_h_high.x, scene.terrain_h_high.y, jh);
+        float t_snow = smoothstep(scene.terrain_h_high.z, scene.terrain_h_high.w, jh);
 
         vec3 base = mix(sand, grass, t_sand);
         base = mix(base, dirt, t_dirt);
         base = mix(base, rock, t_rock);
         base = mix(base, snow, t_snow);
 
-        // Steep faces become rocky regardless of altitude — the rule
-        // every height-mapped game uses for cliffs. 0.45 = ~27° from
-        // vertical (i.e. fairly steep before rock kicks in).
-        float steep = smoothstep(0.45, 0.75, slope);
+        // Steep faces become rocky regardless of altitude. Slope jitter
+        // breaks up the cliff/grass border the same way the height
+        // jitter breaks up horizontal layer transitions.
+        float slope_jitter = (ign(vWorldPos.xz * 0.09 + vec2(7.0, 19.0)) - 0.5) * 0.10;
+        float steep = smoothstep(0.45 + slope_jitter, 0.75 + slope_jitter, slope);
         base = mix(base, rock, steep);
+
+        // ---- Cavity AO from local height curvature ----
+        // The heightmap-gradient normal we use was computed from the
+        // global heightmap, so screen-space derivatives of N let us
+        // estimate concavity per fragment — same trick GTAO uses for
+        // its bent normal. Concave (valley) -> darker, convex (peak)
+        // -> brighter. Adds the "natural shadowing in cracks" feel
+        // for free, no extra ray budget.
+        float curvature = -dot(dFdx(N), dFdx(vWorldPos)) -
+                          dot(dFdy(N), dFdy(vWorldPos));
+        float cavity = clamp(0.5 - curvature * 0.4, 0.45, 1.0);
+        base *= cavity;
 
         // Optional triplanar detail using the engine's Ground054 albedo
         // (texture index 0). When textures are off (use_albedo=false)
