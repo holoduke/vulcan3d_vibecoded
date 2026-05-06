@@ -177,9 +177,13 @@ bool closest_hit(vec3 origin, vec3 dir, float t_max,
     return true;
 }
 
-// Closest-hit + material lookup via TLAS instance custom index.
+// Closest-hit + material lookup. Returns instance custom index AND
+// primitive index. The merged-static BLAS instance carries
+// kStaticBlasInstSentinel as its custom index; the shader recovers the
+// per-brush material via primitive_id / 12 in that case (12 tris/brush).
+// Dynamic instances carry their materials-buffer slot directly.
 bool closest_hit_material(vec3 origin, vec3 dir, float t_max,
-                          out float out_t, out int out_idx) {
+                          out float out_t, out int out_inst, out int out_prim) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
                           0xFF, origin, 0.001, dir, t_max);
@@ -189,9 +193,17 @@ bool closest_hit_material(vec3 origin, vec3 dir, float t_max,
         return false;
     }
     out_t = rayQueryGetIntersectionTEXT(rq, true);
-    out_idx = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+    out_inst = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+    out_prim = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
     return true;
 }
+
+// Sentinel for the merged-static BLAS instance — must match
+// `kStaticBlasInstSentinel` in src/engine/vk_engine/rt.cpp. Picked at the
+// top of the 24-bit instanceCustomIndex range so it never collides with a
+// real materials-buffer slot.
+const int kStaticBlasSentinel = 0xFFFFFF;
+const int kCubeTrisPerBox     = 12;
 
 void main() {
     // Screen-space motion vector — current_uv − prev_uv. prev_uv comes from
@@ -492,7 +504,8 @@ void main() {
                 for (int b = 0; b < N_bounces; ++b) {
                     float t;
                     int idx;
-                    if (!closest_hit_material(ray_origin, ray_dir, gi_radius, t, idx)) {
+                    int prim;
+                    if (!closest_hit_material(ray_origin, ray_dir, gi_radius, t, idx, prim)) {
                         path += throughput * sample_sky(ray_dir);
                         // First-bounce miss = the surface can see sky in
                         // this direction. Tracks "open vs enclosed" for the
@@ -500,7 +513,12 @@ void main() {
                         if (b == 0) ++sky_misses;
                         break;
                     }
-                    Material m = materials[idx];
+                    // Static-castle hit: 1 BLAS instance covers all brushes
+                    // — recover the per-brush material slot via primitive id.
+                    int mat_idx = (idx == kStaticBlasSentinel)
+                                    ? (prim / kCubeTrisPerBox)
+                                    : idx;
+                    Material m = materials[mat_idx];
                     vec3 hit_pos = ray_origin + ray_dir * t;
                     vec3 hit_n = -ray_dir;  // approximate outward normal
 

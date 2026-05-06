@@ -10,8 +10,20 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 namespace qlike {
+
+// Sentinel instanceCustomIndex for the merged-static-BLAS TLAS instance.
+// cube.frag's GI loop sees this and switches to per-primitive material
+// lookup (`materials[gl_PrimitiveID / 12]`) instead of per-instance
+// (`materials[customIndex]`). Picked at the top of the 24-bit range so it
+// never collides with a legitimate materials-buffer slot.
+inline constexpr uint32_t kStaticBlasInstSentinel = 0xFFFFFFu;
+
+// Tris per cube — shader does `prim_id / kCubeTrisPerBox` to recover the
+// brush index inside the merged BLAS. Mirrored as `12` in cube.frag.
+inline constexpr uint32_t kCubeTrisPerBox = 12;
 
 void VulkanEngine::init_rt() {
     // RT buffers (BLAS/TLAS storage, instance buffer, scratch) are touched
@@ -128,6 +140,11 @@ void VulkanEngine::init_rt() {
     build_mesh_blas(cylinder_mesh_, "cylinder",
                     cylinder_blas_buffer_, cylinder_blas_alloc_,
                     cylinder_blas_, cylinder_blas_device_address_);
+    // Single big BLAS over the entire static castle. Replaces ~190 small
+    // per-brush TLAS instances with one — drops top-level traversal cost
+    // and (more importantly) keeps RT load below the GPU TDR threshold
+    // when many dyn props + projectiles + particles share the TLAS.
+    bake_merged_static_blas();
 
     // --- Allocate TLAS storage + scratch + instance buffer (rebuilt each frame) ---
     // Sized for the FIFO box cap (200) + ~32 static brushes/lanterns +
@@ -163,8 +180,15 @@ void VulkanEngine::init_rt() {
     // Per-instance material buffer (host-visible, mapped). Three vec4 per
     // entry: color (rgb) + full_emissive flag (a); emissive (rgb) + reserved;
     // tex_params (albedo idx, normal idx, uv scale, reserved).
+    //
+    // After the static-brush BLAS merge, customIndex ranges from 0 (per-brush
+    // material via gl_PrimitiveID/12 — the merged-BLAS instance itself uses
+    // the sentinel custom_index) up to M + tlas_max_instances_ for dynamic
+    // entries. Size accordingly so dynamic slot writes never overflow.
+    const uint32_t kStaticMatSlots = static_cast<uint32_t>(world_.brushes.size());
+    const uint32_t kTotalMatSlots  = kStaticMatSlots + tlas_max_instances_;
     {
-        VkDeviceSize size = static_cast<VkDeviceSize>(tlas_max_instances_) *
+        VkDeviceSize size = static_cast<VkDeviceSize>(kTotalMatSlots) *
                             (3u * sizeof(glm::vec4));
         VkBufferCreateInfo bci{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -190,8 +214,11 @@ void VulkanEngine::init_rt() {
     // this SSBO stays around for a future compute-shader motion-vec pass
     // that can read prev_world via gl_InstanceCustomIndex without needing
     // the engine to re-emit prev_mvp on every draw.
+    //
+    // Sized to match the materials buffer's customIndex range so dynamic
+    // entries with customIndex = M + i can write without overflow.
     {
-        VkDeviceSize size = static_cast<VkDeviceSize>(tlas_max_instances_) *
+        VkDeviceSize size = static_cast<VkDeviceSize>(kTotalMatSlots) *
                             sizeof(glm::mat4);
         VkBufferCreateInfo bci{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -310,6 +337,7 @@ void VulkanEngine::destroy_rt() {
     if (tlas_)               g_rt.destroy_as(device_, tlas_, nullptr);
     if (blas_)               g_rt.destroy_as(device_, blas_, nullptr);
     if (cylinder_blas_)      g_rt.destroy_as(device_, cylinder_blas_, nullptr);
+    if (merged_static_blas_) g_rt.destroy_as(device_, merged_static_blas_, nullptr);
     if (tlas_scratch_buffer_) vmaDestroyBuffer(allocator_, tlas_scratch_buffer_, tlas_scratch_alloc_);
     if (instances_buffer_)    vmaDestroyBuffer(allocator_, instances_buffer_, instances_alloc_);
     if (materials_buffer_)    vmaDestroyBuffer(allocator_, materials_buffer_, materials_alloc_);
@@ -317,29 +345,351 @@ void VulkanEngine::destroy_rt() {
     if (tlas_buffer_)         vmaDestroyBuffer(allocator_, tlas_buffer_, tlas_alloc_);
     if (blas_buffer_)         vmaDestroyBuffer(allocator_, blas_buffer_, blas_alloc_);
     if (cylinder_blas_buffer_) vmaDestroyBuffer(allocator_, cylinder_blas_buffer_, cylinder_blas_alloc_);
-    tlas_ = blas_ = cylinder_blas_ = VK_NULL_HANDLE;
-    tlas_buffer_ = blas_buffer_ = cylinder_blas_buffer_ = tlas_scratch_buffer_ =
-        instances_buffer_ = materials_buffer_ = prev_transforms_buffer_ = VK_NULL_HANDLE;
-    tlas_alloc_ = blas_alloc_ = cylinder_blas_alloc_ = tlas_scratch_alloc_ =
-        instances_alloc_ = materials_alloc_ = prev_transforms_alloc_ = nullptr;
+    if (merged_static_blas_buffer_) vmaDestroyBuffer(allocator_, merged_static_blas_buffer_, merged_static_blas_alloc_);
+    if (merged_static_mesh_.vertex_buffer) destroy_mesh(allocator_, merged_static_mesh_);
+    tlas_ = blas_ = cylinder_blas_ = merged_static_blas_ = VK_NULL_HANDLE;
+    tlas_buffer_ = blas_buffer_ = cylinder_blas_buffer_ = merged_static_blas_buffer_ =
+        tlas_scratch_buffer_ = instances_buffer_ = materials_buffer_ =
+        prev_transforms_buffer_ = VK_NULL_HANDLE;
+    tlas_alloc_ = blas_alloc_ = cylinder_blas_alloc_ = merged_static_blas_alloc_ =
+        tlas_scratch_alloc_ = instances_alloc_ = materials_alloc_ =
+        prev_transforms_alloc_ = nullptr;
     cylinder_blas_device_address_ = 0;
+    merged_static_blas_device_address_ = 0;
+    merged_static_brush_count_ = 0;
     materials_mapped_ = nullptr;
     prev_transforms_mapped_ = nullptr;
     rt_initialized_ = false;
 }
 
+void VulkanEngine::bake_merged_static_blas() {
+    // Concatenate every world_.brush's cube into one world-space triangle
+    // soup. The unit-cube vertex template lives in cube_mesh_ but we need
+    // *positions only* in world space — normals and UVs are unused for RT
+    // (cube.frag's primary shading reads from raster, RT only sees triangle
+    // intersections). We still pack the full Vertex struct because that's
+    // the only path our `create_mesh_from_data` upload helper takes.
+    //
+    // 24 verts × N brushes; 36 indices × N brushes (12 tris × N brushes).
+    // For a 200-brush castle that's 4800 verts / 7200 indices — trivial.
+    const uint32_t M = static_cast<uint32_t>(world_.brushes.size());
+    if (M == 0) {
+        merged_static_brush_count_ = 0;
+        return;
+    }
+
+    // Cube template (positions only — normals/UVs zeroed since RT ignores).
+    constexpr float h = 0.5f;
+    static const glm::vec3 kCubePos[24] = {
+        // +X
+        { h,-h,-h}, { h, h,-h}, { h, h, h}, { h,-h, h},
+        // -X
+        {-h,-h, h}, {-h, h, h}, {-h, h,-h}, {-h,-h,-h},
+        // +Y
+        {-h, h,-h}, {-h, h, h}, { h, h, h}, { h, h,-h},
+        // -Y
+        {-h,-h, h}, {-h,-h,-h}, { h,-h,-h}, { h,-h, h},
+        // +Z
+        {-h,-h, h}, { h,-h, h}, { h, h, h}, {-h, h, h},
+        // -Z
+        { h,-h,-h}, {-h,-h,-h}, {-h, h,-h}, { h, h,-h},
+    };
+    static const uint32_t kCubeIdx[36] = {
+        0, 1, 2,    0, 2, 3,
+        4, 5, 6,    4, 6, 7,
+        8, 9,10,    8,10,11,
+       12,13,14,   12,14,15,
+       16,17,18,   16,18,19,
+       20,21,22,   20,22,23,
+    };
+
+    std::vector<Vertex>   verts;
+    std::vector<uint32_t> indices;
+    verts.reserve(M * 24);
+    indices.reserve(M * 36);
+    // CRITICAL: brush ordering in the merged buffer must match the order the
+    // shader recovers via `gl_PrimitiveID / 12`. We push in `world_.brushes`
+    // order so brush[i] occupies primitive range [i*12, i*12 + 12).
+    for (uint32_t bi = 0; bi < M; ++bi) {
+        const auto& b = world_.brushes[bi];
+        const uint32_t v_off = bi * 24;
+        for (int v = 0; v < 24; ++v) {
+            glm::vec3 wp = b.center + kCubePos[v] * b.size;
+            verts.push_back({wp, glm::vec3(0.0f), glm::vec2(0.0f)});
+        }
+        for (int k = 0; k < 36; ++k) {
+            indices.push_back(v_off + kCubeIdx[k]);
+        }
+    }
+
+    merged_static_mesh_ = create_mesh_from_data(
+        device_, allocator_, graphics_queue_, graphics_queue_family_,
+        verts.data(), static_cast<uint32_t>(verts.size()),
+        indices.data(), static_cast<uint32_t>(indices.size()));
+    merged_static_brush_count_ = M;
+
+    // Build a BLAS over the merged triangle soup. PREFER_FAST_TRACE +
+    // single-build (no UPDATE flag) — this geometry never changes after
+    // level load.
+    const uint32_t tri_count = merged_static_mesh_.index_count / 3;
+    VkDeviceAddress vbo_addr = buffer_device_address(device_, merged_static_mesh_.vertex_buffer);
+    VkDeviceAddress ibo_addr = buffer_device_address(device_, merged_static_mesh_.index_buffer);
+
+    VkAccelerationStructureGeometryTrianglesDataKHR tri{};
+    tri.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    tri.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    tri.vertexData.deviceAddress = vbo_addr;
+    tri.vertexStride = sizeof(Vertex);
+    tri.maxVertex = merged_static_mesh_.vertex_count - 1;
+    tri.indexType = VK_INDEX_TYPE_UINT32;
+    tri.indexData.deviceAddress = ibo_addr;
+
+    VkAccelerationStructureGeometryKHR geom{};
+    geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geom.geometry.triangles = tri;
+    geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+
+    VkAccelerationStructureBuildGeometryInfoKHR bgi{};
+    bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    // ALLOW_COMPACTION lets us re-create the AS at its actual minimum size
+    // after the initial build. NVIDIA's BVH builder typically over-allocates
+    // by 30-50% for worst-case fits; compacting reclaims that VRAM AND tends
+    // to give a slightly faster traversal because the post-compact tree fits
+    // tighter in cache. Required because the merged BLAS for ~1800 tris is
+    // permanent — we'd carry the over-allocation forever otherwise.
+    bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+    bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    bgi.geometryCount = 1;
+    bgi.pGeometries = &geom;
+
+    uint32_t prim_count = tri_count;
+    VkAccelerationStructureBuildSizesInfoKHR sizes{};
+    sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    g_rt.get_as_build_sizes(device_,
+        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, &prim_count, &sizes);
+
+    // Mirror init_rt()'s rt_sharing decision so the BLAS storage is visible
+    // from BOTH the graphics queue (during cube.frag ray traversal) and the
+    // compute queue (during the per-frame TLAS rebuild that references this
+    // BLAS by device address). Without this, NVIDIA's driver eventually
+    // surfaces the EXCLUSIVE-with-cross-queue-access as a DEVICE_LOST.
+    const uint32_t shared_families[2] = {
+        graphics_queue_family_, compute_queue_family_
+    };
+    const VkSharingMode rt_sharing = compute_queue_distinct_
+        ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
+    const uint32_t rt_share_count = compute_queue_distinct_ ? 2u : 0u;
+    const uint32_t* rt_share_indices = compute_queue_distinct_ ? shared_families : nullptr;
+    {
+        VkBufferCreateInfo bci{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .size = sizes.accelerationStructureSize,
+            .usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            .sharingMode = rt_sharing,
+            .queueFamilyIndexCount = rt_share_count,
+            .pQueueFamilyIndices = rt_share_indices,
+        };
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
+                                 &merged_static_blas_buffer_,
+                                 &merged_static_blas_alloc_, nullptr),
+                 "merged static blas buffer");
+    }
+    VkAccelerationStructureCreateInfoKHR aci_blas{};
+    aci_blas.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    aci_blas.buffer = merged_static_blas_buffer_;
+    aci_blas.size = sizes.accelerationStructureSize;
+    aci_blas.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    vk_check(g_rt.create_as(device_, &aci_blas, nullptr, &merged_static_blas_),
+             "vkCreateAccelerationStructureKHR merged static blas");
+    bgi.dstAccelerationStructure = merged_static_blas_;
+
+    VkBuffer scratch = VK_NULL_HANDLE;
+    VmaAllocation scratch_alloc = nullptr;
+    {
+        VkBufferCreateInfo bci{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .size = sizes.buildScratchSize,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+        };
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
+                                 &scratch, &scratch_alloc, nullptr),
+                 "merged static blas scratch");
+    }
+    bgi.scratchData.deviceAddress = buffer_device_address(device_, scratch);
+
+    // Single-shot query pool to read back the post-build compacted size.
+    VkQueryPoolCreateInfo qpci{};
+    qpci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    qpci.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
+    qpci.queryCount = 1;
+    VkQueryPool qpool = VK_NULL_HANDLE;
+    vk_check(vkCreateQueryPool(device_, &qpci, nullptr, &qpool),
+             "compaction query pool");
+
+    // Build + write compacted-size query in one submit. The barrier between
+    // the build and the query is mandatory: writeProperties needs the build
+    // result fully visible.
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkCmdResetQueryPool(cb, qpool, 0, 1);
+        VkAccelerationStructureBuildRangeInfoKHR range{};
+        range.primitiveCount = tri_count;
+        const VkAccelerationStructureBuildRangeInfoKHR* p_range = &range;
+        g_rt.cmd_build_as(cb, 1, &bgi, &p_range);
+
+        VkMemoryBarrier2 mb{};
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        mb.srcStageMask  = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        mb.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        mb.dstStageMask  = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        mb.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.memoryBarrierCount = 1;
+        dep.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cb, &dep);
+
+        g_rt.cmd_write_as_props(cb, 1, &merged_static_blas_,
+            VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+            qpool, 0);
+    });
+
+    VkDeviceSize compacted_size = 0;
+    vk_check(vkGetQueryPoolResults(device_, qpool, 0, 1,
+                                   sizeof(VkDeviceSize), &compacted_size,
+                                   sizeof(VkDeviceSize),
+                                   VK_QUERY_RESULT_WAIT_BIT |
+                                   VK_QUERY_RESULT_64_BIT),
+             "compaction size query result");
+    vkDestroyQueryPool(device_, qpool, nullptr);
+
+    if (compacted_size > 0 && compacted_size < sizes.accelerationStructureSize) {
+        // Allocate a new tighter buffer + AS, copy with COMPACT mode, swap in.
+        VkBuffer compact_buf = VK_NULL_HANDLE;
+        VmaAllocation compact_alloc = nullptr;
+        {
+            VkBufferCreateInfo bci{
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .pNext = nullptr, .flags = 0,
+                .size = compacted_size,
+                .usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                .sharingMode = rt_sharing,
+                .queueFamilyIndexCount = rt_share_count,
+                .pQueueFamilyIndices = rt_share_indices,
+            };
+            VmaAllocationCreateInfo aci{};
+            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
+                                     &compact_buf, &compact_alloc, nullptr),
+                     "merged static blas compact buffer");
+        }
+        VkAccelerationStructureKHR compact_as = VK_NULL_HANDLE;
+        VkAccelerationStructureCreateInfoKHR aci_c{};
+        aci_c.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+        aci_c.buffer = compact_buf;
+        aci_c.size = compacted_size;
+        aci_c.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        vk_check(g_rt.create_as(device_, &aci_c, nullptr, &compact_as),
+                 "compact AS");
+
+        vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                                [&](VkCommandBuffer cb) {
+            VkCopyAccelerationStructureInfoKHR cinfo{};
+            cinfo.sType = VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR;
+            cinfo.src = merged_static_blas_;
+            cinfo.dst = compact_as;
+            cinfo.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+            g_rt.cmd_copy_as(cb, &cinfo);
+        });
+
+        const VkDeviceSize before = sizes.accelerationStructureSize;
+        // Swap and free the original. Safe to do here because the
+        // one_time_submit above already returned with vkQueueWaitIdle.
+        g_rt.destroy_as(device_, merged_static_blas_, nullptr);
+        vmaDestroyBuffer(allocator_, merged_static_blas_buffer_, merged_static_blas_alloc_);
+        merged_static_blas_ = compact_as;
+        merged_static_blas_buffer_ = compact_buf;
+        merged_static_blas_alloc_ = compact_alloc;
+        log::infof("BLAS (merged-static) compacted: %llu -> %llu bytes (%.0f%%)",
+                   static_cast<unsigned long long>(before),
+                   static_cast<unsigned long long>(compacted_size),
+                   100.0 * static_cast<double>(compacted_size) /
+                          static_cast<double>(before));
+    }
+
+    vmaDestroyBuffer(allocator_, scratch, scratch_alloc);
+    merged_static_blas_device_address_ = as_device_address(device_, merged_static_blas_);
+    log::infof("BLAS (merged-static): %u brushes, %u tris", M, tri_count);
+}
+
 void VulkanEngine::bake_static_brushes() {
     constexpr glm::vec4 kNoTex(-1.0f, -1.0f, 1.0f, 0.0f);
     const bool tex_on = rt_.textures_enabled;
+    const bool merged = rt_.use_merged_static_blas &&
+                        merged_static_blas_device_address_ != 0;
 
     static_brush_instances_.clear();
     static_brush_materials_.clear();
     static_brush_worlds_.clear();
-    static_brush_instances_.reserve(world_.brushes.size());
     static_brush_materials_.reserve(world_.brushes.size() * 3);
     static_brush_worlds_.reserve(world_.brushes.size());
 
-    uint32_t i = 0;
+    if (merged && !world_.brushes.empty()) {
+        // Merged path: one TLAS instance covering the whole castle. Material
+        // lookup in cube.frag is routed through gl_PrimitiveID/12 by the
+        // sentinel custom index.
+        static_brush_instances_.reserve(1);
+        VkAccelerationStructureInstanceKHR inst{};
+        inst.transform.matrix[0][0] = 1.0f;
+        inst.transform.matrix[1][1] = 1.0f;
+        inst.transform.matrix[2][2] = 1.0f;
+        inst.instanceCustomIndex = kStaticBlasInstSentinel;
+        inst.mask = 0xFF;
+        inst.instanceShaderBindingTableRecordOffset = 0;
+        inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        inst.accelerationStructureReference = merged_static_blas_device_address_;
+        static_brush_instances_.push_back(inst);
+    } else {
+        // Legacy path: one TLAS instance per brush, all pointing at the
+        // shared cube BLAS. customIndex matches the brush index so the
+        // shader's `materials[customIndex]` keeps working.
+        static_brush_instances_.reserve(world_.brushes.size());
+        uint32_t i = 0;
+        for (const auto& b : world_.brushes) {
+            glm::mat4 m = glm::translate(glm::mat4(1.0f), b.center) *
+                          glm::scale(glm::mat4(1.0f), b.size);
+            VkAccelerationStructureInstanceKHR inst{};
+            for (int row = 0; row < 3; ++row) {
+                for (int col = 0; col < 4; ++col) {
+                    inst.transform.matrix[row][col] = m[col][row];
+                }
+            }
+            inst.instanceCustomIndex = i;
+            inst.mask = 0xFF;
+            inst.instanceShaderBindingTableRecordOffset = 0;
+            inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+            inst.accelerationStructureReference = blas_device_address_;
+            static_brush_instances_.push_back(inst);
+            ++i;
+        }
+    }
+
+    // Per-brush material table — populated identically for both paths so
+    // the materials[brush_idx] layout is consistent.
     for (const auto& b : world_.brushes) {
         glm::mat4 m = glm::translate(glm::mat4(1.0f), b.center) *
                       glm::scale(glm::mat4(1.0f), b.size);
@@ -350,25 +700,10 @@ void VulkanEngine::bake_static_brushes() {
                         static_cast<float>(b.tex_normal),
                         b.uv_scale, 0.0f)
             : kNoTex;
-
-        VkAccelerationStructureInstanceKHR inst{};
-        for (int row = 0; row < 3; ++row) {
-            for (int col = 0; col < 4; ++col) {
-                inst.transform.matrix[row][col] = m[col][row];
-            }
-        }
-        inst.instanceCustomIndex = i;
-        inst.mask = 0xFF;
-        inst.instanceShaderBindingTableRecordOffset = 0;
-        inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-        inst.accelerationStructureReference = blas_device_address_;
-        static_brush_instances_.push_back(inst);
-
         static_brush_materials_.push_back(
             glm::vec4(glm::vec3(base), b.full_emissive ? 1.0f : 0.0f));
         static_brush_materials_.push_back(glm::vec4(b.emissive, 0.0f));
         static_brush_materials_.push_back(tex);
-        ++i;
     }
     static_brush_tex_on_ = tex_on;
     static_brush_dirty_ = false;
@@ -401,31 +736,50 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     }
 
     const bool tex_on = rt_.textures_enabled;
-    if (static_brush_dirty_ || static_brush_tex_on_ != tex_on) {
+    // Detect a flipped use_merged_static_blas toggle: the cached static
+    // instances were emitted under the OLD value, so re-bake to match.
+    const bool merged_active = !static_brush_instances_.empty() &&
+        static_brush_instances_.front().instanceCustomIndex == kStaticBlasInstSentinel;
+    const bool merged_wanted = rt_.use_merged_static_blas &&
+                               merged_static_blas_device_address_ != 0 &&
+                               !world_.brushes.empty();
+    if (static_brush_dirty_ || static_brush_tex_on_ != tex_on ||
+        merged_active != merged_wanted) {
         bake_static_brushes();
+        // Force a full TLAS rebuild (not UPDATE) on the next frame because
+        // the instance count just changed.
+        prev_tlas_n_ = UINT32_MAX;
     }
 
     auto* dst = static_cast<VkAccelerationStructureInstanceKHR*>(instances_mapped_);
     auto* mats = static_cast<glm::vec4*>(materials_mapped_);  // 3 vec4 per material
     auto* prevs = static_cast<glm::mat4*>(prev_transforms_mapped_);
 
-    // Static-brush block: baked once per (level, textures_enabled). Memcpy
-    // straight in instead of recomputing the world matrices and material
-    // tuples every frame. Prev_world for static brushes equals current world
-    // (no motion).
-    const uint32_t static_n = std::min<uint32_t>(
-        static_cast<uint32_t>(static_brush_instances_.size()), tlas_max_instances_);
-    std::memcpy(dst, static_brush_instances_.data(),
-                sizeof(VkAccelerationStructureInstanceKHR) * static_n);
-    if (mats && static_n > 0) {
+    // Materials/prev_transforms layout: slots [0..M-1] hold per-brush data
+    // for the castle. The merged path points the shader at this range via
+    // gl_PrimitiveID/12; the legacy path uses the same slots via per-brush
+    // customIndex == brush_idx. Either way the static block is identical.
+    const uint32_t M = static_cast<uint32_t>(world_.brushes.size());
+    if (mats && M > 0) {
         std::memcpy(mats, static_brush_materials_.data(),
-                    sizeof(glm::vec4) * 3 * static_n);
+                    sizeof(glm::vec4) * 3 * M);
     }
-    if (prevs && static_n > 0) {
+    if (prevs && M > 0) {
         std::memcpy(prevs, static_brush_worlds_.data(),
-                    sizeof(glm::mat4) * static_n);
+                    sizeof(glm::mat4) * M);
+    }
+    // TLAS instance block: 1 entry (merged) or M entries (legacy). memcpy
+    // the prebuilt instances directly — they don't change frame-to-frame.
+    const uint32_t static_n = static_cast<uint32_t>(
+        std::min<size_t>(static_brush_instances_.size(), tlas_max_instances_));
+    if (static_n > 0) {
+        std::memcpy(dst, static_brush_instances_.data(),
+                    sizeof(VkAccelerationStructureInstanceKHR) * static_n);
     }
     uint32_t n = static_n;
+    // Dynamic customIndex always starts at M so dynamic write_instance
+    // calls land in materials slots [M..] regardless of merged/legacy.
+    uint32_t mat_idx = M;
 
     auto write_instance = [&](const glm::mat4& m, const glm::mat4& prev_m,
                               const glm::vec4& color,
@@ -440,7 +794,10 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
                 inst.transform.matrix[row][col] = m[col][row];
             }
         }
-        inst.instanceCustomIndex = n;
+        // customIndex is the materials buffer slot, NOT the TLAS slot. The
+        // shader reads materials[customIndex] for dynamic hits. The merged
+        // static BLAS uses kStaticBlasInstSentinel and is handled separately.
+        inst.instanceCustomIndex = mat_idx;
         // Mask convention:
         //   bit 0 = "shadow caster / AO occluder"
         //   bit 1 = "visible to GI / reflection"
@@ -454,14 +811,15 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         dst[n] = inst;
 
         if (mats) {
-            mats[n * 3 + 0] = glm::vec4(glm::vec3(color), full_emissive ? 1.0f : 0.0f);
-            mats[n * 3 + 1] = glm::vec4(emissive, 0.0f);
-            mats[n * 3 + 2] = tex_params;
+            mats[mat_idx * 3 + 0] = glm::vec4(glm::vec3(color), full_emissive ? 1.0f : 0.0f);
+            mats[mat_idx * 3 + 1] = glm::vec4(emissive, 0.0f);
+            mats[mat_idx * 3 + 2] = tex_params;
         }
         if (prevs) {
-            prevs[n] = prev_m;
+            prevs[mat_idx] = prev_m;
         }
         ++n;
+        ++mat_idx;
     };
 
     constexpr glm::vec4 kNoTex(-1.0f, -1.0f, 1.0f, 0.0f);
@@ -539,10 +897,14 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
 
     vmaFlushAllocation(allocator_, instances_alloc_,  0,
                        sizeof(VkAccelerationStructureInstanceKHR) * n);
-    vmaFlushAllocation(allocator_, materials_alloc_, 0,
-                       sizeof(glm::vec4) * 3 * n);
-    vmaFlushAllocation(allocator_, prev_transforms_alloc_, 0,
-                       sizeof(glm::mat4) * n);
+    // Materials/prev_transforms layout: [0..M-1] static brushes,
+    // [M..mat_idx-1] dynamic. Flush the full populated prefix.
+    if (mat_idx > 0) {
+        vmaFlushAllocation(allocator_, materials_alloc_, 0,
+                           sizeof(glm::vec4) * 3 * mat_idx);
+        vmaFlushAllocation(allocator_, prev_transforms_alloc_, 0,
+                           sizeof(glm::mat4) * mat_idx);
+    }
 
     VkAccelerationStructureBuildRangeInfoKHR range{};
     range.primitiveCount = n;

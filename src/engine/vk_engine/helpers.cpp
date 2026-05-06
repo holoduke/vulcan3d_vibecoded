@@ -30,6 +30,10 @@ void load_rt_functions(VkDevice device) {
         vkGetDeviceProcAddr(device, "vkGetAccelerationStructureDeviceAddressKHR"));
     g_rt.get_as_build_sizes = reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
         vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR"));
+    g_rt.cmd_write_as_props = reinterpret_cast<PFN_vkCmdWriteAccelerationStructuresPropertiesKHR>(
+        vkGetDeviceProcAddr(device, "vkCmdWriteAccelerationStructuresPropertiesKHR"));
+    g_rt.cmd_copy_as = reinterpret_cast<PFN_vkCmdCopyAccelerationStructureKHR>(
+        vkGetDeviceProcAddr(device, "vkCmdCopyAccelerationStructureKHR"));
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(

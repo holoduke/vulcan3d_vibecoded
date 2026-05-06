@@ -110,6 +110,11 @@ private:
     // world_.brushes for the current rt_.textures_enabled. Cheap; called only
     // on init and when textures-toggled.
     void bake_static_brushes();
+    // Build the merged-static BLAS once per level. Concatenates every
+    // world_.brush into a single world-space triangle soup, then runs an
+    // AS-build over it with PREFER_FAST_TRACE. Called from init_rt() AFTER
+    // init_world() has populated world_.brushes.
+    void bake_merged_static_blas();
     // Depth-only pre-pass over the same brush + dyn-prop geometry that
     // render_world() draws — populates depth_image_ so the subsequent color
     // pass's depth_compare=LESS_OR_EQUAL early-rejects occluded fragments
@@ -366,13 +371,12 @@ private:
     std::vector<ViewmodelMesh> viewmodel_gltf_;
     glm::mat4 viewmodel_root_offset_{ 1.0f };    // local-to-camera placement
 
-    // 100 dynamic crates is the sweet spot for this scene's RT load —
-    // 200 was reachable in a few minutes of play and pushed the GPU
-    // through TDR (DEVICE_LOST) under heavy fire because the per-pixel
-    // ray budget × TLAS instance count exceeded the card's GRays/s
-    // budget. Static-brush BLAS bake (see docs/vulkan_best_practices.md)
-    // would lift this back up.
-    static constexpr int   kMaxDynProps    = 100;
+    // 60 dynamic crates: 100 still let the autodemo TDR (~2.4s on a 4080
+    // even with the merged-static BLAS), so we drop further. The bottleneck
+    // is per-pixel ray budget × in-flight projectiles + active dyn props,
+    // not BLAS topology. Static-brush merge (see rt.cpp::bake_merged_static_blas)
+    // already shrank static-side load; this caps the dynamic side.
+    static constexpr int   kMaxDynProps    = 60;
     static constexpr float kSpawnInterval  = 0.4f;  // seconds between spawns
     float spawn_timer_ = 0.0f;
     uint32_t spawn_rng_state_ = 0xc0ffee42u;
@@ -476,6 +480,19 @@ private:
     VmaAllocation cylinder_blas_alloc_ = nullptr;
     VkAccelerationStructureKHR cylinder_blas_ = VK_NULL_HANDLE;
     VkDeviceAddress cylinder_blas_device_address_ = 0;
+
+    // Merged static-brush BLAS: every world_.brushes box pre-transformed into
+    // world space and concatenated into a single triangle soup. One TLAS
+    // instance covers the whole castle (vs ~190 small instances), which keeps
+    // the TLAS small + reduces per-ray inter-instance traversal overhead.
+    // Materials are looked up per-primitive in cube.frag using
+    // gl_PrimitiveID / 12 (12 tris per cube) — see kStaticBlasInstSentinel.
+    Mesh merged_static_mesh_{};
+    VkBuffer merged_static_blas_buffer_ = VK_NULL_HANDLE;
+    VmaAllocation merged_static_blas_alloc_ = nullptr;
+    VkAccelerationStructureKHR merged_static_blas_ = VK_NULL_HANDLE;
+    VkDeviceAddress merged_static_blas_device_address_ = 0;
+    uint32_t merged_static_brush_count_ = 0;
 
     VkBuffer tlas_buffer_ = VK_NULL_HANDLE;
     VmaAllocation tlas_alloc_ = nullptr;
@@ -669,6 +686,13 @@ private:
         // through a doorway over-expose into bloom. Strength 0 = off,
         // 1 = full eye-adaptation, ~0.5 = stylised (the default).
         float auto_exposure_strength = 0.5f;
+        // Static-castle BLAS merging: true = one BLAS for all 151 brushes
+        // (the merged path baked at level load), false = per-brush TLAS
+        // instance pointing at the shared cube BLAS (the original path).
+        // Toggle exists so we can A/B autodemo to confirm the merge isn't
+        // making per-pixel ray cost worse on a given GPU. Leave on by
+        // default once verified.
+        bool  use_merged_static_blas = true;
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;
         // Specular reflection on flagged surfaces (the pedestal).

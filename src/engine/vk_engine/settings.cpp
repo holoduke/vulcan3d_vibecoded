@@ -159,6 +159,7 @@ void VulkanEngine::save_settings() const {
     f << "gi_shadow_max_bounce = " << rt_.gi_shadow_max_bounce << "\n";
     f << "ao_floor = "             << rt_.ao_floor             << "\n";
     f << "auto_exposure_strength = " << rt_.auto_exposure_strength << "\n";
+    f << "use_merged_static_blas = " << (rt_.use_merged_static_blas ? 1 : 0) << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
     f << "reflections_enabled = "<< (rt_.reflections_enabled ? 1 : 0) << "\n";
@@ -232,6 +233,7 @@ void VulkanEngine::load_settings() {
             else if (key == "gi_shadow_max_bounce") rt_.gi_shadow_max_bounce = std::stoi(val);
             else if (key == "ao_floor")             rt_.ao_floor = std::stof(val);
             else if (key == "auto_exposure_strength") rt_.auto_exposure_strength = std::stof(val);
+            else if (key == "use_merged_static_blas") rt_.use_merged_static_blas = (std::stoi(val) != 0);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);
             else if (key == "reflections_enabled") rt_.reflections_enabled = std::stoi(val) != 0;

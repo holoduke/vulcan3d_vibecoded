@@ -86,6 +86,8 @@ struct RtFuncs {
     PFN_vkCmdBuildAccelerationStructuresKHR cmd_build_as = nullptr;
     PFN_vkGetAccelerationStructureDeviceAddressKHR get_as_device_addr = nullptr;
     PFN_vkGetAccelerationStructureBuildSizesKHR get_as_build_sizes = nullptr;
+    PFN_vkCmdWriteAccelerationStructuresPropertiesKHR cmd_write_as_props = nullptr;
+    PFN_vkCmdCopyAccelerationStructureKHR cmd_copy_as = nullptr;
 };
 extern RtFuncs g_rt;
 void load_rt_functions(VkDevice device);
