@@ -864,10 +864,27 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
 
     constexpr glm::vec4 kNoTex(-1.0f, -1.0f, 1.0f, 0.0f);
 
+    // Angular-size TLAS culling (Khronos hybrid-RT best practice; Wolfenstein
+    // uses the same heuristic). A dyn-prop whose AABB subtends less than this
+    // angle from the camera is small enough that its shadow / GI contribution
+    // is sub-pixel; skipping it from the TLAS saves traversal cost and BLAS-
+    // instance overhead. Threshold ≈ 0.5° = ~tan(0.5°) ≈ 0.0087 rad. Hits
+    // about half the dyn-props at typical play distances and is invisible.
+    constexpr float kMinAngularSize = 0.0087f;
+    const glm::vec3 cam_pos = player_.eye_position();
     for (size_t i = 0; i < dyn_props_.size(); ++i) {
         const DynRender& dr = i < dyn_render_cache_.size() ? dyn_render_cache_[i]
                                                             : DynRender{};
         if (!dr.valid) continue;
+        // Distance from camera to prop centre; AABB radius via half-extent
+        // (full_size is the box extent so half-diagonal = 0.5 * length(size)).
+        glm::vec3 prop_pos = glm::vec3(dr.world[3]);
+        float dist = glm::distance(prop_pos, cam_pos);
+        float radius = 0.5f * glm::length(dyn_props_[i].full_size);
+        if (dist > radius * 2.0f &&
+            (radius / std::max(dist, 0.001f)) < kMinAngularSize) {
+            continue;
+        }
         const glm::mat4 scale_m = glm::scale(glm::mat4(1.0f), dyn_props_[i].full_size);
         glm::mat4 m = dr.world * scale_m;
         glm::mat4 prev_m = dr.prev_world * scale_m;
