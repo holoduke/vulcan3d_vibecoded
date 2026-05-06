@@ -350,16 +350,17 @@ void main() {
     vec3 ambient_ground = scene.ambient.rgb * scene.rt_params.z;
     vec3 ambient_sky    = scene.sky_color.rgb * 0.45 * scene.rt_params.z;
 
-    float n_dot_l_raw = max(dot(N, L), 0.0);  // gate for shadow rays
-    // Half-Lambert wrap on terrain — push back-of-ridge pixels toward
-    // soft sky-tinted ambient. wrap_strength=0 falls back to standard
-    // Lambert; =1 is the full half-Lambert formula. User-tunable.
+    // Direct lighting uses pure Lambert (max(0, N·L)). The "wrap" lift
+    // for back-of-mountain pixels is applied LATER as a sky-tinted
+    // ambient bounce — applying it to direct here would produce the
+    // "back-face fully lit while front-face shadow-rayed" artifact:
+    // back faces have n_dot_l_raw = 0 so no shadow ray fires, but the
+    // wrap pushes their effective n_dot_l above zero and the missing
+    // shadow term means full sun colour leaks through. Front-facing
+    // pixels resolved correctly via the shadow ray. Adjacent pixels
+    // looking radically different is what the user reported.
+    float n_dot_l_raw = max(dot(N, L), 0.0);
     float n_dot_l = n_dot_l_raw;
-    if (is_terrain_pre) {
-        float wrap_amt = clamp(scene.terrain_params.y, 0.0, 1.0);
-        float wrapped  = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
-        n_dot_l = mix(n_dot_l_raw, wrapped, wrap_amt);
-    }
 
     // Per-pixel seed WITH the frame counter — TAA accumulates over ~8
     // frames, so animating the noise lets temporal averaging resolve the
@@ -685,6 +686,16 @@ void main() {
     vec3 ambient_combined = mix(ambient_ground,
                                  ambient_sky * sky_factor, up);
     vec3 indirect = albedo * ambient_combined * ao + gi_indirect;
+    // Terrain sky-bounce wrap. Back-facing pixels (-N·L > 0) pick up a
+    // sky-tinted lift to model atmospheric scattering bouncing onto the
+    // shadow side of mountains. Applied as ambient here (not as direct)
+    // so it never overrides a real shadow-ray result. wrap_strength
+    // tunes the intensity from the Settings UI.
+    if (is_terrain_pre) {
+        float wrap_amt = clamp(scene.terrain_params.y, 0.0, 1.0);
+        float back = max(0.0, -dot(N, L));
+        indirect += albedo * scene.sky_color.rgb * back * 0.30 * wrap_amt;
+    }
     vec3 final = direct + indirect + vEmissive.rgb;
 
     // Atmospheric perspective for terrain. Distant ground fades toward
