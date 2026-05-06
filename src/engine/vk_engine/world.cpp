@@ -255,14 +255,21 @@ void VulkanEngine::init_world() {
         // the keep-out rectangle below so blades never poke through
         // the brushes themselves.
         gp.height_min = -2.0f;
-        gp.height_max = hp.plateau_height + 8.0f;   // plateau + a bit
-        gp.half_extent = 0.5f * hm.side();
+        gp.height_max = hp.plateau_height + 8.0f;
+        // Concentrate blades in a 200m square around the castle so the
+        // density is high (~12 blades/m²) where the player actually
+        // sees grass. Spreading them across the full 1km map gave
+        // ~0.5/m² (about a metre between blades — looks bald).
+        gp.half_extent = 200.0f;
         // Inner keep is ~6m square at origin. Keep blades out of the
         // keep interior only; the outer courtyard between keep and
         // perimeter walls gets grass too. Blades whose footprint
         // overlaps a brush stay invisible — the wall geometry occludes
         // them from outside views.
         gp.keep_out_xz = glm::vec2(4.0f, 4.0f);
+        // 500k blades caps the instance buffer at ~25 MB and gives
+        // dense coverage when concentrated. Vertex throughput is fine.
+        gp.max_blades  = 500000;
         grass_ = build_grass(device_, allocator_,
                              graphics_queue_, graphics_queue_family_,
                              hm, gp);

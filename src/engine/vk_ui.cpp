@@ -150,12 +150,18 @@ void VulkanEngine::build_menu_ui() {
     if (state_ != State::Paused) return;
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    // Cap the pause-menu height at 90% of screen so scrolling kicks in
+    // for long settings lists (Terrain shader + Grass + Sculpt + ...
+    // pushed the auto-resized window past the screen edge, hiding the
+    // bottom sections).
+    float max_h = vp->WorkSize.y * 0.90f;
+    ImGui::SetNextWindowSize(ImVec2(560.0f, max_h), ImGuiCond_Always);
     ImGuiWindowFlags flags =
-        ImGuiWindowFlags_AlwaysAutoResize |
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoSavedSettings;
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_AlwaysVerticalScrollbar;
     ImGui::Begin("##pause-menu", nullptr, flags);
     ImGui::Text("PAUSED");
     ImGui::Separator();

@@ -43,13 +43,18 @@ void main() {
     // the bloom threshold (≈1.0 by default) blows up into halos when
     // auto-exposure compensates for darker portions of the scene
     // (castle interior). Hard cap below.
-    vec3 sun_term = scene.sun_color.rgb * (scene.sun_color.a * 0.10) * n_dot_l;
-    vec3 sky_term = scene.sky_color.rgb * 0.20;
+    // Light intensity as a SCALAR — preserves the blade's green tint
+    // regardless of the sun direction. Earlier per-channel sky-colour
+    // multiplication crushed red/green and pulled shaded blades toward
+    // the blue sky tint (inside-the-castle blades read as black/blue).
+    float sun_amt = scene.sun_color.a * 0.10 * n_dot_l;
+    float sky_amt = 0.30;
+    float lum = sun_amt + sky_amt;
 
-    vec3 tip_lift = mix(vec3(0.9), vec3(1.0, 1.0, 0.9), vHeightRatio);
+    vec3 tip_lift = mix(vec3(0.95), vec3(1.05, 1.0, 0.9), vHeightRatio);
     vec3 base = vColor * tip_lift;
 
-    vec3 lit = base * (sun_term + sky_term);
+    vec3 lit = base * lum;
     // Hard ceiling — guarantees we never feed the bloom mip chain with
     // grass pixels above its threshold even under aggressive
     // auto-exposure boosts.

@@ -85,17 +85,22 @@ void main() {
 
     // Per-blade Y rotation, then translate to world.
     mat3 R = rotY(rotation);
+
+    // Smooth distance fade: shrink blade height to zero over the last
+    // 25% of grass_params.x. The hard cull-to-NaN at exactly grass_params.x
+    // produced a visible "ring" where blades popped in/out of existence.
+    // Shrinking instead of popping makes the boundary invisible.
+    float view_dist_base = distance(base_world, scene.camera_pos.xyz);
+    float fade_start = pc.grass_params.x * 0.75;
+    float fade = 1.0 - smoothstep(fade_start, pc.grass_params.x, view_dist_base);
+    lp.y *= fade;
+
     vec3 world = R * lp + base_world;
 
-    // Distance cull: blades beyond grass_params.x collapse to NaN clip
-    // space, which the rasteriser drops without producing fragments.
-    float view_dist = distance(world, scene.camera_pos.xyz);
-    vCullKill = step(pc.grass_params.x, view_dist);
-
+    // Hard cull: well beyond max distance, collapse to NaN clip space
+    // so the rasteriser drops the triangle entirely.
+    vCullKill = step(pc.grass_params.x + 5.0, view_dist_base);
     if (vCullKill > 0.5) {
-        // Send the vertex outside any sane clip box and call it done.
-        // The triangle is degenerate (all 3 verts go here) so no
-        // fragment work runs. Faster than discard in fragment shader.
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         vNormal = vec3(0.0, 1.0, 0.0);
         vColor  = vec3(0.0);
