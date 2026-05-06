@@ -171,66 +171,54 @@ void main() {
     // Per-blade Y rotation, then translate to world.
     mat3 R = rotY(rotation);
 
-    // Smooth distance fade — blades shrink to zero over the last 25%
-    // of the max-distance slider so the cull doesn't pop visibly.
     float view_dist_base = distance(base_world, scene.camera_pos.xyz);
+
+    // Smooth distance fade — blades shrink over the last 25% of the
+    // max-distance slider so the cull doesn't pop visibly.
     float fade_start = pc.grass_params.x * 0.75;
-    float fade = 1.0 - smoothstep(fade_start, pc.grass_params.x, view_dist_base);
-    lp.y *= fade;
+    float dist_fade = 1.0 - smoothstep(fade_start, pc.grass_params.x, view_dist_base);
 
     // ---- Distance-based density thinning (slider-controlled) ----
     // Each blade has a stable rank (hash on world XZ). The density
     // threshold falls with distance — far blades are more likely to
-    // shrink to zero height. The smoothstep window is wide (0.30) so
-    // when the player walks, individual blades take many frames to
-    // transition through the band — no visible flashing.
-    //
-    // grass_extra.w controls the strength: 0 = uniform density, 1 =
-    // far blades thinned to ~40%.
+    // shrink to zero. Wide smoothstep window (±0.30) keeps per-blade
+    // transitions many camera-metres long → no visible flashing.
     float ddens_strength = clamp(scene.grass_extra.w, 0.0, 1.0);
+    float keep = 1.0;
     if (ddens_strength > 0.001) {
-        // Aggressive cutoff: at slider=1.0 the far field thins to 5%
-        // (95% of distant blades fade out). Onset moved from 0.25 to
-        // 0.15 of max distance so the thinning starts earlier and is
-        // visibly stronger near the far end.
-        float min_density   = mix(1.0, 0.05, ddens_strength);
-        float dist_norm     = clamp(view_dist_base / pc.grass_params.x, 0.0, 1.0);
+        float min_density    = mix(1.0, 0.05, ddens_strength);
+        float dist_norm      = clamp(view_dist_base / pc.grass_params.x, 0.0, 1.0);
         float thresh_density = mix(1.0, min_density, smoothstep(0.15, 1.0, dist_norm));
         float blade_rank = fract(sin(dot(base_world.xz,
                                           vec2(12.9898, 78.233))) * 43758.5453);
-        // Wide window (±0.30) ensures the per-blade transition is
-        // many camera-metres long, eliminating the per-frame "pop"
-        // that a tight (0.04) window produced.
-        float keep = 1.0 - smoothstep(thresh_density - 0.30,
-                                       thresh_density + 0.30,
-                                       blade_rank);
-        lp.y *= keep;
+        keep = 1.0 - smoothstep(thresh_density - 0.30,
+                                 thresh_density + 0.30,
+                                 blade_rank);
     }
 
-    // Slope fade — blades whose stored heightmap-normal Y is below
-    // the user threshold shrink toward 0 height. Smoothstep makes
-    // the slope-density transition gradual instead of cutting blades
-    // off cliff-flat at one slope value.
-    float slope_n  = inRotHeight.z;
-    float slope_th = scene.grass_extra.z;
+    // Slope fade — heightmap-normal-Y below threshold → shrinks toward 0.
+    float slope_n    = inRotHeight.z;
+    float slope_th   = scene.grass_extra.z;
     float slope_fade = smoothstep(slope_th - 0.10, slope_th + 0.05, slope_n);
-    lp.y *= slope_fade;
 
-    // Altitude band fade — blade stays full height inside [alt_min,
-    // alt_max], then smoothsteps to zero outside. 2m soft edges on
-    // each side so the band boundary isn't a sharp horizontal line.
+    // Altitude band fade with 2m soft edges on each side.
     float alt_min = scene.grass_extra2.x;
     float alt_max = scene.grass_extra2.y;
     float alt_fade =
         smoothstep(alt_min - 2.0, alt_min + 2.0, base_world.y) *
         (1.0 - smoothstep(alt_max - 2.0, alt_max + 2.0, base_world.y));
-    lp.y *= alt_fade;
 
-    vec3 world = R * lp + base_world;
+    // Combine into a single cull-factor. If it drops below a small
+    // threshold we kill the blade outright — otherwise the multiplied
+    // factors leave 1-pixel slivers above the altitude band, on steep
+    // slopes, and in distance-thinned regions. The user reported "tiny
+    // grass" on mountains was exactly that: alt_fade was ~0.02, blade
+    // shrank to 2% height = a single visible sub-pixel needle.
+    float cull_factor = dist_fade * keep * slope_fade * alt_fade;
 
-    // Hard cull: well beyond max distance, collapse to NaN clip space
-    // so the rasteriser drops the triangle entirely.
-    vCullKill = step(pc.grass_params.x + 5.0, view_dist_base);
+    // Hard cull: out of range, fully faded, or below the kill threshold.
+    vCullKill = (view_dist_base > pc.grass_params.x + 5.0 ||
+                 cull_factor < 0.04) ? 1.0 : 0.0;
     if (vCullKill > 0.5) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         vNormal = vec3(0.0, 1.0, 0.0);
@@ -242,6 +230,11 @@ void main() {
         vDistToCam = 0.0;
         return;
     }
+
+    // Above the threshold — apply the smooth scale so the band
+    // boundary still reads as a soft fade rather than a hard wall.
+    lp.y *= cull_factor;
+    vec3 world = R * lp + base_world;
 
     // Sample the pre-baked heightmap shadow texture at this blade's
     // world XZ. Texture is centred on origin (matches the heightmap
