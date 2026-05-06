@@ -56,14 +56,15 @@ void VulkanEngine::init_world() {
     {
         HeightmapParams hp{};
         // dim+1 must be a power of 2 so Jolt's HeightFieldShape can pick
-        // a valid block_size that divides the sample count. 255 cells
-        // → 256 samples per side → block_size 16. ~1km terrain.
-        hp.dim = 255;
-        hp.cell_size = 4.0f;          // 4m per cell × 255 = 1020m square
-        hp.height_scale = 90.0f;
-        hp.plateau_extent = glm::vec2(20.0f, 20.0f);
-        hp.plateau_height = 14.0f;     // castle base sits at this Y
-        hp.plateau_blend  = 16.0f;
+        // a valid block_size that divides the sample count. 511 cells
+        // → 512 samples per side → block_size 8. ~2km terrain.
+        hp.dim = 511;
+        hp.cell_size = 4.0f;          // 4m per cell × 511 = 2044m square
+        hp.height_scale = 140.0f;     // taller mountains for the bigger world
+        hp.plateau_extent = glm::vec2(28.0f, 28.0f);
+        hp.plateau_height = 22.0f;     // castle base sits at this Y
+        hp.plateau_blend  = 24.0f;
+        hp.frequency      = 0.0014f;   // bigger features for the bigger world
         Heightmap hm = generate_heightmap(hp);
         // Cache for collision + Phase 4 sculpt access.
         terrain_data_.dim = hm.dim;
@@ -788,9 +789,14 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         pc.mvp = vp;
         pc.model = glm::mat4(1.0f);
         pc.prev_mvp = prev_vp;
-        pc.color = glm::vec4(terrain_color_, 1.0f);
+        pc.color = glm::vec4(1.0f);   // multiplier; the shader builds its own albedo
         pc.emissive = glm::vec4(0.0f);
-        pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
+        // tex_params.w == 2.0 = "this is terrain — do height/slope blended
+        // shading in cube.frag". x=0 picks the Ground054 albedo for the
+        // triplanar detail pass; uv_scale is in metres per repeat.
+        pc.tex_params = tex_on
+            ? glm::vec4(0.0f, 0.0f, 16.0f, 2.0f)
+            : glm::vec4(-1.0f, -1.0f, 16.0f, 2.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &pc);

@@ -239,24 +239,87 @@ void main() {
     int   albedo_idx_raw = int(vTexParams.x);
     int   normal_idx_raw = int(vTexParams.y);
     float scale          = max(0.001, vTexParams.z);
-    bool  obj_space      = vTexParams.w > 0.5;
+    // tex_params.w convention:
+    //   0 = world-space triplanar (default — castle brushes)
+    //   1 = object-space triplanar (dynamic crates so the texture
+    //       rotates with the body)
+    //   2 = terrain shading: sand→grass→dirt→rock→snow blended by
+    //       world height + slope, with optional triplanar Ground054
+    //       detail multiplied on top.
+    bool  is_terrain     = vTexParams.w > 1.5;
+    bool  obj_space      = !is_terrain && vTexParams.w > 0.5;
+    // Terrain uses world-space triplanar like the static brushes — the
+    // mesh model is identity so vObjectPos == vWorldPos already, but we
+    // pick world-space explicitly so the height read uses true world Y.
     vec3  sample_pos     = (obj_space ? vObjectPos : vWorldPos) * scale;
     vec3  proj_n         = obj_space ? normalize(vObjectNormal) : N;
     bool  use_albedo     = albedo_idx_raw >= 0 && albedo_idx_raw < 5;
-    bool  use_normal     = normal_idx_raw >= 0 && normal_idx_raw < 5 && !obj_space;
+    bool  use_normal     = normal_idx_raw >= 0 && normal_idx_raw < 5 &&
+                           !obj_space && !is_terrain;
     // Texture sampling lives in branches gated on use_albedo / use_normal.
     // Sampler-array indexing on Vulkan requires a known-valid index; clamp
     // before indexing to keep the access well-defined regardless of any
     // hoisting the optimiser might do.
     vec3 albedo = vColor;
-    if (use_albedo) {
-        int  albedo_idx = clamp(albedo_idx_raw, 0, 4);
-        vec3 tex_albedo = triplanar_sample(u_albedo[albedo_idx], sample_pos, proj_n);
-        albedo = tex_albedo * vColor;
-    }
-    if (use_normal) {
-        int  normal_idx = clamp(normal_idx_raw, 0, 4);
-        N = triplanar_normal(u_normal[normal_idx], sample_pos, N);
+    if (is_terrain) {
+        // ---- Terrain layer blend (height + slope) ----
+        // Layer palette tuned for "natural earth" — desaturated, not too
+        // toy-coloured. Heights match the heightmap params:
+        //   plateau ~22, mountain crests ~120-140 (height_scale=140 in
+        //   the generator). Sea level isn't real here, but we still
+        //   give the bottom band a sandy hue.
+        const vec3 sand   = vec3(0.78, 0.71, 0.50);
+        const vec3 grass  = vec3(0.31, 0.45, 0.18);
+        const vec3 dirt   = vec3(0.42, 0.30, 0.18);
+        const vec3 rock   = vec3(0.40, 0.38, 0.36);
+        const vec3 snow   = vec3(0.95, 0.95, 0.97);
+
+        float h = vWorldPos.y;
+        // Slope: 0 = flat (normal up), 1 = vertical wall.
+        float slope = 1.0 - clamp(N.y, 0.0, 1.0);
+
+        // Smoothstep-driven layer transitions. Centres + widths chosen
+        // empirically — tweak per-level if the height_scale changes.
+        float t_sand  = smoothstep( 4.0, 12.0, h);    // sand → grass
+        float t_dirt  = smoothstep(28.0, 42.0, h);    // grass → dirt
+        float t_rock  = smoothstep(58.0, 80.0, h);    // dirt → rock
+        float t_snow  = smoothstep(95.0, 120.0, h);   // rock → snow
+
+        vec3 base = mix(sand, grass, t_sand);
+        base = mix(base, dirt, t_dirt);
+        base = mix(base, rock, t_rock);
+        base = mix(base, snow, t_snow);
+
+        // Steep faces become rocky regardless of altitude — the rule
+        // every height-mapped game uses for cliffs. 0.45 = ~27° from
+        // vertical (i.e. fairly steep before rock kicks in).
+        float steep = smoothstep(0.45, 0.75, slope);
+        base = mix(base, rock, steep);
+
+        // Optional triplanar detail using the engine's Ground054 albedo
+        // (texture index 0). When textures are off (use_albedo=false)
+        // we just show the layer-blended colour.
+        if (use_albedo) {
+            int  albedo_idx = clamp(albedo_idx_raw, 0, 4);
+            vec3 detail = triplanar_sample(u_albedo[albedo_idx],
+                                           sample_pos, proj_n);
+            // Multiply detail × layer base × small lift so the detail
+            // doesn't darken everything to mud. Detail ~0.5 average.
+            albedo = base * detail * 1.6;
+        } else {
+            albedo = base;
+        }
+    } else {
+        if (use_albedo) {
+            int  albedo_idx = clamp(albedo_idx_raw, 0, 4);
+            vec3 tex_albedo = triplanar_sample(u_albedo[albedo_idx],
+                                               sample_pos, proj_n);
+            albedo = tex_albedo * vColor;
+        }
+        if (use_normal) {
+            int  normal_idx = clamp(normal_idx_raw, 0, 4);
+            N = triplanar_normal(u_normal[normal_idx], sample_pos, N);
+        }
     }
 
     float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
