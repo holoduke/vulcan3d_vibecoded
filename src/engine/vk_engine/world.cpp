@@ -773,13 +773,17 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
     player_.position = render_pos;
     glm::mat4 view = player_.view_matrix();
     player_.position = saved;
-    // Far plane bumped from 500m to 3000m so the visible terrain disc is
-    // symmetric — at 80° FOV the corner ray reached ~650m world while
-    // the centre ray clipped at 500m, leaving the obvious "I see further
-    // sideways than forward" wobble while turning. With float32 depth
-    // and the atmospheric fog blending to full sky by ~2.0km, the
-    // larger far plane has no visible cost.
-    glm::mat4 proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 3000.0f);
+    // Far plane: 1500m. Tradeoff between two artefacts:
+    //   - too short (e.g. 500m): visible terrain disc is asymmetric
+    //     because the corner ray at 80° FOV reaches further world
+    //     distance than the centre, swept across the screen on turn;
+    //   - too long  (e.g. 3000m): float32 depth precision at the
+    //     silhouette of steep distant peaks runs out of bits and
+    //     adjacent triangles z-fight, looking "see-through".
+    // 1500m + atmospheric fog reaching ~95% sky tint by ~1.3km keeps
+    // the asymmetry hidden under fog AND keeps depth precision tight
+    // enough that distant cliffs are stable.
+    glm::mat4 proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 1500.0f);
     proj[1][1] *= -1.0f;
 
     // Match the color-pass jitter exactly so depth-prepass and color-pass
@@ -890,13 +894,17 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     player_.position = render_pos;
     glm::mat4 view = player_.view_matrix();
     player_.position = saved;
-    // Far plane bumped from 500m to 3000m so the visible terrain disc is
-    // symmetric — at 80° FOV the corner ray reached ~650m world while
-    // the centre ray clipped at 500m, leaving the obvious "I see further
-    // sideways than forward" wobble while turning. With float32 depth
-    // and the atmospheric fog blending to full sky by ~2.0km, the
-    // larger far plane has no visible cost.
-    glm::mat4 proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 3000.0f);
+    // Far plane: 1500m. Tradeoff between two artefacts:
+    //   - too short (e.g. 500m): visible terrain disc is asymmetric
+    //     because the corner ray at 80° FOV reaches further world
+    //     distance than the centre, swept across the screen on turn;
+    //   - too long  (e.g. 3000m): float32 depth precision at the
+    //     silhouette of steep distant peaks runs out of bits and
+    //     adjacent triangles z-fight, looking "see-through".
+    // 1500m + atmospheric fog reaching ~95% sky tint by ~1.3km keeps
+    // the asymmetry hidden under fog AND keeps depth precision tight
+    // enough that distant cliffs are stable.
+    glm::mat4 proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 1500.0f);
     proj[1][1] *= -1.0f;
 
     // Sub-pixel Halton jitter — TAA integrates these offsets into a super-

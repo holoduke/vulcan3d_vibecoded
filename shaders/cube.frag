@@ -707,10 +707,11 @@ void main() {
     if (is_terrain_pre) {
         vec3 view_dir = normalize(vWorldPos - scene.camera_pos.xyz);
         vec3 fog_color = sample_sky(view_dir);
-        // Curve runs to (almost) full sky-tint by ~2km so the far-plane
-        // clip (3km) is well past where terrain still has any visible
-        // contribution. Onset at 250m keeps near terrain unaffected.
-        float fog_t = clamp((cam_dist - 250.0) / 1700.0, 0.0, 0.95);
+        // 95% sky by ~1.3km — both edges (corner ray reaches ~2km of
+        // world at 80° FOV / far=1500m) AND centre (clipped at 1500m
+        // hard) are deep into fog before the cut, so the asymmetric
+        // visible disc is invisible.
+        float fog_t = clamp((cam_dist - 250.0) / 1100.0, 0.0, 0.95);
         fog_t = fog_t * fog_t * (3.0 - 2.0 * fog_t);
         fog_t *= clamp(scene.terrain_params.x, 0.0, 1.0);
         final = mix(final, fog_color, fog_t);
