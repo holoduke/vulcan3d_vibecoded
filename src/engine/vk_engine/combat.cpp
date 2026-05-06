@@ -171,6 +171,10 @@ void VulkanEngine::update_projectiles(float dt) {
                                          ? glm::normalize(post_vel)
                                          : -it->initial_dir;
                 spawn_hit_particles(hit_pos, reflect, it->initial_dir);
+                // Scorch decal — short raycast back along the bullet's
+                // path to recover the actual surface normal at the
+                // contact point.
+                spawn_impact_decal(hit_pos, it->initial_dir);
             }
             physics_->remove_body(it->body_id);
             it = projectiles_.erase(it);
@@ -251,6 +255,35 @@ void VulkanEngine::spawn_hit_particles(glm::vec3 pos, glm::vec3 reflect_dir,
     }
 }
 
+void VulkanEngine::draw_decals(VkCommandBuffer cmd, const glm::mat4& vp) {
+    if (decals_.empty()) return;
+    for (const auto& d : decals_) {
+        // Fade decal alpha-curve via color modulation since the existing
+        // brush pipeline is opaque. Old decals just darken toward zero
+        // until they disappear at TTL.
+        float life = 1.0f - (d.age / d.ttl);
+        if (life <= 0.0f) continue;
+        // Place a flat scaled cube on the surface: align local +Y with the
+        // surface normal, scale (size, near-zero, size) so it reads as a
+        // thin disc parallel to the wall.
+        glm::mat4 model = align_local_y_to(d.pos, d.normal) *
+                          glm::scale(glm::mat4(1.0f),
+                                     glm::vec3(d.size, 0.005f, d.size));
+        glm::vec3 col(0.04f * life);            // dark grey, fading to black
+        PushConstants pc{};
+        pc.mvp = vp * model;
+        pc.model = model;
+        pc.prev_mvp = pc.mvp;        // static decal, no motion
+        pc.color = glm::vec4(col, 1.0f);
+        pc.emissive = glm::vec4(0.0f);
+        pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);  // no textures
+        vkCmdPushConstants(cmd, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
+    }
+}
+
 void VulkanEngine::draw_spark_trails(VkCommandBuffer cmd, const glm::mat4& vp) {
     if (!physics_) return;
 
@@ -316,6 +349,41 @@ void VulkanEngine::draw_spark_trails(VkCommandBuffer cmd, const glm::mat4& vp) {
             draw_segment(pa.trail[i], pa.trail[i + 1], radius, emi);
         }
     }
+}
+
+void VulkanEngine::spawn_impact_decal(glm::vec3 hit_pos, glm::vec3 incoming_dir) {
+    if (!physics_) return;
+    // Recover the surface normal: raycast from a short distance behind
+    // the impact, along the bullet's travel direction. The first hit's
+    // normal is what we want. Falls back to -incoming if the ray misses.
+    glm::vec3 dir = glm::length(incoming_dir) > 1e-3f
+                        ? glm::normalize(incoming_dir)
+                        : glm::vec3(0, 0, 1);
+    glm::vec3 from = hit_pos - dir * 0.5f;
+    auto rh = physics_->raycast(from, dir, 1.0f);
+    glm::vec3 normal = rh.hit ? rh.normal : -dir;
+    glm::vec3 pos    = rh.hit ? rh.position : hit_pos;
+
+    Decal d{};
+    // Push out by a few mm along the normal to keep us off the surface
+    // and avoid z-fighting with the underlying brush.
+    d.pos    = pos + normal * 0.005f;
+    d.normal = normal;
+    d.size   = frand_range(spawn_rng_state_, 0.10f, 0.18f);
+    d.ttl    = kDecalTtl;
+    decals_.push_back(d);
+    // FIFO cap.
+    while (static_cast<int>(decals_.size()) > kMaxDecals) {
+        decals_.erase(decals_.begin());
+    }
+}
+
+void VulkanEngine::update_decals(float dt) {
+    for (auto& d : decals_) d.age += dt;
+    decals_.erase(
+        std::remove_if(decals_.begin(), decals_.end(),
+                        [](const Decal& d) { return d.age >= d.ttl; }),
+        decals_.end());
 }
 
 void VulkanEngine::update_particles(float dt) {

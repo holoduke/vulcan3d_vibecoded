@@ -718,6 +718,7 @@ void VulkanEngine::run(const RunOptions& opts) {
                 if (physics_) physics_->step(kFixedDt);
                 update_projectiles(kFixedDt);
                 update_particles(kFixedDt);
+                update_decals(kFixedDt);
                 physics_accumulator_ -= kFixedDt;
                 ++last_physics_ticks_;
             }

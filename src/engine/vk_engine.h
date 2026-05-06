@@ -311,6 +311,24 @@ private:
     static constexpr float kParticleStretch   = 0.06f;   // m of streak per (m/s)
     static constexpr float kParticleMaxStretchMul = 4.0f;
     static constexpr int   kMaxParticles      = 384;
+
+    // Wall decals — small dark "scorch mark" quads placed at each bullet
+    // impact, oriented along the surface normal. Capped FIFO; fade out
+    // over kDecalTtl. Rendered via the existing brush pipeline (cube
+    // mesh scaled flat) so no new pipeline is needed.
+    struct Decal {
+        glm::vec3 pos;
+        glm::vec3 normal;
+        float     size;
+        float     age = 0.0f;
+        float     ttl;
+    };
+    std::vector<Decal> decals_;
+    static constexpr int   kMaxDecals = 64;
+    static constexpr float kDecalTtl  = 25.0f;
+    void spawn_impact_decal(glm::vec3 hit_pos, glm::vec3 incoming_dir);
+    void update_decals(float dt);
+    void draw_decals(VkCommandBuffer cmd, const glm::mat4& vp);
     // Speed range / count are scaled by GameSettings::spark_scale at spawn.
 
     // Viewmodel: a "gun" rendered at a fixed offset from the camera. Two
