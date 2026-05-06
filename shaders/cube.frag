@@ -163,6 +163,17 @@ bool any_hit(vec3 origin, vec3 dir, float t_max) {
            gl_RayQueryCommittedIntersectionTriangleEXT;
 }
 
+// Sky tint without the sun halo — for atmospheric fog where adding
+// the localized halo brightness on distant terrain pixels makes them
+// glow blindingly when looking near the sun. Same horizon→zenith
+// gradient as `sample_sky` but no halo term.
+vec3 sample_sky_atmosphere(vec3 dir) {
+    float up = clamp(dir.y, 0.0, 1.0);
+    vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
+    vec3 zenith  = scene.sky_color.rgb;
+    return mix(horizon, zenith, pow(up, 0.45));
+}
+
 // Procedural sky: warm low horizon → cool zenith, brighter near sun.
 vec3 sample_sky(vec3 dir) {
     vec3 L = normalize(scene.sun_direction.xyz);
@@ -706,7 +717,12 @@ void main() {
     // for clear-day weather.
     if (is_terrain_pre) {
         vec3 view_dir = normalize(vWorldPos - scene.camera_pos.xyz);
-        vec3 fog_color = sample_sky(view_dir);
+        // sample_sky_atmosphere: no sun halo. The halo is fine for the
+        // actual sky pixels (compose pass / GI rays), but applying it
+        // to FOG made distant terrain near the sun direction look like
+        // glowing white blobs — sun's halo × intensity 2 was multiplied
+        // INTO the fog tint and bled bright-white over the mountains.
+        vec3 fog_color = sample_sky_atmosphere(view_dir);
         // 95% sky by ~1.3km — both edges (corner ray reaches ~2km of
         // world at 80° FOV / far=1500m) AND centre (clipped at 1500m
         // hard) are deep into fog before the cut, so the asymmetric
