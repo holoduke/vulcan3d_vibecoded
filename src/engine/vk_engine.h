@@ -15,6 +15,7 @@
 #include "engine/physics_world.h"
 #include "engine/skybox.h"
 #include "engine/terrain.h"
+#include "engine/grass.h"
 #include "game/level.h"
 #include "game/player.h"
 
@@ -531,6 +532,17 @@ private:
     // Phase 2 chunked raster terrain.
     TerrainChunkSet terrain_chunks_{};
 
+    // Instanced grass — one shared blade mesh + per-blade transforms.
+    // Built once at level load via build_grass(). Pipeline is separate
+    // from the cube pipeline because grass uses its own (cheap) shading
+    // path — no RT shadows or GI per blade.
+    GrassMesh grass_{};
+    VkPipeline       grass_pipeline_       = VK_NULL_HANDLE;
+    VkShaderModule   grass_vert_module_    = VK_NULL_HANDLE;
+    VkShaderModule   grass_frag_module_    = VK_NULL_HANDLE;
+    void init_grass_pipeline();
+    void destroy_grass_pipeline();
+
     // Phase 4 sculpt state. The brush is driven by the player's center-
     // screen ray; click-and-hold raises/lowers/smooths the heightmap
     // within `terrain_brush_radius` of the hit point. Mutated chunks
@@ -781,6 +793,15 @@ private:
         float terrain_h_dirt_rock_end    = 80.0f;
         float terrain_h_rock_snow_start  = 95.0f;
         float terrain_h_rock_snow_end    = 120.0f;
+
+        // ---- Grass ----
+        bool  grass_enabled        = true;
+        // Max blade-render distance in metres. Beyond this, blades
+        // collapse to NaN clip space (no fragment work).
+        float grass_distance       = 80.0f;
+        // Peak per-blade tip wind sway in metres. The sway is per-blade
+        // sin/cos so neighbours move out of phase.
+        float grass_wind           = 0.04f;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;

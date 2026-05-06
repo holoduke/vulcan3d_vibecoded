@@ -6,6 +6,7 @@
 
 #include "engine/vk_engine/internal.h"
 #include "engine/gltf_loader.h"
+#include "engine/grass.h"
 #include "engine/skybox.h"
 #include "engine/terrain.h"
 #include "engine/texture.h"
@@ -243,6 +244,21 @@ void VulkanEngine::init_world() {
                                           a.max.y += hp.plateau_height; }
         // Lift player's default spawn point above the new ground.
         player_.position.y += hp.plateau_height;
+
+        // Grass: scatter blades on the heightmap. Acceptance band +
+        // slope test mean only the grass-coloured layer of the
+        // terrain (low altitude, gentle slope) gets covered. Cap at
+        // 200k blades for a healthy density without bloating VRAM.
+        GrassParams gp{};
+        // Stay below the plateau so blades don't scatter inside the
+        // castle. height_max = plateau - 2m gives a clean ring of
+        // grass on the natural terrain that surrounds the castle.
+        gp.height_min = -2.0f;
+        gp.height_max = hp.plateau_height - 2.0f;
+        gp.half_extent = 0.5f * hm.side();
+        grass_ = build_grass(device_, allocator_,
+                             graphics_queue_, graphics_queue_family_,
+                             hm, gp);
     }
 
     physics_ = std::make_unique<PhysicsWorld>();
@@ -1010,6 +1026,46 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             vkCmdDrawIndexed(cmd, c.mesh.index_count, 1, 0, 0, 0);
         }
         // Rebind cube for the brush loop.
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    }
+
+    // Grass — instanced billboard blades. Single draw call covers
+    // every blade; the grass.vert collapses out-of-range blades to
+    // a degenerate triangle (NaN clip space) so no fragment work runs
+    // for them. Skipped entirely when disabled in Settings or when
+    // build_grass produced an empty set.
+    if (rt_.grass_enabled && grass_.instance_count > 0 &&
+        grass_pipeline_ != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, grass_pipeline_);
+        // descriptor set is the same scene set, already bound at the
+        // top of render_world; no need to rebind.
+        VkBuffer  bufs[2]    = { grass_.blade_mesh.vertex_buffer,
+                                  grass_.instance_buffer };
+        VkDeviceSize offs[2] = { 0, 0 };
+        vkCmdBindVertexBuffers(cmd, 0, 2, bufs, offs);
+        vkCmdBindIndexBuffer(cmd, grass_.blade_mesh.index_buffer, 0,
+                             VK_INDEX_TYPE_UINT32);
+        // Grass push constants — only grass_params is read by grass.vert,
+        // the rest are dummies. Time is just the frame number scaled to
+        // a sane wind period.
+        PushConstants gpc{};
+        gpc.mvp = vp;
+        gpc.model = glm::mat4(1.0f);
+        gpc.prev_mvp = prev_vp;
+        gpc.color = glm::vec4(1.0f);
+        gpc.emissive = glm::vec4(0.0f);
+        gpc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
+        float t = static_cast<float>(frame_number_) * 0.016f;
+        gpc.grass_params = glm::vec4(rt_.grass_distance, rt_.grass_wind, t, 0.0f);
+        vkCmdPushConstants(cmd, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PushConstants), &gpc);
+        vkCmdDrawIndexed(cmd, grass_.blade_mesh.index_count,
+                         grass_.instance_count, 0, 0, 0);
+        // Restore the world pipeline + cube mesh bindings for the
+        // brush loop below.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }

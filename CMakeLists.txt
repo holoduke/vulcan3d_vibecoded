@@ -175,6 +175,7 @@ add_library(qlike_engine STATIC
     src/engine/crash_handler.cpp
     src/engine/audio.cpp
     src/engine/terrain.cpp
+    src/engine/grass.cpp
 )
 target_include_directories(qlike_engine PUBLIC src)
 target_include_directories(qlike_engine PRIVATE

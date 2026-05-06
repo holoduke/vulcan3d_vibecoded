@@ -181,6 +181,9 @@ void VulkanEngine::save_settings() const {
     f << "terrain_h_dirt_rock_end = "    << rt_.terrain_h_dirt_rock_end    << "\n";
     f << "terrain_h_rock_snow_start = "  << rt_.terrain_h_rock_snow_start  << "\n";
     f << "terrain_h_rock_snow_end = "    << rt_.terrain_h_rock_snow_end    << "\n";
+    f << "grass_enabled = "  << (rt_.grass_enabled ? 1 : 0) << "\n";
+    f << "grass_distance = " << rt_.grass_distance          << "\n";
+    f << "grass_wind = "     << rt_.grass_wind              << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
     f << "reflections_enabled = "<< (rt_.reflections_enabled ? 1 : 0) << "\n";
@@ -274,6 +277,9 @@ void VulkanEngine::load_settings() {
             else if (key == "terrain_h_dirt_rock_end")    rt_.terrain_h_dirt_rock_end    = std::stof(val);
             else if (key == "terrain_h_rock_snow_start")  rt_.terrain_h_rock_snow_start  = std::stof(val);
             else if (key == "terrain_h_rock_snow_end")    rt_.terrain_h_rock_snow_end    = std::stof(val);
+            else if (key == "grass_enabled")  rt_.grass_enabled  = (std::stoi(val) != 0);
+            else if (key == "grass_distance") rt_.grass_distance = std::stof(val);
+            else if (key == "grass_wind")     rt_.grass_wind     = std::stof(val);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);
             else if (key == "reflections_enabled") rt_.reflections_enabled = std::stoi(val) != 0;

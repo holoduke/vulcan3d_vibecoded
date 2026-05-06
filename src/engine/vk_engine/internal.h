@@ -36,7 +36,8 @@ inline constexpr const char* kSettingsPath = "qlike_settings.cfg";
 
 // Per-draw push constants for the cube/cylinder raster pipeline. The depth
 // pre-pass uses the same layout (depth_pipeline_'s shader ignores everything
-// past mvp/model). 240 bytes total — see static_assert in helpers.cpp.
+// past mvp/model); grass.vert reads `grass_params` and ignores the rest.
+// 256 bytes total — see static_assert in helpers.cpp.
 struct PushConstants {
     glm::mat4 mvp        = glm::mat4(1.0f);
     glm::mat4 model      = glm::mat4(1.0f);
@@ -47,8 +48,15 @@ struct PushConstants {
     glm::vec4 color      = glm::vec4(1.0f);
     glm::vec4 emissive   = glm::vec4(0.0f);
     // x: albedo idx (-1 = none), y: normal idx (-1 = none), z: uv scale,
-    // w: 0 = world-space triplanar, 1 = object-space triplanar.
+    // w: 0 = world-space triplanar, 1 = object-space triplanar, 2 = terrain.
     glm::vec4 tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
+    // Grass-only knobs (read by grass.vert):
+    //   x: max draw distance (m). beyond this the vertex shader collapses
+    //      the blade to a degenerate triangle so the rasteriser drops it.
+    //   y: wind strength (peak side-sway in metres at the blade tip).
+    //   z: time (seconds; drives the wind sin).
+    //   w: unused.
+    glm::vec4 grass_params = glm::vec4(80.0f, 0.04f, 0.0f, 0.0f);
 };
 
 // Per-frame scene UBO, bound at scene_desc_set binding 0.

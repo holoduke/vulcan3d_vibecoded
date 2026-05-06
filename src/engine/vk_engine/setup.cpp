@@ -415,6 +415,68 @@ void VulkanEngine::init_pipeline() {
     log::info("graphics + depth-prepass pipelines built");
 }
 
+void VulkanEngine::init_grass_pipeline() {
+    std::string sd = QLIKE_SHADER_DIR;
+    grass_vert_module_ = vkpipe::load_shader_module(device_, sd + "/grass.vert.spv");
+    grass_frag_module_ = vkpipe::load_shader_module(device_, sd + "/grass.frag.spv");
+
+    vkpipe::GraphicsPipelineConfig cfg{};
+    cfg.vert = grass_vert_module_;
+    cfg.frag = grass_frag_module_;
+    cfg.layout = pipeline_layout_;     // shares cube's layout (push consts)
+    cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+    cfg.depth_format = depth_format_;
+
+    // Grass uses CULL_NONE — blades are double-sided, the back of a
+    // billboard would otherwise vanish when its random rotation faces
+    // away from the camera.
+    cfg.cull = VK_CULL_MODE_NONE;
+    cfg.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    // Vertex bindings:
+    //   0 = blade mesh per-vertex (Vertex layout, same as cube)
+    //   1 = per-instance GrassBlade (3 vec4 entries: pos+pad,
+    //       rot+height+pad, tint+pad)
+    VkVertexInputBindingDescription b0{};
+    b0.binding = 0;
+    b0.stride = sizeof(Vertex);
+    b0.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputBindingDescription b1{};
+    b1.binding = 1;
+    b1.stride = static_cast<uint32_t>(sizeof(GrassBlade));
+    b1.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+    cfg.vbindings = { b0, b1 };
+
+    auto attr = [](uint32_t loc, uint32_t binding, VkFormat fmt, uint32_t off) {
+        VkVertexInputAttributeDescription a{};
+        a.location = loc; a.binding = binding; a.format = fmt; a.offset = off;
+        return a;
+    };
+    cfg.vattrs = {
+        attr(0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)),
+        attr(1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)),
+        attr(2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(Vertex, uv)),
+        // GrassBlade layout (matches header):
+        //   vec3 pos + float pad     -> vec4 at offset 0
+        //   float rot + float h + 2pad -> vec4 at offset 16
+        //   vec3 tint + float pad     -> vec4 at offset 32
+        attr(3, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0),
+        attr(4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 16),
+        attr(5, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 32),
+    };
+
+    grass_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    log::info("grass pipeline built");
+}
+
+void VulkanEngine::destroy_grass_pipeline() {
+    if (grass_pipeline_) vkDestroyPipeline(device_, grass_pipeline_, nullptr);
+    if (grass_vert_module_) vkDestroyShaderModule(device_, grass_vert_module_, nullptr);
+    if (grass_frag_module_) vkDestroyShaderModule(device_, grass_frag_module_, nullptr);
+    grass_pipeline_ = VK_NULL_HANDLE;
+    grass_vert_module_ = grass_frag_module_ = VK_NULL_HANDLE;
+}
+
 void VulkanEngine::destroy_pipeline() {
     if (pipeline_)         vkDestroyPipeline(device_, pipeline_, nullptr);
     if (depth_pipeline_)   vkDestroyPipeline(device_, depth_pipeline_, nullptr);

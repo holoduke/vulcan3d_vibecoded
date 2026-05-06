@@ -116,6 +116,7 @@ void VulkanEngine::init() {
                                      alb, nrm, kTextureCount, texture_sampler_);
     }
     init_pipeline();
+    init_grass_pipeline();
     init_taa();
     init_viewmodel();
     init_imgui();
@@ -963,7 +964,9 @@ void VulkanEngine::shutdown() {
     });
     guarded("destroy_skybox", [&]{ destroy_skybox_resources(); });
     guarded("destroy_textures", [&]{ destroy_textures(); });
+    guarded("destroy_grass_pipeline", [&]{ destroy_grass_pipeline(); });
     guarded("destroy_pipeline", [&]{ destroy_pipeline(); });
+    guarded("destroy_grass", [&]{ destroy_grass(allocator_, grass_); });
     guarded("destroy_pipeline_cache", [&]{ destroy_pipeline_cache(); });
     guarded("destroy_readback_buffer", [&]{ destroy_readback_buffer(); });
 

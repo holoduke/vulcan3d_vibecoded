@@ -298,6 +298,11 @@ void VulkanEngine::build_menu_ui() {
             ImGui::TreePop();
         }
 
+        ImGui::SeparatorText("Grass");
+        ImGui::Checkbox("grass enabled", &rt_.grass_enabled);
+        ImGui::SliderFloat("grass distance (m)", &rt_.grass_distance, 10.0f, 200.0f);
+        ImGui::SliderFloat("grass wind (m)",     &rt_.grass_wind,      0.0f, 0.20f);
+
         ImGui::SeparatorText("Terrain sculpt (Phase 4)");
         ImGui::Checkbox("Edit mode (left-click sculpts, not fires)",
                         &terrain_edit_mode_);
