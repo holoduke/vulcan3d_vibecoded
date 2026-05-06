@@ -248,8 +248,14 @@ void main() {
     }
 
     float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 ambient = mix(scene.ambient.rgb, scene.sky_color.rgb * 0.45, up);
-    ambient *= scene.rt_params.z;
+    // Split ambient into a sky-derived component (fades when the surface
+    // is enclosed — sky_factor below) and a constant ground/reflected
+    // component that exists indoors too (a real room has a floor that
+    // reflects light, not a black void). Combining them later avoids
+    // the "AO * sky_factor" double-darkening that crushed interior
+    // edges to black.
+    vec3 ambient_ground = scene.ambient.rgb * scene.rt_params.z;
+    vec3 ambient_sky    = scene.sky_color.rgb * 0.45 * scene.rt_params.z;
 
     float n_dot_l = max(dot(N, L), 0.0);
 
@@ -561,8 +567,15 @@ void main() {
     // rolls in the sky contribution faster than linear so the open arena
     // still reads bright. GI-disabled fallback (sky_vis=1.0) leaves the
     // outdoor look identical to before this change.
-    float sky_factor = mix(0.15, 1.0, smoothstep(0.0, 0.6, sky_vis));
-    vec3 indirect = albedo * ambient * ao * sky_factor + gi_indirect;
+    // Combine: sky_factor only attenuates the sky-derived part of
+    // ambient, the ground term carries through everywhere. AO multiplies
+    // the whole thing so edges still darken, but never to zero (the
+    // ground term keeps a baseline). 0.10 floor on sky_factor is a tiny
+    // gesture toward "windowless rooms still have some light leakage."
+    float sky_factor = mix(0.10, 1.0, smoothstep(0.0, 0.6, sky_vis));
+    vec3 ambient_combined = mix(ambient_ground,
+                                 ambient_sky * sky_factor, up);
+    vec3 indirect = albedo * ambient_combined * ao + gi_indirect;
     vec3 final = direct + indirect + vEmissive.rgb + reflection * (shiny ? 1.0 : 0.0);
 
     outColor = vec4(final, 1.0);
