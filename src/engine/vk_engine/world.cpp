@@ -851,29 +851,28 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         glm::mat4 model = dr.world * glm::scale(glm::mat4(1.0f), dyn_props_[i].full_size);
         push_depth(model);
     }
-    // Terrain: chunked (matches the color pass's LOD) so the depth
-    // buffer sees the same surface that the color pass will sample.
+    // Terrain: full-LOD (matching the color pass — color pass renders
+    // every chunk at full LOD until stitched-LOD lands). If the prepass
+    // used half-LOD here, its rasterized depth would be the linear
+    // interp of every-other vertex, while the color pass renders the
+    // real heightmap surface at full density. Where the full-LOD
+    // mid-vert sits BELOW the half-LOD straight line (a valley between
+    // two ridge verts), the color pass's depth is GREATER than the
+    // prepass's depth, the LESS_OR_EQUAL test fails, and the pixel is
+    // discarded → "missing triangles" exactly as the user reported.
     if (!terrain_chunks_.chunks.empty()) {
-        const glm::vec3 cam_pos = render_pos;
-        const float kNearLod = 320.0f;
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
-            glm::vec3 ctr = (c.aabb_min + c.aabb_max) * 0.5f;
-            float d = glm::length(ctr - cam_pos);
-            bool full_lod = d < kNearLod;
             VkDeviceSize toff = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
-            VkBuffer ibo = full_lod ? c.mesh.index_buffer : c.ibo_half;
-            uint32_t icnt = full_lod ? c.mesh.index_count : c.index_count_half;
-            if (icnt == 0) continue;
-            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdBindIndexBuffer(cmd, c.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
             PushConstants pc{};
             pc.mvp = vp;
             pc.model = glm::mat4(1.0f);
             vkCmdPushConstants(cmd, pipeline_layout_,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(PushConstants), &pc);
-            vkCmdDrawIndexed(cmd, icnt, 1, 0, 0, 0);
+            vkCmdDrawIndexed(cmd, c.mesh.index_count, 1, 0, 0, 0);
         }
     }
 }
