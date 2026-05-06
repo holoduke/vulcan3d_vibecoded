@@ -33,23 +33,19 @@ layout(set = 0, binding = 0) uniform SceneUBO {
 
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 
-// Single shadow ray to the sun. cull-mask 0x01 keeps it consistent
-// with cube.frag's shadow tests — sparks and bullets stay out.
-// t_min = 1.0 (one metre along the ray) so the origin is clear of
-// the full-res terrain BLAS which is co-located with the heightmap
-// the blade base sits on. A smaller bias would self-intersect and
-// the shadow ray would always report "blocked", but the symptom
-// reported was the opposite (shadows not casting at all) which
-// suggests this descriptor was reachable but the ray was never
-// missing — every shadow test was reading the wrong / no hit.
-// Larger t_min makes both failure modes correct: ray clears terrain
-// and only registers a hit on something distinct (castle, crate).
+// Single any-hit shadow ray. cull-mask 0x01 matches cube.frag.
+// t_min stays near zero — the spatial offset on the origin (caller
+// adds 0.5m straight up) is what clears the heightmap BLAS so the
+// ray can't self-intersect the ground we're standing on. Earlier
+// fix used t_min=1m which skipped PAST close-by occluders (a small
+// crate just above the grass would already be behind the ray's
+// start point), so castle/crate shadows weren't casting on grass.
 bool sun_blocked(vec3 origin, vec3 dir) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS,
                           gl_RayFlagsTerminateOnFirstHitEXT |
                           gl_RayFlagsOpaqueEXT,
-                          0x01, origin, 1.0, dir, 200.0);
+                          0x01, origin, 0.001, dir, 200.0);
     while (rayQueryProceedEXT(rq)) {}
     return rayQueryGetIntersectionTypeEXT(rq, true) ==
            gl_RayQueryCommittedIntersectionTriangleEXT;
@@ -82,12 +78,18 @@ void main() {
     // keep read only 25% darker than open ground (sky_amt=0.30 still
     // dominated lum) and the user couldn't tell they were indoors.
     if (scene.rt_flags.x != 0) {
-        vec3 origin = vWorldPos + vec3(0.0, 0.30, 0.0);
+        // Origin offset 0.5m above the blade base — high enough to
+        // clear the heightmap BLAS underfoot, low enough that a
+        // shadow caster sitting just over the grass (a fallen crate,
+        // a low castle merlon at the foot of the wall) still occludes
+        // the ray. Earlier 0.30m + t_min=1.0 missed those because
+        // the ray skipped past them.
+        vec3 origin = vWorldPos + vec3(0.0, 0.5, 0.0);
         if (sun_blocked(origin, normalize(scene.sun_direction.xyz))) {
             sun_amt = 0.0;
         }
         if (sun_blocked(origin, vec3(0.0, 1.0, 0.0))) {
-            sky_amt *= 0.15;     // mostly cut sky bounce when roofed
+            sky_amt *= 0.15;     // roofed → kill sky bounce too
         }
     }
     float lum = sun_amt + sky_amt;
