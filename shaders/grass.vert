@@ -171,25 +171,19 @@ void main() {
 
     // ---- Distance-based density thinning ----
     // Far blades get progressively dropped so dense fields don't form
-    // an overpacked carpet at distance. Near (~25% of max) keeps full
-    // density; from there it falls off linearly to ~0.40 at the
-    // distance limit. Per-blade rank is a deterministic hash on the
-    // blade's world XZ — same blade decides the same way every frame
-    // so the field doesn't shimmer.
+    // an overpacked carpet at distance. Per-blade rank is a stable
+    // hash on world XZ. Instead of a hard if-cull (caused popping
+    // flashes as the player moved across the rank/density boundary),
+    // we use a smoothstep height multiplier — blades on the edge of
+    // being culled shrink smoothly to zero so the cut is invisible.
     float dist_norm = clamp(view_dist_base / pc.grass_params.x, 0.0, 1.0);
     float dist_density = mix(1.0, 0.40, smoothstep(0.25, 1.0, dist_norm));
     float blade_rank = fract(sin(dot(base_world.xz,
                                       vec2(12.9898, 78.233))) * 43758.5453);
-    if (blade_rank > dist_density) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-        vCullKill = 1.0;
-        vNormal = vec3(0.0, 1.0, 0.0);
-        vColor  = vec3(0.0);
-        vUv     = vec2(0.0);
-        vHeightRatio = 0.0;
-        vWorldPos = vec3(0.0);
-        return;
-    }
+    float density_keep = 1.0 - smoothstep(dist_density - 0.04,
+                                           dist_density + 0.04,
+                                           blade_rank);
+    lp.y *= density_keep;
 
     // Slope fade — blades whose stored heightmap-normal Y is below
     // the user threshold shrink toward 0 height. Smoothstep makes
