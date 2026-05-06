@@ -247,23 +247,13 @@ void main() {
         return;
     }
 
-    // ---- Per-blade sun shadow (vertex-shader ray) ----
-    // Old code fired the shadow ray PER FRAGMENT, which on close
-    // blades meant hundreds of rays per blade. Now we fire ONE ray
-    // per vertex (5 rays per blade) and pass the result through a
-    // varying — the fragment just multiplies. Net cost on close
-    // grass drops by orders of magnitude; far grass picks up the
-    // shadow at marginal extra cost. Visually a single per-blade
-    // shadow value is fine: blades are tiny, fragment-level shadow
-    // resolution wasn't earning its cost.
+    // Vertex-shader shadow rays caused TDRs on dense fields (5 rays
+    // per placed blade = 10M+ per frame at density 4×). Reverted to
+    // fragment-shader rays gated to a small distance (see grass.frag).
+    // These two varyings are kept around for downstream wiring but
+    // are unused for now — vSunShadow=0 means "let the fragment
+    // shader figure it out".
     vSunShadow = 0.0;
-    if (scene.rt_flags.x != 0) {
-        vec3 origin = base_world + vec3(0.0, 0.5, 0.0);
-        vec3 sun_dir = normalize(scene.sun_direction.xyz);
-        if (sun_blocked_v(origin, sun_dir)) {
-            vSunShadow = 1.0;
-        }
-    }
     vDistToCam = view_dist_base;
 
     gl_Position = pc.mvp * vec4(world, 1.0);

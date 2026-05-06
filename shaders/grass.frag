@@ -73,18 +73,19 @@ void main() {
     float sun_amt = scene.sun_color.a * 0.10 * n_dot_l;
     float sky_amt = 0.30;
 
-    // Shadow factor:
-    //   - Sun shadow comes from a per-vertex ray result (vSunShadow,
-    //     interpolated as flat varying — see grass.vert). One ray
-    //     per blade vertex, vs the previous per-pixel ray which on
-    //     dense close-up grass was hundreds of rays per blade.
-    //   - Sky-up "is roofed" ray still runs per fragment for blades
-    //     within kSkyShadowDist (only relevant inside the keep).
-    const float kSkyShadowDist = 45.0;
+    // Shadow factor — both rays gated to <30m of camera so even at
+    // density 4× (hundreds of thousands of rendered blades) the total
+    // ray budget stays bounded. Distant grass uses ambient-only
+    // shading; you'll only spot the missing shadows looking carefully
+    // at far blades, while close-up grass picks up castle/box/keep
+    // shadows correctly.
+    const float kShadowDist = 30.0;
     float shadow_factor = 1.0;
-    if (vSunShadow > 0.5) shadow_factor *= 0.18;
-    if (scene.rt_flags.x != 0 && vDistToCam < kSkyShadowDist) {
+    if (scene.rt_flags.x != 0 && vDistToCam < kShadowDist) {
         vec3 origin = vWorldPos + vec3(0.0, 0.5, 0.0);
+        if (sun_blocked(origin, normalize(scene.sun_direction.xyz))) {
+            shadow_factor *= 0.18;
+        }
         if (sun_blocked(origin, vec3(0.0, 1.0, 0.0))) {
             shadow_factor *= 0.45;
         }
