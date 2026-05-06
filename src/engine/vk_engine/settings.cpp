@@ -188,6 +188,7 @@ void VulkanEngine::save_settings() const {
     f << "grass_height_scale = "  << rt_.grass_height_scale      << "\n";
     f << "grass_alpha_cutoff = "  << rt_.grass_alpha_cutoff      << "\n";
     f << "grass_slope_n_min = "   << rt_.grass_slope_n_min       << "\n";
+    f << "grass_distance_density = " << rt_.grass_distance_density << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
     f << "reflections_enabled = "<< (rt_.reflections_enabled ? 1 : 0) << "\n";
@@ -288,6 +289,7 @@ void VulkanEngine::load_settings() {
             else if (key == "grass_height_scale") rt_.grass_height_scale  = std::stof(val);
             else if (key == "grass_alpha_cutoff") rt_.grass_alpha_cutoff  = std::stof(val);
             else if (key == "grass_slope_n_min")  rt_.grass_slope_n_min   = std::stof(val);
+            else if (key == "grass_distance_density") rt_.grass_distance_density = std::stof(val);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);
             else if (key == "reflections_enabled") rt_.reflections_enabled = std::stoi(val) != 0;

@@ -100,7 +100,7 @@ struct SceneUBO {
     //   x: height_scale (multiplies per-blade Y, 0.3..2.0)
     //   y: alpha_cutoff (side-taper discard, 0..0.6)
     //   z: slope_n_min  (blade fades to 0 below this stored n.y)
-    //   w: unused
+    //   w: distance_density (0..1, 0 = uniform, 1 = strong far falloff)
     glm::vec4  grass_extra;
 };
 

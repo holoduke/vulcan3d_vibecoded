@@ -816,6 +816,12 @@ private:
         // 1.0 = only perfectly flat ground; 0.55 = up to ~57° slope.
         // 0.85 (default) ≈ 32° max slope.
         float grass_slope_n_min    = 0.85f;
+        // Distance-based density falloff (0 = uniform density, 1 = far
+        // grass thinned to ~40% of near density). Implemented per-
+        // blade in grass.vert via a deterministic rank vs distance-
+        // driven threshold with a wide smoothstep so blades don't
+        // flicker as the player walks.
+        float grass_distance_density = 0.6f;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;

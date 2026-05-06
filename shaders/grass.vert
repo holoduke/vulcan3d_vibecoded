@@ -169,12 +169,30 @@ void main() {
     float fade = 1.0 - smoothstep(fade_start, pc.grass_params.x, view_dist_base);
     lp.y *= fade;
 
-    // (Distance-based density falloff was removed: it produced
-    // visible "flashes" as blades crossed the density threshold while
-    // the player moved, and reportedly correlated with intermittent
-    // crashes. If we want it back later, do it in a way that doesn't
-    // cause per-frame visibility flips — e.g. distance only changing
-    // the shader's draw-call instance offset, not per-blade fade.)
+    // ---- Distance-based density thinning (slider-controlled) ----
+    // Each blade has a stable rank (hash on world XZ). The density
+    // threshold falls with distance — far blades are more likely to
+    // shrink to zero height. The smoothstep window is wide (0.30) so
+    // when the player walks, individual blades take many frames to
+    // transition through the band — no visible flashing.
+    //
+    // grass_extra.w controls the strength: 0 = uniform density, 1 =
+    // far blades thinned to ~40%.
+    float ddens_strength = clamp(scene.grass_extra.w, 0.0, 1.0);
+    if (ddens_strength > 0.001) {
+        float min_density   = mix(1.0, 0.40, ddens_strength);
+        float dist_norm     = clamp(view_dist_base / pc.grass_params.x, 0.0, 1.0);
+        float thresh_density = mix(1.0, min_density, smoothstep(0.25, 1.0, dist_norm));
+        float blade_rank = fract(sin(dot(base_world.xz,
+                                          vec2(12.9898, 78.233))) * 43758.5453);
+        // Wide window (±0.30) ensures the per-blade transition is
+        // many camera-metres long, eliminating the per-frame "pop"
+        // that a tight (0.04) window produced.
+        float keep = 1.0 - smoothstep(thresh_density - 0.30,
+                                       thresh_density + 0.30,
+                                       blade_rank);
+        lp.y *= keep;
+    }
 
     // Slope fade — blades whose stored heightmap-normal Y is below
     // the user threshold shrink toward 0 height. Smoothstep makes

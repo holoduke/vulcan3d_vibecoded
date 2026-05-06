@@ -192,6 +192,9 @@ void VulkanEngine::build_menu_ui() {
                            "%.2f (lower = chunkier blade)");
         ImGui::SliderFloat("slope cutoff",   &rt_.grass_slope_n_min, 0.55f, 1.0f,
                            "%.2f (1.0 = only flat)");
+        ImGui::SliderFloat("distance density falloff",
+                           &rt_.grass_distance_density, 0.0f, 1.0f,
+                           "%.2f (0=uniform, 1=thin far)");
     }
 
     ImGui::Spacing();
