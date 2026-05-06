@@ -56,6 +56,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <typeinfo>
 
 #ifndef QLIKE_SHADER_DIR
@@ -570,6 +571,24 @@ void VulkanEngine::run(const RunOptions& opts) {
     constexpr float kFixedDt = 1.0f / 120.0f;  // 120 Hz physics
     constexpr int   kMaxTicksPerFrame = 6;
 
+    // FPS cap = primary monitor's refresh rate. Vulkan's FIFO present mode
+    // *should* already pace the swap to the display, but we've measured
+    // 500+ fps in this loop on some setups (driver fast-path / multi-
+    // monitor mismatch). Letting the CPU outrun the GPU saturates the
+    // RT pipeline and triggers TDR (DEVICE_LOST). A simple sleep-to-target
+    // at the start of each frame caps the loop at the monitor's rate
+    // without changing visuals. Falls back to 144 if GLFW can't read the
+    // monitor (rare on Windows).
+    int monitor_hz = 0;
+    if (auto* monitor = glfwGetPrimaryMonitor()) {
+        if (auto* mode = glfwGetVideoMode(monitor)) {
+            monitor_hz = mode->refreshRate;
+        }
+    }
+    if (monitor_hz <= 0) monitor_hz = 144;
+    const auto frame_target = std::chrono::nanoseconds(1'000'000'000 / monitor_hz);
+    log::infof("fps cap: %d Hz (monitor refresh)", monitor_hz);
+
     auto last = std::chrono::steady_clock::now();
     auto demo_start = last;
     prev_player_position_ = player_.position;
@@ -577,6 +596,19 @@ void VulkanEngine::run(const RunOptions& opts) {
     while (!window_->should_close()) {
         window_->poll_events();
         if (resize_requested_) recreate_swapchain();
+
+        // Frame-rate cap: sleep until at least frame_target has elapsed
+        // since the previous frame began. std::this_thread::sleep_until
+        // is precise enough on Windows ≥ 8.1 (timeBeginPeriod isn't
+        // strictly needed at 144 Hz target), and the busy-wait tail in
+        // the OS scheduler keeps wake-up jitter under ~1ms. Skipped in
+        // headless mode (max_frames / screenshot) so test runs aren't
+        // throttled to monitor refresh.
+        if (!headless) {
+            auto target = last + frame_target;
+            auto now0 = std::chrono::steady_clock::now();
+            if (now0 < target) std::this_thread::sleep_until(target);
+        }
 
         auto now = std::chrono::steady_clock::now();
         float frame_dt = std::chrono::duration<float>(now - last).count();

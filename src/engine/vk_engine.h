@@ -334,7 +334,13 @@ private:
     std::vector<ViewmodelMesh> viewmodel_gltf_;
     glm::mat4 viewmodel_root_offset_{ 1.0f };    // local-to-camera placement
 
-    static constexpr int   kMaxDynProps    = 200;
+    // 100 dynamic crates is the sweet spot for this scene's RT load —
+    // 200 was reachable in a few minutes of play and pushed the GPU
+    // through TDR (DEVICE_LOST) under heavy fire because the per-pixel
+    // ray budget × TLAS instance count exceeded the card's GRays/s
+    // budget. Static-brush BLAS bake (see docs/vulkan_best_practices.md)
+    // would lift this back up.
+    static constexpr int   kMaxDynProps    = 100;
     static constexpr float kSpawnInterval  = 0.4f;  // seconds between spawns
     float spawn_timer_ = 0.0f;
     uint32_t spawn_rng_state_ = 0xc0ffee42u;
