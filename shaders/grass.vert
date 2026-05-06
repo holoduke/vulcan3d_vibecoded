@@ -124,8 +124,19 @@ void main() {
                        base_world.z * 0.73 + t * 0.9) * 0.15;
 
     float gust = pulse * thickness * (1.0 + jitter);
+
+    // Idle breeze: a tiny per-blade sway that's always on, so blades
+    // outside the gust band aren't dead-still. Amplitude ~15% of the
+    // wind strength, two phases so X and Z don't oscillate in lockstep
+    // (looks like a gentle drifting jitter rather than a back-and-
+    // forth metronome).
+    float idle_phase_a = base_world.x * 0.41 + base_world.z * 0.27;
+    float idle_phase_b = base_world.x * 0.19 + base_world.z * 0.53;
+    vec2  idle_sway = vec2(sin(t * 1.3 + idle_phase_a),
+                           cos(t * 0.9 + idle_phase_b)) * 0.15 * wind_strength;
+
     float bend = inUv.y * inUv.y;
-    vec2  sway_xz = wind_dir * gust * wind_strength;
+    vec2  sway_xz = wind_dir * gust * wind_strength + idle_sway;
     lp.x += sway_xz.x * bend;
     lp.z += sway_xz.y * bend;
 
