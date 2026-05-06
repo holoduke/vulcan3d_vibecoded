@@ -71,20 +71,23 @@ void main() {
     // auto-exposure compensates for darker portions of the scene
     // (castle interior). Hard cap below.
     // Light intensity as a SCALAR — preserves the blade's green tint
-    // regardless of the sun direction. Earlier per-channel sky-colour
-    // multiplication crushed red/green and pulled shaded blades toward
-    // the blue sky tint.
+    // regardless of sun direction.
     float sun_amt = scene.sun_color.a * 0.10 * n_dot_l;
     float sky_amt = 0.30;
 
-    // Shadow: one any-hit ray to the sun. Origin is bumped 0.30m up
-    // off the heightmap surface so the t_min=1.0 inside sun_blocked
-    // can fully escape the BLAS terrain even at glancing sun angles.
-    // 200m max-t covers the tallest mountains in the scene.
+    // Shadow: one ray to the sun + one ray straight up for sky access.
+    // Sun ray drops the sun term. Sky ray approximates "is this blade
+    // under a roof?" — if yes, sky bounce is also blocked, so the sky
+    // term collapses too. Without this second test, blades inside the
+    // keep read only 25% darker than open ground (sky_amt=0.30 still
+    // dominated lum) and the user couldn't tell they were indoors.
     if (scene.rt_flags.x != 0) {
-        if (sun_blocked(vWorldPos + vec3(0.0, 0.30, 0.0),
-                        normalize(scene.sun_direction.xyz))) {
+        vec3 origin = vWorldPos + vec3(0.0, 0.30, 0.0);
+        if (sun_blocked(origin, normalize(scene.sun_direction.xyz))) {
             sun_amt = 0.0;
+        }
+        if (sun_blocked(origin, vec3(0.0, 1.0, 0.0))) {
+            sky_amt *= 0.15;     // mostly cut sky bounce when roofed
         }
     }
     float lum = sun_amt + sky_amt;
