@@ -14,6 +14,7 @@
 #include "engine/mesh.h"
 #include "engine/physics_world.h"
 #include "engine/skybox.h"
+#include "engine/terrain.h"
 #include "game/level.h"
 #include "game/player.h"
 
@@ -515,18 +516,43 @@ private:
     VkDeviceAddress merged_static_blas_device_address_ = 0;
     uint32_t merged_static_brush_count_ = 0;
 
-    // Phase 1 terrain BLAS: a single procedural heightmap grid mesh.
-    // Uploaded once at level load. Rendered via a dedicated draw call
-    // (separate vertex/index bind from the cube mesh) and added to the
-    // TLAS as one instance with kTerrainInstSentinel custom index — the
-    // shader skips per-primitive material lookup and falls back to its
-    // raster-pushed color for terrain GI hits.
+    // Phase 1 terrain BLAS: a single full-resolution mesh used by the
+    // RT path (shadows / GI / AO see crisp ground regardless of raster
+    // LOD). Raster goes through `terrain_chunks_` instead so the visible
+    // mesh can swap LOD per chunk and Phase 4 sculpt can rebuild only
+    // affected chunks.
     Mesh terrain_mesh_{};
     VkBuffer terrain_blas_buffer_ = VK_NULL_HANDLE;
     VmaAllocation terrain_blas_alloc_ = nullptr;
     VkAccelerationStructureKHR terrain_blas_ = VK_NULL_HANDLE;
     VkDeviceAddress terrain_blas_device_address_ = 0;
     glm::vec3 terrain_color_ = glm::vec3(0.45f, 0.42f, 0.32f);
+
+    // Phase 2 chunked raster terrain.
+    TerrainChunkSet terrain_chunks_{};
+
+    // Phase 4 sculpt state. The brush is driven by the player's center-
+    // screen ray; click-and-hold raises/lowers/smooths the heightmap
+    // within `terrain_brush_radius` of the hit point. Mutated chunks
+    // are rebuilt the next frame; the BLAS + Jolt heightfield are
+    // refreshed when the stroke ends (mouse-up) so the per-frame cost
+    // stays low.
+    enum class TerrainBrushMode { Raise, Lower, Smooth, Flatten };
+    bool  terrain_edit_mode_     = false;
+    bool  terrain_stroke_active_ = false;     // mouse held since stroke begin
+    bool  terrain_blas_dirty_    = false;     // rebuild BLAS at next safe point
+    bool  terrain_jolt_dirty_    = false;     // rebuild Jolt heightfield
+    TerrainBrushMode terrain_brush_mode_ = TerrainBrushMode::Raise;
+    float terrain_brush_radius_  = 6.0f;       // metres
+    float terrain_brush_strength_ = 8.0f;      // metres/sec at brush centre
+    float terrain_brush_flatten_target_ = 22.0f;
+    glm::vec3 terrain_brush_world_pos_{0.0f}; // last hit point (UI gizmo)
+    bool  terrain_brush_has_hit_ = false;
+    std::vector<int> terrain_dirty_chunks_;    // indices into terrain_chunks_.chunks
+    void apply_terrain_brush(float dt);
+    void rebuild_dirty_terrain_chunks();
+    void refresh_terrain_blas();
+    void refresh_terrain_collision();
 
     VkBuffer tlas_buffer_ = VK_NULL_HANDLE;
     VmaAllocation tlas_alloc_ = nullptr;

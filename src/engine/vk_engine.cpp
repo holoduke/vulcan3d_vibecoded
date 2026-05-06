@@ -689,19 +689,49 @@ void VulkanEngine::run(const RunOptions& opts) {
         if (muzzle_flash_timer_ > 0.0f) muzzle_flash_timer_ -= frame_dt;
         if (recoil_timer_       > 0.0f) recoil_timer_       -= frame_dt;
         if (state_ == State::Playing && window_->cursor_captured()) {
-            float rps = std::max(0.0f, game_.fire_rate_rps);
-            if (rps <= 0.0f) {
-                if (in.fire) {
-                    fire_projectile(player_.eye_position(), player_.forward());
+            if (terrain_edit_mode_) {
+                // ---- Phase 4 sculpt path ----
+                // Raycast from the eye along the camera forward against
+                // the heightfield (Jolt's static body) — works because
+                // the heightfield is in NON_MOVING and add_static_heightfield
+                // uses the standard collision layer.
+                glm::vec3 origin = player_.eye_position();
+                glm::vec3 dir    = player_.forward();
+                if (physics_) {
+                    auto rh = physics_->raycast(origin, dir, 400.0f);
+                    if (rh.hit) {
+                        terrain_brush_world_pos_ = rh.position;
+                        terrain_brush_has_hit_ = true;
+                    } else {
+                        terrain_brush_has_hit_ = false;
+                    }
                 }
-            } else if (in.fire_held) {
-                float interval = 1.0f / rps;
-                if (fire_cooldown_ <= 0.0f) {
-                    fire_projectile(player_.eye_position(), player_.forward());
-                    fire_cooldown_ += interval;
+                if (in.fire_held && terrain_brush_has_hit_) {
+                    apply_terrain_brush(frame_dt);
+                    rebuild_dirty_terrain_chunks();
+                    if (!terrain_stroke_active_) terrain_stroke_active_ = true;
+                } else if (terrain_stroke_active_ && !in.fire_held) {
+                    // Mouse-up: heavy refresh (BLAS + Jolt) deferred until
+                    // here so the stroke itself stays cheap.
+                    refresh_terrain_blas();
+                    refresh_terrain_collision();
+                    terrain_stroke_active_ = false;
                 }
             } else {
-                fire_cooldown_ = 0.0f;  // reset between bursts
+                float rps = std::max(0.0f, game_.fire_rate_rps);
+                if (rps <= 0.0f) {
+                    if (in.fire) {
+                        fire_projectile(player_.eye_position(), player_.forward());
+                    }
+                } else if (in.fire_held) {
+                    float interval = 1.0f / rps;
+                    if (fire_cooldown_ <= 0.0f) {
+                        fire_projectile(player_.eye_position(), player_.forward());
+                        fire_cooldown_ += interval;
+                    }
+                } else {
+                    fire_cooldown_ = 0.0f;  // reset between bursts
+                }
             }
         }
 

@@ -19,6 +19,156 @@
 
 namespace qlike {
 
+void VulkanEngine::apply_terrain_brush(float dt) {
+    if (!terrain_brush_has_hit_ || terrain_chunks_.chunks.empty()) return;
+    if (terrain_data_.heights.empty()) return;
+    const float r = terrain_brush_radius_;
+    const float w = terrain_data_.cell;
+    const int dim = terrain_data_.dim;
+    const int W = dim + 1;
+
+    // Convert world hit point to grid coords + brush radius in cells.
+    float cx = (terrain_brush_world_pos_.x - terrain_data_.origin_x) / w;
+    float cz = (terrain_brush_world_pos_.z - terrain_data_.origin_z) / w;
+    int rcells = static_cast<int>(std::ceil(r / w)) + 1;
+    int ix0 = std::max(0, static_cast<int>(std::floor(cx)) - rcells);
+    int ix1 = std::min(W - 1, static_cast<int>(std::ceil(cx))  + rcells);
+    int iz0 = std::max(0, static_cast<int>(std::floor(cz)) - rcells);
+    int iz1 = std::min(W - 1, static_cast<int>(std::ceil(cz))  + rcells);
+    if (ix0 > ix1 || iz0 > iz1) return;
+
+    const float strength = terrain_brush_strength_ * dt;
+
+    for (int iz = iz0; iz <= iz1; ++iz) {
+        for (int ix = ix0; ix <= ix1; ++ix) {
+            float dx = (static_cast<float>(ix) - cx) * w;
+            float dz = (static_cast<float>(iz) - cz) * w;
+            float d = std::sqrt(dx * dx + dz * dz);
+            if (d > r) continue;
+            // Smoothstep falloff so the brush has a soft edge.
+            float t = 1.0f - (d / r);
+            float falloff = t * t * (3.0f - 2.0f * t);
+            size_t idx = static_cast<size_t>(iz) * static_cast<size_t>(W) +
+                         static_cast<size_t>(ix);
+            float& h = terrain_data_.heights[idx];
+            switch (terrain_brush_mode_) {
+                case TerrainBrushMode::Raise:
+                    h += strength * falloff;
+                    break;
+                case TerrainBrushMode::Lower:
+                    h -= strength * falloff;
+                    break;
+                case TerrainBrushMode::Smooth: {
+                    // 4-tap blur toward neighbour mean.
+                    int xm = std::max(0, ix - 1);
+                    int xp = std::min(W - 1, ix + 1);
+                    int zm = std::max(0, iz - 1);
+                    int zp = std::min(W - 1, iz + 1);
+                    auto at = [&](int x, int z) {
+                        return terrain_data_.heights[
+                            static_cast<size_t>(z) * static_cast<size_t>(W) +
+                            static_cast<size_t>(x)];
+                    };
+                    float mean = 0.25f * (at(xm, iz) + at(xp, iz) +
+                                          at(ix, zm) + at(ix, zp));
+                    h += (mean - h) * std::min(1.0f, strength * 4.0f * falloff);
+                    break;
+                }
+                case TerrainBrushMode::Flatten: {
+                    float target = terrain_brush_flatten_target_;
+                    h += (target - h) * std::min(1.0f, strength * 0.5f * falloff);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Mark affected chunks dirty for next-frame mesh rebuild. A chunk's
+    // sample range is [origin_ix, origin_ix + chunk_cells] in X and Z,
+    // so we mark any chunk whose range overlaps the brush footprint.
+    const int chunk_cells = terrain_chunks_.chunk_cells;
+    auto mark_chunk_dirty = [&](int ci) {
+        for (int existing : terrain_dirty_chunks_) {
+            if (existing == ci) return;
+        }
+        terrain_dirty_chunks_.push_back(ci);
+    };
+    for (size_t ci = 0; ci < terrain_chunks_.chunks.size(); ++ci) {
+        const auto& c = terrain_chunks_.chunks[ci];
+        int cix0 = c.origin_ix;
+        int cix1 = c.origin_ix + chunk_cells;
+        int ciz0 = c.origin_iz;
+        int ciz1 = c.origin_iz + chunk_cells;
+        if (ix1 < cix0 || ix0 > cix1 || iz1 < ciz0 || iz0 > ciz1) continue;
+        mark_chunk_dirty(static_cast<int>(ci));
+    }
+    terrain_blas_dirty_ = true;
+    terrain_jolt_dirty_ = true;
+}
+
+void VulkanEngine::rebuild_dirty_terrain_chunks() {
+    if (terrain_dirty_chunks_.empty()) return;
+    if (terrain_data_.heights.empty()) return;
+    Heightmap hm{};
+    hm.dim = terrain_data_.dim;
+    hm.cell = terrain_data_.cell;
+    hm.origin_x = terrain_data_.origin_x;
+    hm.origin_z = terrain_data_.origin_z;
+    hm.heights = terrain_data_.heights;
+    for (int ci : terrain_dirty_chunks_) {
+        if (ci < 0 || static_cast<size_t>(ci) >= terrain_chunks_.chunks.size()) continue;
+        rebuild_chunk_vertices(device_, allocator_, graphics_queue_,
+                               graphics_queue_family_, hm,
+                               terrain_chunks_.chunks[ci]);
+    }
+    terrain_dirty_chunks_.clear();
+}
+
+void VulkanEngine::refresh_terrain_collision() {
+    if (!terrain_jolt_dirty_) return;
+    if (terrain_data_.heights.empty()) return;
+    // Jolt has no incremental update for HeightFieldShape — we rebuild
+    // the whole shape. Cheap relative to a full physics step (a few ms
+    // for 512x512 samples) and only fires once per stroke (mouse-up).
+    if (physics_) {
+        physics_->add_static_heightfield(terrain_data_.heights.data(),
+                                         terrain_data_.dim,
+                                         glm::vec2(terrain_data_.origin_x,
+                                                    terrain_data_.origin_z),
+                                         terrain_data_.cell);
+    }
+    terrain_jolt_dirty_ = false;
+}
+
+void VulkanEngine::refresh_terrain_blas() {
+    if (!terrain_blas_dirty_) return;
+    // BLAS rebuild is the heavy part. Defer to mouse-up so per-frame
+    // cost stays low during a stroke. The merged terrain mesh's vertex
+    // buffer is rebuilt from the current heightmap, then the BLAS is
+    // re-built in place. RT shadows/GI will be slightly stale until
+    // this fires, which reads as "lighting catches up after you stop
+    // sculpting" — acceptable.
+    if (terrain_mesh_.vertex_buffer && !terrain_data_.heights.empty()) {
+        Heightmap hm{};
+        hm.dim = terrain_data_.dim;
+        hm.cell = terrain_data_.cell;
+        hm.origin_x = terrain_data_.origin_x;
+        hm.origin_z = terrain_data_.origin_z;
+        hm.heights = terrain_data_.heights;
+        // Rebuild the full-mesh vertex buffer in place by abusing the
+        // chunk rebuild helper on a virtual "chunk" covering the whole
+        // mesh.
+        TerrainChunk fake{};
+        fake.mesh = terrain_mesh_;
+        fake.origin_ix = 0;
+        fake.origin_iz = 0;
+        fake.sample_dim = terrain_data_.dim + 1;
+        rebuild_chunk_vertices(device_, allocator_, graphics_queue_,
+                               graphics_queue_family_, hm, fake);
+    }
+    terrain_blas_dirty_ = false;
+}
+
 float VulkanEngine::sample_terrain_height(float x, float z) const {
     if (terrain_data_.heights.empty() || terrain_data_.dim <= 0) return 0.0f;
     const int W = terrain_data_.dim + 1;
@@ -56,15 +206,17 @@ void VulkanEngine::init_world() {
     {
         HeightmapParams hp{};
         // dim+1 must be a power of 2 so Jolt's HeightFieldShape can pick
-        // a valid block_size that divides the sample count. 511 cells
-        // → 512 samples per side → block_size 8. ~2km terrain.
-        hp.dim = 511;
-        hp.cell_size = 4.0f;          // 4m per cell × 511 = 2044m square
-        hp.height_scale = 140.0f;     // taller mountains for the bigger world
+        // a valid block_size that divides the sample count, AND dim must
+        // be divisible by the chunked-renderer's chunks_per_side. 1023
+        // cells → 1024 samples (block_size 8 ✓), divisible by 33 (chunks
+        // per side, giving chunk_cells = 31 ≈ 62m chunks) and 11 etc.
+        hp.dim = 1023;
+        hp.cell_size = 2.0f;           // 2m per cell × 1023 ≈ 2046m square
+        hp.height_scale = 140.0f;
         hp.plateau_extent = glm::vec2(28.0f, 28.0f);
-        hp.plateau_height = 22.0f;     // castle base sits at this Y
+        hp.plateau_height = 22.0f;
         hp.plateau_blend  = 24.0f;
-        hp.frequency      = 0.0014f;   // bigger features for the bigger world
+        hp.frequency      = 0.0014f;
         Heightmap hm = generate_heightmap(hp);
         // Cache for collision + Phase 4 sculpt access.
         terrain_data_.dim = hm.dim;
@@ -74,6 +226,14 @@ void VulkanEngine::init_world() {
         terrain_data_.heights = hm.heights;
         terrain_mesh_ = build_terrain_mesh(device_, allocator_,
                                            graphics_queue_, graphics_queue_family_, hm);
+        // Chunked raster terrain: 33×33 chunks of 31 cells each on a
+        // 2km world (~62m / chunk). Each chunk has full + half LOD
+        // index buffers; the renderer picks per-frame based on distance
+        // to the camera.
+        const int chunks_per_side = 33;
+        terrain_chunks_ = build_terrain_chunks(device_, allocator_,
+                                               graphics_queue_, graphics_queue_family_,
+                                               hm, chunks_per_side);
         // Lift every level brush by plateau_height so the castle's y=0
         // baseline lands on the plateau surface. Cheaper than rewriting
         // level.cpp — the brush AABBs / world matrices update through the
@@ -675,18 +835,30 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         glm::mat4 model = dr.world * glm::scale(glm::mat4(1.0f), dyn_props_[i].full_size);
         push_depth(model);
     }
-    // Terrain: vertices are already in world space, model = identity.
-    if (terrain_mesh_.index_count > 0) {
-        VkDeviceSize toff = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &terrain_mesh_.vertex_buffer, &toff);
-        vkCmdBindIndexBuffer(cmd, terrain_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
-        PushConstants pc{};
-        pc.mvp = vp;
-        pc.model = glm::mat4(1.0f);
-        vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pc);
-        vkCmdDrawIndexed(cmd, terrain_mesh_.index_count, 1, 0, 0, 0);
+    // Terrain: chunked (matches the color pass's LOD) so the depth
+    // buffer sees the same surface that the color pass will sample.
+    if (!terrain_chunks_.chunks.empty()) {
+        const glm::vec3 cam_pos = render_pos;
+        const float kNearLod = 320.0f;
+        for (const auto& c : terrain_chunks_.chunks) {
+            if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
+            glm::vec3 ctr = (c.aabb_min + c.aabb_max) * 0.5f;
+            float d = glm::length(ctr - cam_pos);
+            bool full_lod = d < kNearLod;
+            VkDeviceSize toff = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
+            VkBuffer ibo = full_lod ? c.mesh.index_buffer : c.ibo_half;
+            uint32_t icnt = full_lod ? c.mesh.index_count : c.index_count_half;
+            if (icnt == 0) continue;
+            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
+            PushConstants pc{};
+            pc.mvp = vp;
+            pc.model = glm::mat4(1.0f);
+            vkCmdPushConstants(cmd, pipeline_layout_,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(PushConstants), &pc);
+            vkCmdDrawIndexed(cmd, icnt, 1, 0, 0, 0);
+        }
     }
 }
 
@@ -779,28 +951,41 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     };
 
     int culled_static = 0, culled_dyn = 0, drawn_static = 0, drawn_dyn = 0;
-    // Terrain pass — bound first because the brush+dyn loop below assumes
-    // the cube mesh is bound. Switch back to cube after.
-    if (terrain_mesh_.index_count > 0) {
-        VkDeviceSize toff = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &terrain_mesh_.vertex_buffer, &toff);
-        vkCmdBindIndexBuffer(cmd, terrain_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
-        PushConstants pc{};
-        pc.mvp = vp;
-        pc.model = glm::mat4(1.0f);
-        pc.prev_mvp = prev_vp;
-        pc.color = glm::vec4(1.0f);   // multiplier; the shader builds its own albedo
-        pc.emissive = glm::vec4(0.0f);
-        // tex_params.w == 2.0 = "this is terrain — do height/slope blended
-        // shading in cube.frag". x=0 picks the Ground054 albedo for the
-        // triplanar detail pass; uv_scale is in metres per repeat.
-        pc.tex_params = tex_on
-            ? glm::vec4(0.0f, 0.0f, 16.0f, 2.0f)
-            : glm::vec4(-1.0f, -1.0f, 16.0f, 2.0f);
-        vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pc);
-        vkCmdDrawIndexed(cmd, terrain_mesh_.index_count, 1, 0, 0, 0);
+    // Terrain pass — chunked. Each visible chunk is drawn at full LOD
+    // when within `near_lod` metres of the camera, otherwise half LOD.
+    // The merged-static-BLAS-style "single big draw" is reserved for the
+    // RT path; for raster we want LOD + frustum cull per chunk so the
+    // 2km terrain stays cheap from any viewpoint.
+    if (!terrain_chunks_.chunks.empty()) {
+        const glm::vec3 cam_pos = render_pos;
+        const float kNearLod = 320.0f;       // full LOD inside this radius
+        for (const auto& c : terrain_chunks_.chunks) {
+            if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
+            // Distance from camera to chunk AABB centre. Cheap and good
+            // enough to drive a 2-bucket LOD selector.
+            glm::vec3 ctr = (c.aabb_min + c.aabb_max) * 0.5f;
+            float d = glm::length(ctr - cam_pos);
+            bool full_lod = d < kNearLod;
+            VkDeviceSize toff = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
+            VkBuffer ibo = full_lod ? c.mesh.index_buffer : c.ibo_half;
+            uint32_t icnt = full_lod ? c.mesh.index_count : c.index_count_half;
+            if (icnt == 0) continue;
+            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
+            PushConstants pc{};
+            pc.mvp = vp;
+            pc.model = glm::mat4(1.0f);
+            pc.prev_mvp = prev_vp;
+            pc.color = glm::vec4(1.0f);
+            pc.emissive = glm::vec4(0.0f);
+            pc.tex_params = tex_on
+                ? glm::vec4(0.0f, 0.0f, 16.0f, 2.0f)
+                : glm::vec4(-1.0f, -1.0f, 16.0f, 2.0f);
+            vkCmdPushConstants(cmd, pipeline_layout_,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(PushConstants), &pc);
+            vkCmdDrawIndexed(cmd, icnt, 1, 0, 0, 0);
+        }
         // Rebind cube for the brush loop.
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);

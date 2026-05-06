@@ -56,9 +56,55 @@ struct Heightmap {
 
 Heightmap generate_heightmap(const HeightmapParams& p);
 
-// Builds a triangulated terrain mesh + VRAM upload via create_mesh_from_data.
-// Vertex normals are smoothed per-vertex from neighbouring triangle normals.
+// Builds a single triangulated terrain mesh covering the whole heightmap.
+// Used by the merged BLAS for ray traversal — RT shadows / GI / AO see
+// the full-resolution surface regardless of raster LOD.
 Mesh build_terrain_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
                         uint32_t queue_family, const Heightmap& hm);
+
+// Phase 2 chunked terrain: split the heightmap into a grid of chunks,
+// each with its own full-LOD vertex+index buffer plus a sparser
+// half-LOD index buffer that re-indexes the same vertex buffer at every
+// other grid step. Per-frame, the renderer picks LOD per chunk based on
+// distance to the camera, frustum-culls invisible chunks, and draws.
+//
+// The vertex buffer is also kept on the host side (`positions` stores
+// per-vertex world Y) so Phase 4 sculpt can apply heightmap edits then
+// rebuild the affected chunk meshes incrementally.
+struct TerrainChunk {
+    Mesh mesh{};                       // full-LOD VBO + IBO
+    VkBuffer ibo_half = VK_NULL_HANDLE; // half-LOD index buffer
+    VmaAllocation ibo_half_alloc = nullptr;
+    uint32_t index_count_half = 0;
+    int cx = 0, cz = 0;                // grid coords (0..N-1)
+    int origin_ix = 0, origin_iz = 0;  // first heightmap sample
+    int sample_dim = 0;                // samples per chunk side (chunk_cells+1)
+    glm::vec3 aabb_min{0.0f};
+    glm::vec3 aabb_max{0.0f};
+};
+
+struct TerrainChunkSet {
+    std::vector<TerrainChunk> chunks;
+    int chunks_per_side = 0;
+    int chunk_cells = 0;       // cells per chunk side
+};
+
+// Builds chunks_per_side² chunks from `hm`. `chunks_per_side` must
+// divide `hm.dim`. Each chunk covers chunk_cells = hm.dim/chunks_per_side
+// cells per side.
+TerrainChunkSet build_terrain_chunks(VkDevice device, VmaAllocator alloc,
+                                     VkQueue queue, uint32_t queue_family,
+                                     const Heightmap& hm,
+                                     int chunks_per_side);
+
+void destroy_terrain_chunks(VkDevice device, VmaAllocator alloc,
+                            TerrainChunkSet& set);
+
+// Rebuild a single chunk's vertex buffer from the (possibly mutated)
+// heightmap. Index buffers don't change — only positions and normals.
+// Used by Phase 4 sculpt after a brush stroke modifies heights.
+void rebuild_chunk_vertices(VkDevice device, VmaAllocator alloc, VkQueue queue,
+                            uint32_t queue_family,
+                            const Heightmap& hm, TerrainChunk& c);
 
 } // namespace qlike

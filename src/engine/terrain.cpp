@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 #ifdef max
@@ -112,46 +113,43 @@ Heightmap generate_heightmap(const HeightmapParams& p) {
     return hm;
 }
 
-Mesh build_terrain_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
-                        uint32_t queue_family, const Heightmap& hm) {
-    const int W = hm.width();
-    const int H = hm.height();
-    std::vector<Vertex> verts;
-    verts.reserve(static_cast<size_t>(W) * static_cast<size_t>(H));
-    // First pass: positions + zero normals.
-    for (int iz = 0; iz < H; ++iz) {
-        for (int ix = 0; ix < W; ++ix) {
-            glm::vec3 p(hm.origin_x + static_cast<float>(ix) * hm.cell,
-                        hm.at(ix, iz),
-                        hm.origin_z + static_cast<float>(iz) * hm.cell);
-            // UV: world units per metre / 8m repeat — Phase 3 picks up
-            // proper triplanar so this is just a hint for raster shaders.
-            glm::vec2 uv(p.x / 8.0f, p.z / 8.0f);
+namespace {
+
+// Generate one chunk's vertex grid + smoothed per-vertex normals from
+// `hm` covering [origin_ix, origin_ix + sample_dim) × [origin_iz, ...).
+// Used both by the single-mesh builder and the chunked builder.
+void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
+                     int sample_dim,
+                     std::vector<Vertex>& verts,
+                     glm::vec3& aabb_min, glm::vec3& aabb_max) {
+    verts.clear();
+    verts.reserve(static_cast<size_t>(sample_dim) * static_cast<size_t>(sample_dim));
+    aabb_min = glm::vec3( 1e9f);
+    aabb_max = glm::vec3(-1e9f);
+    for (int iz = 0; iz < sample_dim; ++iz) {
+        for (int ix = 0; ix < sample_dim; ++ix) {
+            int gx = origin_ix + ix;
+            int gz = origin_iz + iz;
+            // Clamp to heightmap bounds for the boundary chunks; prevents
+            // out-of-range reads at the world edge.
+            gx = std::clamp(gx, 0, hm.width()  - 1);
+            gz = std::clamp(gz, 0, hm.height() - 1);
+            glm::vec3 p(hm.origin_x + static_cast<float>(gx) * hm.cell,
+                        hm.at(gx, gz),
+                        hm.origin_z + static_cast<float>(gz) * hm.cell);
+            // UV: 1m per repeat unit, scaled later by uv_scale push constant.
+            glm::vec2 uv(p.x, p.z);
             verts.push_back({p, glm::vec3(0.0f), uv});
+            aabb_min = glm::min(aabb_min, p);
+            aabb_max = glm::max(aabb_max, p);
         }
     }
-
-    // Index buffer. 2 triangles per cell.
-    std::vector<uint32_t> indices;
-    indices.reserve(static_cast<size_t>(hm.dim) * static_cast<size_t>(hm.dim) * 6u);
-    for (int iz = 0; iz < hm.dim; ++iz) {
-        for (int ix = 0; ix < hm.dim; ++ix) {
-            uint32_t i00 = static_cast<uint32_t>(iz * W + ix);
-            uint32_t i10 = i00 + 1;
-            uint32_t i01 = i00 + static_cast<uint32_t>(W);
-            uint32_t i11 = i01 + 1;
-            // CCW when viewed from +Y so the terrain's outward normal is
-            // up. With X × Z = -Y, the (i00, i10, i11) order produced
-            // -Y normals; (i00, i11, i10) produces +Y. Same flip on the
-            // diagonal-opposite triangle.
-            indices.push_back(i00); indices.push_back(i11); indices.push_back(i10);
-            indices.push_back(i00); indices.push_back(i01); indices.push_back(i11);
-        }
-    }
-
-    // Smooth per-vertex normals: accumulate face normal into each tri's
-    // verts, then normalize.
-    auto add_face = [&](uint32_t a, uint32_t b, uint32_t c) {
+    // Smooth per-vertex normals from the cell triangles.
+    auto idx = [&](int ix, int iz) {
+        return static_cast<size_t>(iz) * static_cast<size_t>(sample_dim) +
+               static_cast<size_t>(ix);
+    };
+    auto add_face = [&](size_t a, size_t b, size_t c) {
         glm::vec3 e1 = verts[b].position - verts[a].position;
         glm::vec3 e2 = verts[c].position - verts[a].position;
         glm::vec3 n = glm::cross(e1, e2);
@@ -159,20 +157,303 @@ Mesh build_terrain_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
         verts[b].normal += n;
         verts[c].normal += n;
     };
-    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
-        add_face(indices[i], indices[i + 1], indices[i + 2]);
+    for (int iz = 0; iz < sample_dim - 1; ++iz) {
+        for (int ix = 0; ix < sample_dim - 1; ++ix) {
+            size_t i00 = idx(ix,     iz);
+            size_t i10 = idx(ix + 1, iz);
+            size_t i01 = idx(ix,     iz + 1);
+            size_t i11 = idx(ix + 1, iz + 1);
+            // Match index order from build_terrain_mesh.
+            add_face(i00, i11, i10);
+            add_face(i00, i01, i11);
+        }
     }
     for (auto& v : verts) {
         float L = glm::length(v.normal);
         v.normal = (L > 1e-6f) ? (v.normal / L) : glm::vec3(0.0f, 1.0f, 0.0f);
     }
+}
 
+// Full-LOD index buffer for a chunk of `sample_dim` × `sample_dim` verts.
+void gen_full_indices(int sample_dim, std::vector<uint32_t>& out) {
+    const int cells = sample_dim - 1;
+    out.clear();
+    out.reserve(static_cast<size_t>(cells) * static_cast<size_t>(cells) * 6u);
+    for (int iz = 0; iz < cells; ++iz) {
+        for (int ix = 0; ix < cells; ++ix) {
+            uint32_t i00 = static_cast<uint32_t>(iz * sample_dim + ix);
+            uint32_t i10 = i00 + 1;
+            uint32_t i01 = i00 + static_cast<uint32_t>(sample_dim);
+            uint32_t i11 = i01 + 1;
+            out.push_back(i00); out.push_back(i11); out.push_back(i10);
+            out.push_back(i00); out.push_back(i01); out.push_back(i11);
+        }
+    }
+}
+
+// Half-LOD index buffer: skip every other vertex on both axes. The
+// vertex buffer stays at full resolution — we just reference a sparser
+// subset. Cells span 2x in each axis. Cracks at chunk boundaries are
+// hidden by the next-LOD-up chunks meeting at the seam (we always
+// match neighbour LODs in this build because the LOD is purely
+// distance-driven and neighbours are at most one ring apart).
+void gen_half_indices(int sample_dim, std::vector<uint32_t>& out) {
+    const int cells = sample_dim - 1;
+    out.clear();
+    if (cells < 2) return;
+    out.reserve(static_cast<size_t>(cells / 2) *
+                static_cast<size_t>(cells / 2) * 6u);
+    for (int iz = 0; iz < cells - 1; iz += 2) {
+        for (int ix = 0; ix < cells - 1; ix += 2) {
+            uint32_t i00 = static_cast<uint32_t>(iz * sample_dim + ix);
+            uint32_t i20 = i00 + 2;
+            uint32_t i02 = i00 + static_cast<uint32_t>(2 * sample_dim);
+            uint32_t i22 = i02 + 2;
+            out.push_back(i00); out.push_back(i22); out.push_back(i20);
+            out.push_back(i00); out.push_back(i02); out.push_back(i22);
+        }
+    }
+}
+
+} // namespace
+
+Mesh build_terrain_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
+                        uint32_t queue_family, const Heightmap& hm) {
+    std::vector<Vertex>   verts;
+    std::vector<uint32_t> indices;
+    glm::vec3 amin, amax;
+    gen_chunk_verts(hm, 0, 0, hm.dim + 1, verts, amin, amax);
+    gen_full_indices(hm.dim + 1, indices);
     Mesh m = create_mesh_from_data(device, alloc, queue, queue_family,
                                    verts.data(), static_cast<uint32_t>(verts.size()),
                                    indices.data(), static_cast<uint32_t>(indices.size()));
     log::infof("[terrain] mesh: %zu verts, %zu indices",
                verts.size(), indices.size());
     return m;
+}
+
+namespace {
+// Upload a uint32_t index buffer as a device-local read-only IBO.
+// Tiny helper since create_mesh_from_data couples vert + index uploads.
+void upload_index_buffer(VkDevice device, VmaAllocator alloc, VkQueue queue,
+                         uint32_t queue_family,
+                         const uint32_t* data, uint32_t count,
+                         VkBuffer& out_buf, VmaAllocation& out_alloc) {
+    const VkDeviceSize size = sizeof(uint32_t) * static_cast<VkDeviceSize>(count);
+    // Stage on host then copy to device-local — same pattern as mesh.cpp.
+    VkBufferCreateInfo bci_stage{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .size = size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+    };
+    VmaAllocationCreateInfo aci_stage{};
+    aci_stage.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+    VkBuffer stage = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = nullptr;
+    vmaCreateBuffer(alloc, &bci_stage, &aci_stage, &stage, &stage_alloc, nullptr);
+    void* m = nullptr;
+    vmaMapMemory(alloc, stage_alloc, &m);
+    std::memcpy(m, data, static_cast<size_t>(size));
+    vmaUnmapMemory(alloc, stage_alloc);
+
+    VkBufferCreateInfo bci_dst{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .size = size,
+        .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+    };
+    VmaAllocationCreateInfo aci_dst{};
+    aci_dst.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    vmaCreateBuffer(alloc, &bci_dst, &aci_dst, &out_buf, &out_alloc, nullptr);
+
+    VkCommandPoolCreateInfo pci{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = queue_family,
+    };
+    VkCommandPool pool = VK_NULL_HANDLE;
+    vkCreateCommandPool(device, &pci, nullptr, &pool);
+    VkCommandBufferAllocateInfo ai{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(device, &ai, &cb);
+    VkCommandBufferBeginInfo bi{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = nullptr,
+    };
+    vkBeginCommandBuffer(cb, &bi);
+    VkBufferCopy region{0, 0, size};
+    vkCmdCopyBuffer(cb, stage, out_buf, 1, &region);
+    vkEndCommandBuffer(cb);
+    VkSubmitInfo si{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = nullptr,
+        .waitSemaphoreCount = 0, .pWaitSemaphores = nullptr,
+        .pWaitDstStageMask = nullptr,
+        .commandBufferCount = 1, .pCommandBuffers = &cb,
+        .signalSemaphoreCount = 0, .pSignalSemaphores = nullptr,
+    };
+    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+    vkDestroyCommandPool(device, pool, nullptr);
+    vmaDestroyBuffer(alloc, stage, stage_alloc);
+}
+} // namespace
+
+TerrainChunkSet build_terrain_chunks(VkDevice device, VmaAllocator alloc,
+                                     VkQueue queue, uint32_t queue_family,
+                                     const Heightmap& hm,
+                                     int chunks_per_side) {
+    TerrainChunkSet set;
+    if (chunks_per_side <= 0 || hm.dim % chunks_per_side != 0) {
+        log::errorf("[terrain] bad chunks_per_side=%d for dim=%d (must divide)",
+                    chunks_per_side, hm.dim);
+        return set;
+    }
+    set.chunks_per_side = chunks_per_side;
+    set.chunk_cells = hm.dim / chunks_per_side;
+    const int sample_dim = set.chunk_cells + 1;
+
+    // Pre-build the index buffers (full + half) — they're identical for
+    // every chunk so we share contents but each chunk gets its own GPU
+    // buffer (the rasterizer doesn't deduplicate buffers across draws).
+    std::vector<uint32_t> idx_full;
+    std::vector<uint32_t> idx_half;
+    gen_full_indices(sample_dim, idx_full);
+    gen_half_indices(sample_dim, idx_half);
+
+    set.chunks.reserve(static_cast<size_t>(chunks_per_side) *
+                       static_cast<size_t>(chunks_per_side));
+    std::vector<Vertex> verts;
+    for (int cz = 0; cz < chunks_per_side; ++cz) {
+        for (int cx = 0; cx < chunks_per_side; ++cx) {
+            TerrainChunk c{};
+            c.cx = cx; c.cz = cz;
+            c.origin_ix = cx * set.chunk_cells;
+            c.origin_iz = cz * set.chunk_cells;
+            c.sample_dim = sample_dim;
+
+            gen_chunk_verts(hm, c.origin_ix, c.origin_iz, sample_dim,
+                            verts, c.aabb_min, c.aabb_max);
+
+            c.mesh = create_mesh_from_data(
+                device, alloc, queue, queue_family,
+                verts.data(), static_cast<uint32_t>(verts.size()),
+                idx_full.data(), static_cast<uint32_t>(idx_full.size()));
+
+            upload_index_buffer(device, alloc, queue, queue_family,
+                                idx_half.data(),
+                                static_cast<uint32_t>(idx_half.size()),
+                                c.ibo_half, c.ibo_half_alloc);
+            c.index_count_half = static_cast<uint32_t>(idx_half.size());
+
+            set.chunks.push_back(std::move(c));
+        }
+    }
+    log::infof("[terrain] chunks: %d × %d (= %d) at %d cells/chunk; "
+               "verts/chunk=%d full_tris/chunk=%d half_tris/chunk=%d",
+               chunks_per_side, chunks_per_side,
+               static_cast<int>(set.chunks.size()),
+               set.chunk_cells,
+               sample_dim * sample_dim,
+               static_cast<int>(idx_full.size() / 3u),
+               static_cast<int>(idx_half.size() / 3u));
+    return set;
+}
+
+void destroy_terrain_chunks(VkDevice device, VmaAllocator alloc,
+                            TerrainChunkSet& set) {
+    (void)device;
+    for (auto& c : set.chunks) {
+        if (c.mesh.vertex_buffer) destroy_mesh(alloc, c.mesh);
+        if (c.ibo_half) {
+            vmaDestroyBuffer(alloc, c.ibo_half, c.ibo_half_alloc);
+            c.ibo_half = VK_NULL_HANDLE;
+            c.ibo_half_alloc = nullptr;
+        }
+    }
+    set.chunks.clear();
+    set.chunks_per_side = 0;
+    set.chunk_cells = 0;
+}
+
+void rebuild_chunk_vertices(VkDevice device, VmaAllocator alloc, VkQueue queue,
+                            uint32_t queue_family,
+                            const Heightmap& hm, TerrainChunk& c) {
+    std::vector<Vertex> verts;
+    gen_chunk_verts(hm, c.origin_ix, c.origin_iz, c.sample_dim,
+                    verts, c.aabb_min, c.aabb_max);
+    // Re-upload via stage-then-copy. We could keep a persistent host-
+    // mapped staging buffer for sculpt strokes if this becomes a hot
+    // path, but a single chunk is ~40KB so the one-shot path is fine.
+    const VkDeviceSize size = sizeof(Vertex) *
+                              static_cast<VkDeviceSize>(verts.size());
+    VkBufferCreateInfo bci_stage{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .size = size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+    };
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+    VkBuffer stage = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = nullptr;
+    vmaCreateBuffer(alloc, &bci_stage, &aci, &stage, &stage_alloc, nullptr);
+    void* mapped = nullptr;
+    vmaMapMemory(alloc, stage_alloc, &mapped);
+    std::memcpy(mapped, verts.data(), static_cast<size_t>(size));
+    vmaUnmapMemory(alloc, stage_alloc);
+
+    VkCommandPoolCreateInfo pci{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = queue_family,
+    };
+    VkCommandPool pool = VK_NULL_HANDLE;
+    vkCreateCommandPool(device, &pci, nullptr, &pool);
+    VkCommandBufferAllocateInfo ai{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(device, &ai, &cb);
+    VkCommandBufferBeginInfo bi{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = nullptr,
+    };
+    vkBeginCommandBuffer(cb, &bi);
+    VkBufferCopy region{0, 0, size};
+    vkCmdCopyBuffer(cb, stage, c.mesh.vertex_buffer, 1, &region);
+    vkEndCommandBuffer(cb);
+    VkSubmitInfo si{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = nullptr,
+        .waitSemaphoreCount = 0, .pWaitSemaphores = nullptr,
+        .pWaitDstStageMask = nullptr,
+        .commandBufferCount = 1, .pCommandBuffers = &cb,
+        .signalSemaphoreCount = 0, .pSignalSemaphores = nullptr,
+    };
+    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+    vkDestroyCommandPool(device, pool, nullptr);
+    vmaDestroyBuffer(alloc, stage, stage_alloc);
 }
 
 } // namespace qlike

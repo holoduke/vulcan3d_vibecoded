@@ -165,6 +165,10 @@ void VulkanEngine::save_settings() const {
     f << "ao_floor = "             << rt_.ao_floor             << "\n";
     f << "auto_exposure_strength = " << rt_.auto_exposure_strength << "\n";
     f << "use_merged_static_blas = " << (rt_.use_merged_static_blas ? 1 : 0) << "\n";
+    f << "terrain_brush_radius = "   << terrain_brush_radius_   << "\n";
+    f << "terrain_brush_strength = " << terrain_brush_strength_ << "\n";
+    f << "terrain_brush_mode = "     << static_cast<int>(terrain_brush_mode_) << "\n";
+    f << "terrain_brush_flatten_target = " << terrain_brush_flatten_target_ << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
     f << "reflections_enabled = "<< (rt_.reflections_enabled ? 1 : 0) << "\n";
@@ -239,6 +243,13 @@ void VulkanEngine::load_settings() {
             else if (key == "ao_floor")             rt_.ao_floor = std::stof(val);
             else if (key == "auto_exposure_strength") rt_.auto_exposure_strength = std::stof(val);
             else if (key == "use_merged_static_blas") rt_.use_merged_static_blas = (std::stoi(val) != 0);
+            else if (key == "terrain_brush_radius")   terrain_brush_radius_   = std::stof(val);
+            else if (key == "terrain_brush_strength") terrain_brush_strength_ = std::stof(val);
+            else if (key == "terrain_brush_mode") {
+                int m = std::stoi(val);
+                if (m >= 0 && m <= 3) terrain_brush_mode_ = static_cast<TerrainBrushMode>(m);
+            }
+            else if (key == "terrain_brush_flatten_target") terrain_brush_flatten_target_ = std::stof(val);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);
             else if (key == "reflections_enabled") rt_.reflections_enabled = std::stoi(val) != 0;

@@ -281,6 +281,32 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("GI strength", &rt_.gi_strength, 0.0f, 3.0f);
         ImGui::SliderFloat("GI radius", &rt_.gi_radius, 1.0f, 400.0f);
 
+        ImGui::SeparatorText("Terrain sculpt (Phase 4)");
+        ImGui::Checkbox("Edit mode (left-click sculpts, not fires)",
+                        &terrain_edit_mode_);
+        if (terrain_edit_mode_) {
+            const char* modes[] = {"Raise", "Lower", "Smooth", "Flatten"};
+            int mode_i = static_cast<int>(terrain_brush_mode_);
+            if (ImGui::Combo("brush mode", &mode_i, modes, IM_ARRAYSIZE(modes))) {
+                terrain_brush_mode_ = static_cast<TerrainBrushMode>(mode_i);
+            }
+            ImGui::SliderFloat("brush radius (m)", &terrain_brush_radius_, 1.0f, 60.0f);
+            ImGui::SliderFloat("brush strength (m/s)", &terrain_brush_strength_,
+                               0.5f, 60.0f);
+            if (terrain_brush_mode_ == TerrainBrushMode::Flatten) {
+                ImGui::SliderFloat("flatten target Y",
+                                   &terrain_brush_flatten_target_, 0.0f, 200.0f);
+            }
+            if (terrain_brush_has_hit_) {
+                ImGui::Text("brush at: (%.1f, %.1f, %.1f)",
+                            terrain_brush_world_pos_.x,
+                            terrain_brush_world_pos_.y,
+                            terrain_brush_world_pos_.z);
+            } else {
+                ImGui::TextDisabled("aim at terrain to engage brush");
+            }
+        }
+
         ImGui::SeparatorText("Anti-aliasing (TAA + Halton sub-pixel jitter)");
         ImGui::Checkbox("sub-pixel jitter", &rt_.taa_jitter_enabled);
         ImGui::SliderFloat("jitter strength", &rt_.taa_jitter_strength, 0.0f, 2.0f);
