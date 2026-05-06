@@ -492,9 +492,18 @@ void VulkanEngine::draw(uint32_t img_index) {
         vkCmdEndRendering(frame.command_buffer);
     }
 
-    bool want_screenshot = !opts_.screenshot_path.empty() &&
-                           !screenshot_taken_ &&
-                           static_cast<int>(frame_number_) >= opts_.screenshot_after_frames;
+    // Two screenshot triggers: the --screenshot CLI one-shot AND F12 in-game.
+    std::string screenshot_path_this_frame;
+    bool screenshot_is_oneshot = false;
+    if (!pending_screenshot_path_.empty()) {
+        screenshot_path_this_frame = pending_screenshot_path_;
+        pending_screenshot_path_.clear();
+    } else if (!opts_.screenshot_path.empty() && !screenshot_taken_ &&
+               static_cast<int>(frame_number_) >= opts_.screenshot_after_frames) {
+        screenshot_path_this_frame = opts_.screenshot_path;
+        screenshot_is_oneshot = true;
+    }
+    bool want_screenshot = !screenshot_path_this_frame.empty();
     if (want_screenshot) {
         capture_screenshot(frame.command_buffer, swapchain_images_[img_index],
                            swapchain_extent_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -544,8 +553,9 @@ void VulkanEngine::draw(uint32_t img_index) {
     if (want_screenshot) {
         vk_check(vkWaitForFences(device_, 1, &frame.render_fence, VK_TRUE, UINT64_MAX),
                  "screenshot vkWaitForFences");
-        write_ppm(opts_.screenshot_path, swapchain_extent_.width, swapchain_extent_.height);
-        screenshot_taken_ = true;
+        write_ppm(screenshot_path_this_frame, swapchain_extent_.width, swapchain_extent_.height);
+        if (screenshot_is_oneshot) screenshot_taken_ = true;
+        log::infof("[screenshot] saved %s", screenshot_path_this_frame.c_str());
     }
 
     VkPresentInfoKHR present{
@@ -635,6 +645,15 @@ void VulkanEngine::run(const RunOptions& opts) {
                    : (ema_fps_ * 0.9f + (1.0f / frame_dt) * 0.1f);
 
         InputFrame in = window_->consume_input();
+        // F12 in-game capture: queue a numbered PPM in the working dir.
+        // The render frame below picks it up and writes to disk.
+        if (in.screenshot && pending_screenshot_path_.empty()) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "screenshot_%04d.ppm",
+                          ingame_screenshot_counter_++);
+            pending_screenshot_path_ = buf;
+            log::infof("[screenshot] F12 queued %s", buf);
+        }
         if (autodemo) {
             float demo_t = std::chrono::duration<float>(now - demo_start).count();
             if (demo_t >= opts_.autodemo_seconds) {

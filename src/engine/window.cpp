@@ -86,6 +86,12 @@ InputFrame Window::consume_input() {
     f.fire_held = fire_now;             // level (held)
     prev_fire_ = fire_now;
 
+    // F12 — rising-edge screenshot key. Engine catches this and writes
+    // a numbered PPM in the working directory.
+    bool ss_now = down(GLFW_KEY_F12);
+    f.screenshot = ss_now && !prev_screenshot_;
+    prev_screenshot_ = ss_now;
+
     double cx = 0.0, cy = 0.0;
     glfwGetCursorPos(window_, &cx, &cy);
     if (first_cursor_sample_) {
