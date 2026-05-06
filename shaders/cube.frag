@@ -412,20 +412,21 @@ void main() {
         // than ambient occlusion of the whole hemisphere.
         float ao_radius = scene.rt_params.y * (ao_mode == 1 ? 0.5 : 1.0);
         vec3 origin_ao = vWorldPos + N * 0.01;
-        int strata = int(ceil(sqrt(float(N_ao))));
-        float inv_strata = 1.0 / float(strata);
+        // Unstratified random samples driven by IGN + temporal frame seed.
+        // The stratified version (ceil(sqrt(N))²-cell grid) was biased
+        // when N wasn't a perfect square — at N=2 strata=2 picked only
+        // the cells with sy=0 → all rays in one half of the hemisphere
+        // azimuth, which read as systematically darker edges. Random +
+        // TAA temporal accumulation converges to true AO over ~8 frames
+        // regardless of N.
         int taken = 0;
         float occluded = 0.0;
-        for (int sy = 0; sy < strata && taken < N_ao; ++sy) {
-            for (int sx = 0; sx < strata && taken < N_ao; ++sx) {
-                float r1 = rand(seed_base + uvec3(taken, 7u, 53u));
-                float r2 = rand(seed_base + uvec3(taken, 41u, 5u));
-                float u1 = (float(sx) + r1) * inv_strata;
-                float u2 = (float(sy) + r2) * inv_strata;
-                vec3 d = cos_hemi(u1, u2, N);
-                if (any_hit(origin_ao, d, ao_radius)) occluded += 1.0;
-                ++taken;
-            }
+        for (int i = 0; i < N_ao; ++i) {
+            float u1 = rand(seed_base + uvec3(i, 7u, 53u));
+            float u2 = rand(seed_base + uvec3(i, 41u, 5u));
+            vec3 d = cos_hemi(u1, u2, N);
+            if (any_hit(origin_ao, d, ao_radius)) occluded += 1.0;
+            ++taken;
         }
         ao = 1.0 - (occluded / float(taken));
     }
