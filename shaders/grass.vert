@@ -197,9 +197,13 @@ void main() {
     // far blades thinned to ~40%.
     float ddens_strength = clamp(scene.grass_extra.w, 0.0, 1.0);
     if (ddens_strength > 0.001) {
-        float min_density   = mix(1.0, 0.40, ddens_strength);
+        // Aggressive cutoff: at slider=1.0 the far field thins to 5%
+        // (95% of distant blades fade out). Onset moved from 0.25 to
+        // 0.15 of max distance so the thinning starts earlier and is
+        // visibly stronger near the far end.
+        float min_density   = mix(1.0, 0.05, ddens_strength);
         float dist_norm     = clamp(view_dist_base / pc.grass_params.x, 0.0, 1.0);
-        float thresh_density = mix(1.0, min_density, smoothstep(0.25, 1.0, dist_norm));
+        float thresh_density = mix(1.0, min_density, smoothstep(0.15, 1.0, dist_norm));
         float blade_rank = fract(sin(dot(base_world.xz,
                                           vec2(12.9898, 78.233))) * 43758.5453);
         // Wide window (±0.30) ensures the per-blade transition is
