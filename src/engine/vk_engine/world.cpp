@@ -270,11 +270,14 @@ void VulkanEngine::init_world() {
         // overlaps a brush stay invisible — the wall geometry occludes
         // them from outside views.
         gp.keep_out_xz = glm::vec2(4.0f, 4.0f);
-        // 2M placed blades: density slider 0..4 maps to a render
-        // fraction of (density / 4) × placed. So density=1.0 (the
-        // visual default) renders 500k blades, and the user can crank
-        // to 4.0 for the full 2M when they want a thicker field.
-        gp.max_blades  = 2000000;
+        // 800k placed blades: density slider 0..4 maps to render
+        // fraction (density / 4) × placed, so density=1.0 → 200k,
+        // density=4.0 → 800k. Earlier 2M cap meant density=4 fired
+        // ~10M sun shadow rays/frame (5 verts each) and pushed the
+        // GPU into TDR. 800k keeps the worst case at ~4M rays which
+        // the 4080 handles comfortably even with the rest of the
+        // RT load (terrain shadows, AO, GI).
+        gp.max_blades  = 800000;
         grass_ = build_grass(device_, allocator_,
                              graphics_queue_, graphics_queue_family_,
                              hm, gp);
