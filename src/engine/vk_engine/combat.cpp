@@ -226,11 +226,20 @@ void VulkanEngine::spawn_hit_particles(glm::vec3 pos, glm::vec3 reflect_dir,
                                (0.55f + 0.45f * aligned) *
                                (1.0f - 0.35f * backward);
         float jitter = frand_range(spawn_rng_state_, 0.85f, 1.15f);
+        // ~4% of sparks get a "screamer" boost — flies way harder, gives
+        // each impact a couple of long streakers among the cluster of
+        // short hops. Looks like sparks ricocheting off something extra
+        // hard. Bonus also kicks the upward y-velocity.
+        bool screamer = frand(spawn_rng_state_) < 0.04f;
+        float boost = screamer
+                       ? frand_range(spawn_rng_state_, 3.0f, 5.0f)
+                       : 1.0f;
         float speed = frand_range(spawn_rng_state_, 4.5f, 11.0f) *
-                      speed_envelope * jitter * scale;
+                      speed_envelope * jitter * scale * boost;
 
         glm::vec3 vel = dir * speed;
-        vel.y += frand_range(spawn_rng_state_, 0.6f, 2.2f) * speed_envelope * scale;
+        vel.y += frand_range(spawn_rng_state_, 0.6f, 2.2f) *
+                 speed_envelope * scale * boost;
 
         float spawn_dist = frand_range(spawn_rng_state_, 0.05f, 0.18f);
         glm::vec3 spawn = pos + dir * spawn_dist;

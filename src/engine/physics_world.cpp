@@ -37,9 +37,15 @@ namespace qlike {
 namespace {
 
 namespace Layers {
+    // Four object layers so bullets and sparks can be made transparent to
+    // each other (the user's request: bullets shouldn't deflect off
+    // hit-spark spheres). Broadphase still has just NON_MOVING vs MOVING
+    // since the per-pair filtering is what matters for game logic.
     static constexpr JPH::ObjectLayer NON_MOVING = 0;
     static constexpr JPH::ObjectLayer MOVING     = 1;
-    static constexpr JPH::ObjectLayer NUM        = 2;
+    static constexpr JPH::ObjectLayer BULLET     = 2;
+    static constexpr JPH::ObjectLayer SPARK      = 3;
+    static constexpr JPH::ObjectLayer NUM        = 4;
 }
 
 namespace BPLayers {
@@ -53,6 +59,8 @@ public:
     BPLayerInterfaceImpl() {
         map_[Layers::NON_MOVING] = BPLayers::NON_MOVING;
         map_[Layers::MOVING]     = BPLayers::MOVING;
+        map_[Layers::BULLET]     = BPLayers::MOVING;
+        map_[Layers::SPARK]      = BPLayers::MOVING;
     }
     unsigned int GetNumBroadPhaseLayers() const override { return BPLayers::NUM; }
     JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer l) const override {
@@ -71,9 +79,17 @@ class ObjectVsBPFilterImpl final : public JPH::ObjectVsBroadPhaseLayerFilter {
 public:
     bool ShouldCollide(JPH::ObjectLayer obj, JPH::BroadPhaseLayer bp) const override {
         switch (obj) {
-            case Layers::NON_MOVING: return bp == BPLayers::MOVING;
-            case Layers::MOVING:     return true;
-            default:                 return false;
+            case Layers::NON_MOVING:
+                // Static only collides with anything that moves.
+                return bp == BPLayers::MOVING;
+            case Layers::MOVING:
+            case Layers::BULLET:
+            case Layers::SPARK:
+                // Movables sweep the whole broadphase; pair filter below
+                // does the actual game-logic culling.
+                return true;
+            default:
+                return false;
         }
     }
 };
@@ -81,11 +97,22 @@ public:
 class ObjectPairFilterImpl final : public JPH::ObjectLayerPairFilter {
 public:
     bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
-        switch (a) {
-            case Layers::NON_MOVING: return b == Layers::MOVING;
-            case Layers::MOVING:     return true;
-            default:                 return false;
-        }
+        // Symmetric, so order in the matrix doesn't matter.
+        // Collision matrix:
+        //   STATIC  vs MOVING / BULLET / SPARK : yes (everything bounces off the world)
+        //   MOVING  vs MOVING                  : yes (crates collide with each other)
+        //   MOVING  vs BULLET                  : yes (bullets push crates)
+        //   MOVING  vs SPARK                   : yes (sparks settle on crates)
+        //   BULLET  vs BULLET                  : no  (bullets ignore each other)
+        //   BULLET  vs SPARK                   : NO  (the user's fix — bullets pass through sparks)
+        //   SPARK   vs SPARK                   : no  (cheap, and looks better — sparks streak through each other)
+        //   STATIC  vs STATIC                  : no
+        if (a == Layers::NON_MOVING && b == Layers::NON_MOVING) return false;
+        if (a == Layers::BULLET     && b == Layers::BULLET)     return false;
+        if (a == Layers::SPARK      && b == Layers::SPARK)      return false;
+        if ((a == Layers::BULLET && b == Layers::SPARK) ||
+            (a == Layers::SPARK  && b == Layers::BULLET)) return false;
+        return true;
     }
 };
 
@@ -301,7 +328,7 @@ uint32_t PhysicsWorld::add_dynamic_cylinder_ccd(glm::vec3 c, float radius,
     JPH::BodyCreationSettings bcs(sr.Get(),
                                   JPH::RVec3(c.x, c.y, c.z), jq,
                                   JPH::EMotionType::Dynamic,
-                                  Layers::MOVING);
+                                  Layers::BULLET);
     // *** Industry-standard CCD for fast small bodies. *** Jolt sweep-casts
     // the cylinder along its motion at the start of each step and reports the
     // first contact instead of integrating-then-resolving. Eliminates tunnel-
@@ -336,7 +363,7 @@ uint32_t PhysicsWorld::add_dynamic_sphere(glm::vec3 c, float radius,
                                   JPH::RVec3(c.x, c.y, c.z),
                                   JPH::Quat::sIdentity(),
                                   JPH::EMotionType::Dynamic,
-                                  Layers::MOVING);
+                                  Layers::SPARK);
     bcs.mLinearVelocity = JPH::Vec3(linvel.x, linvel.y, linvel.z);
     bcs.mRestitution = restitution;
     bcs.mFriction = friction;
