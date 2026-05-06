@@ -105,7 +105,18 @@ void main() {
     vec3 mn, mx;
     vec3 cur_raw = variance_clip(ip, mn, mx);
 
-    float strength = clamp(taa.params.w, 0.0, 1.0);
+    // Read motion early so spatial strength can be modulated by it.
+    vec2 motion = texelFetch(motion_color, ip, 0).rg;
+    float motion_pix = length(motion * taa.viewport.xy);
+
+    // Spatial à-trous adds a constant low-pass blur to the input. When
+    // still, that blur is masked by TAA's super-sampling accumulation;
+    // when moving, the spatial filter is the largest remaining blur
+    // contributor. Fade it out for moving pixels — at 8+ px/frame
+    // (a typical mouse turn) we drop spatial to ~25% of slider strength.
+    float spatial_falloff = mix(1.0, 0.25,
+                                smoothstep(0.5, 8.0, motion_pix));
+    float strength = clamp(taa.params.w, 0.0, 1.0) * spatial_falloff;
     vec3 cur = (strength > 0.0)
         ? mix(cur_raw, atrous_filter(ip), strength)
         : cur_raw;
@@ -114,12 +125,6 @@ void main() {
         outColor = vec4(cur, 1.0);
         return;
     }
-
-    // Motion-vector-driven reprojection. cube.frag wrote current_uv - prev_uv
-    // per-pixel, accounting for both camera AND per-instance object motion.
-    // (The earlier depth-reconstruct path assumed a static world, which
-    // smeared trails behind moving boxes.)
-    vec2 motion = texelFetch(motion_color, ip, 0).rg;
     vec2 prev_uv = uv - motion;
     if (prev_uv.x < 0.0 || prev_uv.x > 1.0 ||
         prev_uv.y < 0.0 || prev_uv.y > 1.0) {
@@ -130,9 +135,20 @@ void main() {
     vec3 hist = texture(history_color, prev_uv).rgb;
     vec3 hist_clamped = clamp(hist, mn, mx);
 
-    // Match the C++ slider clamp (0..0.98) — leaving the upper edge below 1.0
-    // prevents the temporal feedback from freezing on a stale frame.
-    float alpha = clamp(taa.params.x, 0.0, 0.98);
+    // Velocity-adaptive history blend. Constant high-feedback (0.95)
+    // is great when the camera is still — TAA reduces RT noise. But
+    // during motion the history must be bilinearly reprojected, which
+    // adds a sub-pixel blur every frame; with 95% feedback that blur
+    // locks in for ~20 frames. The "blurry while moving, sharp when
+    // still" complaint.
+    //
+    // Solution: drop alpha smoothly toward ZERO as motion grows.
+    // < 0.5 px/frame keeps full feedback (still pixels denoise
+    // normally); 8+ px/frame uses NO history so bilinear reprojection
+    // can't blur the current frame. The cost is a tiny pop of RT noise
+    // when you start moving — much less objectionable than smear.
+    float base_alpha = clamp(taa.params.x, 0.0, 0.98);
+    float alpha = mix(base_alpha, 0.0, smoothstep(0.5, 8.0, motion_pix));
     vec3 blended = mix(cur, hist_clamped, alpha);
 
     outColor = vec4(blended, 1.0);
