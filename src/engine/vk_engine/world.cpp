@@ -709,8 +709,14 @@ void VulkanEngine::rebuild_tick_aabbs() {
 void VulkanEngine::spawn_random_box() {
     if (!physics_) return;
 
+    // Spawn around the castle: XY/Z spread covers the keep + courtyard;
+    // height seeds well above the highest tower so crates fall onto the
+    // walkway / merlons / outside the perimeter.
+    //   - terrain plateau ~y22, castle interior ~y22..27, towers ~y32
+    //   - spawn 38..50m so crates have airtime to scatter realistically.
+    const float plateau_y = terrain_data_.heights.empty() ? 0.0f : 22.0f;
     glm::vec3 pos(frand_range(spawn_rng_state_, -16.0f, 16.0f),
-                  frand_range(spawn_rng_state_, 13.0f, 18.0f),
+                  plateau_y + frand_range(spawn_rng_state_, 16.0f, 28.0f),
                   frand_range(spawn_rng_state_, -16.0f, 16.0f));
 
     glm::vec3 euler(frand_range(spawn_rng_state_, -1.2f, 1.2f),
