@@ -283,6 +283,12 @@ void VulkanEngine::spawn_hit_particles(glm::vec3 pos, glm::vec3 reflect_dir,
 
 void VulkanEngine::draw_decals(VkCommandBuffer cmd, const glm::mat4& vp) {
     if (decals_.empty()) return;
+    // Bind cylinder mesh — its 16-segment side gives a near-round disc
+    // when scaled to a thin Y. (The previous cube path showed obvious
+    // square edges on close-up scorch marks.)
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &cylinder_mesh_.vertex_buffer, &off);
+    vkCmdBindIndexBuffer(cmd, cylinder_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     for (const auto& d : decals_) {
         float life = 1.0f - (d.age / d.ttl);
         if (life <= 0.0f) continue;
@@ -304,8 +310,11 @@ void VulkanEngine::draw_decals(VkCommandBuffer cmd, const glm::mat4& vp) {
 
         glm::mat4 model = align_local_y_to(world_pos, world_normal) *
                           glm::scale(glm::mat4(1.0f),
-                                     glm::vec3(d.size, 0.005f, d.size));
-        glm::vec3 col(0.04f * life);
+                                     glm::vec3(d.size, 0.002f, d.size));
+        // Lighter base color — opaque pipeline can't blend with the wall
+        // beneath, so a brighter scorch reads as more "tinted/transparent"
+        // than the previous near-black 0.04*life. Fades with life.
+        glm::vec3 col(0.18f * life);
         PushConstants pc{};
         pc.mvp = vp * model;
         pc.model = model;
@@ -316,7 +325,7 @@ void VulkanEngine::draw_decals(VkCommandBuffer cmd, const glm::mat4& vp) {
         vkCmdPushConstants(cmd, pipeline_layout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &pc);
-        vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
+        vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
     }
 }
 
@@ -399,7 +408,7 @@ void VulkanEngine::spawn_impact_decal(glm::vec3 hit_pos, glm::vec3 incoming_dir)
     pos += normal * 0.005f;     // anti-z-fight skin
 
     Decal d{};
-    d.size = frand_range(spawn_rng_state_, 0.10f, 0.18f);
+    d.size = frand_range(spawn_rng_state_, 0.04f, 0.07f);
     d.ttl  = kDecalTtl;
     if (rh.hit && rh.dynamic && rh.body_id != 0) {
         // Hit a dyn box — parent the decal to it. Store pos/normal in
