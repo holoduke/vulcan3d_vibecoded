@@ -428,12 +428,16 @@ void main() {
             if (any_hit(origin_ao, d, ao_radius)) occluded += 1.0;
             ++taken;
         }
-        // Remap raw [0..1] AO into [ao_floor..1.0]. ao_floor caps how
-        // dark fully-occluded surfaces get; without it, three coincident
-        // occlusions at an inner corner stacked into near-black. 0.30
-        // is a reasonable default — clear AO contrast at simple edges
-        // while corners stay believable instead of pitch-pure black.
+        // Two-step shaping to control corner overlap-darkness:
+        //   1. sqrt curve on raw AO — compresses the [0..1] range so the
+        //      delta between 30% occluded (1 edge) and 60% (2 edges
+        //      overlapping) reads as a small darkening step instead of
+        //      "twice as dark". Linear AO stacked occlusions
+        //      multiplicatively, perceptually wrong at inner corners.
+        //   2. ao_floor remap so even fully-occluded never crushes to
+        //      pure black.
         float raw = 1.0 - (occluded / float(taken));
+        raw = sqrt(raw);
         float ao_floor_v = scene.rt_lod.w;
         ao = mix(ao_floor_v, 1.0, raw);
     }
