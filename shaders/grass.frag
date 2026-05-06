@@ -38,21 +38,22 @@ void main() {
     vec3 L = normalize(scene.sun_direction.xyz);
     float n_dot_l = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
 
-    // Sun contribution: deliberately under-baked so 100k+ tiny blades
-    // can't over-stuff the bloom mip chain. At sun_color.a == 2 a flat
-    // green blade peaks around 0.4 luminance — well under the default
-    // 1.05 bloom_threshold, so blades don't trigger global bloom +
-    // auto-exposure runaway (which earlier dumped the screen into
-    // big green halos).
-    vec3 sun_term = scene.sun_color.rgb * (scene.sun_color.a * 0.25) * n_dot_l;
-    vec3 sky_term = scene.sky_color.rgb * 0.35;
+    // Lighting deliberately heavily under-baked. Grass occupies a
+    // large fraction of the lower screen and any per-pixel value above
+    // the bloom threshold (≈1.0 by default) blows up into halos when
+    // auto-exposure compensates for darker portions of the scene
+    // (castle interior). Hard cap below.
+    vec3 sun_term = scene.sun_color.rgb * (scene.sun_color.a * 0.10) * n_dot_l;
+    vec3 sky_term = scene.sky_color.rgb * 0.20;
 
-    // Subtle bottom→tip variation; nothing strong enough to push the
-    // tip past bloom threshold.
-    vec3 tip_lift = mix(vec3(0.9), vec3(1.05, 1.0, 0.9), vHeightRatio);
+    vec3 tip_lift = mix(vec3(0.9), vec3(1.0, 1.0, 0.9), vHeightRatio);
     vec3 base = vColor * tip_lift;
 
     vec3 lit = base * (sun_term + sky_term);
+    // Hard ceiling — guarantees we never feed the bloom mip chain with
+    // grass pixels above its threshold even under aggressive
+    // auto-exposure boosts.
+    lit = min(lit, vec3(0.32));
 
     // Soft alpha across the blade UV — slightly tapered sides so
     // adjacent blades blend visually without needing alpha-blend +

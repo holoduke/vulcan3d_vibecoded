@@ -250,12 +250,19 @@ void VulkanEngine::init_world() {
         // terrain (low altitude, gentle slope) gets covered. Cap at
         // 200k blades for a healthy density without bloating VRAM.
         GrassParams gp{};
-        // Stay below the plateau so blades don't scatter inside the
-        // castle. height_max = plateau - 2m gives a clean ring of
-        // grass on the natural terrain that surrounds the castle.
+        // Cover the plateau too — slopes, valleys, and the plateau
+        // courtyard around the castle. Castle stones are excluded by
+        // the keep-out rectangle below so blades never poke through
+        // the brushes themselves.
         gp.height_min = -2.0f;
-        gp.height_max = hp.plateau_height - 2.0f;
+        gp.height_max = hp.plateau_height + 8.0f;   // plateau + a bit
         gp.half_extent = 0.5f * hm.side();
+        // Inner keep is ~6m square at origin. Keep blades out of the
+        // keep interior only; the outer courtyard between keep and
+        // perimeter walls gets grass too. Blades whose footprint
+        // overlaps a brush stay invisible — the wall geometry occludes
+        // them from outside views.
+        gp.keep_out_xz = glm::vec2(4.0f, 4.0f);
         grass_ = build_grass(device_, allocator_,
                              graphics_queue_, graphics_queue_family_,
                              hm, gp);

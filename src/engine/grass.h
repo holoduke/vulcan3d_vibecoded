@@ -50,6 +50,11 @@ struct GrassParams {
     float    blade_height = 0.55f;   // base unit blade height (m)
     float    blade_width  = 0.045f;  // base half-width (m)
     int      seed         = 0xC0DE;
+    // Rectangular keep-out zone, centered on (0, 0). Candidates with
+    // |x| < keep_out_xz.x AND |z| < keep_out_xz.y are rejected — so
+    // the castle's footprint stays clear of blades that would poke
+    // through the brushes. (0,0) disables the zone.
+    glm::vec2 keep_out_xz = glm::vec2(0.0f, 0.0f);
 };
 
 struct GrassMesh {

@@ -125,6 +125,13 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
         float wx = -params.half_extent + hx * side;
         float wz = -params.half_extent + hz * side;
 
+        // Castle keep-out: skip blades inside the rectangle.
+        if (params.keep_out_xz.x > 0.0f && params.keep_out_xz.y > 0.0f &&
+            std::abs(wx) < params.keep_out_xz.x &&
+            std::abs(wz) < params.keep_out_xz.y) {
+            continue;
+        }
+
         // Bilinear sample of heightmap at (wx, wz). Reject if outside.
         float fx = (wx - hm.origin_x) / hm.cell;
         float fz = (wz - hm.origin_z) / hm.cell;
