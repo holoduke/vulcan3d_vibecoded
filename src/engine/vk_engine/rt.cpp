@@ -493,9 +493,9 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
 
     for (const auto& p : projectiles_) {
         glm::mat4 world;
-        if (!physics_->get_body_world_matrix(p.body_id, world)) continue;
+        if (!physics_->get_body_world_matrix_h(p.jolt_handle, world)) continue;
         glm::vec3 pos(world[3]);
-        glm::vec3 vel = physics_->get_linear_velocity(p.body_id);
+        glm::vec3 vel = physics_->get_linear_velocity_h(p.jolt_handle);
         glm::vec3 dir = glm::length(vel) > 1e-3f ? glm::normalize(vel) : p.initial_dir;
         glm::mat4 align = align_local_y_to(pos, dir);
         glm::mat4 scale_m = glm::scale(glm::mat4(1.0f),

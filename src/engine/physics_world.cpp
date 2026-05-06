@@ -133,7 +133,10 @@ void global_shutdown_if_last() {
 
 struct PhysicsWorld::Impl {
     JPH::PhysicsSystem system;
-    JPH::TempAllocatorImpl temp_alloc{ 16 * 1024 * 1024 };
+    // 32 MB temp scratch — at 100 dyn props with up to 6 collision_steps
+    // the constraint solver fits comfortably; previously 16 MB was tight
+    // enough to occasionally fall back to the heap allocator.
+    JPH::TempAllocatorImpl temp_alloc{ 32 * 1024 * 1024 };
     JPH::JobSystemThreadPool job_system{
         JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers,
         std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 1) };
@@ -158,6 +161,14 @@ PhysicsWorld::PhysicsWorld() {
         impl_->obj_vs_bp,
         impl_->obj_pairs);
     impl_->system.SetGravity(JPH::Vec3(0, -25.0f, 0));
+    // Tune the constraint solver. Default is 10 velocity / 2 position
+    // iterations — fine for tall stacks of crates, overkill for our
+    // shallow piles. 4 vel / 1 pos still resolves crate-on-floor stably
+    // and shaves a measurable slice of step time at 100 dyn bodies.
+    JPH::PhysicsSettings ps = impl_->system.GetPhysicsSettings();
+    ps.mNumVelocitySteps = 4;
+    ps.mNumPositionSteps = 1;
+    impl_->system.SetPhysicsSettings(ps);
     log::info("PhysicsWorld initialized (Jolt)");
 }
 
@@ -201,6 +212,45 @@ void PhysicsWorld::add_static_box(glm::vec3 c, glm::vec3 he) {
                                   JPH::EMotionType::Static,
                                   Layers::NON_MOVING);
     impl_->system.GetBodyInterface().CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+}
+
+void PhysicsWorld::add_static_boxes(const StaticBox* boxes, size_t count) {
+    if (count == 0) return;
+    JPH::BodyInterface& bi = impl_->system.GetBodyInterface();
+    // Two-step: first allocate all bodies (bi.CreateBody, no add), then
+    // batch-add via AddBodiesPrepare + AddBodiesFinalize. The prepare/
+    // finalize pair takes the broadphase mutex once for the whole batch
+    // instead of per body, which is the dominant cost when 150+ static
+    // brushes are loaded at level start.
+    std::vector<JPH::BodyID> ids;
+    ids.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        glm::vec3 he = boxes[i].half_extents;
+        float min_he = std::min({he.x, he.y, he.z});
+        float convex_radius = std::min(0.04f, min_he * 0.4f);
+        JPH::BoxShapeSettings ss(JPH::Vec3(he.x, he.y, he.z), convex_radius);
+        ss.SetEmbedded();
+        JPH::ShapeSettings::ShapeResult sr = ss.Create();
+        if (sr.HasError()) {
+            log::errorf("[jolt] static box shape (batch %zu): %s",
+                        i, sr.GetError().c_str());
+            continue;
+        }
+        glm::vec3 c = boxes[i].center;
+        JPH::BodyCreationSettings bcs(sr.Get(),
+                                      JPH::RVec3(c.x, c.y, c.z),
+                                      JPH::Quat::sIdentity(),
+                                      JPH::EMotionType::Static,
+                                      Layers::NON_MOVING);
+        if (JPH::Body* body = bi.CreateBody(bcs)) {
+            ids.push_back(body->GetID());
+        }
+    }
+    if (ids.empty()) return;
+    JPH::BodyInterface::AddState state =
+        bi.AddBodiesPrepare(ids.data(), static_cast<int>(ids.size()));
+    bi.AddBodiesFinalize(ids.data(), static_cast<int>(ids.size()),
+                          state, JPH::EActivation::DontActivate);
 }
 
 uint32_t PhysicsWorld::add_dynamic_box(glm::vec3 c, glm::vec3 he,
@@ -384,6 +434,45 @@ bool PhysicsWorld::get_body_world_matrix(uint32_t id, glm::mat4& out) const {
         m(0,2), m(1,2), m(2,2), m(3,2),
         m(0,3), m(1,3), m(2,3), m(3,3));
     return true;
+}
+
+// --- BodyHandle fast-path: caller stores the cached BodyID once, all
+// subsequent reads skip the unordered_map.find. JPH::BodyID's underlying
+// storage is a uint32 (index + sequence), so we can just round-trip it.
+
+PhysicsWorld::BodyHandle PhysicsWorld::handle_of(uint32_t id) const {
+    auto it = impl_->ids.find(id);
+    if (it == impl_->ids.end()) return 0;
+    return it->second.GetIndexAndSequenceNumber();
+}
+
+bool PhysicsWorld::get_body_world_matrix_h(BodyHandle h, glm::mat4& out) const {
+    if (h == 0) return false;
+    JPH::BodyID bid(h);
+    JPH::RMat44 m = impl_->system.GetBodyInterfaceNoLock().GetWorldTransform(bid);
+    out = glm::mat4(
+        m(0,0), m(1,0), m(2,0), m(3,0),
+        m(0,1), m(1,1), m(2,1), m(3,1),
+        m(0,2), m(1,2), m(2,2), m(3,2),
+        m(0,3), m(1,3), m(2,3), m(3,3));
+    return true;
+}
+
+bool PhysicsWorld::is_body_active_h(BodyHandle h) const {
+    if (h == 0) return false;
+    return impl_->system.GetBodyInterfaceNoLock().IsActive(JPH::BodyID(h));
+}
+
+glm::vec3 PhysicsWorld::get_linear_velocity_h(BodyHandle h) const {
+    if (h == 0) return glm::vec3(0.0f);
+    JPH::Vec3 v = impl_->system.GetBodyInterfaceNoLock().GetLinearVelocity(JPH::BodyID(h));
+    return glm::vec3(v.GetX(), v.GetY(), v.GetZ());
+}
+
+void PhysicsWorld::apply_impulse_h(BodyHandle h, glm::vec3 impulse) {
+    if (h == 0) return;
+    impl_->system.GetBodyInterface().AddImpulse(
+        JPH::BodyID(h), JPH::Vec3(impulse.x, impulse.y, impulse.z));
 }
 
 } // namespace qlike

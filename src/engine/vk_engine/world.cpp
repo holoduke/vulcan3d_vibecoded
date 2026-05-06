@@ -26,9 +26,16 @@ void VulkanEngine::init_world() {
     log::infof("world: %u brushes", static_cast<unsigned>(world_.brushes.size()));
 
     physics_ = std::make_unique<PhysicsWorld>();
+    // Batch-add the level brushes — Jolt's AddBodiesPrepare/Finalize takes
+    // the broadphase mutex once for the whole pile instead of per body.
+    // For 150+ static brushes (the castle) this is the difference between
+    // ~30 ms and ~3 ms at level load.
+    std::vector<PhysicsWorld::StaticBox> sboxes;
+    sboxes.reserve(world_.brushes.size());
     for (const auto& b : world_.brushes) {
-        physics_->add_static_box(b.center, b.size * 0.5f);
+        sboxes.push_back({b.center, b.size * 0.5f});
     }
+    physics_->add_static_boxes(sboxes.data(), sboxes.size());
 
     log::infof("Jolt: %d static bodies; dynamic boxes will spawn over time "
                "(max %d, every %.2fs)",
@@ -378,17 +385,18 @@ void VulkanEngine::rebuild_dyn_render_cache() {
     for (size_t i = 0; i < dyn_props_.size(); ++i) {
         DynRender& dr = dyn_render_cache_[i];
         const uint32_t body = dyn_props_[i].body_id;
+        const auto handle = dyn_props_[i].jolt_handle;
         const bool slot_matches = dr.valid && dr.body_id == body;
         // Reuse cached transform if the slot still maps to the same body AND
         // Jolt has put it to sleep.
-        if (slot_matches && !physics_->is_body_active(body)) {
+        if (slot_matches && !physics_->is_body_active_h(handle)) {
             // Sleeping → no motion this frame. Drag prev_world forward.
             dr.prev_world = dr.world;
             continue;
         }
         // Capture the prior world before we overwrite it.
         glm::mat4 captured_prev = slot_matches ? dr.world : glm::mat4(1.0f);
-        if (!physics_->get_body_world_matrix(body, dr.world)) {
+        if (!physics_->get_body_world_matrix_h(handle, dr.world)) {
             dr.valid = false;
             dr.body_id = 0;
             continue;
@@ -434,7 +442,7 @@ void VulkanEngine::rebuild_tick_aabbs() {
         // stale cached AABB describes a now-removed box and the player
         // walks through the new occupant.
         const bool slot_matches = slot.body_id == dp.body_id;
-        const bool active = physics_->is_body_active(dp.body_id);
+        const bool active = physics_->is_body_active_h(dp.jolt_handle);
         if (slot_matches && !active) {
             // Sleeping body in a slot we already populated → AABB hasn't
             // moved since last compute, reuse.
@@ -442,7 +450,7 @@ void VulkanEngine::rebuild_tick_aabbs() {
             continue;
         }
         glm::mat4 m;
-        if (!physics_->get_body_world_matrix(dp.body_id, m)) {
+        if (!physics_->get_body_world_matrix_h(dp.jolt_handle, m)) {
             slot.body_id = 0;   // mark invalid
             continue;
         }
@@ -489,6 +497,7 @@ void VulkanEngine::spawn_random_box() {
     if (id == 0) return;
     DynamicProp p{};
     p.body_id = id;
+    p.jolt_handle = physics_->handle_of(id);
     p.full_size = he * 2.0f;
     p.fallback_color = glm::vec4(col, 1.0f);
     int tex = 1 + static_cast<int>(xorshift32(spawn_rng_state_) % 4u);

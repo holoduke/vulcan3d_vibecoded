@@ -233,6 +233,10 @@ private:
 
     struct DynamicProp {
         uint32_t body_id;
+        // Cached PhysicsWorld::BodyHandle (Jolt BodyID's index+seq). All
+        // per-frame read paths use this to skip the uint32_t→BodyID hash
+        // lookup. 0 = invalid (lookup failed at spawn time).
+        uint32_t jolt_handle = 0;
         glm::vec3 full_size;   // for rendering: scale of unit cube mesh
         glm::vec4 color;            // texture-tint
         glm::vec4 fallback_color;   // saturated color used when textures off
@@ -247,6 +251,7 @@ private:
     // through dynamic boxes between physics ticks. Despawn on TTL.
     struct Projectile {
         uint32_t body_id;
+        uint32_t jolt_handle = 0;  // cached BodyHandle, see DynamicProp
         float    radius;
         float    half_length;
         float    ttl;            // seconds remaining
@@ -277,6 +282,7 @@ private:
     static constexpr int kSparkTrailLen = 4;
     struct Particle {
         uint32_t  body_id;
+        uint32_t  jolt_handle = 0;  // cached BodyHandle, see DynamicProp
         float     ttl;
         float     ttl_max;
         float     vis_radius;    // visual cylinder radius

@@ -80,7 +80,7 @@ void VulkanEngine::apply_player_pushes(glm::vec3 pre_velocity) {
         // by the body's mass internally, so heavier crates accelerate less
         // for the same impulse — bigger boxes are stiffer.
         glm::vec3 impulse = dir * (into_box * kPlayerMass);
-        physics_->apply_impulse(dp.body_id, impulse);
+        physics_->apply_impulse_h(dp.jolt_handle, impulse);
     }
 }
 
@@ -120,6 +120,7 @@ void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
 
     Projectile p{};
     p.body_id = id;
+    p.jolt_handle = physics_->handle_of(id);
     p.radius = kProjectileRad;
     p.half_length = kProjectileHalf;
     p.ttl = kProjectileTtl;
@@ -142,14 +143,14 @@ void VulkanEngine::update_projectiles(float dt) {
 
         if (!drop) {
             glm::mat4 m;
-            if (!physics_->get_body_world_matrix(it->body_id, m)) {
+            if (!physics_->get_body_world_matrix_h(it->jolt_handle, m)) {
                 drop = true;
             } else if (m[3].y < -100.0f) {
                 drop = true;     // fell out of the world
             } else {
                 // Impact detection. After Jolt's step the bullet's velocity
                 // tells us what happened. We remove on first impact — no bounce.
-                glm::vec3 v = physics_->get_linear_velocity(it->body_id);
+                glm::vec3 v = physics_->get_linear_velocity_h(it->jolt_handle);
                 float along = glm::dot(v, it->initial_dir);
                 float speed = glm::length(v);
                 float min_speed = std::max(20.0f, it->initial_speed * 0.5f);
@@ -165,7 +166,7 @@ void VulkanEngine::update_projectiles(float dt) {
             if (was_impact) {
                 // Use the bullet's post-impact velocity as the spark spray
                 // axis — that's the actual reflection direction.
-                glm::vec3 post_vel = physics_->get_linear_velocity(it->body_id);
+                glm::vec3 post_vel = physics_->get_linear_velocity_h(it->jolt_handle);
                 glm::vec3 reflect = glm::length(post_vel) > 0.5f
                                          ? glm::normalize(post_vel)
                                          : -it->initial_dir;
@@ -240,6 +241,7 @@ void VulkanEngine::spawn_hit_particles(glm::vec3 pos, glm::vec3 reflect_dir,
 
         Particle pa{};
         pa.body_id = id;
+        pa.jolt_handle = physics_->handle_of(id);
         float ttl_jitter = frand_range(spawn_rng_state_, 0.75f, 1.25f);
         pa.ttl_max = kParticleTtl * ttl_jitter;
         pa.ttl = pa.ttl_max;
@@ -327,7 +329,7 @@ void VulkanEngine::update_particles(float dt) {
         // mutex locks per particle per frame.
         it->valid_world = false;
         if (!drop) {
-            if (!physics_->get_body_world_matrix(it->body_id, it->world)) {
+            if (!physics_->get_body_world_matrix_h(it->jolt_handle, it->world)) {
                 drop = true;
             } else if (it->world[3].y < -100.0f) {
                 drop = true;

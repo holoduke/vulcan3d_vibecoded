@@ -27,6 +27,23 @@ public:
     // Add a static box AABB to the world (for matching the level geometry to Jolt).
     void add_static_box(glm::vec3 center, glm::vec3 half_extents);
 
+    // Batch-add many static boxes in one BodyInterface call. ~10x faster
+    // than calling add_static_box per brush at level load (Jolt's
+    // AddBodiesPrepare/Finalize amortizes the body-mutex acquire and the
+    // broadphase tree rebuild). Bodies stay disabled until prepare returns.
+    struct StaticBox { glm::vec3 center; glm::vec3 half_extents; };
+    void add_static_boxes(const StaticBox* boxes, size_t count);
+
+    // Engine-side body handle (cached BodyID). Storing this on each
+    // dynamic prop / particle / projectile lets the read-only queries skip
+    // the unordered_map lookup in physics_world.cpp. 0 = invalid.
+    using BodyHandle = uint32_t;
+    BodyHandle handle_of(uint32_t id) const;
+    bool get_body_world_matrix_h(BodyHandle h, glm::mat4& out) const;
+    bool is_body_active_h(BodyHandle h) const;
+    glm::vec3 get_linear_velocity_h(BodyHandle h) const;
+    void apply_impulse_h(BodyHandle h, glm::vec3 impulse);
+
     // Spawn a dynamic box; returns an opaque body id (uint32_t).
     // `euler_radians` is XYZ Euler order (pitch, yaw, roll) — pass {0,0,0} for upright.
     uint32_t add_dynamic_box(glm::vec3 center, glm::vec3 half_extents,
