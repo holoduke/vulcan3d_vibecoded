@@ -553,7 +553,21 @@ private:
     VkSampler         terrain_shadow_sampler_ = VK_NULL_HANDLE;
     int               terrain_shadow_dim_     = 0;
     glm::vec3         terrain_shadow_sun_dir_ = glm::vec3(0.0f);
+    // Progressive tile re-bake state. When the sun rotates we don't
+    // re-bake the whole texture in one go (would stutter ~100 ms);
+    // instead we slice the heightmap into tiles, sort by distance to
+    // the camera (nearest first), and drain a small per-frame budget.
+    // Distant grass shadows lag a few frames behind the slider — the
+    // user explicitly asked for that prioritisation.
+    struct ShadowBakeTile { int ix, iz, w, h; float dist_sq; };
+    glm::vec3                    terrain_shadow_target_sun_dir_ = glm::vec3(0.0f);
+    std::vector<ShadowBakeTile>  terrain_shadow_pending_tiles_;
+    glm::vec3                    terrain_shadow_last_sort_pos_  = glm::vec3(1e9f);
+    static constexpr int kShadowTileSize       = 64;
+    static constexpr int kShadowTilesPerFrame  = 6;
     void rebuild_terrain_shadow_texture();
+    void enqueue_terrain_shadow_rebake(glm::vec3 target_sun);
+    void tick_terrain_shadow_progressive();
     void destroy_terrain_shadow_texture();
 
     // Phase 4 sculpt state. The brush is driven by the player's center-

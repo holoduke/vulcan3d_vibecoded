@@ -199,51 +199,70 @@ void gen_half_indices(int sample_dim, std::vector<uint32_t>& out) {
 
 } // namespace
 
+namespace {
+// Inner ray-march for a single rectangular region. `out` points to the
+// top-left of a w×h sub-image with the given row stride (in bytes).
+// 0 = lit, 255 = in shadow. The full-map and tile bake share this loop.
+void bake_shadow_region(const Heightmap& hm, glm::vec3 L,
+                        int ix0, int iz0, int w, int h,
+                        uint8_t* out, int stride) {
+    if (L.y < 0.05f) {
+        for (int dz = 0; dz < h; ++dz)
+            std::fill_n(out + static_cast<size_t>(dz) * static_cast<size_t>(stride),
+                        w, uint8_t(255));
+        return;
+    }
+    const float step = hm.cell * 0.5f;
+    const float max_t = 400.0f;
+    const int   max_steps = static_cast<int>(max_t / step);
+    const int W = hm.width();
+    const int H = hm.height();
+    for (int dz = 0; dz < h; ++dz) {
+        int iz = iz0 + dz;
+        if (iz < 0 || iz >= H) {
+            std::fill_n(out + static_cast<size_t>(dz) * static_cast<size_t>(stride),
+                        w, uint8_t(0));
+            continue;
+        }
+        uint8_t* row = out + static_cast<size_t>(dz) * static_cast<size_t>(stride);
+        for (int dx = 0; dx < w; ++dx) {
+            int ix = ix0 + dx;
+            if (ix < 0 || ix >= W) { row[dx] = 0; continue; }
+            float h0 = hm.at(ix, iz);
+            glm::vec3 p0(hm.origin_x + static_cast<float>(ix) * hm.cell,
+                         h0 + 0.20f,
+                         hm.origin_z + static_cast<float>(iz) * hm.cell);
+            bool shadowed = false;
+            for (int s = 1; s <= max_steps; ++s) {
+                float t = static_cast<float>(s) * step;
+                glm::vec3 p = p0 + L * t;
+                float h_at_p = hm.sample_world(p.x, p.z);
+                if (p.y < h_at_p) { shadowed = true; break; }
+                if (p.y - h0 > 100.0f) break;
+            }
+            row[dx] = shadowed ? 255 : 0;
+        }
+    }
+}
+} // namespace
+
+void bake_heightmap_shadow_tile(const Heightmap& hm, glm::vec3 sun_dir,
+                                int ix0, int iz0, int w, int h,
+                                uint8_t* out_tile) {
+    bake_shadow_region(hm, glm::normalize(sun_dir), ix0, iz0, w, h, out_tile, w);
+}
+
 std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
                                            glm::vec3 sun_dir) {
     const int W = hm.width();
     const int H = hm.height();
     std::vector<uint8_t> out(static_cast<size_t>(W) * static_cast<size_t>(H), 0);
     glm::vec3 L = glm::normalize(sun_dir);
-    if (L.y < 0.05f) {
-        // Sun below horizon → everything shadowed.
-        std::fill(out.begin(), out.end(), uint8_t(255));
-        return out;
-    }
-    // Step size = half the heightmap cell. Smaller = more accurate but
-    // slower. 0.5 is a good balance for ~1024 cell terrain.
-    const float step = hm.cell * 0.5f;
-    // Max marching distance — beyond this we consider the ray to have
-    // escaped the terrain. 400m covers tall mountain shadows even at
-    // glancing sun angles.
-    const float max_t = 400.0f;
-    const int   max_steps = static_cast<int>(max_t / step);
 
-    // Multi-threaded — split rows across hardware threads. With 1024²
-    // cells × ~80 marching steps the single-threaded version was ~1s
-    // (too long for a slider re-bake to feel responsive); with 8-12
-    // worker threads it drops to ~100-150 ms.
-    auto bake_rows = [&](int z_lo, int z_hi) {
-        for (int iz = z_lo; iz < z_hi; ++iz) {
-            for (int ix = 0; ix < W; ++ix) {
-                float h0 = hm.at(ix, iz);
-                glm::vec3 p0(hm.origin_x + static_cast<float>(ix) * hm.cell,
-                             h0 + 0.20f,
-                             hm.origin_z + static_cast<float>(iz) * hm.cell);
-                bool shadowed = false;
-                for (int s = 1; s <= max_steps; ++s) {
-                    float t = static_cast<float>(s) * step;
-                    glm::vec3 p = p0 + L * t;
-                    float h_at_p = hm.sample_world(p.x, p.z);
-                    if (p.y < h_at_p) { shadowed = true; break; }
-                    if (p.y - h0 > 100.0f) break;
-                }
-                out[static_cast<size_t>(iz) * static_cast<size_t>(W) +
-                    static_cast<size_t>(ix)] = shadowed ? 255 : 0;
-            }
-        }
-    };
-
+    // Multi-threaded — split rows across hardware threads. ~1024² cells
+    // × ~80 marching steps drops from ~1s single-threaded to ~100-150 ms
+    // with 8-12 worker threads. Used at level load; sun-change re-bakes
+    // go through the progressive tile path instead.
     unsigned n_threads = std::max(1u, std::thread::hardware_concurrency());
     std::vector<std::thread> workers;
     workers.reserve(n_threads);
@@ -253,7 +272,11 @@ std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
         int z_lo = static_cast<int>(t) * rows_per;
         int z_hi = std::min(H, z_lo + rows_per);
         if (z_lo >= z_hi) break;
-        workers.emplace_back(bake_rows, z_lo, z_hi);
+        workers.emplace_back([&, z_lo, z_hi]() {
+            uint8_t* row0 = out.data() +
+                static_cast<size_t>(z_lo) * static_cast<size_t>(W);
+            bake_shadow_region(hm, L, 0, z_lo, W, z_hi - z_lo, row0, W);
+        });
     }
     for (auto& th : workers) th.join();
 

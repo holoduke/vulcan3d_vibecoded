@@ -71,6 +71,15 @@ Mesh build_terrain_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
 std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
                                            glm::vec3 sun_dir);
 
+// Bake a single rectangular tile [ix0..ix0+w) × [iz0..iz0+h) of the
+// heightmap into `out_tile` (w*h bytes, row-major). Used by the
+// progressive sun-change re-bake to amortize the work across frames
+// and prioritize tiles near the camera. Cells outside the heightmap
+// bounds are written as 0 (lit) — clamp at sample sites only.
+void bake_heightmap_shadow_tile(const Heightmap& hm, glm::vec3 sun_dir,
+                                int ix0, int iz0, int w, int h,
+                                uint8_t* out_tile);
+
 // Phase 2 chunked terrain: split the heightmap into a grid of chunks,
 // each with its own full-LOD vertex+index buffer plus a sparser
 // half-LOD index buffer that re-indexes the same vertex buffer at every

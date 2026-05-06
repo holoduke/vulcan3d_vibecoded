@@ -16,7 +16,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <vector>
 
 namespace qlike {
 
@@ -187,6 +189,75 @@ void VulkanEngine::destroy_terrain_shadow_texture() {
     terrain_shadow_dim_ = 0;
 }
 
+namespace {
+// First-time creation of the heightmap shadow image + view + sampler.
+// Pulled out of rebuild_terrain_shadow_texture so the progressive tile
+// path can rely on the resources existing without duplicating setup.
+// Caller writes binding 6 separately; transitions the image into
+// SHADER_READ_ONLY_OPTIMAL on first creation (so partial uploads can
+// flip TRANSFER_DST → SHADER_READ_ONLY symmetrically).
+void ensure_shadow_resources(VkDevice device, VmaAllocator alloc,
+                             VkQueue queue, uint32_t qfam,
+                             int W, int H,
+                             VkImage& img, VmaAllocation& img_alloc,
+                             VkImageView& view, VkSampler& sampler,
+                             int& dim_out) {
+    if (img) return;
+    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8_UNORM;
+    ici.extent = { static_cast<uint32_t>(W),
+                   static_cast<uint32_t>(H), 1 };
+    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vk_check(vmaCreateImage(alloc, &ici, &aci, &img, &img_alloc, nullptr),
+             "terrain shadow image");
+
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = img;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_R8_UNORM;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vci.subresourceRange.baseMipLevel = 0;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.baseArrayLayer = 0;
+    vci.subresourceRange.layerCount = 1;
+    vk_check(vkCreateImageView(device, &vci, nullptr, &view),
+             "terrain shadow view");
+
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = VK_FILTER_LINEAR;
+    si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vk_check(vkCreateSampler(device, &si, nullptr, &sampler),
+             "terrain shadow sampler");
+
+    // Initialise to SHADER_READ_ONLY so the very first tick's
+    // tile transition (SHADER_READ_ONLY → TRANSFER_DST → SHADER_READ_ONLY)
+    // is symmetric. Without this the layout starts UNDEFINED and the
+    // first frame would have to special-case the source layout.
+    vkinit::one_time_submit(device, queue, qfam, [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, img,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    dim_out = W;
+}
+} // namespace
+
 void VulkanEngine::rebuild_terrain_shadow_texture() {
     if (terrain_data_.heights.empty()) return;
     // Reconstruct a Heightmap view over the cached data.
@@ -202,61 +273,20 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
     float y = glm::radians(rt_.sun_yaw_deg);
     glm::vec3 sun_dir(std::sin(y) * std::cos(p), std::sin(p),
                       std::cos(y) * std::cos(p));
-    terrain_shadow_sun_dir_ = sun_dir;
+    terrain_shadow_sun_dir_        = sun_dir;
+    terrain_shadow_target_sun_dir_ = sun_dir;
+    terrain_shadow_pending_tiles_.clear();
 
     std::vector<uint8_t> shadow = bake_heightmap_shadow(hm, sun_dir);
     const int W = hm.width();
     const int H = hm.height();
 
-    // First-time setup: create image + sampler + view.
-    if (!terrain_shadow_image_) {
-        VkImageCreateInfo ici{};
-        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        ici.imageType = VK_IMAGE_TYPE_2D;
-        ici.format = VK_FORMAT_R8_UNORM;
-        ici.extent = { static_cast<uint32_t>(W),
-                       static_cast<uint32_t>(H), 1 };
-        ici.mipLevels = 1; ici.arrayLayers = 1;
-        ici.samples = VK_SAMPLE_COUNT_1_BIT;
-        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT |
-                    VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-        vk_check(vmaCreateImage(allocator_, &ici, &aci,
-                                 &terrain_shadow_image_,
-                                 &terrain_shadow_alloc_, nullptr),
-                 "terrain shadow image");
-
-        VkImageViewCreateInfo vci{};
-        vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        vci.image = terrain_shadow_image_;
-        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        vci.format = VK_FORMAT_R8_UNORM;
-        vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        vci.subresourceRange.baseMipLevel = 0;
-        vci.subresourceRange.levelCount = 1;
-        vci.subresourceRange.baseArrayLayer = 0;
-        vci.subresourceRange.layerCount = 1;
-        vk_check(vkCreateImageView(device_, &vci, nullptr,
-                                   &terrain_shadow_view_),
-                 "terrain shadow view");
-
-        VkSamplerCreateInfo si{};
-        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        si.magFilter = VK_FILTER_LINEAR;
-        si.minFilter = VK_FILTER_LINEAR;
-        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        vk_check(vkCreateSampler(device_, &si, nullptr,
-                                 &terrain_shadow_sampler_),
-                 "terrain shadow sampler");
-        terrain_shadow_dim_ = W;
-    }
+    const bool first_create = (terrain_shadow_image_ == VK_NULL_HANDLE);
+    ensure_shadow_resources(device_, allocator_, graphics_queue_,
+                             graphics_queue_family_, W, H,
+                             terrain_shadow_image_, terrain_shadow_alloc_,
+                             terrain_shadow_view_, terrain_shadow_sampler_,
+                             terrain_shadow_dim_);
 
     // Stage upload via a scratch host-visible buffer.
     const VkDeviceSize bytes =
@@ -284,7 +314,7 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
     vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
                             [&](VkCommandBuffer cb) {
         vkinit::transition_image(cb, terrain_shadow_image_,
-                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkBufferImageCopy region{};
         region.bufferOffset = 0;
@@ -307,21 +337,190 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
 
     vmaDestroyBuffer(allocator_, stage, stage_alloc);
 
-    // Write the texture into descriptor binding 6 so grass.vert sees
-    // it. Done as a single VkWriteDescriptorSet — overwrites any
-    // previous value (re-bake on sun change).
-    VkDescriptorImageInfo dii{};
-    dii.sampler = terrain_shadow_sampler_;
-    dii.imageView = terrain_shadow_view_;
-    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkWriteDescriptorSet w{};
-    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w.dstSet = scene_desc_set_;
-    w.dstBinding = 6;
-    w.descriptorCount = 1;
-    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    w.pImageInfo = &dii;
-    vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+    // Write the texture into descriptor binding 6 only on first
+    // creation; the image handle doesn't change after that, so partial
+    // tile uploads don't need to re-write the descriptor.
+    if (first_create) {
+        VkDescriptorImageInfo dii{};
+        dii.sampler = terrain_shadow_sampler_;
+        dii.imageView = terrain_shadow_view_;
+        dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet w{};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = scene_desc_set_;
+        w.dstBinding = 6;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &dii;
+        vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+    }
+}
+
+void VulkanEngine::enqueue_terrain_shadow_rebake(glm::vec3 target_sun) {
+    if (terrain_data_.heights.empty()) return;
+    terrain_shadow_target_sun_dir_ = target_sun;
+    terrain_shadow_pending_tiles_.clear();
+
+    const int W = terrain_data_.dim + 1;
+    const int H = terrain_data_.dim + 1;
+    const int ts = kShadowTileSize;
+    const glm::vec3 cam = player_.eye_position();
+    terrain_shadow_last_sort_pos_ = cam;
+
+    int n_tiles = ((W + ts - 1) / ts) * ((H + ts - 1) / ts);
+    terrain_shadow_pending_tiles_.reserve(static_cast<size_t>(n_tiles));
+    for (int iz = 0; iz < H; iz += ts) {
+        int th = std::min(ts, H - iz);
+        for (int ix = 0; ix < W; ix += ts) {
+            int tw = std::min(ts, W - ix);
+            // Tile centre in world space.
+            float wx = terrain_data_.origin_x +
+                       (static_cast<float>(ix) + 0.5f * static_cast<float>(tw)) *
+                       terrain_data_.cell;
+            float wz = terrain_data_.origin_z +
+                       (static_cast<float>(iz) + 0.5f * static_cast<float>(th)) *
+                       terrain_data_.cell;
+            float dx = wx - cam.x;
+            float dz = wz - cam.z;
+            ShadowBakeTile t{ix, iz, tw, th, dx * dx + dz * dz};
+            terrain_shadow_pending_tiles_.push_back(t);
+        }
+    }
+    // std::sort on the whole list once. Subsequent re-sorts when the
+    // camera drifts only re-sort the remaining tail (cheaper).
+    std::sort(terrain_shadow_pending_tiles_.begin(),
+              terrain_shadow_pending_tiles_.end(),
+              [](const ShadowBakeTile& a, const ShadowBakeTile& b) {
+                  return a.dist_sq < b.dist_sq;
+              });
+}
+
+void VulkanEngine::tick_terrain_shadow_progressive() {
+    if (terrain_shadow_pending_tiles_.empty()) return;
+    if (terrain_shadow_image_ == VK_NULL_HANDLE) return;
+
+    // Re-sort the remaining tail if the player has drifted enough that
+    // priorities changed. 16m threshold ≈ a quarter of a tile so the
+    // ordering stays meaningful without re-sorting every frame.
+    const glm::vec3 cam = player_.eye_position();
+    if (glm::distance(cam, terrain_shadow_last_sort_pos_) > 16.0f) {
+        for (auto& t : terrain_shadow_pending_tiles_) {
+            float wx = terrain_data_.origin_x +
+                       (static_cast<float>(t.ix) + 0.5f * static_cast<float>(t.w)) *
+                       terrain_data_.cell;
+            float wz = terrain_data_.origin_z +
+                       (static_cast<float>(t.iz) + 0.5f * static_cast<float>(t.h)) *
+                       terrain_data_.cell;
+            float dx = wx - cam.x, dz = wz - cam.z;
+            t.dist_sq = dx * dx + dz * dz;
+        }
+        std::sort(terrain_shadow_pending_tiles_.begin(),
+                  terrain_shadow_pending_tiles_.end(),
+                  [](const ShadowBakeTile& a, const ShadowBakeTile& b) {
+                      return a.dist_sq < b.dist_sq;
+                  });
+        terrain_shadow_last_sort_pos_ = cam;
+    }
+
+    // Pop a budget of tiles off the front (nearest first).
+    int budget = std::min<int>(kShadowTilesPerFrame,
+                               static_cast<int>(terrain_shadow_pending_tiles_.size()));
+    if (budget <= 0) return;
+
+    Heightmap hm{};
+    hm.dim       = terrain_data_.dim;
+    hm.cell      = terrain_data_.cell;
+    hm.origin_x  = terrain_data_.origin_x;
+    hm.origin_z  = terrain_data_.origin_z;
+    hm.heights   = terrain_data_.heights;
+    const glm::vec3 sun_dir = terrain_shadow_target_sun_dir_;
+
+    // Pack all tiles' bytes into a single staging buffer with
+    // contiguous per-tile regions, one BufferImageCopy per tile.
+    struct Pending { int ix, iz, w, h; size_t offset; };
+    std::vector<Pending> pendings;
+    pendings.reserve(budget);
+    size_t total_bytes = 0;
+    for (int i = 0; i < budget; ++i) {
+        const auto& t = terrain_shadow_pending_tiles_[i];
+        pendings.push_back({t.ix, t.iz, t.w, t.h, total_bytes});
+        total_bytes += static_cast<size_t>(t.w) * static_cast<size_t>(t.h);
+    }
+
+    VkBuffer stage = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = nullptr;
+    VkBufferCreateInfo bci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .size = total_bytes,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+    };
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    vmaCreateBuffer(allocator_, &bci, &aci, &stage, &stage_alloc, nullptr);
+    VmaAllocationInfo ai{};
+    vmaGetAllocationInfo(allocator_, stage_alloc, &ai);
+    uint8_t* mapped = static_cast<uint8_t*>(ai.pMappedData);
+
+    // Bake each tile into its slot in the staging buffer. Tiles are
+    // small (64×64 = 4 KiB), CPU-cheap enough that single-threaded
+    // here is fine — the whole tick stays well under a frame.
+    for (int i = 0; i < budget; ++i) {
+        const auto& p = pendings[i];
+        bake_heightmap_shadow_tile(hm, sun_dir, p.ix, p.iz, p.w, p.h,
+                                   mapped + p.offset);
+    }
+
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, terrain_shadow_image_,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        std::vector<VkBufferImageCopy> regions;
+        regions.reserve(budget);
+        for (int i = 0; i < budget; ++i) {
+            const auto& p = pendings[i];
+            VkBufferImageCopy r{};
+            r.bufferOffset = p.offset;
+            r.bufferRowLength = 0;
+            r.bufferImageHeight = 0;
+            r.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            r.imageSubresource.mipLevel = 0;
+            r.imageSubresource.baseArrayLayer = 0;
+            r.imageSubresource.layerCount = 1;
+            r.imageOffset = { p.ix, p.iz, 0 };
+            r.imageExtent = { static_cast<uint32_t>(p.w),
+                              static_cast<uint32_t>(p.h), 1 };
+            regions.push_back(r);
+        }
+        vkCmdCopyBufferToImage(cb, stage, terrain_shadow_image_,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                static_cast<uint32_t>(regions.size()),
+                                regions.data());
+        vkinit::transition_image(cb, terrain_shadow_image_,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+
+    vmaDestroyBuffer(allocator_, stage, stage_alloc);
+
+    // Drop the consumed tiles from the front. erase() of a contiguous
+    // range is O(N) but the tail is small and the per-frame budget is
+    // tiny — measured negligible vs. the bake itself.
+    terrain_shadow_pending_tiles_.erase(
+        terrain_shadow_pending_tiles_.begin(),
+        terrain_shadow_pending_tiles_.begin() + budget);
+
+    // Once the queue drains, snap the "current" sun to the target so
+    // future change-detection compares against what's actually on the
+    // GPU. While tiles are still pending, we leave terrain_shadow_sun_dir_
+    // alone; the threshold check uses the target field anyway.
+    if (terrain_shadow_pending_tiles_.empty()) {
+        terrain_shadow_sun_dir_ = terrain_shadow_target_sun_dir_;
+    }
 }
 
 float VulkanEngine::sample_terrain_height(float x, float z) const {
