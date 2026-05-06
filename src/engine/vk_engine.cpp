@@ -90,7 +90,6 @@ void VulkanEngine::init() {
     audio_->load_clip("shot",     "assets/sounds/shot.ogg");
     audio_->load_clip("impact",   "assets/sounds/impact.ogg");
     audio_->load_clip("jump",     "assets/sounds/jump.ogg");
-    audio_->load_clip("land",     "assets/sounds/land.ogg");
     init_vulkan();
     init_pipeline_cache();
     init_swapchain();
@@ -800,15 +799,13 @@ void VulkanEngine::run(const RunOptions& opts) {
                         player_.on_ground = true;
                     }
                 }
-                // Audio triggers from the player tick.
+                // Audio triggers from the player tick. Land sound used to
+                // fire on every air→ground transition, but on_ground flickers
+                // each tick while walking over uneven terrain → it doubled as
+                // an unwanted footstep sound. Removed; only jump remains.
                 if (audio_ && state_ == State::Playing) {
-                    // Jump: rising edge of leaving ground while pressing jump.
                     if (was_on_ground && !player_.on_ground && pin.jump) {
                         audio_->play_local("jump", 0.7f, 0.06f, 0.10f);
-                    }
-                    // Land: falling edge — touched ground after being airborne.
-                    if (!was_on_ground && player_.on_ground) {
-                        audio_->play_local("land", 0.6f, 0.05f, 0.10f);
                     }
                 }
                 apply_player_pushes(pre_vel);
