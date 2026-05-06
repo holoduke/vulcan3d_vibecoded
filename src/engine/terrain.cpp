@@ -117,7 +117,10 @@ namespace {
 
 // Generate one chunk's vertex grid + smoothed per-vertex normals from
 // `hm` covering [origin_ix, origin_ix + sample_dim) × [origin_iz, ...).
-// Used both by the single-mesh builder and the chunked builder.
+// Per-vertex normals come from the global heightmap gradient (central
+// differences) so adjacent chunks agree on shared-edge normals — face-
+// average accumulation only saw triangles WITHIN a chunk and produced
+// faint shading seams at chunk boundaries.
 void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
                      int sample_dim,
                      std::vector<Vertex>& verts,
@@ -126,51 +129,29 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
     verts.reserve(static_cast<size_t>(sample_dim) * static_cast<size_t>(sample_dim));
     aabb_min = glm::vec3( 1e9f);
     aabb_max = glm::vec3(-1e9f);
+    auto sample_normal = [&](int gx, int gz) {
+        int xm = std::max(0, gx - 1);
+        int xp = std::min(hm.width()  - 1, gx + 1);
+        int zm = std::max(0, gz - 1);
+        int zp = std::min(hm.height() - 1, gz + 1);
+        float inv_2dx = 1.0f / (static_cast<float>(xp - xm) * hm.cell);
+        float inv_2dz = 1.0f / (static_cast<float>(zp - zm) * hm.cell);
+        float dhdx = (hm.at(xp, gz) - hm.at(xm, gz)) * inv_2dx;
+        float dhdz = (hm.at(gx, zp) - hm.at(gx, zm)) * inv_2dz;
+        return glm::normalize(glm::vec3(-dhdx, 1.0f, -dhdz));
+    };
     for (int iz = 0; iz < sample_dim; ++iz) {
         for (int ix = 0; ix < sample_dim; ++ix) {
-            int gx = origin_ix + ix;
-            int gz = origin_iz + iz;
-            // Clamp to heightmap bounds for the boundary chunks; prevents
-            // out-of-range reads at the world edge.
-            gx = std::clamp(gx, 0, hm.width()  - 1);
-            gz = std::clamp(gz, 0, hm.height() - 1);
+            int gx = std::clamp(origin_ix + ix, 0, hm.width()  - 1);
+            int gz = std::clamp(origin_iz + iz, 0, hm.height() - 1);
             glm::vec3 p(hm.origin_x + static_cast<float>(gx) * hm.cell,
                         hm.at(gx, gz),
                         hm.origin_z + static_cast<float>(gz) * hm.cell);
-            // UV: 1m per repeat unit, scaled later by uv_scale push constant.
             glm::vec2 uv(p.x, p.z);
-            verts.push_back({p, glm::vec3(0.0f), uv});
+            verts.push_back({p, sample_normal(gx, gz), uv});
             aabb_min = glm::min(aabb_min, p);
             aabb_max = glm::max(aabb_max, p);
         }
-    }
-    // Smooth per-vertex normals from the cell triangles.
-    auto idx = [&](int ix, int iz) {
-        return static_cast<size_t>(iz) * static_cast<size_t>(sample_dim) +
-               static_cast<size_t>(ix);
-    };
-    auto add_face = [&](size_t a, size_t b, size_t c) {
-        glm::vec3 e1 = verts[b].position - verts[a].position;
-        glm::vec3 e2 = verts[c].position - verts[a].position;
-        glm::vec3 n = glm::cross(e1, e2);
-        verts[a].normal += n;
-        verts[b].normal += n;
-        verts[c].normal += n;
-    };
-    for (int iz = 0; iz < sample_dim - 1; ++iz) {
-        for (int ix = 0; ix < sample_dim - 1; ++ix) {
-            size_t i00 = idx(ix,     iz);
-            size_t i10 = idx(ix + 1, iz);
-            size_t i01 = idx(ix,     iz + 1);
-            size_t i11 = idx(ix + 1, iz + 1);
-            // Match index order from build_terrain_mesh.
-            add_face(i00, i11, i10);
-            add_face(i00, i01, i11);
-        }
-    }
-    for (auto& v : verts) {
-        float L = glm::length(v.normal);
-        v.normal = (L > 1e-6f) ? (v.normal / L) : glm::vec3(0.0f, 1.0f, 0.0f);
     }
 }
 

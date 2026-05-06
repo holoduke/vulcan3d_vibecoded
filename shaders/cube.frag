@@ -230,20 +230,11 @@ void main() {
         return;
     }
 
-    // Terrain: replace the per-vertex normal with the actual rasterized
-    // face normal computed from screen-space derivatives. The chunked
-    // raster meshes use half-LOD index buffers that re-use the full-
-    // resolution per-vertex normals — the resulting interpolated N is
-    // inconsistent with the bigger half-LOD triangle face, which makes
-    // back-of-ridge pixels read as wildly miss-oriented. Derivatives
-    // give the true face direction every time.
+    // Terrain — per-vertex normals are now computed from the heightmap
+    // gradient on the C++ side (consistent across chunks, smooth across
+    // triangles). No need to override N here — keeping `is_terrain_pre`
+    // as a flag for downstream wrap-light + atmospheric perspective.
     bool is_terrain_pre = vTexParams.w > 1.5;
-    if (is_terrain_pre) {
-        vec3 ddx = dFdx(vWorldPos);
-        vec3 ddy = dFdy(vWorldPos);
-        vec3 fn  = cross(ddy, ddx);   // outward (+Y for flat terrain)
-        if (dot(fn, fn) > 1e-8) N = normalize(fn);
-    }
 
     vec3 L = normalize(scene.sun_direction.xyz);
 
@@ -387,13 +378,12 @@ void main() {
         vec3 tan_u = normalize(cross(ref, L));
         vec3 tan_v = cross(L, tan_u);
 
-        // Bigger shadow bias for terrain — half-LOD raster verts can sit
-        // up to a few metres above/below the full-resolution BLAS surface
-        // that the shadow ray will hit. Without this clearance the ray
-        // origin pierces the BLAS terrain and registers an immediate
-        // self-intersection → false black shadow.
+        // Modest extra bias for terrain — the chunked raster mesh
+        // matches the BLAS at full LOD now, so a small bump (vs the
+        // brush default) is plenty to clear sub-cell precision drift
+        // without blurring shadow edges.
         float bias = is_terrain_pre
-            ? (0.25 + 1.5 * (1.0 - n_dot_l_raw))
+            ? (0.04 + 0.10 * (1.0 - n_dot_l_raw))
             : (0.005 + 0.02 * (1.0 - n_dot_l_raw));
         vec3 origin = vWorldPos + N * bias;
 

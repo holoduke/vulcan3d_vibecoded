@@ -957,21 +957,19 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // RT path; for raster we want LOD + frustum cull per chunk so the
     // 2km terrain stays cheap from any viewpoint.
     if (!terrain_chunks_.chunks.empty()) {
-        const glm::vec3 cam_pos = render_pos;
-        const float kNearLod = 320.0f;       // full LOD inside this radius
+        // FULL LOD only — half-LOD path produces visible LOD-boundary
+        // cracks because neighbouring full-LOD chunks have edge verts at
+        // every step while half-LOD has every-other. The middle vert's
+        // actual height differs from the straight-line interp, leaving
+        // a vertical gap. Proper fix is stitched LOD (full-density edge
+        // ring + fan triangulation to step-2 interior); queued as a
+        // follow-up. At 1089 chunks @ ~62m each, frustum cull alone
+        // keeps the per-frame cost well under budget on a modern GPU.
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
-            // Distance from camera to chunk AABB centre. Cheap and good
-            // enough to drive a 2-bucket LOD selector.
-            glm::vec3 ctr = (c.aabb_min + c.aabb_max) * 0.5f;
-            float d = glm::length(ctr - cam_pos);
-            bool full_lod = d < kNearLod;
             VkDeviceSize toff = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
-            VkBuffer ibo = full_lod ? c.mesh.index_buffer : c.ibo_half;
-            uint32_t icnt = full_lod ? c.mesh.index_count : c.index_count_half;
-            if (icnt == 0) continue;
-            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdBindIndexBuffer(cmd, c.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
             PushConstants pc{};
             pc.mvp = vp;
             pc.model = glm::mat4(1.0f);
@@ -984,7 +982,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             vkCmdPushConstants(cmd, pipeline_layout_,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(PushConstants), &pc);
-            vkCmdDrawIndexed(cmd, icnt, 1, 0, 0, 0);
+            vkCmdDrawIndexed(cmd, c.mesh.index_count, 1, 0, 0, 0);
         }
         // Rebind cube for the brush loop.
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
