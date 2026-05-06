@@ -70,22 +70,27 @@ void main() {
     float sun_amt = scene.sun_color.a * 0.10 * n_dot_l;
     float sky_amt = 0.30;
 
-    // Shadow factor. Only fired for blades inside `kShadowDist` of the
-    // camera — at high density (2M placed, 4× slider) firing two rays
-    // per blade across the whole field was a measurable slice of frame
-    // time and is suspected to push some hardware into TDR. Distant
-    // blades are tiny on screen anyway; not having shadow on them is
-    // not visually noticeable.
-    const float kShadowDist = 45.0;
+    // Shadow factor. Two rays:
+    //   - sun ray: fires for ALL grass regardless of distance, so far-
+    //     distance grass also picks up the castle/mountain shadow.
+    //     This is the visually important one — you can read the shadow
+    //     of the castle wall stretching across the field at distance.
+    //   - sky-up ray: only inside `kSkyShadowDist`. It tests "am I
+    //     under a roof?" which is only relevant within a few tens of
+    //     metres (inside the keep). Skipping it at distance halves
+    //     the per-fragment ray cost on the far field, where nothing
+    //     overhead would have been hit anyway.
+    const float kSkyShadowDist = 45.0;
     float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
     float shadow_factor = 1.0;
-    if (scene.rt_flags.x != 0 && dist_to_cam < kShadowDist) {
+    if (scene.rt_flags.x != 0) {
         vec3 origin = vWorldPos + vec3(0.0, 0.5, 0.0);
         if (sun_blocked(origin, normalize(scene.sun_direction.xyz))) {
-            shadow_factor *= 0.18;     // sun blocked: 82% darker
+            shadow_factor *= 0.18;
         }
-        if (sun_blocked(origin, vec3(0.0, 1.0, 0.0))) {
-            shadow_factor *= 0.45;     // also roofed: another half
+        if (dist_to_cam < kSkyShadowDist &&
+            sun_blocked(origin, vec3(0.0, 1.0, 0.0))) {
+            shadow_factor *= 0.45;
         }
     }
     float lum = (sun_amt + sky_amt) * shadow_factor;
