@@ -230,6 +230,20 @@ void main() {
         return;
     }
 
+    // Terrain: replace the per-vertex normal with the actual rasterized
+    // face normal computed from screen-space derivatives. The chunked
+    // raster meshes use half-LOD index buffers that re-use the full-
+    // resolution per-vertex normals — the resulting interpolated N is
+    // inconsistent with the bigger half-LOD triangle face, which makes
+    // back-of-ridge pixels read as wildly miss-oriented. Derivatives
+    // give the true face direction every time.
+    bool is_terrain_pre = vTexParams.w > 1.5;
+    if (is_terrain_pre) {
+        vec3 ddx = dFdx(vWorldPos);
+        vec3 ddy = dFdy(vWorldPos);
+        vec3 fn  = cross(ddy, ddx);   // outward (+Y for flat terrain)
+        if (dot(fn, fn) > 1e-8) N = normalize(fn);
+    }
 
     vec3 L = normalize(scene.sun_direction.xyz);
 
@@ -332,7 +346,15 @@ void main() {
     vec3 ambient_ground = scene.ambient.rgb * scene.rt_params.z;
     vec3 ambient_sky    = scene.sky_color.rgb * 0.45 * scene.rt_params.z;
 
-    float n_dot_l = max(dot(N, L), 0.0);
+    float n_dot_l_raw = max(dot(N, L), 0.0);  // gate for shadow rays
+    // Distant terrain needs softer wrap so back-of-ridge pixels read as
+    // "atmospheric ambient" instead of pure black. Half-Lambert pushes
+    // the contrast down so the bright/dark transition is smooth, which
+    // matches how real mountains look at altitude (sky bounce dominates
+    // the shadow side).
+    float n_dot_l = is_terrain_pre
+        ? clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0)
+        : n_dot_l_raw;
 
     // Per-pixel seed WITH the frame counter — TAA accumulates over ~8
     // frames, so animating the noise lets temporal averaging resolve the
@@ -357,7 +379,7 @@ void main() {
     //    is razor-sharp, the same shadow stretched across the floor is fuzzy.
     // 3. SHADOW RAYS: stratified sampling inside the size-adapted cone.
     float shadow = 0.0;
-    if (n_dot_l > 0.0 && scene.rt_flags.x != 0) {
+    if (n_dot_l_raw > 0.0 && scene.rt_flags.x != 0) {
         int  N_s = lod_samples(max(1, scene.rt_flags.y), cam_dist);
         float base_softness = scene.rt_params.x;
 
@@ -365,7 +387,14 @@ void main() {
         vec3 tan_u = normalize(cross(ref, L));
         vec3 tan_v = cross(L, tan_u);
 
-        float bias = 0.005 + 0.02 * (1.0 - n_dot_l);
+        // Bigger shadow bias for terrain — half-LOD raster verts can sit
+        // up to a few metres above/below the full-resolution BLAS surface
+        // that the shadow ray will hit. Without this clearance the ray
+        // origin pierces the BLAS terrain and registers an immediate
+        // self-intersection → false black shadow.
+        float bias = is_terrain_pre
+            ? (0.25 + 1.5 * (1.0 - n_dot_l_raw))
+            : (0.005 + 0.02 * (1.0 - n_dot_l_raw));
         vec3 origin = vWorldPos + N * bias;
 
         // 1. Blocker search — 4 rays in a wider cone (4× base softness) so we
@@ -646,6 +675,21 @@ void main() {
                                  ambient_sky * sky_factor, up);
     vec3 indirect = albedo * ambient_combined * ao + gi_indirect;
     vec3 final = direct + indirect + vEmissive.rgb;
+
+    // Atmospheric perspective for terrain. Distant ground fades toward
+    // the sky tint along the view direction — the standard "real
+    // mountains" look. Onset starts at 200m and reaches 75% blend at
+    // 1500m; never fully hides the silhouette so the scene retains
+    // depth. Cheaper than volumetric fog and visually indistinguishable
+    // for clear-day weather.
+    if (is_terrain_pre) {
+        vec3 view_dir = normalize(vWorldPos - scene.camera_pos.xyz);
+        vec3 fog_color = sample_sky(view_dir);
+        float fog_t = clamp((cam_dist - 200.0) / 1300.0, 0.0, 0.75);
+        // Ease the fog onset so the transition isn't a hard line.
+        fog_t = fog_t * fog_t * (3.0 - 2.0 * fog_t);
+        final = mix(final, fog_color, fog_t);
+    }
 
     outColor = vec4(final, 1.0);
 }
