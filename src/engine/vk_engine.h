@@ -753,6 +753,35 @@ private:
         // making per-pixel ray cost worse on a given GPU. Leave on by
         // default once verified.
         bool  use_merged_static_blas = true;
+
+        // ---- Terrain shader knobs (cube.frag, raster tex_params.w==2) ----
+        // Atmospheric perspective fog: distant terrain blends toward
+        // the view-direction sky tint. 0=off, 1=full.
+        float terrain_fog_strength = 1.0f;
+        // Half-Lambert wrap: 0 = hard Lambert (back-of-ridge can go
+        // pure black with shadow), 1 = full wrap (back gets ~half
+        // light from the half-Lambert formula).
+        float terrain_wrap_strength = 1.0f;
+        // Multiplies the triplanar Ground054 detail × layer-base in the
+        // terrain shading branch. >1 punches up texture detail; ~1 is
+        // neutral; <1 fades the detail and reads more uniform.
+        float terrain_detail_strength = 1.6f;
+        // Multiplies the global shadow_softness for terrain pixels only.
+        // Lower = tighter shadow cone = less PCSS dither at the cost
+        // of harder shadow edges. Useful when shadow_samples is modest
+        // and the terrain looks noisy.
+        float terrain_shadow_softness_scale = 0.5f;
+        // Layer transition heights (smoothstep edges). Tweak per-level
+        // if height_scale changes; defaults match the 140m mountains.
+        float terrain_h_sand_grass_start = 4.0f;
+        float terrain_h_sand_grass_end   = 12.0f;
+        float terrain_h_grass_dirt_start = 28.0f;
+        float terrain_h_grass_dirt_end   = 42.0f;
+        float terrain_h_dirt_rock_start  = 58.0f;
+        float terrain_h_dirt_rock_end    = 80.0f;
+        float terrain_h_rock_snow_start  = 95.0f;
+        float terrain_h_rock_snow_end    = 120.0f;
+
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;
         // Specular reflection on flagged surfaces (the pedestal).

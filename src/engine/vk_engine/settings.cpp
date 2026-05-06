@@ -169,6 +169,18 @@ void VulkanEngine::save_settings() const {
     f << "terrain_brush_strength = " << terrain_brush_strength_ << "\n";
     f << "terrain_brush_mode = "     << static_cast<int>(terrain_brush_mode_) << "\n";
     f << "terrain_brush_flatten_target = " << terrain_brush_flatten_target_ << "\n";
+    f << "terrain_fog_strength = "    << rt_.terrain_fog_strength << "\n";
+    f << "terrain_wrap_strength = "   << rt_.terrain_wrap_strength << "\n";
+    f << "terrain_detail_strength = " << rt_.terrain_detail_strength << "\n";
+    f << "terrain_shadow_softness_scale = " << rt_.terrain_shadow_softness_scale << "\n";
+    f << "terrain_h_sand_grass_start = " << rt_.terrain_h_sand_grass_start << "\n";
+    f << "terrain_h_sand_grass_end = "   << rt_.terrain_h_sand_grass_end   << "\n";
+    f << "terrain_h_grass_dirt_start = " << rt_.terrain_h_grass_dirt_start << "\n";
+    f << "terrain_h_grass_dirt_end = "   << rt_.terrain_h_grass_dirt_end   << "\n";
+    f << "terrain_h_dirt_rock_start = "  << rt_.terrain_h_dirt_rock_start  << "\n";
+    f << "terrain_h_dirt_rock_end = "    << rt_.terrain_h_dirt_rock_end    << "\n";
+    f << "terrain_h_rock_snow_start = "  << rt_.terrain_h_rock_snow_start  << "\n";
+    f << "terrain_h_rock_snow_end = "    << rt_.terrain_h_rock_snow_end    << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
     f << "reflections_enabled = "<< (rt_.reflections_enabled ? 1 : 0) << "\n";
@@ -250,6 +262,18 @@ void VulkanEngine::load_settings() {
                 if (m >= 0 && m <= 3) terrain_brush_mode_ = static_cast<TerrainBrushMode>(m);
             }
             else if (key == "terrain_brush_flatten_target") terrain_brush_flatten_target_ = std::stof(val);
+            else if (key == "terrain_fog_strength")    rt_.terrain_fog_strength    = std::stof(val);
+            else if (key == "terrain_wrap_strength")   rt_.terrain_wrap_strength   = std::stof(val);
+            else if (key == "terrain_detail_strength") rt_.terrain_detail_strength = std::stof(val);
+            else if (key == "terrain_shadow_softness_scale") rt_.terrain_shadow_softness_scale = std::stof(val);
+            else if (key == "terrain_h_sand_grass_start") rt_.terrain_h_sand_grass_start = std::stof(val);
+            else if (key == "terrain_h_sand_grass_end")   rt_.terrain_h_sand_grass_end   = std::stof(val);
+            else if (key == "terrain_h_grass_dirt_start") rt_.terrain_h_grass_dirt_start = std::stof(val);
+            else if (key == "terrain_h_grass_dirt_end")   rt_.terrain_h_grass_dirt_end   = std::stof(val);
+            else if (key == "terrain_h_dirt_rock_start")  rt_.terrain_h_dirt_rock_start  = std::stof(val);
+            else if (key == "terrain_h_dirt_rock_end")    rt_.terrain_h_dirt_rock_end    = std::stof(val);
+            else if (key == "terrain_h_rock_snow_start")  rt_.terrain_h_rock_snow_start  = std::stof(val);
+            else if (key == "terrain_h_rock_snow_end")    rt_.terrain_h_rock_snow_end    = std::stof(val);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);
             else if (key == "reflections_enabled") rt_.reflections_enabled = std::stoi(val) != 0;

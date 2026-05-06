@@ -183,6 +183,18 @@ void VulkanEngine::update_scene_ubo() {
             data.muzzle_color = glm::vec4(0.0f);
         }
     }
+    data.terrain_params = glm::vec4(rt_.terrain_fog_strength,
+                                    rt_.terrain_wrap_strength,
+                                    rt_.terrain_detail_strength,
+                                    rt_.terrain_shadow_softness_scale);
+    data.terrain_h_low  = glm::vec4(rt_.terrain_h_sand_grass_start,
+                                    rt_.terrain_h_sand_grass_end,
+                                    rt_.terrain_h_grass_dirt_start,
+                                    rt_.terrain_h_grass_dirt_end);
+    data.terrain_h_high = glm::vec4(rt_.terrain_h_dirt_rock_start,
+                                    rt_.terrain_h_dirt_rock_end,
+                                    rt_.terrain_h_rock_snow_start,
+                                    rt_.terrain_h_rock_snow_end);
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

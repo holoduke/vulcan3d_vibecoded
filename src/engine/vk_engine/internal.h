@@ -73,6 +73,21 @@ struct SceneUBO {
     //   muzzle_color.w   = falloff radius (m); contribution drops to ~0 past it
     glm::vec4  muzzle_pos;
     glm::vec4  muzzle_color;
+    // Terrain-only shader knobs (raster path with tex_params.w==2):
+    //   x: atmospheric fog strength (0=off, 1=full)
+    //   y: half-Lambert wrap amount (0=hard Lambert, 1=full wrap)
+    //   z: detail-texture brightness (multiplier on the layer base)
+    //   w: shadow softness scale — multiplies global shadow softness
+    //      for terrain pixels, lets the user reduce PCSS dither
+    //      without affecting brush/dyn shadow softness.
+    glm::vec4  terrain_params;
+    // Per-layer height transitions (start..end smoothstep widths):
+    //   x..y: sand → grass (default 4..12)
+    //   z..w: grass → dirt (default 28..42)
+    glm::vec4  terrain_h_low;
+    //   x..y: dirt → rock (default 58..80)
+    //   z..w: rock → snow (default 95..120)
+    glm::vec4  terrain_h_high;
 };
 
 // ---- KHR ray tracing entry points ----

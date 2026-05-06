@@ -42,6 +42,19 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     // (0 disables the contribution). Color/radius live in muzzle_color.
     vec4  muzzle_pos;
     vec4  muzzle_color; // rgb = color (linear), w = falloff radius (m)
+    // Terrain shader knobs:
+    //   terrain_params.x = fog_strength (atmospheric perspective)
+    //   terrain_params.y = wrap_strength (half-Lambert)
+    //   terrain_params.z = detail_strength (texture brightness)
+    //   terrain_params.w = shadow_softness_scale (PCSS cone × this)
+    vec4  terrain_params;
+    // Per-layer height-blend smoothstep edges:
+    //   terrain_h_low.xy  = sand→grass start..end
+    //   terrain_h_low.zw  = grass→dirt start..end
+    //   terrain_h_high.xy = dirt→rock start..end
+    //   terrain_h_high.zw = rock→snow start..end
+    vec4  terrain_h_low;
+    vec4  terrain_h_high;
 } scene;
 
 // Distance-based sample LOD. fragments within lod_near get full samples;
@@ -285,10 +298,10 @@ void main() {
 
         // Smoothstep-driven layer transitions. Centres + widths chosen
         // empirically — tweak per-level if the height_scale changes.
-        float t_sand  = smoothstep( 4.0, 12.0, h);    // sand → grass
-        float t_dirt  = smoothstep(28.0, 42.0, h);    // grass → dirt
-        float t_rock  = smoothstep(58.0, 80.0, h);    // dirt → rock
-        float t_snow  = smoothstep(95.0, 120.0, h);   // rock → snow
+        float t_sand  = smoothstep(scene.terrain_h_low.x,  scene.terrain_h_low.y,  h);
+        float t_dirt  = smoothstep(scene.terrain_h_low.z,  scene.terrain_h_low.w,  h);
+        float t_rock  = smoothstep(scene.terrain_h_high.x, scene.terrain_h_high.y, h);
+        float t_snow  = smoothstep(scene.terrain_h_high.z, scene.terrain_h_high.w, h);
 
         vec3 base = mix(sand, grass, t_sand);
         base = mix(base, dirt, t_dirt);
@@ -308,9 +321,9 @@ void main() {
             int  albedo_idx = clamp(albedo_idx_raw, 0, 4);
             vec3 detail = triplanar_sample(u_albedo[albedo_idx],
                                            sample_pos, proj_n);
-            // Multiply detail × layer base × small lift so the detail
-            // doesn't darken everything to mud. Detail ~0.5 average.
-            albedo = base * detail * 1.6;
+            // Multiply detail × layer base × user-tunable detail
+            // brightness so the user can dial detail in/out.
+            albedo = base * detail * scene.terrain_params.z;
         } else {
             albedo = base;
         }
@@ -338,14 +351,15 @@ void main() {
     vec3 ambient_sky    = scene.sky_color.rgb * 0.45 * scene.rt_params.z;
 
     float n_dot_l_raw = max(dot(N, L), 0.0);  // gate for shadow rays
-    // Distant terrain needs softer wrap so back-of-ridge pixels read as
-    // "atmospheric ambient" instead of pure black. Half-Lambert pushes
-    // the contrast down so the bright/dark transition is smooth, which
-    // matches how real mountains look at altitude (sky bounce dominates
-    // the shadow side).
-    float n_dot_l = is_terrain_pre
-        ? clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0)
-        : n_dot_l_raw;
+    // Half-Lambert wrap on terrain — push back-of-ridge pixels toward
+    // soft sky-tinted ambient. wrap_strength=0 falls back to standard
+    // Lambert; =1 is the full half-Lambert formula. User-tunable.
+    float n_dot_l = n_dot_l_raw;
+    if (is_terrain_pre) {
+        float wrap_amt = clamp(scene.terrain_params.y, 0.0, 1.0);
+        float wrapped  = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
+        n_dot_l = mix(n_dot_l_raw, wrapped, wrap_amt);
+    }
 
     // Per-pixel seed WITH the frame counter — TAA accumulates over ~8
     // frames, so animating the noise lets temporal averaging resolve the
@@ -372,7 +386,14 @@ void main() {
     float shadow = 0.0;
     if (n_dot_l_raw > 0.0 && scene.rt_flags.x != 0) {
         int  N_s = lod_samples(max(1, scene.rt_flags.y), cam_dist);
+        // Per-pixel softness — terrain optionally tightens the cone via
+        // the Settings UI to reduce PCSS dither. Tightening trades soft
+        // shadow edges for cleaner per-pixel results at the same sample
+        // count. Brushes/dyn props always use the global slider value.
         float base_softness = scene.rt_params.x;
+        if (is_terrain_pre) {
+            base_softness *= max(0.05, scene.terrain_params.w);
+        }
 
         vec3 ref = abs(L.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
         vec3 tan_u = normalize(cross(ref, L));
@@ -676,8 +697,10 @@ void main() {
         vec3 view_dir = normalize(vWorldPos - scene.camera_pos.xyz);
         vec3 fog_color = sample_sky(view_dir);
         float fog_t = clamp((cam_dist - 200.0) / 1300.0, 0.0, 0.75);
-        // Ease the fog onset so the transition isn't a hard line.
         fog_t = fog_t * fog_t * (3.0 - 2.0 * fog_t);
+        // User-tunable strength: 0 disables the perspective fade, 1 is
+        // the default photographic look.
+        fog_t *= clamp(scene.terrain_params.x, 0.0, 1.0);
         final = mix(final, fog_color, fog_t);
     }
 

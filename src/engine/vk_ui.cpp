@@ -281,6 +281,23 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("GI strength", &rt_.gi_strength, 0.0f, 3.0f);
         ImGui::SliderFloat("GI radius", &rt_.gi_radius, 1.0f, 400.0f);
 
+        ImGui::SeparatorText("Terrain shader");
+        ImGui::SliderFloat("atmospheric fog",  &rt_.terrain_fog_strength,    0.0f, 1.5f);
+        ImGui::SliderFloat("light wrap",       &rt_.terrain_wrap_strength,   0.0f, 1.0f);
+        ImGui::SliderFloat("detail brightness",&rt_.terrain_detail_strength, 0.0f, 3.0f);
+        ImGui::SliderFloat("shadow softness x",&rt_.terrain_shadow_softness_scale, 0.05f, 1.5f);
+        if (ImGui::TreeNode("layer transitions (height in metres)")) {
+            ImGui::SliderFloat("sand→grass start", &rt_.terrain_h_sand_grass_start,  -10.0f,  60.0f);
+            ImGui::SliderFloat("sand→grass end",   &rt_.terrain_h_sand_grass_end,    -10.0f,  60.0f);
+            ImGui::SliderFloat("grass→dirt start", &rt_.terrain_h_grass_dirt_start,    0.0f, 100.0f);
+            ImGui::SliderFloat("grass→dirt end",   &rt_.terrain_h_grass_dirt_end,      0.0f, 100.0f);
+            ImGui::SliderFloat("dirt→rock start",  &rt_.terrain_h_dirt_rock_start,    20.0f, 150.0f);
+            ImGui::SliderFloat("dirt→rock end",    &rt_.terrain_h_dirt_rock_end,      20.0f, 150.0f);
+            ImGui::SliderFloat("rock→snow start",  &rt_.terrain_h_rock_snow_start,    50.0f, 200.0f);
+            ImGui::SliderFloat("rock→snow end",    &rt_.terrain_h_rock_snow_end,      50.0f, 200.0f);
+            ImGui::TreePop();
+        }
+
         ImGui::SeparatorText("Terrain sculpt (Phase 4)");
         ImGui::Checkbox("Edit mode (left-click sculpts, not fires)",
                         &terrain_edit_mode_);
