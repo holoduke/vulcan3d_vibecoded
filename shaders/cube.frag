@@ -483,25 +483,25 @@ void main() {
                     vec3 hit_pos = ray_origin + ray_dir * t;
                     vec3 hit_n = -ray_dir;  // approximate outward normal
 
-                    // *** Real GI bounce lighting *** — fires a shadow
-                    // ray from the hit point to the sun. If the path is
-                    // clear AND the surface faces the sun, the bounce
-                    // carries actual sun energy back to our shading
-                    // pixel. If blocked (the hit surface is in shadow),
-                    // we still keep a small sky-fill term so completely
-                    // enclosed rooms don't go pitch black, but it's
-                    // FAR less than a "fake everything is sunlit" term.
-                    // This is what makes the inside of the keep
-                    // visibly darker than the open arena outside —
-                    // previously every bounce hit was illuminated as if
-                    // it could see the sun.
+                    // *** Real GI bounce lighting *** — first bounce only.
+                    // Fires one shadow ray from the hit point to the sun
+                    // so surfaces that can't see the sun stay dark, and
+                    // surfaces that CAN actually see it get correct sun-
+                    // bounced light. Deeper bounces (b > 0) fall back to
+                    // sky_fill alone — their contribution is already
+                    // attenuated by throughput per bounce so the shadow
+                    // ray's cost isn't worth it (and adding one shadow
+                    // ray per bounce per sample blew the per-frame ray
+                    // budget on this scene's 251-instance TLAS).
                     vec3 hit_light = sky_fill;
-                    float n_dot_sun = dot(hit_n, scene.sun_direction.xyz);
-                    if (n_dot_sun > 0.0) {
-                        if (!any_hit(hit_pos + hit_n * 0.01,
-                                     scene.sun_direction.xyz, 200.0)) {
-                            hit_light += scene.sun_color.rgb *
-                                         scene.sun_color.a * n_dot_sun;
+                    if (b == 0) {
+                        float n_dot_sun = dot(hit_n, scene.sun_direction.xyz);
+                        if (n_dot_sun > 0.0) {
+                            if (!any_hit(hit_pos + hit_n * 0.01,
+                                         scene.sun_direction.xyz, 200.0)) {
+                                hit_light += scene.sun_color.rgb *
+                                             scene.sun_color.a * n_dot_sun;
+                            }
                         }
                     }
                     path += throughput * (m.emissive.rgb +
