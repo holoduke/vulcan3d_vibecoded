@@ -543,6 +543,19 @@ private:
     void init_grass_pipeline();
     void destroy_grass_pipeline();
 
+    // CPU-baked heightmap sun-shadow texture (R8). Sampled by
+    // grass.vert per blade so distant grass picks up mountain
+    // shadows without firing any RT rays. Re-baked when sun
+    // direction changes (sun_pitch/sun_yaw sliders).
+    VkImage           terrain_shadow_image_   = VK_NULL_HANDLE;
+    VmaAllocation     terrain_shadow_alloc_   = nullptr;
+    VkImageView       terrain_shadow_view_    = VK_NULL_HANDLE;
+    VkSampler         terrain_shadow_sampler_ = VK_NULL_HANDLE;
+    int               terrain_shadow_dim_     = 0;
+    glm::vec3         terrain_shadow_sun_dir_ = glm::vec3(0.0f);
+    void rebuild_terrain_shadow_texture();
+    void destroy_terrain_shadow_texture();
+
     // Phase 4 sculpt state. The brush is driven by the player's center-
     // screen ray; click-and-hold raises/lowers/smooths the heightmap
     // within `terrain_brush_radius` of the hit point. Mutated chunks

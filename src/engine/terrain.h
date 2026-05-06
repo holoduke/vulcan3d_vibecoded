@@ -62,6 +62,15 @@ Heightmap generate_heightmap(const HeightmapParams& p);
 Mesh build_terrain_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
                         uint32_t queue_family, const Heightmap& hm);
 
+// CPU-baked sun-shadow map. For each heightmap cell, marches a ray
+// toward `sun_dir` and tests whether the ray dips below the heightmap
+// at any step. Result is a (width × height) byte array, 0 = lit,
+// 255 = in shadow. Used by grass.vert as a pre-baked replacement
+// for per-fragment RT shadow rays — zero per-frame cost, scales to
+// arbitrary grass density.
+std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
+                                           glm::vec3 sun_dir);
+
 // Phase 2 chunked terrain: split the heightmap into a grid of chunks,
 // each with its own full-LOD vertex+index buffer plus a sparser
 // half-LOD index buffer that re-indexes the same vertex buffer at every

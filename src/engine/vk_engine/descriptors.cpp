@@ -38,7 +38,8 @@ void VulkanEngine::init_descriptors() {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 },
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTextureCount * 2 },
+        // +1 for the heightmap shadow texture at binding 6.
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTextureCount * 2 + 1 },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -52,7 +53,7 @@ void VulkanEngine::init_descriptors() {
 
     // Bindings: 0=UBO, 1=TLAS, 2=materials, 3=albedo[N], 4=normal[N],
     //           5=prev_transforms (per-instance prev mat4).
-    VkDescriptorSetLayoutBinding bindings[6]{};
+    VkDescriptorSetLayoutBinding bindings[7]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -83,10 +84,18 @@ void VulkanEngine::init_descriptors() {
     bindings[5].descriptorCount = 1;
     bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Binding 6: pre-baked heightmap sun-shadow R8 texture. Sampled
+    // by grass.vert (vertex stage) so cast shadows from the terrain
+    // appear on grass at any distance, with zero per-frame ray cost.
+    bindings[6].binding = 6;
+    bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[6].descriptorCount = 1;
+    bindings[6].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 6, .pBindings = bindings,
+        .bindingCount = 7, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),

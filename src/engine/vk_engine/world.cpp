@@ -170,6 +170,160 @@ void VulkanEngine::refresh_terrain_blas() {
     terrain_blas_dirty_ = false;
 }
 
+void VulkanEngine::destroy_terrain_shadow_texture() {
+    if (terrain_shadow_view_) {
+        vkDestroyImageView(device_, terrain_shadow_view_, nullptr);
+        terrain_shadow_view_ = VK_NULL_HANDLE;
+    }
+    if (terrain_shadow_image_) {
+        vmaDestroyImage(allocator_, terrain_shadow_image_, terrain_shadow_alloc_);
+        terrain_shadow_image_ = VK_NULL_HANDLE;
+        terrain_shadow_alloc_ = nullptr;
+    }
+    if (terrain_shadow_sampler_) {
+        vkDestroySampler(device_, terrain_shadow_sampler_, nullptr);
+        terrain_shadow_sampler_ = VK_NULL_HANDLE;
+    }
+    terrain_shadow_dim_ = 0;
+}
+
+void VulkanEngine::rebuild_terrain_shadow_texture() {
+    if (terrain_data_.heights.empty()) return;
+    // Reconstruct a Heightmap view over the cached data.
+    Heightmap hm{};
+    hm.dim       = terrain_data_.dim;
+    hm.cell      = terrain_data_.cell;
+    hm.origin_x  = terrain_data_.origin_x;
+    hm.origin_z  = terrain_data_.origin_z;
+    hm.heights   = terrain_data_.heights;
+
+    // Sun direction from the user settings (matches what cube.frag uses).
+    float p = glm::radians(rt_.sun_pitch_deg);
+    float y = glm::radians(rt_.sun_yaw_deg);
+    glm::vec3 sun_dir(std::sin(y) * std::cos(p), std::sin(p),
+                      std::cos(y) * std::cos(p));
+    terrain_shadow_sun_dir_ = sun_dir;
+
+    std::vector<uint8_t> shadow = bake_heightmap_shadow(hm, sun_dir);
+    const int W = hm.width();
+    const int H = hm.height();
+
+    // First-time setup: create image + sampler + view.
+    if (!terrain_shadow_image_) {
+        VkImageCreateInfo ici{};
+        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.imageType = VK_IMAGE_TYPE_2D;
+        ici.format = VK_FORMAT_R8_UNORM;
+        ici.extent = { static_cast<uint32_t>(W),
+                       static_cast<uint32_t>(H), 1 };
+        ici.mipLevels = 1; ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                    VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        vk_check(vmaCreateImage(allocator_, &ici, &aci,
+                                 &terrain_shadow_image_,
+                                 &terrain_shadow_alloc_, nullptr),
+                 "terrain shadow image");
+
+        VkImageViewCreateInfo vci{};
+        vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.image = terrain_shadow_image_;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = VK_FORMAT_R8_UNORM;
+        vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.baseMipLevel = 0;
+        vci.subresourceRange.levelCount = 1;
+        vci.subresourceRange.baseArrayLayer = 0;
+        vci.subresourceRange.layerCount = 1;
+        vk_check(vkCreateImageView(device_, &vci, nullptr,
+                                   &terrain_shadow_view_),
+                 "terrain shadow view");
+
+        VkSamplerCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = VK_FILTER_LINEAR;
+        si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vk_check(vkCreateSampler(device_, &si, nullptr,
+                                 &terrain_shadow_sampler_),
+                 "terrain shadow sampler");
+        terrain_shadow_dim_ = W;
+    }
+
+    // Stage upload via a scratch host-visible buffer.
+    const VkDeviceSize bytes =
+        static_cast<VkDeviceSize>(W) * static_cast<VkDeviceSize>(H);
+    VkBuffer stage = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = nullptr;
+    {
+        VkBufferCreateInfo bci{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr, .flags = 0, .size = bytes,
+            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+        };
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        vmaCreateBuffer(allocator_, &bci, &aci, &stage, &stage_alloc, nullptr);
+        VmaAllocationInfo ai{};
+        vmaGetAllocationInfo(allocator_, stage_alloc, &ai);
+        std::memcpy(ai.pMappedData, shadow.data(), static_cast<size_t>(bytes));
+    }
+
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, terrain_shadow_image_,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = { static_cast<uint32_t>(W),
+                                static_cast<uint32_t>(H), 1 };
+        vkCmdCopyBufferToImage(cb, stage, terrain_shadow_image_,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                1, &region);
+        vkinit::transition_image(cb, terrain_shadow_image_,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+
+    vmaDestroyBuffer(allocator_, stage, stage_alloc);
+
+    // Write the texture into descriptor binding 6 so grass.vert sees
+    // it. Done as a single VkWriteDescriptorSet — overwrites any
+    // previous value (re-bake on sun change).
+    VkDescriptorImageInfo dii{};
+    dii.sampler = terrain_shadow_sampler_;
+    dii.imageView = terrain_shadow_view_;
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = scene_desc_set_;
+    w.dstBinding = 6;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &dii;
+    vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+}
+
 float VulkanEngine::sample_terrain_height(float x, float z) const {
     if (terrain_data_.heights.empty() || terrain_data_.dim <= 0) return 0.0f;
     const int W = terrain_data_.dim + 1;

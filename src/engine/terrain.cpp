@@ -198,6 +198,57 @@ void gen_half_indices(int sample_dim, std::vector<uint32_t>& out) {
 
 } // namespace
 
+std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
+                                           glm::vec3 sun_dir) {
+    const int W = hm.width();
+    const int H = hm.height();
+    std::vector<uint8_t> out(static_cast<size_t>(W) * static_cast<size_t>(H), 0);
+    glm::vec3 L = glm::normalize(sun_dir);
+    if (L.y < 0.05f) {
+        // Sun below horizon → everything shadowed.
+        std::fill(out.begin(), out.end(), uint8_t(255));
+        return out;
+    }
+    // Step size = half the heightmap cell. Smaller = more accurate but
+    // slower. 0.5 is a good balance for ~1024 cell terrain.
+    const float step = hm.cell * 0.5f;
+    // Max marching distance — beyond this we consider the ray to have
+    // escaped the terrain. 400m covers tall mountain shadows even at
+    // glancing sun angles.
+    const float max_t = 400.0f;
+    const int   max_steps = static_cast<int>(max_t / step);
+
+    for (int iz = 0; iz < H; ++iz) {
+        for (int ix = 0; ix < W; ++ix) {
+            float h0 = hm.at(ix, iz);
+            // Origin slightly above the terrain so the ray isn't on
+            // the surface (would always self-intersect step 1).
+            glm::vec3 p0(hm.origin_x + static_cast<float>(ix) * hm.cell,
+                         h0 + 0.20f,
+                         hm.origin_z + static_cast<float>(iz) * hm.cell);
+            bool shadowed = false;
+            for (int s = 1; s <= max_steps; ++s) {
+                float t = static_cast<float>(s) * step;
+                glm::vec3 p = p0 + L * t;
+                float h_at_p = hm.sample_world(p.x, p.z);
+                if (p.y < h_at_p) {
+                    shadowed = true;
+                    break;
+                }
+                // Once the ray climbs higher than the terrain max in
+                // every direction, no more occluders possible — stop.
+                // (Cheap heuristic: stop once we're 100m above the
+                // starting height.)
+                if (p.y - h0 > 100.0f) break;
+            }
+            out[static_cast<size_t>(iz) * static_cast<size_t>(W) +
+                static_cast<size_t>(ix)] = shadowed ? 255 : 0;
+        }
+    }
+    log::infof("[terrain] heightmap shadow baked: %dx%d", W, H);
+    return out;
+}
+
 Mesh build_terrain_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
                         uint32_t queue_family, const Heightmap& hm) {
     std::vector<Vertex>   verts;

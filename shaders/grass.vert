@@ -57,8 +57,10 @@ layout(location = 5) out vec3 vWorldPos;
 layout(location = 6) out float vSunShadow;   // 0 = lit, 1 = sun-blocked
 layout(location = 7) out float vDistToCam;
 
-// Vertex-stage RT helpers were here. Removed — vertex ray queries
-// blew the GPU TDR budget on NVIDIA even with aggressive gating.
+// Pre-baked heightmap sun-shadow texture. CPU traces each cell once
+// at level load (and on sun-direction changes); zero per-frame ray
+// cost from the grass.
+layout(set = 0, binding = 6) uniform sampler2D u_terrain_shadow;
 
 mat3 rotY(float a) {
     float c = cos(a), s = sin(a);
@@ -241,11 +243,24 @@ void main() {
         return;
     }
 
-    // Vertex-stage ray queries TDR'd even with aggressive gating —
-    // NVIDIA's vertex-stage RT cost is much higher than fragment
-    // here. Reverted to fragment-shader rays with a strict <15m
-    // distance gate (see grass.frag). Distant grass goes shadowless.
-    vSunShadow = 0.0;
+    // Sample the pre-baked heightmap shadow texture at this blade's
+    // world XZ. Texture is centred on origin (matches the heightmap
+    // origin = -side/2). Bilinear filtering smooths the cell-grid.
+    // > 0.5 r = in shadow.
+    {
+        ivec2 texSize = textureSize(u_terrain_shadow, 0);
+        // 2m per cell (matches HeightmapParams::cell_size in init).
+        // Heightmap origin is -size/2 in both X and Z.
+        float side = float(texSize.x) * 2.0;
+        vec2 uv = (base_world.xz / side) + vec2(0.5);
+        if (all(greaterThanEqual(uv, vec2(0.0))) &&
+            all(lessThanEqual(uv, vec2(1.0)))) {
+            float s = textureLod(u_terrain_shadow, uv, 0.0).r;
+            vSunShadow = step(0.5, s);
+        } else {
+            vSunShadow = 0.0;
+        }
+    }
     vDistToCam = view_dist_base;
 
     gl_Position = pc.mvp * vec4(world, 1.0);

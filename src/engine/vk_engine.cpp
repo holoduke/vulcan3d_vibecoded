@@ -117,6 +117,11 @@ void VulkanEngine::init() {
     }
     init_pipeline();
     init_grass_pipeline();
+    // Heightmap shadow texture must be baked AFTER descriptors and the
+    // texture itself can be created; depends on terrain_data_ which
+    // init_world fills. Done here so the descriptor write at the end
+    // of rebuild_terrain_shadow_texture lands on the live scene set.
+    rebuild_terrain_shadow_texture();
     init_taa();
     init_viewmodel();
     init_imgui();
@@ -967,6 +972,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_grass_pipeline", [&]{ destroy_grass_pipeline(); });
     guarded("destroy_pipeline", [&]{ destroy_pipeline(); });
     guarded("destroy_grass", [&]{ destroy_grass(allocator_, grass_); });
+    guarded("destroy_terrain_shadow_texture", [&]{ destroy_terrain_shadow_texture(); });
     guarded("destroy_pipeline_cache", [&]{ destroy_pipeline_cache(); });
     guarded("destroy_readback_buffer", [&]{ destroy_readback_buffer(); });
 

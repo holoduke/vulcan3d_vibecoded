@@ -73,19 +73,18 @@ void main() {
     float sun_amt = scene.sun_color.a * 0.10 * n_dot_l;
     float sky_amt = 0.30;
 
-    // Shadow factor — both rays fragment-shader, gated to a tight
-    // <15m of camera so even at high density the per-frame ray
-    // budget stays well under the GPU's TDR limit. Distant grass
-    // (>15m) gets ambient-only shading, no cast shadow. The right
-    // long-term fix is a precomputed heightmap-shadow texture
-    // sampled in grass.vert; queued for later.
-    const float kShadowDist = 15.0;
+    // Shadow factor:
+    //   - Sun shadow comes from the pre-baked heightmap shadow texture
+    //     sampled in grass.vert (vSunShadow). Mountain/terrain self-
+    //     shadows now apply at any distance with zero per-frame ray
+    //     cost.
+    //   - Sky-up "is roofed" ray still fires per fragment for blades
+    //     within 30m — handles "inside the keep" but not at distance.
+    const float kSkyShadowDist = 30.0;
     float shadow_factor = 1.0;
-    if (scene.rt_flags.x != 0 && vDistToCam < kShadowDist) {
+    if (vSunShadow > 0.5) shadow_factor *= 0.18;
+    if (scene.rt_flags.x != 0 && vDistToCam < kSkyShadowDist) {
         vec3 origin = vWorldPos + vec3(0.0, 0.5, 0.0);
-        if (sun_blocked(origin, normalize(scene.sun_direction.xyz))) {
-            shadow_factor *= 0.18;
-        }
         if (sun_blocked(origin, vec3(0.0, 1.0, 0.0))) {
             shadow_factor *= 0.45;
         }
