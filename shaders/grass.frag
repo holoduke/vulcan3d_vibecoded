@@ -32,6 +32,7 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  terrain_h_high;
     vec4  grass_extra;   // x: height_scale, y: alpha_cutoff, z: slope_n_min, w: distance_density
     vec4  grass_extra2;  // x: alt_min, y: alt_max
+    mat4  light_vp;      // unused in frag, keeps UBO layout identical
 } scene;
 
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;

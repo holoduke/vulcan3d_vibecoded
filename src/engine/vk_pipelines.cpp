@@ -42,10 +42,15 @@ VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     stages[0].module = cfg.vert;
     stages[0].pName = "main";
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = cfg.frag;
-    stages[1].pName = "main";
+    // Fragment stage is optional — depth-only shadow passes drop it so
+    // the rasteriser writes only depth and no color.
+    const uint32_t stage_count = cfg.frag ? 2u : 1u;
+    if (cfg.frag) {
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = cfg.frag;
+        stages[1].pName = "main";
+    }
 
     VkPipelineVertexInputStateCreateInfo vi{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -78,7 +83,7 @@ VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig
         .polygonMode = VK_POLYGON_MODE_FILL,
         .cullMode = cfg.cull,
         .frontFace = cfg.front_face,
-        .depthBiasEnable = VK_FALSE,
+        .depthBiasEnable = cfg.depth_bias_enable ? VK_TRUE : VK_FALSE,
         .depthBiasConstantFactor = 0, .depthBiasClamp = 0, .depthBiasSlopeFactor = 0,
         .lineWidth = 1.0f,
     };
@@ -139,11 +144,14 @@ VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig
         .blendConstants = {0,0,0,0},
     };
 
-    VkDynamicState dyn_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkDynamicState dyn_states[3] = { VK_DYNAMIC_STATE_VIEWPORT,
+                                      VK_DYNAMIC_STATE_SCISSOR,
+                                      VK_DYNAMIC_STATE_DEPTH_BIAS };
     VkPipelineDynamicStateCreateInfo dyn{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .dynamicStateCount = 2, .pDynamicStates = dyn_states,
+        .dynamicStateCount = cfg.depth_bias_enable ? 3u : 2u,
+        .pDynamicStates = dyn_states,
     };
 
     const VkFormat* color_format_ptr = nullptr;
@@ -165,7 +173,7 @@ VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig
     VkGraphicsPipelineCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = &rendering, .flags = 0,
-        .stageCount = 2, .pStages = stages,
+        .stageCount = stage_count, .pStages = stages,
         .pVertexInputState = &vi,
         .pInputAssemblyState = &ia,
         .pTessellationState = nullptr,

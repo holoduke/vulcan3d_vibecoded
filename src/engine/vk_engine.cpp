@@ -115,12 +115,17 @@ void VulkanEngine::init() {
                                      alb, nrm, kTextureCount, texture_sampler_);
     }
     init_pipeline();
+    init_sun_shadow_pipeline();
     init_grass_pipeline();
     // Heightmap shadow texture must be baked AFTER descriptors and the
     // texture itself can be created; depends on terrain_data_ which
     // init_world fills. Done here so the descriptor write at the end
     // of rebuild_terrain_shadow_texture lands on the live scene set.
     rebuild_terrain_shadow_texture();
+    // Sun shadow map (binding 7). Created after descriptors so the
+    // one-shot binding-7 write at the end of init_sun_shadow_resources
+    // lands on the live scene set.
+    init_sun_shadow_resources();
     init_taa();
     init_viewmodel();
     init_imgui();
@@ -193,6 +198,11 @@ void VulkanEngine::draw(uint32_t img_index) {
 
     auto begin = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
     vk_check(vkBeginCommandBuffer(frame.command_buffer, &begin), "vkBeginCommandBuffer");
+
+    // Sun shadow map pass — runs first so its depth target is in
+    // SHADER_READ_ONLY_OPTIMAL by the time the scene color pass samples
+    // it via grass.vert (binding 7).
+    render_sun_shadow_pass(frame.command_buffer);
 
     // Scene-color image: undefined -> color attachment optimal for rendering.
     vkinit::transition_image(frame.command_buffer, scene_color_image_,
@@ -848,6 +858,10 @@ void VulkanEngine::run(const RunOptions& opts) {
             }
         }
 
+        // Recompute the sun shadow-map light view-proj before update_scene_ubo
+        // so the matrix copied into the UBO this frame matches the geometry
+        // we'll draw into the shadow target.
+        update_sun_shadow_light_vp();
         update_scene_ubo();
         // Heightmap sun-shadow is sun-direction-dependent. Instead of
         // re-baking the whole 1024² texture in one go (~100 ms hitch),
@@ -987,9 +1001,11 @@ void VulkanEngine::shutdown() {
     guarded("destroy_skybox", [&]{ destroy_skybox_resources(); });
     guarded("destroy_textures", [&]{ destroy_textures(); });
     guarded("destroy_grass_pipeline", [&]{ destroy_grass_pipeline(); });
+    guarded("destroy_sun_shadow_pipeline", [&]{ destroy_sun_shadow_pipeline(); });
     guarded("destroy_pipeline", [&]{ destroy_pipeline(); });
     guarded("destroy_grass", [&]{ destroy_grass(allocator_, grass_); });
     guarded("destroy_terrain_shadow_texture", [&]{ destroy_terrain_shadow_texture(); });
+    guarded("destroy_sun_shadow_resources", [&]{ destroy_sun_shadow_resources(); });
     guarded("destroy_pipeline_cache", [&]{ destroy_pipeline_cache(); });
     guarded("destroy_readback_buffer", [&]{ destroy_readback_buffer(); });
 

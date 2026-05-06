@@ -356,6 +356,277 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
     }
 }
 
+// ---------------- Sun shadow map (single-cascade ortho) ----------------
+//
+// Standard depth-only shadow pass: one 2048² D32 depth target written
+// from the sun's POV each frame, sampled by grass.vert as a
+// sampler2DShadow at descriptor binding 7. Cube.frag continues to use
+// RT shadow rays — we don't move the whole engine to CSM yet, this is
+// the cheap path that lets dynamic occluders (castle, dyn-props) cast
+// shadow on grass without firing a ray per blade.
+//
+// Light frustum: ortho box centred on the player. Half-width covers the
+// grass distance + slack. Depth along the sun axis is large so far-off
+// mountain ridges still register as casters even when the receiver
+// (grass) is right under the camera. Texel-snapped each frame to avoid
+// crawling shadow edges as the player walks.
+void VulkanEngine::init_sun_shadow_resources() {
+    const uint32_t W = kShadowMapSize;
+
+    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_D32_SFLOAT;
+    ici.extent = { W, W, 1 };
+    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vk_check(vmaCreateImage(allocator_, &ici, &aci,
+                             &sun_shadow_image_, &sun_shadow_alloc_, nullptr),
+             "sun shadow image");
+
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = sun_shadow_image_;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_D32_SFLOAT;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    vci.subresourceRange.baseMipLevel = 0;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.baseArrayLayer = 0;
+    vci.subresourceRange.layerCount = 1;
+    vk_check(vkCreateImageView(device_, &vci, nullptr, &sun_shadow_view_),
+             "sun shadow view");
+
+    // Comparison sampler — sampler2DShadow returns the comparison result
+    // (0..1 with PCF) instead of raw depth. LINEAR + 2x2 hardware PCF gives
+    // soft penumbra essentially for free.
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = VK_FILTER_LINEAR;
+    si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;  // out-of-bounds = lit
+    si.compareEnable = VK_TRUE;
+    si.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    vk_check(vkCreateSampler(device_, &si, nullptr, &sun_shadow_sampler_),
+             "sun shadow sampler");
+
+    // Initial transition into SHADER_READ_ONLY so render_sun_shadow_pass's
+    // first transition (READ_ONLY → DEPTH_ATTACHMENT_OPTIMAL) is
+    // symmetric with subsequent frames.
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image_aspect(cb, sun_shadow_image_,
+                                         VK_IMAGE_LAYOUT_UNDEFINED,
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                         VK_IMAGE_ASPECT_DEPTH_BIT);
+    });
+
+    // Descriptor binding 7 only needs writing once — the image handle
+    // doesn't change for the lifetime of the engine.
+    VkDescriptorImageInfo dii{};
+    dii.sampler = sun_shadow_sampler_;
+    dii.imageView = sun_shadow_view_;
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = scene_desc_set_;
+    w.dstBinding = 7;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &dii;
+    vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+}
+
+void VulkanEngine::destroy_sun_shadow_resources() {
+    if (sun_shadow_view_) {
+        vkDestroyImageView(device_, sun_shadow_view_, nullptr);
+        sun_shadow_view_ = VK_NULL_HANDLE;
+    }
+    if (sun_shadow_image_) {
+        vmaDestroyImage(allocator_, sun_shadow_image_, sun_shadow_alloc_);
+        sun_shadow_image_ = VK_NULL_HANDLE;
+        sun_shadow_alloc_ = nullptr;
+    }
+    if (sun_shadow_sampler_) {
+        vkDestroySampler(device_, sun_shadow_sampler_, nullptr);
+        sun_shadow_sampler_ = VK_NULL_HANDLE;
+    }
+}
+
+void VulkanEngine::update_sun_shadow_light_vp() {
+    // Sun direction from the user settings (matches cube.frag and the
+    // heightmap bake). Light position floats along the sun axis above the
+    // player so the ortho frustum's depth range covers nearby grass and
+    // distant mountain ridges that need to cast on it.
+    float p_rad = glm::radians(rt_.sun_pitch_deg);
+    float y_rad = glm::radians(rt_.sun_yaw_deg);
+    glm::vec3 sun_dir = glm::normalize(glm::vec3(
+        std::sin(y_rad) * std::cos(p_rad),
+        std::sin(p_rad),
+        std::cos(y_rad) * std::cos(p_rad)));
+
+    // Half-extent of the ortho box in the light's view plane. Cover the
+    // grass distance plus a margin so nearby brushes / dyn-props still
+    // appear as casters even when the player is at the edge of grass.
+    const float half = std::max(rt_.grass_distance, 80.0f) + 40.0f;
+    // Sun-axis depth: large so the shadow camera can sit far back along
+    // the sun direction and still capture distant cliff peaks.
+    const float depth_back  = 600.0f;  // distance behind the player along sun
+    const float depth_front = 400.0f;  // distance in front (receivers below)
+
+    glm::vec3 cam = player_.eye_position();
+
+    // Texel-grid snap: round the light-space view-plane origin to the
+    // nearest shadow texel so distant edges don't crawl as the player
+    // walks. Pick world axes spanning the light-view plane (any two axes
+    // perpendicular to sun_dir).
+    glm::vec3 up_ref = std::abs(sun_dir.y) > 0.99f
+        ? glm::vec3(0.0f, 0.0f, 1.0f)
+        : glm::vec3(0.0f, 1.0f, 0.0f);
+    glm::vec3 right_axis = glm::normalize(glm::cross(up_ref, sun_dir));
+    glm::vec3 up_axis    = glm::normalize(glm::cross(sun_dir, right_axis));
+    float texel = (2.0f * half) / static_cast<float>(kShadowMapSize);
+    float u = glm::dot(cam, right_axis);
+    float v = glm::dot(cam, up_axis);
+    u = std::round(u / texel) * texel;
+    v = std::round(v / texel) * texel;
+    // Reconstruct snapped centre (component along sun_dir doesn't matter
+    // for an ortho frustum, but keep player-y so the box is positioned
+    // sensibly).
+    glm::vec3 snapped_centre = right_axis * u + up_axis * v +
+                                sun_dir * glm::dot(cam, sun_dir);
+
+    glm::vec3 light_eye = snapped_centre + sun_dir * depth_back;
+    glm::mat4 view = glm::lookAt(light_eye, snapped_centre, up_axis);
+    glm::mat4 proj = glm::ortho(-half, half, -half, half,
+                                 0.0f, depth_back + depth_front);
+    proj[1][1] *= -1.0f;  // match Vulkan-y-flipped convention used elsewhere
+    sun_shadow_light_vp_ = proj * view;
+}
+
+void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
+    // Transition into DEPTH_ATTACHMENT_OPTIMAL for the depth-only render.
+    vkinit::transition_image_aspect(cmd, sun_shadow_image_,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                     VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    VkClearValue clear_depth{};
+    clear_depth.depthStencil.depth = 1.0f;
+
+    VkRenderingAttachmentInfo depth_att{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .pNext = nullptr,
+        .imageView = sun_shadow_view_,
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .resolveMode = VK_RESOLVE_MODE_NONE,
+        .resolveImageView = VK_NULL_HANDLE,
+        .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = clear_depth,
+    };
+    VkExtent2D ext{ kShadowMapSize, kShadowMapSize };
+    VkRenderingInfo ri{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .pNext = nullptr, .flags = 0,
+        .renderArea = { {0, 0}, ext },
+        .layerCount = 1, .viewMask = 0,
+        .colorAttachmentCount = 0, .pColorAttachments = nullptr,
+        .pDepthAttachment = &depth_att, .pStencilAttachment = nullptr,
+    };
+    vkCmdBeginRendering(cmd, &ri);
+
+    VkViewport vp_state{};
+    vp_state.x = 0.0f; vp_state.y = 0.0f;
+    vp_state.width = static_cast<float>(kShadowMapSize);
+    vp_state.height = static_cast<float>(kShadowMapSize);
+    vp_state.minDepth = 0.0f; vp_state.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &vp_state);
+    VkRect2D scissor{ {0, 0}, ext };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sun_shadow_pipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
+                            0, 1, &scene_desc_set_, 0, nullptr);
+
+    // Slope-scale + constant bias to combat acne. Tuned conservatively;
+    // peter-panning at thin geometry edges is the lesser evil here vs
+    // shadow acne scrolling across grass as the sun rotates.
+    vkCmdSetDepthBias(cmd, /*const*/ 1.5f, /*clamp*/ 0.0f, /*slope*/ 4.0f);
+
+    glm::mat4 vp = sun_shadow_light_vp_;
+
+    auto push_shadow = [&](const glm::mat4& model) {
+        PushConstants pc{};
+        pc.mvp = vp * model;
+        pc.model = model;
+        vkCmdPushConstants(cmd, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PushConstants), &pc);
+    };
+
+    // Static brushes (castle, towers).
+    VkDeviceSize cube_off = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &cube_off);
+    vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    for (size_t i = 0; i < world_.brushes.size(); ++i) {
+        const auto& b = world_.brushes[i];
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), b.center) *
+                          glm::scale(glm::mat4(1.0f), b.size);
+        push_shadow(model);
+        vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
+    }
+
+    // Dyn-props — same cube BLAS is the cube mesh; cylinders use their
+    // own mesh. For simplicity we render every dyn-prop as its actual
+    // mesh: the existing render path already binds per-prop mesh buffers,
+    // we mirror that.
+    for (size_t i = 0; i < dyn_props_.size(); ++i) {
+        const DynRender& dr = i < dyn_render_cache_.size() ? dyn_render_cache_[i]
+                                                            : DynRender{};
+        if (!dr.valid) continue;
+        glm::mat4 model = dr.world * glm::scale(glm::mat4(1.0f),
+                                                 dyn_props_[i].full_size);
+        push_shadow(model);
+        // dyn-prop mesh index — same vbuffer (cube_mesh_) was bound; if a
+        // future cylinder/sphere prop ships we'd need per-prop mesh
+        // bindings here. Cubes use the bound cube mesh, which is correct.
+        vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
+    }
+
+    // Terrain chunks. No per-chunk frustum cull against the light frustum
+    // for now — the chunk count is modest and depth-only is cheap.
+    if (!terrain_chunks_.chunks.empty()) {
+        for (const auto& c : terrain_chunks_.chunks) {
+            VkDeviceSize toff = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
+            vkCmdBindIndexBuffer(cmd, c.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+            push_shadow(glm::mat4(1.0f));
+            vkCmdDrawIndexed(cmd, c.mesh.index_count, 1, 0, 0, 0);
+        }
+    }
+
+    vkCmdEndRendering(cmd);
+
+    // Transition back to SHADER_READ_ONLY so grass.vert can sample it.
+    vkinit::transition_image_aspect(cmd, sun_shadow_image_,
+                                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                     VK_IMAGE_ASPECT_DEPTH_BIT);
+}
+
 void VulkanEngine::enqueue_terrain_shadow_rebake(glm::vec3 target_sun) {
     if (terrain_data_.heights.empty()) return;
     terrain_shadow_target_sun_dir_ = target_sun;

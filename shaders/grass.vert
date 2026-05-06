@@ -31,6 +31,7 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  terrain_h_high;
     vec4  grass_extra;   // x: height_scale, y: alpha_cutoff, z: slope_n_min, w: distance_density
     vec4  grass_extra2;  // x: alt_min, y: alt_max
+    mat4  light_vp;      // sun shadow map view-proj (world → light clip)
 } scene;
 
 layout(push_constant) uniform PC {
@@ -57,10 +58,15 @@ layout(location = 5) out vec3 vWorldPos;
 layout(location = 6) out float vSunShadow;   // 0 = lit, 1 = sun-blocked
 layout(location = 7) out float vDistToCam;
 
-// Pre-baked heightmap sun-shadow texture. CPU traces each cell once
-// at level load (and on sun-direction changes); zero per-frame ray
-// cost from the grass.
+// Legacy heightmap sun-shadow texture (binding 6) — kept for fallback;
+// the active path samples binding 7 (sun shadow map) instead.
 layout(set = 0, binding = 6) uniform sampler2D u_terrain_shadow;
+// Sun shadow map. Single-cascade orthographic depth render from the
+// sun's POV, written each frame in render_sun_shadow_pass with the
+// castle, dyn-props and terrain chunks as casters. Sampled here as a
+// sampler2DShadow so the hardware comparison + 2x2 PCF runs in one
+// texture() call.
+layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 
 mat3 rotY(float a) {
     float c = cos(a), s = sin(a);
@@ -236,23 +242,27 @@ void main() {
     lp.y *= cull_factor;
     vec3 world = R * lp + base_world;
 
-    // Sample the pre-baked heightmap shadow texture at this blade's
-    // world XZ. Texture is centred on origin (matches the heightmap
-    // origin = -side/2). Bilinear filtering smooths the cell-grid.
-    // > 0.5 r = in shadow.
+    // Sample the sun shadow map (single-cascade ortho). Transform the
+    // blade's base world position into light-clip space, do the [-1,1]
+    // → [0,1] remap on XY (Vulkan keeps Z in [0,1]), and use
+    // sampler2DShadow's hardware comparison: result is 0 (lit) when
+    // the rasterised depth is closer than the receiver, 1 (shadowed)
+    // otherwise. Border-clamp white means out-of-frustum samples read
+    // as lit — fine since the receiver is necessarily inside the
+    // ortho box (it was sized to the grass distance + slack).
     {
-        ivec2 texSize = textureSize(u_terrain_shadow, 0);
-        // 2m per cell (matches HeightmapParams::cell_size in init).
-        // Heightmap origin is -size/2 in both X and Z.
-        float side = float(texSize.x) * 2.0;
-        vec2 uv = (base_world.xz / side) + vec2(0.5);
-        if (all(greaterThanEqual(uv, vec2(0.0))) &&
-            all(lessThanEqual(uv, vec2(1.0)))) {
-            float s = textureLod(u_terrain_shadow, uv, 0.0).r;
-            vSunShadow = step(0.5, s);
-        } else {
-            vSunShadow = 0.0;
-        }
+        vec4 lc = scene.light_vp * vec4(base_world, 1.0);
+        // Ortho — w == 1 — but divide anyway in case a future cascade
+        // setup uses a non-affine projection.
+        vec3 lndc = lc.xyz / lc.w;
+        vec2 luv = lndc.xy * 0.5 + 0.5;
+        // textureLod on sampler2DShadow: vec3 = (xy_uv, ref_depth).
+        // Bias the receiver depth away from the caster slightly to
+        // damp any leftover acne the slope-bias didn't catch.
+        const float kReceiverBias = 0.0005;
+        vSunShadow = 1.0 - textureLod(u_sun_shadow_map,
+                                       vec3(luv, lndc.z - kReceiverBias),
+                                       0.0);
     }
     vDistToCam = view_dist_base;
 

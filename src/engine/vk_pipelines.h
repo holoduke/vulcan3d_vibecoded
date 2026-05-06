@@ -39,6 +39,11 @@ struct GraphicsPipelineConfig {
     // field needs to grow into a per-attachment vector — no caller needs
     // that today.
     bool additive_blend = false;
+
+    // Enables VK_DYNAMIC_STATE_DEPTH_BIAS so the caller can drive depth
+    // bias per-frame via vkCmdSetDepthBias. Required for the shadow-map
+    // depth-only pipeline (slope-scale + constant bias to combat acne).
+    bool depth_bias_enable = false;
 };
 
 VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig& cfg);

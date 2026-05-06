@@ -39,7 +39,8 @@ void VulkanEngine::init_descriptors() {
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 },
         // +1 for the heightmap shadow texture at binding 6.
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTextureCount * 2 + 1 },
+        // +1 for the sun shadow map at binding 7 (sampler2DShadow).
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTextureCount * 2 + 2 },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -52,8 +53,8 @@ void VulkanEngine::init_descriptors() {
              "scene desc pool");
 
     // Bindings: 0=UBO, 1=TLAS, 2=materials, 3=albedo[N], 4=normal[N],
-    //           5=prev_transforms (per-instance prev mat4).
-    VkDescriptorSetLayoutBinding bindings[7]{};
+    //           5=prev_transforms, 6=heightmap shadow, 7=sun shadow map.
+    VkDescriptorSetLayoutBinding bindings[8]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -92,10 +93,18 @@ void VulkanEngine::init_descriptors() {
     bindings[6].descriptorCount = 1;
     bindings[6].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
+    // Binding 7: sun shadow map (single-cascade D32). Sampled by grass.vert
+    // as a sampler2DShadow for hardware PCF + comparison. Replaces the
+    // heightmap-bake path going forward (binding 6 stays for fallback).
+    bindings[7].binding = 7;
+    bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[7].descriptorCount = 1;
+    bindings[7].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 7, .pBindings = bindings,
+        .bindingCount = 8, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),
@@ -211,6 +220,7 @@ void VulkanEngine::update_scene_ubo() {
     data.grass_extra2 = glm::vec4(rt_.grass_alt_min,
                                   rt_.grass_alt_max,
                                   0.0f, 0.0f);
+    data.light_vp = sun_shadow_light_vp_;
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

@@ -107,6 +107,12 @@ struct SceneUBO {
     //   y: alt_max (blade fades to 0 above this world Y)
     //   z, w: unused
     glm::vec4  grass_extra2;
+    // Sun shadow map's view-projection matrix. Grass.vert transforms its
+    // world position into light-clip space and samples binding 7 (a
+    // sampler2DShadow) for sun visibility. Computed each frame in
+    // update_scene_ubo from sun_pitch/sun_yaw + the player position;
+    // texel-grid-snapped so distant edges don't crawl as the camera moves.
+    glm::mat4  light_vp;
 };
 
 // ---- KHR ray tracing entry points ----

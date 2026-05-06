@@ -570,6 +570,28 @@ private:
     void tick_terrain_shadow_progressive();
     void destroy_terrain_shadow_texture();
 
+    // Sun shadow map (single-cascade, ortho). Replaces the heightmap-bake
+    // path for grass and lets dynamic occluders (castle, dyn-props) cast
+    // sun shadows on grass. 2048² D32 depth target rendered each frame
+    // via shadow_pipeline_ in render_sun_shadow_pass(). Sampled by
+    // grass.vert at scene_desc binding 7 as a sampler2DShadow (hardware
+    // PCF). Cube.frag continues to use RT shadow rays — the shadow map
+    // here is grass-only for now.
+    static constexpr uint32_t kShadowMapSize = 2048;
+    VkImage         sun_shadow_image_   = VK_NULL_HANDLE;
+    VmaAllocation   sun_shadow_alloc_   = nullptr;
+    VkImageView     sun_shadow_view_    = VK_NULL_HANDLE;
+    VkSampler       sun_shadow_sampler_ = VK_NULL_HANDLE;
+    VkPipeline      sun_shadow_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule  sun_shadow_vert_module_ = VK_NULL_HANDLE;
+    glm::mat4       sun_shadow_light_vp_ = glm::mat4(1.0f);
+    void init_sun_shadow_resources();
+    void destroy_sun_shadow_resources();
+    void init_sun_shadow_pipeline();
+    void destroy_sun_shadow_pipeline();
+    void update_sun_shadow_light_vp();
+    void render_sun_shadow_pass(VkCommandBuffer cmd);
+
     // Phase 4 sculpt state. The brush is driven by the player's center-
     // screen ray; click-and-hold raises/lowers/smooths the heightmap
     // within `terrain_brush_radius` of the hit point. Mutated chunks
