@@ -43,3 +43,8 @@ assets/**/*.mtlx
 assets/**/MorningSkyHDRI002B.png
 assets/tex/**/*.png
 
+
+# debug screenshots
+shot*.png
+shot*.ppm
+shot*.jpg
