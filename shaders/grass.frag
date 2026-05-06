@@ -66,33 +66,26 @@ void main() {
     // the bloom threshold (≈1.0 by default) blows up into halos when
     // auto-exposure compensates for darker portions of the scene
     // (castle interior). Hard cap below.
-    // Light intensity as a SCALAR — preserves the blade's green tint
-    // regardless of sun direction.
+    // Light intensity (scalar, preserves blade tint).
     float sun_amt = scene.sun_color.a * 0.10 * n_dot_l;
     float sky_amt = 0.30;
 
-    // Shadow: one ray to the sun + one ray straight up for sky access.
-    // Sun ray drops the sun term. Sky ray approximates "is this blade
-    // under a roof?" — if yes, sky bounce is also blocked, so the sky
-    // term collapses too. Without this second test, blades inside the
-    // keep read only 25% darker than open ground (sky_amt=0.30 still
-    // dominated lum) and the user couldn't tell they were indoors.
+    // Shadow factor — separate from lum. cube.frag's terrain in
+    // shadow drops to ~10% of its sunlit value; we match that here
+    // so grass in a cast shadow visibly tracks the terrain beneath
+    // it. Earlier formulation (sun_amt = 0 in shadow, sky_amt = 0.30
+    // always) only got a 50% drop, which read as "barely darker".
+    float shadow_factor = 1.0;
     if (scene.rt_flags.x != 0) {
-        // Origin offset 0.5m above the blade base — high enough to
-        // clear the heightmap BLAS underfoot, low enough that a
-        // shadow caster sitting just over the grass (a fallen crate,
-        // a low castle merlon at the foot of the wall) still occludes
-        // the ray. Earlier 0.30m + t_min=1.0 missed those because
-        // the ray skipped past them.
         vec3 origin = vWorldPos + vec3(0.0, 0.5, 0.0);
         if (sun_blocked(origin, normalize(scene.sun_direction.xyz))) {
-            sun_amt = 0.0;
+            shadow_factor *= 0.18;     // sun blocked: 82% darker
         }
         if (sun_blocked(origin, vec3(0.0, 1.0, 0.0))) {
-            sky_amt *= 0.15;     // roofed → kill sky bounce too
+            shadow_factor *= 0.45;     // also roofed: another half
         }
     }
-    float lum = sun_amt + sky_amt;
+    float lum = (sun_amt + sky_amt) * shadow_factor;
 
     vec3 tip_lift = mix(vec3(0.95), vec3(1.05, 1.0, 0.9), vHeightRatio);
     vec3 base = vColor * tip_lift;
