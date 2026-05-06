@@ -447,11 +447,10 @@ void main() {
     if (N_gi > 0) {
         float gi_radius = scene.rt_params2.y;
 
-        // Cheap "what light would land on a hit surface" estimate: a blended
-        // view of the sun + sky.
-        vec3 sun_term = scene.sun_color.rgb * scene.sun_color.a * 0.45;
-        vec3 sky_term = scene.sky_color.rgb * 0.55;
-        vec3 scene_light = sun_term + sky_term;
+        // Sky-only ambient term — used when a GI bounce hits a surface
+        // that CANNOT see the sun. Approximates the soft fill light from
+        // the sky dome that reaches indoor surfaces near openings.
+        vec3 sky_fill = scene.sky_color.rgb * 0.18;
 
         int strata = int(ceil(sqrt(float(N_gi))));
         float inv_strata = 1.0 / float(strata);
@@ -481,15 +480,37 @@ void main() {
                         break;
                     }
                     Material m = materials[idx];
+                    vec3 hit_pos = ray_origin + ray_dir * t;
+                    vec3 hit_n = -ray_dir;  // approximate outward normal
+
+                    // *** Real GI bounce lighting *** — fires a shadow
+                    // ray from the hit point to the sun. If the path is
+                    // clear AND the surface faces the sun, the bounce
+                    // carries actual sun energy back to our shading
+                    // pixel. If blocked (the hit surface is in shadow),
+                    // we still keep a small sky-fill term so completely
+                    // enclosed rooms don't go pitch black, but it's
+                    // FAR less than a "fake everything is sunlit" term.
+                    // This is what makes the inside of the keep
+                    // visibly darker than the open arena outside —
+                    // previously every bounce hit was illuminated as if
+                    // it could see the sun.
+                    vec3 hit_light = sky_fill;
+                    float n_dot_sun = dot(hit_n, scene.sun_direction.xyz);
+                    if (n_dot_sun > 0.0) {
+                        if (!any_hit(hit_pos + hit_n * 0.01,
+                                     scene.sun_direction.xyz, 200.0)) {
+                            hit_light += scene.sun_color.rgb *
+                                         scene.sun_color.a * n_dot_sun;
+                        }
+                    }
                     path += throughput * (m.emissive.rgb +
-                                          m.color.rgb * scene_light);
+                                          m.color.rgb * hit_light);
                     if (b + 1 >= N_bounces) break;
 
                     // Tint the path's throughput by the surface albedo and
                     // continue from the hit point in a new cosine-hemisphere.
                     throughput *= m.color.rgb;
-                    vec3 hit_pos = ray_origin + ray_dir * t;
-                    vec3 hit_n = -ray_dir;  // approximate outward normal
                     ray_origin = hit_pos + hit_n * 0.01;
                     float br1 = rand(seed_base + uvec3(taken * 7 + b, 31u, 17u));
                     float br2 = rand(seed_base + uvec3(taken * 7 + b, 7u, 91u));
