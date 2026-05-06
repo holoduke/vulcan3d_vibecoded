@@ -32,7 +32,8 @@ void update_player(Player& p, const PlayerInput& in, const Level& world, float d
 }
 
 void update_player(Player& p, const PlayerInput& in,
-                   std::span<const collision::AABB> world_aabbs, float dt) {
+                   std::span<const collision::AABB> world_aabbs, float dt,
+                   size_t static_count) {
     // Mouse-look has been moved to the render loop (so it runs at frame rate
     // for low latency, decoupled from fixed-timestep physics). Calls passing
     // mouse_dx/dy here would still apply, but the engine now passes 0.
@@ -96,7 +97,8 @@ void update_player(Player& p, const PlayerInput& in,
         p.on_ground = false;
     }
 
-    auto move = collision::slide_move(p.shape(), p.position, p.velocity, world_aabbs, dt);
+    auto move = collision::slide_move(p.shape(), p.position, p.velocity,
+                                       world_aabbs, dt, 4, static_count);
     p.position = move.position;
     p.velocity = move.velocity;
     p.on_ground = move.grounded;

@@ -36,10 +36,17 @@ struct MoveResult {
 };
 
 // Slide-move: given a player AABB at `position`, attempt to move by `velocity * dt`
-// against a list of static AABBs, sliding along contact planes. Up to `max_iterations`
+// against a list of AABBs, sliding along contact planes. Up to `max_iterations`
 // slide iterations.
+//
+// `static_count` is the number of leading entries in `world` that are STATIC
+// (level brushes / stairs). Auto step-up is only permitted over static
+// obstacles — stepping onto a dynamic crate would let the player walk
+// through pushable boxes. The default of npos treats every entry as static
+// (back-compat for the test suite).
 MoveResult slide_move(const AABB& player, glm::vec3 position, glm::vec3 velocity,
                       std::span<const AABB> world, float dt,
-                      int max_iterations = 4);
+                      int max_iterations = 4,
+                      size_t static_count = static_cast<size_t>(-1));
 
 } // namespace qlike::collision

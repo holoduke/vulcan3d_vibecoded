@@ -680,7 +680,8 @@ void VulkanEngine::run(const RunOptions& opts) {
                 pin.mouse_dy = 0.0f;
                 rebuild_tick_aabbs();
                 glm::vec3 pre_vel = player_.velocity;
-                game::update_player(player_, pin, tick_aabbs_, kFixedDt);
+                game::update_player(player_, pin, tick_aabbs_, kFixedDt,
+                                     world_.aabbs.size());
                 apply_player_pushes(pre_vel);
                 if (physics_) physics_->step(kFixedDt);
                 update_projectiles(kFixedDt);

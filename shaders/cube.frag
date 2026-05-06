@@ -433,6 +433,15 @@ void main() {
     //   - On a miss (sky): accumulate throughput × procedural sky and stop.
     // Samples are stratified on a sqrt(N)×sqrt(N) grid for clean low-N look.
     vec3 gi_indirect = vec3(0.0);
+    // Sky visibility — fraction of first-bounce GI rays that escape the
+    // scene. Used after the GI loop to attenuate the (sky-derived) ambient
+    // term: enclosed surfaces (e.g. inside the keep) get sky_vis ≈ 0 and
+    // their ambient drops to near zero, giving the room a real "interior"
+    // feel instead of the same flat brightness as outdoors. Default 1.0
+    // when GI is disabled so existing behaviour is unchanged.
+    float sky_vis = 1.0;
+    int sky_misses = 0;
+    int sky_total  = 0;
     int N_gi = scene.rt_flags2.x > 0 ? lod_samples(scene.rt_flags2.x, cam_dist) : 0;
     int N_bounces = max(1, scene.rt_flags2.z);
     if (N_gi > 0) {
@@ -465,6 +474,10 @@ void main() {
                     int idx;
                     if (!closest_hit_material(ray_origin, ray_dir, gi_radius, t, idx)) {
                         path += throughput * sample_sky(ray_dir);
+                        // First-bounce miss = the surface can see sky in
+                        // this direction. Tracks "open vs enclosed" for the
+                        // ambient attenuation below.
+                        if (b == 0) ++sky_misses;
                         break;
                     }
                     Material m = materials[idx];
@@ -487,6 +500,8 @@ void main() {
             }
         }
         gi_indirect = albedo * (sum / float(taken)) * scene.rt_params2.x;
+        sky_total = taken;
+        sky_vis = float(sky_misses) / float(max(1, sky_total));
     }
 
     // --- AO --- (also stratified to spread samples cleanly)
@@ -516,7 +531,15 @@ void main() {
         reflection *= scene.rt_params2.z;
     }
 
-    vec3 indirect = albedo * ambient * ao + gi_indirect;
+    // Sky-occlusion term. Surfaces that can't see the sky get a much
+    // darker ambient — that's the natural look of an enclosed room. The
+    // 0.15 floor stops pure-interior pixels from going completely black
+    // (real rooms have some bounced light), and the smoothstep curve
+    // rolls in the sky contribution faster than linear so the open arena
+    // still reads bright. GI-disabled fallback (sky_vis=1.0) leaves the
+    // outdoor look identical to before this change.
+    float sky_factor = mix(0.15, 1.0, smoothstep(0.0, 0.6, sky_vis));
+    vec3 indirect = albedo * ambient * ao * sky_factor + gi_indirect;
     vec3 final = direct + indirect + vEmissive.rgb + reflection * (shiny ? 1.0 : 0.0);
 
     outColor = vec4(final, 1.0);

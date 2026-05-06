@@ -108,7 +108,9 @@ glm::vec3 depenetrate(const AABB& player, glm::vec3 pos,
 }
 
 MoveResult slide_move(const AABB& player, glm::vec3 position, glm::vec3 velocity,
-                      std::span<const AABB> world, float dt, int max_iterations) {
+                      std::span<const AABB> world, float dt, int max_iterations,
+                      size_t static_count) {
+    if (static_count > world.size()) static_count = world.size();
     // Maximum height of a vertical step the player can climb without jumping.
     // Walking into a riser ≤ kStepHeight: the player is automatically lifted
     // onto the step's top surface. Walking into a wall ≥ kStepHeight: blocked
@@ -124,13 +126,14 @@ MoveResult slide_move(const AABB& player, glm::vec3 position, glm::vec3 velocity
         for (const AABB& w : world) if (aabb_overlap(pb, w)) return true;
         return false;
     };
+    struct SweepHit { float t; glm::vec3 n; size_t idx; };
     auto best_sweep = [&](AABB swept_box, glm::vec3 displacement) {
-        float t = 1.0f; glm::vec3 n(0.0f);
-        for (const AABB& w : world) {
-            SweepResult r = sweep_aabb(swept_box, displacement, w);
-            if (r.hit && r.t < t) { t = r.t; n = r.normal; }
+        SweepHit best{1.0f, glm::vec3(0.0f), static_cast<size_t>(-1)};
+        for (size_t i = 0; i < world.size(); ++i) {
+            SweepResult r = sweep_aabb(swept_box, displacement, world[i]);
+            if (r.hit && r.t < best.t) { best = {r.t, r.normal, i}; }
         }
-        return std::pair<float, glm::vec3>(t, n);
+        return best;
     };
 
     position = depenetrate(player, position, world);
@@ -143,8 +146,11 @@ MoveResult slide_move(const AABB& player, glm::vec3 position, glm::vec3 velocity
         if (glm::dot(remaining, remaining) < kEpsilon * kEpsilon) break;
 
         AABB swept_box = box_at(pos);
-        auto [earliest_t, hit_normal] = best_sweep(swept_box, remaining);
+        SweepHit hit = best_sweep(swept_box, remaining);
+        float earliest_t = hit.t;
+        glm::vec3 hit_normal = hit.n;
         bool any_hit = earliest_t < 1.0f;
+        bool hit_static = any_hit && hit.idx < static_count;
 
         if (!any_hit) {
             // Free travel — no skin offset.
@@ -156,35 +162,47 @@ MoveResult slide_move(const AABB& player, glm::vec3 position, glm::vec3 velocity
         // Step-up: if we hit a vertical wall (mostly horizontal normal) and
         // there's clear space above the player when lifted by kStepHeight,
         // try the same horizontal move from the lifted position. If that
-        // clears the obstacle, accept the step and drop the player back
-        // down onto the new surface. Lets a real flight of stairs work
-        // without per-step jumping.
-        if (std::abs(hit_normal.y) < 0.5f) {
+        // clears the obstacle AND the lifted player can drop onto a
+        // surface, accept the step. Lets a flight of stairs work without
+        // per-step jumping.
+        //
+        // Two guards prevent the "walk through a short box" bug:
+        //   1. The move must be roughly horizontal — falling / jumping
+        //      players shouldn't get a free vertical assist mid-air.
+        //   2. The post-step downward sweep must hit something within
+        //      kStepHeight. If drop_t is ~1.0 there is no surface to land
+        //      on; accepting the step would teleport the player horizontally
+        //      past the obstacle while leaving them in free space, which
+        //      reads as "walking through".
+        // Step-up additionally requires that the obstacle we hit is
+        // STATIC. Stepping over a dynamic crate would make pushable
+        // boxes feel walkable / pass-through.
+        const bool is_horiz_move = std::abs(velocity.y) < 1.0f &&
+                                    std::abs(remaining.y) < 0.05f;
+        if (hit_static && is_horiz_move && std::abs(hit_normal.y) < 0.5f) {
             glm::vec3 horiz_disp(remaining.x, 0.0f, remaining.z);
             glm::vec3 lifted_pos = pos + glm::vec3(0.0f, kStepHeight, 0.0f);
             if (!pos_overlaps(lifted_pos)) {
                 AABB lifted_box = box_at(lifted_pos);
-                auto step = best_sweep(lifted_box, horiz_disp);
-                float step_t = step.first;
+                SweepHit step = best_sweep(lifted_box, horiz_disp);
+                float step_t = step.t;
                 if (step_t > earliest_t + kEpsilon) {
-                    // Move horizontally from the lifted position…
                     glm::vec3 stepped = lifted_pos +
                         horiz_disp * std::max(0.0f, step_t - kEpsilon);
-                    // …then snap straight down by up to kStepHeight to land
-                    // on the step's top. drop_t is the fraction of
-                    // kStepHeight we travel before hitting something.
                     AABB stepped_box = box_at(stepped);
-                    auto drop = best_sweep(stepped_box,
-                                            glm::vec3(0.0f, -kStepHeight, 0.0f));
-                    float drop_t = drop.first;
-                    glm::vec3 final_pos = stepped + glm::vec3(
-                        0.0f, -kStepHeight * std::max(0.0f, drop_t - kEpsilon),
-                        0.0f);
-                    step_amount += final_pos.y - pos.y;
-                    pos = final_pos;
-                    grounded = true;
-                    remaining = glm::vec3(0.0f);
-                    break;
+                    SweepHit drop = best_sweep(stepped_box,
+                                                glm::vec3(0.0f, -kStepHeight, 0.0f));
+                    float drop_t = drop.t;
+                    if (drop_t < 1.0f - kEpsilon) {
+                        glm::vec3 final_pos = stepped + glm::vec3(
+                            0.0f, -kStepHeight * std::max(0.0f, drop_t - kEpsilon),
+                            0.0f);
+                        step_amount += final_pos.y - pos.y;
+                        pos = final_pos;
+                        grounded = true;
+                        remaining = glm::vec3(0.0f);
+                        break;
+                    }
                 }
             }
         }

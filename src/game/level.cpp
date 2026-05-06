@@ -286,7 +286,6 @@ Level make_arena(float r, float wh) {
         add_lantern(lv, glm::vec3(-ent_w * 0.5f - 0.9f, 0.0f, cr - wt - 1.0f));
         add_lantern(lv, glm::vec3( door_w * 0.5f + 0.6f, 0.0f, kp_cz + kp_sz * 0.5f + 0.6f));
         add_lantern(lv, glm::vec3(-door_w * 0.5f - 0.6f, 0.0f, kp_cz + kp_sz * 0.5f + 0.6f));
-        add_lantern(lv, glm::vec3(kp_cx, 0.0f, kp_cz - 1.0f));    // inside keep, near south wall
     }
 
     // Outer arena lanterns at the four arena-corner zones, well clear of

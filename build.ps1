@@ -35,7 +35,32 @@ if ($Clean -and (Test-Path $build)) {
     Remove-Item -Recurse -Force $build
 }
 
-if (-not (Test-Path $build)) {
+# Reconfigure if the build dir is missing OR has no CMake cache (a previous
+# aborted configure can leave an empty build dir behind and cmake --build
+# will fail with "not a CMake build directory").
+$needConfigure = -not (Test-Path (Join-Path $build "CMakeCache.txt"))
+if (-not $needConfigure) {
+    # Reconfigure when the requested -Config does not match the cache.
+    # Ninja single-config does not carry build type in build files, so the
+    # cached CMAKE_BUILD_TYPE is the source of truth -- forgetting to
+    # re-run configure when switching meant Release builds silently used
+    # the previous Debug cache (no /O2, validation layer on).
+    $cache = Join-Path $build "CMakeCache.txt"
+    if (Test-Path $cache) {
+        $cachedLine = Select-String -Path $cache -Pattern "CMAKE_BUILD_TYPE:STRING=" -SimpleMatch | Select-Object -First 1
+        if ($cachedLine) {
+            $parts = $cachedLine.Line -split "="
+            $cached = $parts[1]
+            if ($cached -ne $Config) {
+                Write-Host "Build type changed ($cached to $Config) -- reconfiguring" -ForegroundColor Yellow
+                Remove-Item -Recurse -Force $build
+                $needConfigure = $true
+            }
+        }
+    }
+}
+
+if ($needConfigure) {
     Write-Host "Configuring (CMake -> Ninja, $Config)" -ForegroundColor Cyan
     # NOTE: splat the CMake args. Inline `-DCMAKE_BUILD_TYPE=$Config` is
     # parsed unreliably by PowerShell when other inline flags are present
@@ -48,12 +73,21 @@ if (-not (Test-Path $build)) {
                    "-DCMAKE_BUILD_TYPE=$Config",
                    "-DCMAKE_C_COMPILER=cl",
                    "-DCMAKE_CXX_COMPILER=cl")
+    # cmake's git-clone progress goes to stderr, which $ErrorActionPreference
+    # = Stop treats as fatal even when cmake exits 0. Drop to Continue for
+    # the native call, then restore.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & cmake @cmakeArgs
+    $ErrorActionPreference = $prev
     if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
 }
 
 Write-Host "Building" -ForegroundColor Cyan
-cmake --build $build
+$prev = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& cmake --build $build
+$ErrorActionPreference = $prev
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
 if ($Test) {

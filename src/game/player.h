@@ -86,8 +86,14 @@ inline constexpr physics::MoveParams kPlayerMove{
     .jump_speed      = 8.5f,
 };
 
+// `static_count` is the number of leading entries in world_aabbs that are
+// STATIC level geometry — collision::slide_move uses it so the auto step-up
+// only fires on stairs/static brushes, not on pushable dynamic crates.
+// Default npos treats every entry as static (matches the convenience
+// overload below).
 void update_player(Player& p, const PlayerInput& in,
-                   std::span<const collision::AABB> world_aabbs, float dt);
+                   std::span<const collision::AABB> world_aabbs, float dt,
+                   size_t static_count = static_cast<size_t>(-1));
 
 // Convenience overload: collision against the static level only.
 void update_player(Player& p, const PlayerInput& in, const Level& world, float dt);
