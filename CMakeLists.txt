@@ -101,7 +101,17 @@ FetchContent_Declare(tinyexr
     GIT_TAG v1.0.8
     GIT_SHALLOW TRUE)
 
-FetchContent_MakeAvailable(glfw glm vk_bootstrap vma Catch2 JoltPhysics imgui tinygltf tinyexr)
+# miniaudio — single-header audio engine (MIT-0). Built-in 3D spatial
+# sources with WAV/MP3/FLAC decoding; Vorbis comes via the bundled
+# stb_vorbis. We pull just the source tree and wire a header-only
+# INTERFACE target ourselves; the implementation goes in vma_impl.cpp's
+# sibling (audio.cpp) so MINIAUDIO_IMPLEMENTATION lives in exactly one TU.
+FetchContent_Declare(miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG 0.11.21
+    GIT_SHALLOW TRUE)
+
+FetchContent_MakeAvailable(glfw glm vk_bootstrap vma Catch2 JoltPhysics imgui tinygltf tinyexr miniaudio)
 
 # Dear ImGui ships without CMakeLists; build our own target from its sources.
 add_library(imgui STATIC
@@ -156,11 +166,13 @@ add_library(qlike_engine STATIC
     src/engine/vma_impl.cpp
     src/engine/log.cpp
     src/engine/crash_handler.cpp
+    src/engine/audio.cpp
 )
 target_include_directories(qlike_engine PUBLIC src)
 target_include_directories(qlike_engine PRIVATE
     ${tinygltf_SOURCE_DIR}
-    ${tinyexr_SOURCE_DIR})
+    ${tinyexr_SOURCE_DIR}
+    ${miniaudio_SOURCE_DIR})
 target_link_libraries(qlike_engine PUBLIC
     qlike_core
     Vulkan::Vulkan

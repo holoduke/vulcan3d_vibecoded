@@ -3,6 +3,7 @@
 // horizontal-impulse loop. All depend on `physics_` (Jolt) being live.
 
 #include "engine/vk_engine/internal.h"
+#include "engine/audio.h"
 
 #include <algorithm>
 #include <cmath>
@@ -117,6 +118,12 @@ void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
 
     muzzle_flash_timer_ = kMuzzleFlashDuration;
     recoil_timer_       = kRecoilDuration;
+    if (audio_) {
+        // Shot is "local" — happens at the camera, mostly bypasses 3D
+        // attenuation. Light pitch jitter so rapid fire doesn't sound
+        // mechanical.
+        audio_->play_local("shot", 0.7f, 0.05f, 0.06f);
+    }
 
     Projectile p{};
     p.body_id = id;
@@ -175,6 +182,13 @@ void VulkanEngine::update_projectiles(float dt) {
                 // path to recover the actual surface normal at the
                 // contact point.
                 spawn_impact_decal(hit_pos, it->initial_dir);
+                if (audio_) {
+                    // Impact is 3D — positioned at the hit so distant
+                    // ricochets attenuate naturally. Wider pitch jitter
+                    // so the same wav doesn't sound identical on every
+                    // hit.
+                    audio_->play_at("impact", hit_pos, 0.8f, 0.10f, 0.08f);
+                }
             }
             physics_->remove_body(it->body_id);
             it = projectiles_.erase(it);

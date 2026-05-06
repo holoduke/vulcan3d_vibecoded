@@ -230,6 +230,7 @@ private:
     game::Level world_;
     game::Player player_{};
     std::unique_ptr<PhysicsWorld> physics_;
+    std::unique_ptr<class AudioEngine> audio_;
 
     struct DynamicProp {
         uint32_t body_id;

@@ -26,6 +26,8 @@
 #include "engine/vk_engine.h"
 #include "engine/vk_engine/internal.h"
 
+#include "engine/audio.h"
+
 #include "engine/frustum.h"
 #include "engine/gltf_loader.h"
 #include "engine/log.h"
@@ -81,6 +83,15 @@ void VulkanEngine::init() {
     log::info("VulkanEngine::init()");
     window_ = std::make_unique<Window>(WindowConfig{ .width = 1280, .height = 720,
                                                      .title = "quake-like" });
+    // Audio engine starts before Vulkan so a missing audio device just
+    // means silence; the renderer keeps working. Clip files are loaded
+    // by name from assets/sounds/; missing files are ignored.
+    audio_ = std::make_unique<AudioEngine>();
+    audio_->load_clip("shot",     "assets/sounds/shot.wav");
+    audio_->load_clip("impact",   "assets/sounds/impact.wav");
+    audio_->load_clip("jump",     "assets/sounds/jump.wav");
+    audio_->load_clip("step",     "assets/sounds/step.wav");
+    audio_->load_clip("land",     "assets/sounds/land.wav");
     init_vulkan();
     init_pipeline_cache();
     init_swapchain();
@@ -712,8 +723,29 @@ void VulkanEngine::run(const RunOptions& opts) {
                 pin.mouse_dy = 0.0f;
                 rebuild_tick_aabbs();
                 glm::vec3 pre_vel = player_.velocity;
+                bool was_on_ground = player_.on_ground;
                 game::update_player(player_, pin, tick_aabbs_, kFixedDt,
                                      world_.aabbs.size());
+                // Audio triggers from the player tick.
+                if (audio_ && state_ == State::Playing) {
+                    // Jump: rising edge of leaving ground while pressing jump.
+                    if (was_on_ground && !player_.on_ground && pin.jump) {
+                        audio_->play_local("jump", 0.7f, 0.06f, 0.10f);
+                    }
+                    // Land: falling edge — touched ground after being airborne.
+                    if (!was_on_ground && player_.on_ground) {
+                        audio_->play_local("land", 0.6f, 0.05f, 0.10f);
+                    }
+                    // Footstep loop on while moving and grounded.
+                    glm::vec2 hv(player_.velocity.x, player_.velocity.z);
+                    bool moving = glm::length(hv) > 1.5f;
+                    bool want_step_loop = moving && player_.on_ground;
+                    if (want_step_loop && !audio_->is_loop_playing("step")) {
+                        audio_->start_loop("step", 0.4f);
+                    } else if (!want_step_loop && audio_->is_loop_playing("step")) {
+                        audio_->stop_loop("step");
+                    }
+                }
                 apply_player_pushes(pre_vel);
                 if (physics_) physics_->step(kFixedDt);
                 update_projectiles(kFixedDt);
@@ -755,6 +787,11 @@ void VulkanEngine::run(const RunOptions& opts) {
         }
 
         update_scene_ubo();
+        // Audio listener follows the camera. Reaping drained one-shots
+        // also runs here so the active-voice list stays small.
+        if (audio_) {
+            audio_->set_listener(player_.eye_position(), player_.forward());
+        }
         maybe_autosave_settings(frame_dt);
 
         // ImGui frame begins regardless; we just don't fill it when playing.
