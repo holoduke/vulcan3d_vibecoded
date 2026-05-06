@@ -60,11 +60,15 @@ layout(location = 7) out float vDistToCam;
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 
 bool sun_blocked_v(vec3 origin, vec3 dir) {
+    // Max-t of 80m is enough to clear castle towers + nearby
+    // mountains. Larger BLAS traversal isn't worth the cost for
+    // grass — distant occluders 100m+ overhead barely affect a
+    // grass blade's shading anyway.
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS,
                           gl_RayFlagsTerminateOnFirstHitEXT |
                           gl_RayFlagsOpaqueEXT,
-                          0x01, origin, 0.001, dir, 200.0);
+                          0x01, origin, 0.001, dir, 80.0);
     while (rayQueryProceedEXT(rq)) {}
     return rayQueryGetIntersectionTypeEXT(rq, true) ==
            gl_RayQueryCommittedIntersectionTriangleEXT;
@@ -251,14 +255,27 @@ void main() {
         return;
     }
 
-    // Vertex-shader shadow rays caused TDRs on dense fields (5 rays
-    // per placed blade = 10M+ per frame at density 4×). Reverted to
-    // fragment-shader rays gated to a small distance (see grass.frag).
-    // These two varyings are kept around for downstream wiring but
-    // are unused for now — vSunShadow=0 means "let the fragment
-    // shader figure it out".
+    // ---- Per-vertex sun shadow ray ----
+    // We only fire the ray if THIS blade is actually going to draw
+    // (lp.y > 0 — i.e., it survived the distance / slope / altitude /
+    // density culls above) AND inside max draw distance. That makes
+    // the ray budget proportional to the *visible* blade count, not
+    // the placed-blade total. Earlier unconditional version was 5
+    // rays × 2M placed = 10M/frame and TDR'd. Now at strong density
+    // falloff the count collapses naturally with the visible blades.
+    // Ray max-t is the same as the visible distance — occluders
+    // beyond don't matter for grass shading.
     vSunShadow = 0.0;
     vDistToCam = view_dist_base;
+    if (scene.rt_flags.x != 0 &&
+        lp.y > 0.001 &&
+        view_dist_base < pc.grass_params.x) {
+        vec3 origin = base_world + vec3(0.0, 0.5, 0.0);
+        vec3 sun_dir = normalize(scene.sun_direction.xyz);
+        if (sun_blocked_v(origin, sun_dir)) {
+            vSunShadow = 1.0;
+        }
+    }
 
     gl_Position = pc.mvp * vec4(world, 1.0);
 
