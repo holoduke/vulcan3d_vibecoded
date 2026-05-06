@@ -57,22 +57,8 @@ layout(location = 5) out vec3 vWorldPos;
 layout(location = 6) out float vSunShadow;   // 0 = lit, 1 = sun-blocked
 layout(location = 7) out float vDistToCam;
 
-layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
-
-bool sun_blocked_v(vec3 origin, vec3 dir) {
-    // Max-t of 80m is enough to clear castle towers + nearby
-    // mountains. Larger BLAS traversal isn't worth the cost for
-    // grass — distant occluders 100m+ overhead barely affect a
-    // grass blade's shading anyway.
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS,
-                          gl_RayFlagsTerminateOnFirstHitEXT |
-                          gl_RayFlagsOpaqueEXT,
-                          0x01, origin, 0.001, dir, 80.0);
-    while (rayQueryProceedEXT(rq)) {}
-    return rayQueryGetIntersectionTypeEXT(rq, true) ==
-           gl_RayQueryCommittedIntersectionTriangleEXT;
-}
+// Vertex-stage RT helpers were here. Removed — vertex ray queries
+// blew the GPU TDR budget on NVIDIA even with aggressive gating.
 
 mat3 rotY(float a) {
     float c = cos(a), s = sin(a);
@@ -255,27 +241,12 @@ void main() {
         return;
     }
 
-    // ---- Per-vertex sun shadow ray ----
-    // We only fire the ray if THIS blade is actually going to draw
-    // (lp.y > 0 — i.e., it survived the distance / slope / altitude /
-    // density culls above) AND inside max draw distance. That makes
-    // the ray budget proportional to the *visible* blade count, not
-    // the placed-blade total. Earlier unconditional version was 5
-    // rays × 2M placed = 10M/frame and TDR'd. Now at strong density
-    // falloff the count collapses naturally with the visible blades.
-    // Ray max-t is the same as the visible distance — occluders
-    // beyond don't matter for grass shading.
+    // Vertex-stage ray queries TDR'd even with aggressive gating —
+    // NVIDIA's vertex-stage RT cost is much higher than fragment
+    // here. Reverted to fragment-shader rays with a strict <15m
+    // distance gate (see grass.frag). Distant grass goes shadowless.
     vSunShadow = 0.0;
     vDistToCam = view_dist_base;
-    if (scene.rt_flags.x != 0 &&
-        lp.y > 0.001 &&
-        view_dist_base < pc.grass_params.x) {
-        vec3 origin = base_world + vec3(0.0, 0.5, 0.0);
-        vec3 sun_dir = normalize(scene.sun_direction.xyz);
-        if (sun_blocked_v(origin, sun_dir)) {
-            vSunShadow = 1.0;
-        }
-    }
 
     gl_Position = pc.mvp * vec4(world, 1.0);
 
