@@ -181,6 +181,13 @@ void VulkanEngine::build_menu_ui() {
     }
 
     ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Grass")) {
+        ImGui::Checkbox("grass enabled", &rt_.grass_enabled);
+        ImGui::SliderFloat("grass distance (m)", &rt_.grass_distance, 10.0f, 200.0f);
+        ImGui::SliderFloat("grass wind (m)",     &rt_.grass_wind,      0.0f, 0.30f);
+    }
+
+    ImGui::Spacing();
     if (ImGui::CollapsingHeader("Game Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::SliderFloat("gravity (m/s^2)", &game_.gravity, 0.5f, 1250.0f, "%.1f",
                            ImGuiSliderFlags_Logarithmic);
@@ -303,11 +310,6 @@ void VulkanEngine::build_menu_ui() {
             ImGui::SliderFloat("rock→snow end",    &rt_.terrain_h_rock_snow_end,      50.0f, 200.0f);
             ImGui::TreePop();
         }
-
-        ImGui::SeparatorText("Grass");
-        ImGui::Checkbox("grass enabled", &rt_.grass_enabled);
-        ImGui::SliderFloat("grass distance (m)", &rt_.grass_distance, 10.0f, 200.0f);
-        ImGui::SliderFloat("grass wind (m)",     &rt_.grass_wind,      0.0f, 0.20f);
 
         ImGui::SeparatorText("Terrain sculpt (Phase 4)");
         ImGui::Checkbox("Edit mode (left-click sculpts, not fires)",

@@ -156,12 +156,16 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
         if (n.y < params.min_normal_y) continue;
 
         // Per-blade jitter — rotation, height variation, tint.
+        // Layout matches grass.vert: 3 vec4s (pos+pad, rot/height+pad,
+        // tint+pad). Earlier vec3+float packed layout caused the
+        // shader to read the wrong fields — tint came out as garbage
+        // and blades rendered teal instead of green.
         GrassBlade b{};
-        b.pos = glm::vec3(wx, wy, wz);
-        b.rotation_y = rot(rng);
-        b.height_factor = 0.65f + u01(rng) * 0.7f;   // 0.65..1.35
-        b.tint = random_tint();
-        b.pad = 0.0f;
+        b.pos_pad        = glm::vec4(wx, wy, wz, 0.0f);
+        float rotation   = rot(rng);
+        float h_factor   = 0.65f + u01(rng) * 0.7f;
+        b.rot_height_pad = glm::vec4(rotation, h_factor, 0.0f, 0.0f);
+        b.tint_pad       = glm::vec4(random_tint(), 0.0f);
         blades.push_back(b);
         ++kept;
     }

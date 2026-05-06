@@ -16,20 +16,25 @@
 #include "engine/mesh.h"
 #include "engine/terrain.h"
 
+#include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
 
 namespace qlike {
 
-struct GrassBlade {
-    glm::vec3 pos;        // world-space base of the blade
-    float rotation_y;     // radians, around the up axis
-    float height_factor;  // 0.6..1.4, multiplies the unit blade height
-    glm::vec3 tint;       // small per-blade albedo variation (greens/yellows)
-    float pad;            // padding to vec4 alignment for the SSBO/instance buffer
+// Layout MUST match grass.vert's vertex inputs (locations 3/4/5 each
+// declared as vec4, so each entry consumes 16 bytes). Earlier 36-byte
+// packed layout caused the shader to read garbage tint colours from
+// the next blade's data, which made grass render as bright cyan/teal.
+struct alignas(16) GrassBlade {
+    glm::vec4 pos_pad;        // .xyz = world base position, .w unused
+    glm::vec4 rot_height_pad; // .x = rotation_y, .y = height_factor
+    glm::vec4 tint_pad;       // .xyz = tint, .w unused
 };
+static_assert(sizeof(GrassBlade) == 48, "GrassBlade layout must match grass.vert");
 
 struct GrassParams {
     // Cap on total blades stored in the instance buffer. 200k is a
