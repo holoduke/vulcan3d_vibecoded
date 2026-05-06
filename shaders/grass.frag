@@ -34,12 +34,21 @@ layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 
 // Single shadow ray to the sun. cull-mask 0x01 keeps it consistent
 // with cube.frag's shadow tests — sparks and bullets stay out.
+// t_min = 1.0 (one metre along the ray) so the origin is clear of
+// the full-res terrain BLAS which is co-located with the heightmap
+// the blade base sits on. A smaller bias would self-intersect and
+// the shadow ray would always report "blocked", but the symptom
+// reported was the opposite (shadows not casting at all) which
+// suggests this descriptor was reachable but the ray was never
+// missing — every shadow test was reading the wrong / no hit.
+// Larger t_min makes both failure modes correct: ray clears terrain
+// and only registers a hit on something distinct (castle, crate).
 bool sun_blocked(vec3 origin, vec3 dir) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS,
                           gl_RayFlagsTerminateOnFirstHitEXT |
                           gl_RayFlagsOpaqueEXT,
-                          0x01, origin, 0.05, dir, 200.0);
+                          0x01, origin, 1.0, dir, 200.0);
     while (rayQueryProceedEXT(rq)) {}
     return rayQueryGetIntersectionTypeEXT(rq, true) ==
            gl_RayQueryCommittedIntersectionTriangleEXT;
@@ -67,14 +76,12 @@ void main() {
     float sun_amt = scene.sun_color.a * 0.10 * n_dot_l;
     float sky_amt = 0.30;
 
-    // Shadow: one any-hit ray to the sun. The blade base ray origin
-    // sits at (vWorldPos + N * 0.05) so we don't immediately hit the
-    // terrain we're standing on. Distance to sun in scene metres is
-    // huge, but a 200m ray is enough to clear the tallest mountains.
-    // Result: blades in the shadow of the castle / mountains correctly
-    // darken to ambient-only.
-    if (n_dot_l > 0.0 && scene.rt_flags.x != 0) {
-        if (sun_blocked(vWorldPos + vec3(0.0, 0.05, 0.0),
+    // Shadow: one any-hit ray to the sun. Origin is bumped 0.30m up
+    // off the heightmap surface so the t_min=1.0 inside sun_blocked
+    // can fully escape the BLAS terrain even at glancing sun angles.
+    // 200m max-t covers the tallest mountains in the scene.
+    if (scene.rt_flags.x != 0) {
+        if (sun_blocked(vWorldPos + vec3(0.0, 0.30, 0.0),
                         normalize(scene.sun_direction.xyz))) {
             sun_amt = 0.0;
         }
