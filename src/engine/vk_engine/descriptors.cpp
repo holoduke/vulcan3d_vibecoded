@@ -150,7 +150,11 @@ void VulkanEngine::update_scene_ubo() {
     // Distance LOD: 15 m = full samples (gameplay-relevant range — shadows
     // and AO are most visible up close); past 50 m fades to 1 sample so the
     // skybox-distance cubes don't waste a full ray budget per pixel.
-    data.rt_lod = glm::vec4(15.0f, 50.0f, 0.0f, 0.0f);
+    // .z carries gi_shadow_max_bounce — see RtSettings; cast to int in
+    // cube.frag where it gates the per-bounce sun shadow ray.
+    data.rt_lod = glm::vec4(15.0f, 50.0f,
+                             static_cast<float>(rt_.gi_shadow_max_bounce),
+                             0.0f);
     {
         // cube.frag renders at render_extent_ (so does its motion-vec output);
         // gl_FragCoord.xy / viewport.zw is in render-resolution UV space.

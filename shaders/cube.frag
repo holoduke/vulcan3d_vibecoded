@@ -449,8 +449,11 @@ void main() {
 
         // Sky-only ambient term — used when a GI bounce hits a surface
         // that CANNOT see the sun. Approximates the soft fill light from
-        // the sky dome that reaches indoor surfaces near openings.
-        vec3 sky_fill = scene.sky_color.rgb * 0.18;
+        // the sky dome that reaches indoor surfaces near openings. 0.05
+        // (~5% of sky color) keeps deep interiors believably dark; the
+        // earlier 0.18 made every shadowed bounce hit accumulate more
+        // light than a real enclosed room would have.
+        vec3 sky_fill = scene.sky_color.rgb * 0.05;
 
         int strata = int(ceil(sqrt(float(N_gi))));
         float inv_strata = 1.0 / float(strata);
@@ -483,18 +486,17 @@ void main() {
                     vec3 hit_pos = ray_origin + ray_dir * t;
                     vec3 hit_n = -ray_dir;  // approximate outward normal
 
-                    // *** Real GI bounce lighting *** — first bounce only.
-                    // Fires one shadow ray from the hit point to the sun
-                    // so surfaces that can't see the sun stay dark, and
-                    // surfaces that CAN actually see it get correct sun-
-                    // bounced light. Deeper bounces (b > 0) fall back to
-                    // sky_fill alone — their contribution is already
-                    // attenuated by throughput per bounce so the shadow
-                    // ray's cost isn't worth it (and adding one shadow
-                    // ray per bounce per sample blew the per-frame ray
-                    // budget on this scene's 251-instance TLAS).
+                    // *** GI bounce lighting *** — fires a shadow ray
+                    // from the hit point to the sun for bounce levels up
+                    // to gi_shadow_max_bounce (rt_lod.z). Bounces beyond
+                    // that fall back to sky_fill alone. 0 = no GI sun
+                    // shadows (cheap, every shadowed bounce uses fill);
+                    // 1 = first bounce only (default, the cheap one
+                    // that gives the indoor-vs-outdoor delta we want);
+                    // higher = more accurate at proportional cost.
+                    int gi_shadow_max = int(scene.rt_lod.z);
                     vec3 hit_light = sky_fill;
-                    if (b == 0) {
+                    if (b < gi_shadow_max) {
                         float n_dot_sun = dot(hit_n, scene.sun_direction.xyz);
                         if (n_dot_sun > 0.0) {
                             if (!any_hit(hit_pos + hit_n * 0.01,

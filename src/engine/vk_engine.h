@@ -645,6 +645,12 @@ private:
         // segments, picking up tinted color along the way.
         int   gi_samples = 64;        // paths per pixel; 0 = off
         int   gi_bounces = 3;         // 1 = single-bounce sky GI; 2-5 = multi-bounce
+        // How many bounce levels get a sun shadow ray. 0 = no shadow
+        // rays in GI (every shadowed bounce uses sky_fill, fastest);
+        // 1 = first bounce only (default, balanced); higher = more
+        // accurate but linearly more expensive (each level adds N_gi
+        // any_hit rays per pixel).
+        int   gi_shadow_max_bounce = 1;
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;
         // Specular reflection on flagged surfaces (the pedestal).

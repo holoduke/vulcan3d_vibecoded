@@ -272,6 +272,8 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SeparatorText("Path-traced GI (multi-bounce)");
         ImGui::SliderInt("GI samples (0=off)", &rt_.gi_samples, 0, 128);
         ImGui::SliderInt("GI bounces", &rt_.gi_bounces, 1, 5);
+        ImGui::SliderInt("GI shadow bounces (sun shadow on bounce hits)",
+                          &rt_.gi_shadow_max_bounce, 0, 5);
         ImGui::SliderFloat("GI strength", &rt_.gi_strength, 0.0f, 3.0f);
         ImGui::SliderFloat("GI radius", &rt_.gi_radius, 1.0f, 400.0f);
 
