@@ -95,35 +95,50 @@ void main() {
     float wind_yaw = 0.5 + sin(t * 0.04) * 0.3;
     vec2  wind_dir = vec2(cos(wind_yaw), sin(wind_yaw));
 
-    float along = dot(base_world.xz, wind_dir);
+    // Project blade XZ onto wind axis (along) and the perpendicular
+    // axis (across). The gust front isn't a perfect straight line —
+    // we wobble its position based on `across` so the wave reads as
+    // an organic gust boundary, not a marching ruler line.
+    vec2  perp_dir = vec2(-wind_dir.y, wind_dir.x);
+    float along   = dot(base_world.xz, wind_dir);
+    float across  = dot(base_world.xz, perp_dir);
 
-    // Wave period (metres between gust crests) and pulse width.
-    const float kPeriod = 28.0;
-    const float kWidth  = 7.0;
-    float speed = 8.0;
+    // ---- Primary gust wave: wider band, lower speed ----
+    // Wider pulse + larger period = each gust is a clear "wall" of
+    // motion that takes a couple of seconds to pass over you, with
+    // calm in between. Speed 5 m/s ≈ a brisk breeze.
+    const float kPeriod = 55.0;
+    const float kWidth  = 14.0;
+    float       speed   = 5.0;
 
-    // Wrap phase into one period so we always evaluate the nearest
-    // gust crest (= 0 at centre).
-    float phase = mod(along - speed * t, kPeriod) - kPeriod * 0.5;
-    // Smooth pulse: cosine-window over [-width, +width].
+    // Front wobble: shift the gust phase by a low-frequency cross-axis
+    // noise so the gust front is wavy/curved, not a perfectly straight
+    // line. Amplitude ~6 m. The two sin terms at different freqs give
+    // a non-repeating-feeling boundary.
+    float front_wobble = sin(across * 0.12 + t * 0.7) * 4.0 +
+                         sin(across * 0.31 + t * 1.1) * 2.0;
+    float main_phase = along - speed * t + front_wobble;
+    float wrapped    = mod(main_phase, kPeriod) - kPeriod * 0.5;
     float pulse = 0.0;
-    if (abs(phase) < kWidth) {
-        float u = phase / kWidth;            // -1..1
+    if (abs(wrapped) < kWidth) {
+        float u = wrapped / kWidth;
         pulse = 0.5 + 0.5 * cos(u * 3.14159265);
     }
 
-    // Variable thickness/strength: low-frequency hash on the gust's
-    // along-axis position so different gusts pack different punch.
-    float gust_id_pos = along - speed * t - phase;
-    float thickness = 0.45 + 0.55 *
-                      (0.5 + 0.5 * sin(gust_id_pos * 0.07 + 1.7));
+    // Variable thickness — different gusts hit harder than others.
+    float gust_id_pos = main_phase - wrapped;
+    float thickness = 0.40 + 0.60 *
+                      (0.5 + 0.5 * sin(gust_id_pos * 0.045 + 1.7));
 
-    // Per-blade tiny phase offset so adjacent blades don't move in
-    // lockstep — feels noisier and more natural.
+    // Occasional bigger burst — slow low-frequency multiplier so once
+    // every ~30 s the entire field gets a stronger gust.
+    float burst = 0.85 + 0.45 * sin(t * 0.18 + along * 0.005);
+
+    // Per-blade jitter so neighbours don't move identically.
     float jitter = sin(base_world.x * 0.41 +
                        base_world.z * 0.73 + t * 0.9) * 0.15;
 
-    float gust = pulse * thickness * (1.0 + jitter);
+    float gust = pulse * thickness * burst * (1.0 + jitter);
 
     // Idle breeze: a tiny per-blade sway that's always on, so blades
     // outside the gust band aren't dead-still. Amplitude ~15% of the
