@@ -566,30 +566,6 @@ void main() {
     // --- AO --- (also stratified to spread samples cleanly)
     // [moved below, recomputed from N_ao]
 
-    // --- Specular reflection (only for surfaces flagged via emissive.b > 0.5
-    //     in the model — repurposed cheaply: white pedestal & similar). To keep
-    //     scope small we just enable it on surfaces with brightness > 0.85, a
-    //     proxy for "shiny" — turn off via the toggle. ---
-    vec3 reflection = vec3(0.0);
-    bool shiny = scene.rt_flags2.y != 0 &&
-                 (vColor.r > 0.80 && vColor.g > 0.80 && vColor.b > 0.80);
-    if (shiny) {
-        vec3 V = normalize(vWorldPos - vec3(0.0));  // approximate camera dir later
-        // Use the surface tangent of vWorldPos as a proxy for view direction
-        // by reflecting the WORLD-POS-from-origin vector across the normal.
-        // It's a cheap pseudo-reflection that still moves with the surface
-        // orientation; a true reflection needs the camera position pushed
-        // through to the shader.
-        vec3 R = reflect(normalize(vWorldPos), N);
-        float t;
-        if (closest_hit(vWorldPos + N * 0.01, R, 100.0, t)) {
-            reflection = vec3(0.0);  // hit something — fallback to dim
-        } else {
-            reflection = sample_sky(R);
-        }
-        reflection *= scene.rt_params2.z;
-    }
-
     // Sky-occlusion term. Surfaces that can't see the sky get a much
     // darker ambient — that's the natural look of an enclosed room. The
     // 0.15 floor stops pure-interior pixels from going completely black
@@ -606,7 +582,7 @@ void main() {
     vec3 ambient_combined = mix(ambient_ground,
                                  ambient_sky * sky_factor, up);
     vec3 indirect = albedo * ambient_combined * ao + gi_indirect;
-    vec3 final = direct + indirect + vEmissive.rgb + reflection * (shiny ? 1.0 : 0.0);
+    vec3 final = direct + indirect + vEmissive.rgb;
 
     outColor = vec4(final, 1.0);
 }

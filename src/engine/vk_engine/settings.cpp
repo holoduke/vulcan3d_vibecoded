@@ -17,6 +17,11 @@ namespace qlike {
 // adjacent to the settings save/load flow.
 void VulkanEngine::reset_player() {
     player_ = game::Player{};
+    // Lift spawn to terrain plateau height + a little headroom so the
+    // player doesn't fall through the ground on startup.
+    if (!terrain_data_.heights.empty()) {
+        player_.position.y += 16.0f;
+    }
     log::info("player reset to spawn");
 }
 

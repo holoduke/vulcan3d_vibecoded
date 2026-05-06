@@ -115,6 +115,9 @@ private:
     // AS-build over it with PREFER_FAST_TRACE. Called from init_rt() AFTER
     // init_world() has populated world_.brushes.
     void bake_merged_static_blas();
+    // Build a BLAS over the terrain heightmap mesh. Called once per level
+    // load. The terrain mesh itself is created in init_world().
+    void bake_terrain_blas();
     // Depth-only pre-pass over the same brush + dyn-prop geometry that
     // render_world() draws — populates depth_image_ so the subsequent color
     // pass's depth_compare=LESS_OR_EQUAL early-rejects occluded fragments
@@ -216,6 +219,17 @@ private:
     Mesh cube_mesh_{};
     Mesh cylinder_mesh_{};
     Skybox skybox_{};
+    // Procedural heightmap data — kept around so the streaming Phase 2
+    // and the Phase 4 sculpt brush can read/edit it. Phase 1 only needs
+    // it to compute the castle anchor and Jolt collision shape.
+    struct TerrainData {
+        int   dim = 0;
+        float cell = 0.0f;
+        float origin_x = 0.0f;
+        float origin_z = 0.0f;
+        std::vector<float> heights;
+    };
+    TerrainData terrain_data_{};
 
     // PBR-ish material textures. kTextureCount must match the size of the
     // sampler arrays in cube.frag.
@@ -493,6 +507,19 @@ private:
     VkAccelerationStructureKHR merged_static_blas_ = VK_NULL_HANDLE;
     VkDeviceAddress merged_static_blas_device_address_ = 0;
     uint32_t merged_static_brush_count_ = 0;
+
+    // Phase 1 terrain BLAS: a single procedural heightmap grid mesh.
+    // Uploaded once at level load. Rendered via a dedicated draw call
+    // (separate vertex/index bind from the cube mesh) and added to the
+    // TLAS as one instance with kTerrainInstSentinel custom index — the
+    // shader skips per-primitive material lookup and falls back to its
+    // raster-pushed color for terrain GI hits.
+    Mesh terrain_mesh_{};
+    VkBuffer terrain_blas_buffer_ = VK_NULL_HANDLE;
+    VmaAllocation terrain_blas_alloc_ = nullptr;
+    VkAccelerationStructureKHR terrain_blas_ = VK_NULL_HANDLE;
+    VkDeviceAddress terrain_blas_device_address_ = 0;
+    glm::vec3 terrain_color_ = glm::vec3(0.45f, 0.42f, 0.32f);
 
     VkBuffer tlas_buffer_ = VK_NULL_HANDLE;
     VmaAllocation tlas_alloc_ = nullptr;

@@ -70,26 +70,11 @@ Level make_arena(float r, float wh) {
     // user sees that as "stripes / weird texture / flicker on the wall."
     auto T = [](float r, float g, float b) { return glm::vec3(r, g, b); };
 
-    // Floor — Ground054 with mid-density tiling (~2m per tile).
-    add(lv, glm::vec3(0.0f, -0.5f, 0.0f), glm::vec3(2.0f * r, 1.0f, 2.0f * r),
-        T(0.85f, 0.85f, 0.85f), kGround, kGround, 0.5f,
-        T(0.35f, 0.35f, 0.40f));
-
-    // Walls (4 sides), top of wall at y = wh — brick.
-    const float wt = 1.0f;
-    const float cy = wh * 0.5f;
-    add(lv, glm::vec3( r + wt * 0.5f, cy, 0.0f), glm::vec3(wt, wh, 2.0f * r),
-        T(0.95f, 0.85f, 0.80f), kBrick, kBrick, 0.45f,
-        T(0.55f, 0.30f, 0.30f));
-    add(lv, glm::vec3(-r - wt * 0.5f, cy, 0.0f), glm::vec3(wt, wh, 2.0f * r),
-        T(0.85f, 0.95f, 0.85f), kBrick, kBrick, 0.45f,
-        T(0.30f, 0.55f, 0.30f));
-    add(lv, glm::vec3(0.0f, cy,  r + wt * 0.5f), glm::vec3(2.0f * r + 2.0f * wt, wh, wt),
-        T(0.85f, 0.85f, 0.95f), kBrick, kBrick, 0.45f,
-        T(0.30f, 0.30f, 0.55f));
-    add(lv, glm::vec3(0.0f, cy, -r - wt * 0.5f), glm::vec3(2.0f * r + 2.0f * wt, wh, wt),
-        T(0.95f, 0.95f, 0.85f), kBrick, kBrick, 0.45f,
-        T(0.55f, 0.55f, 0.30f));
+    // Floor + arena perimeter walls removed — replaced by the procedural
+    // terrain heightmap (see src/engine/terrain.cpp). The castle below
+    // sits on a flattened plateau in the heightmap so the brushes still
+    // align at y=0..keep_h.
+    (void)r; (void)wh; (void)kGround;
 
     // -----------------------------------------------------------------
     // Castle (centered at origin). 22×22 m footprint, 5 m walls, four
@@ -288,13 +273,9 @@ Level make_arena(float r, float wh) {
         add_lantern(lv, glm::vec3(-door_w * 0.5f - 0.6f, 0.0f, kp_cz + kp_sz * 0.5f + 0.6f));
     }
 
-    // Outer arena lanterns at the four arena-corner zones, well clear of
-    // the castle footprint (cr=11, lanterns at radius 22 from origin).
-    add_lantern(lv, glm::vec3( 22.0f, 0.0f,  22.0f));
-    add_lantern(lv, glm::vec3(-22.0f, 0.0f,  22.0f));
-    add_lantern(lv, glm::vec3( 22.0f, 0.0f, -22.0f));
-    add_lantern(lv, glm::vec3(-22.0f, 0.0f, -22.0f));
-
+    // Outer arena lanterns removed along with the floor + perimeter walls
+    // — they used to anchor the corners of the brick arena. With the
+    // open terrain there is nothing to corner.
     return lv;
 }
 

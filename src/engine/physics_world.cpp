@@ -12,6 +12,7 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Collision/RayCast.h>
@@ -278,6 +279,45 @@ void PhysicsWorld::add_static_boxes(const StaticBox* boxes, size_t count) {
         bi.AddBodiesPrepare(ids.data(), static_cast<int>(ids.size()));
     bi.AddBodiesFinalize(ids.data(), static_cast<int>(ids.size()),
                           state, JPH::EActivation::DontActivate);
+}
+
+void PhysicsWorld::add_static_heightfield(const float* samples, int dim,
+                                           glm::vec2 origin_xz, float cell_size) {
+    if (samples == nullptr || dim <= 0) return;
+    // Jolt's HeightFieldShape wants a power-of-two block size (must divide
+    // sample dim). For dim=256 we pick 8 (256/8=32 blocks). For other dims
+    // pick the largest power-of-two ≤ 16 that divides dim, or 1 as fallback.
+    int block_size = 1;
+    for (int b = 16; b >= 1; b >>= 1) {
+        if (dim % b == 0) { block_size = b; break; }
+    }
+    const int sample_count = dim + 1;
+
+    JPH::HeightFieldShapeSettings ss(
+        samples, JPH::Vec3(origin_xz.x, 0.0f, origin_xz.y),
+        JPH::Vec3(cell_size, 1.0f, cell_size),
+        sample_count);
+    ss.mBlockSize = static_cast<JPH::uint32>(block_size);
+    ss.SetEmbedded();
+    JPH::ShapeSettings::ShapeResult sr = ss.Create();
+    if (sr.HasError()) {
+        log::errorf("[jolt] heightfield shape: %s", sr.GetError().c_str());
+        return;
+    }
+    JPH::BodyCreationSettings bcs(
+        sr.Get(),
+        JPH::RVec3(0.0f, 0.0f, 0.0f),
+        JPH::Quat::sIdentity(),
+        JPH::EMotionType::Static,
+        Layers::NON_MOVING);
+    JPH::BodyInterface& bi = impl_->system.GetBodyInterface();
+    JPH::BodyID id = bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+    if (id.IsInvalid()) {
+        log::error("[jolt] heightfield body create failed");
+    } else {
+        log::infof("[jolt] heightfield: %dx%d samples, block=%d, cell=%.1fm",
+                   sample_count, sample_count, block_size, cell_size);
+    }
 }
 
 uint32_t PhysicsWorld::add_dynamic_box(glm::vec3 c, glm::vec3 he,

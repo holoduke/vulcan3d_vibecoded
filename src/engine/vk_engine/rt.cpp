@@ -140,6 +140,14 @@ void VulkanEngine::init_rt() {
     build_mesh_blas(cylinder_mesh_, "cylinder",
                     cylinder_blas_buffer_, cylinder_blas_alloc_,
                     cylinder_blas_, cylinder_blas_device_address_);
+    // Terrain BLAS — same lambda, since the terrain mesh is just a
+    // standard Vertex/uint32 indexed mesh (built in init_world via
+    // build_terrain_mesh).
+    if (terrain_mesh_.index_count > 0) {
+        build_mesh_blas(terrain_mesh_, "terrain",
+                        terrain_blas_buffer_, terrain_blas_alloc_,
+                        terrain_blas_, terrain_blas_device_address_);
+    }
     // Single big BLAS over the entire static castle. Replaces ~190 small
     // per-brush TLAS instances with one — drops top-level traversal cost
     // and (more importantly) keeps RT load below the GPU TDR threshold
@@ -186,7 +194,9 @@ void VulkanEngine::init_rt() {
     // the sentinel custom_index) up to M + tlas_max_instances_ for dynamic
     // entries. Size accordingly so dynamic slot writes never overflow.
     const uint32_t kStaticMatSlots = static_cast<uint32_t>(world_.brushes.size());
-    const uint32_t kTotalMatSlots  = kStaticMatSlots + tlas_max_instances_;
+    // +1 reserves a slot for the terrain instance (Phase 1 single
+    // heightmap mesh) right after the per-brush materials.
+    const uint32_t kTotalMatSlots  = kStaticMatSlots + 1u + tlas_max_instances_;
     {
         VkDeviceSize size = static_cast<VkDeviceSize>(kTotalMatSlots) *
                             (3u * sizeof(glm::vec4));
@@ -338,6 +348,7 @@ void VulkanEngine::destroy_rt() {
     if (blas_)               g_rt.destroy_as(device_, blas_, nullptr);
     if (cylinder_blas_)      g_rt.destroy_as(device_, cylinder_blas_, nullptr);
     if (merged_static_blas_) g_rt.destroy_as(device_, merged_static_blas_, nullptr);
+    if (terrain_blas_)       g_rt.destroy_as(device_, terrain_blas_, nullptr);
     if (tlas_scratch_buffer_) vmaDestroyBuffer(allocator_, tlas_scratch_buffer_, tlas_scratch_alloc_);
     if (instances_buffer_)    vmaDestroyBuffer(allocator_, instances_buffer_, instances_alloc_);
     if (materials_buffer_)    vmaDestroyBuffer(allocator_, materials_buffer_, materials_alloc_);
@@ -347,16 +358,21 @@ void VulkanEngine::destroy_rt() {
     if (cylinder_blas_buffer_) vmaDestroyBuffer(allocator_, cylinder_blas_buffer_, cylinder_blas_alloc_);
     if (merged_static_blas_buffer_) vmaDestroyBuffer(allocator_, merged_static_blas_buffer_, merged_static_blas_alloc_);
     if (merged_static_mesh_.vertex_buffer) destroy_mesh(allocator_, merged_static_mesh_);
-    tlas_ = blas_ = cylinder_blas_ = merged_static_blas_ = VK_NULL_HANDLE;
+    if (terrain_blas_buffer_) vmaDestroyBuffer(allocator_, terrain_blas_buffer_, terrain_blas_alloc_);
+    if (terrain_mesh_.vertex_buffer) destroy_mesh(allocator_, terrain_mesh_);
+    tlas_ = blas_ = cylinder_blas_ = merged_static_blas_ = terrain_blas_ = VK_NULL_HANDLE;
     tlas_buffer_ = blas_buffer_ = cylinder_blas_buffer_ = merged_static_blas_buffer_ =
+        terrain_blas_buffer_ =
         tlas_scratch_buffer_ = instances_buffer_ = materials_buffer_ =
         prev_transforms_buffer_ = VK_NULL_HANDLE;
     tlas_alloc_ = blas_alloc_ = cylinder_blas_alloc_ = merged_static_blas_alloc_ =
+        terrain_blas_alloc_ =
         tlas_scratch_alloc_ = instances_alloc_ = materials_alloc_ =
         prev_transforms_alloc_ = nullptr;
     cylinder_blas_device_address_ = 0;
     merged_static_blas_device_address_ = 0;
     merged_static_brush_count_ = 0;
+    terrain_blas_device_address_ = 0;
     materials_mapped_ = nullptr;
     prev_transforms_mapped_ = nullptr;
     rt_initialized_ = false;
@@ -705,6 +721,27 @@ void VulkanEngine::bake_static_brushes() {
         static_brush_materials_.push_back(glm::vec4(b.emissive, 0.0f));
         static_brush_materials_.push_back(tex);
     }
+    // Terrain instance + material — appended at slot M (one entry per
+    // call to bake_static_brushes). cube.frag's GI hit recovers the
+    // terrain material via materials[customIndex] just like dynamic
+    // instances. customIndex == M (= world_.brushes.size()).
+    if (terrain_blas_device_address_ != 0) {
+        VkAccelerationStructureInstanceKHR tinst{};
+        tinst.transform.matrix[0][0] = 1.0f;
+        tinst.transform.matrix[1][1] = 1.0f;
+        tinst.transform.matrix[2][2] = 1.0f;
+        tinst.instanceCustomIndex = static_cast<uint32_t>(world_.brushes.size());
+        tinst.mask = 0xFF;
+        tinst.instanceShaderBindingTableRecordOffset = 0;
+        tinst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        tinst.accelerationStructureReference = terrain_blas_device_address_;
+        static_brush_instances_.push_back(tinst);
+        // Material table slot for terrain.
+        static_brush_materials_.push_back(glm::vec4(terrain_color_, 0.0f));
+        static_brush_materials_.push_back(glm::vec4(0.0f));
+        static_brush_materials_.push_back(kNoTex);
+        static_brush_worlds_.push_back(glm::mat4(1.0f));
+    }
     static_brush_tex_on_ = tex_on;
     static_brush_dirty_ = false;
 }
@@ -755,21 +792,23 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     auto* mats = static_cast<glm::vec4*>(materials_mapped_);  // 3 vec4 per material
     auto* prevs = static_cast<glm::mat4*>(prev_transforms_mapped_);
 
-    // Materials/prev_transforms layout: slots [0..M-1] hold per-brush data
-    // for the castle. The merged path points the shader at this range via
-    // gl_PrimitiveID/12; the legacy path uses the same slots via per-brush
-    // customIndex == brush_idx. Either way the static block is identical.
+    // Materials/prev_transforms layout:
+    //   slots [0..M-1]   per-brush data for the castle (always populated)
+    //   slot M           terrain (only if terrain BLAS exists)
+    //   slots [M+T..]    dynamic instances (write_instance fills these)
     const uint32_t M = static_cast<uint32_t>(world_.brushes.size());
-    if (mats && M > 0) {
+    const uint32_t T = (terrain_blas_device_address_ != 0) ? 1u : 0u;
+    const uint32_t static_mats = M + T;
+    if (mats && static_mats > 0) {
         std::memcpy(mats, static_brush_materials_.data(),
-                    sizeof(glm::vec4) * 3 * M);
+                    sizeof(glm::vec4) * 3 * static_mats);
     }
-    if (prevs && M > 0) {
+    if (prevs && static_mats > 0) {
         std::memcpy(prevs, static_brush_worlds_.data(),
-                    sizeof(glm::mat4) * M);
+                    sizeof(glm::mat4) * static_mats);
     }
-    // TLAS instance block: 1 entry (merged) or M entries (legacy). memcpy
-    // the prebuilt instances directly — they don't change frame-to-frame.
+    // TLAS instance block: 1 entry (merged) or M entries (legacy) +
+    // optionally 1 terrain entry. memcpy the prebuilt instances directly.
     const uint32_t static_n = static_cast<uint32_t>(
         std::min<size_t>(static_brush_instances_.size(), tlas_max_instances_));
     if (static_n > 0) {
@@ -777,9 +816,8 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
                     sizeof(VkAccelerationStructureInstanceKHR) * static_n);
     }
     uint32_t n = static_n;
-    // Dynamic customIndex always starts at M so dynamic write_instance
-    // calls land in materials slots [M..] regardless of merged/legacy.
-    uint32_t mat_idx = M;
+    // Dynamic customIndex starts past the static-mat block (brushes+terrain).
+    uint32_t mat_idx = static_mats;
 
     auto write_instance = [&](const glm::mat4& m, const glm::mat4& prev_m,
                               const glm::vec4& color,

@@ -34,6 +34,14 @@ public:
     struct StaticBox { glm::vec3 center; glm::vec3 half_extents; };
     void add_static_boxes(const StaticBox* boxes, size_t count);
 
+    // Add a procedural heightmap as a single Jolt HeightFieldShape static
+    // body. `dim` is the cell count per side; `samples` must be of size
+    // (dim+1) * (dim+1) and laid out row-major (x outer, z inner — matching
+    // Heightmap::at). `origin_xz` is the world-space corner the (0,0) cell
+    // sits at; `cell_size` is the world distance between adjacent samples.
+    void add_static_heightfield(const float* samples, int dim,
+                                glm::vec2 origin_xz, float cell_size);
+
     // Engine-side body handle (cached BodyID). Storing this on each
     // dynamic prop / particle / projectile lets the read-only queries skip
     // the unordered_map lookup in physics_world.cpp. 0 = invalid.

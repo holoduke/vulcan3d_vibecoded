@@ -7,6 +7,7 @@
 #include "engine/vk_engine/internal.h"
 #include "engine/gltf_loader.h"
 #include "engine/skybox.h"
+#include "engine/terrain.h"
 #include "engine/texture.h"
 
 #include <GLFW/glfw3.h>
@@ -25,6 +26,37 @@ void VulkanEngine::init_world() {
     world_ = game::make_arena();
     log::infof("world: %u brushes", static_cast<unsigned>(world_.brushes.size()));
 
+    // Procedural terrain: generated first so the castle can be lifted to
+    // sit on the plateau height. Phase 1 is non-streaming — one big mesh
+    // (~1km²). See docs/terrain_plan.md for streaming/LOD/sculpt phases.
+    {
+        HeightmapParams hp{};
+        hp.dim = 256;
+        hp.cell_size = 4.0f;          // 4m per cell × 256 = 1024m square
+        hp.height_scale = 90.0f;
+        hp.plateau_extent = glm::vec2(20.0f, 20.0f);
+        hp.plateau_height = 14.0f;     // castle base sits at this Y
+        hp.plateau_blend  = 16.0f;
+        Heightmap hm = generate_heightmap(hp);
+        // Cache for collision + Phase 4 sculpt access.
+        terrain_data_.dim = hm.dim;
+        terrain_data_.cell = hm.cell;
+        terrain_data_.origin_x = hm.origin_x;
+        terrain_data_.origin_z = hm.origin_z;
+        terrain_data_.heights = hm.heights;
+        terrain_mesh_ = build_terrain_mesh(device_, allocator_,
+                                           graphics_queue_, graphics_queue_family_, hm);
+        // Lift every level brush by plateau_height so the castle's y=0
+        // baseline lands on the plateau surface. Cheaper than rewriting
+        // level.cpp — the brush AABBs / world matrices update through the
+        // same vector.
+        for (auto& b : world_.brushes) b.center.y += hp.plateau_height;
+        for (auto& a : world_.aabbs)   { a.min.y += hp.plateau_height;
+                                          a.max.y += hp.plateau_height; }
+        // Lift player's default spawn point above the new ground.
+        player_.position.y += hp.plateau_height;
+    }
+
     physics_ = std::make_unique<PhysicsWorld>();
     // Batch-add the level brushes — Jolt's AddBodiesPrepare/Finalize takes
     // the broadphase mutex once for the whole pile instead of per body.
@@ -36,6 +68,14 @@ void VulkanEngine::init_world() {
         sboxes.push_back({b.center, b.size * 0.5f});
     }
     physics_->add_static_boxes(sboxes.data(), sboxes.size());
+    // Heightfield collision for terrain. Player + crates collide cleanly
+    // against the bumpy ground — far cheaper than tessellated brushes.
+    if (!terrain_data_.heights.empty()) {
+        physics_->add_static_heightfield(
+            terrain_data_.heights.data(), terrain_data_.dim,
+            glm::vec2(terrain_data_.origin_x, terrain_data_.origin_z),
+            terrain_data_.cell);
+    }
 
     log::infof("Jolt: %d static bodies; dynamic boxes will spawn over time "
                "(max %d, every %.2fs)",
@@ -242,7 +282,7 @@ void VulkanEngine::init_viewmodel() {
     viewmodel_proc_parts_.push_back({
         ViewmodelPart::Kind::Cylinder,
         T(glm::vec3(gx, gy, barrel_zc)) * rotX(90.0f) *
-            S(glm::vec3(0.022f, barrel_hl, 0.022f)),
+            S(glm::vec3(0.040f, barrel_hl, 0.040f)),
         dark,
     });
     viewmodel_proc_parts_.push_back({
@@ -348,16 +388,23 @@ void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,
     }
 
     // Muzzle flash: a bright, short-lived emissive blob just past the muzzle
-    // tip. Bloom downstream halos it dramatically.
+    // tip. Bloom downstream halos it dramatically. Anchored so the
+    // back face of the (scale-animated) cube always sits past the
+    // barrel tip — without this, the small fade-in/out cube floats
+    // forward of the tip because scale shrinks but center stays fixed.
     if (muzzle_flash_timer_ > 0.0f) {
+        const float barrel_tip_z = -0.72f;  // matches barrel_zc - barrel_hl in init
         float t = std::min(1.0f, muzzle_flash_timer_ / kMuzzleFlashDuration);
         float intensity = t * t;
-        glm::vec3 muzzle(0.18f, -0.18f, -0.74f);
+        float core_size = 0.04f * (0.6f + 0.4f * t);   // full cube size
+        // Center the cube so its back face (toward camera) is exactly at
+        // the barrel tip independent of size: center_z = tip - half_size.
+        float core_z = barrel_tip_z - core_size * 0.5f;
+        glm::vec3 muzzle(0.18f, -0.18f, core_z);
         glm::mat4 base = glm::translate(glm::mat4(1.0f), muzzle);
 
         glm::mat4 core = view_inv_recoil * base *
-                         glm::scale(glm::mat4(1.0f),
-                                    glm::vec3(0.04f * (0.6f + 0.4f * t)));
+                         glm::scale(glm::mat4(1.0f), glm::vec3(core_size));
         glm::vec3 core_emi = glm::vec3(8.0f, 6.5f, 3.0f) * intensity;
         draw_part(cube_mesh_, core, glm::vec4(1.0f, 0.85f, 0.45f, 1.0f),
                   core_emi, true);
@@ -600,6 +647,19 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         glm::mat4 model = dr.world * glm::scale(glm::mat4(1.0f), dyn_props_[i].full_size);
         push_depth(model);
     }
+    // Terrain: vertices are already in world space, model = identity.
+    if (terrain_mesh_.index_count > 0) {
+        VkDeviceSize toff = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &terrain_mesh_.vertex_buffer, &toff);
+        vkCmdBindIndexBuffer(cmd, terrain_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+        PushConstants pc{};
+        pc.mvp = vp;
+        pc.model = glm::mat4(1.0f);
+        vkCmdPushConstants(cmd, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, terrain_mesh_.index_count, 1, 0, 0, 0);
+    }
 }
 
 void VulkanEngine::render_world(VkCommandBuffer cmd) {
@@ -691,6 +751,27 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     };
 
     int culled_static = 0, culled_dyn = 0, drawn_static = 0, drawn_dyn = 0;
+    // Terrain pass — bound first because the brush+dyn loop below assumes
+    // the cube mesh is bound. Switch back to cube after.
+    if (terrain_mesh_.index_count > 0) {
+        VkDeviceSize toff = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &terrain_mesh_.vertex_buffer, &toff);
+        vkCmdBindIndexBuffer(cmd, terrain_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+        PushConstants pc{};
+        pc.mvp = vp;
+        pc.model = glm::mat4(1.0f);
+        pc.prev_mvp = prev_vp;
+        pc.color = glm::vec4(terrain_color_, 1.0f);
+        pc.emissive = glm::vec4(0.0f);
+        pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
+        vkCmdPushConstants(cmd, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, terrain_mesh_.index_count, 1, 0, 0, 0);
+        // Rebind cube for the brush loop.
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    }
     for (size_t i = 0; i < world_.brushes.size(); ++i) {
         const auto& b = world_.brushes[i];
         const auto& a = world_.aabbs[i];

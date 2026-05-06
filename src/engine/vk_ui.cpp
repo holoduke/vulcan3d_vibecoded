@@ -281,10 +281,6 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("GI strength", &rt_.gi_strength, 0.0f, 3.0f);
         ImGui::SliderFloat("GI radius", &rt_.gi_radius, 1.0f, 400.0f);
 
-        ImGui::SeparatorText("Reflections (white-flag surfaces)");
-        ImGui::Checkbox("reflections", &rt_.reflections_enabled);
-        ImGui::SliderFloat("reflection strength", &rt_.reflection_strength, 0.0f, 1.0f);
-
         ImGui::SeparatorText("Anti-aliasing (TAA + Halton sub-pixel jitter)");
         ImGui::Checkbox("sub-pixel jitter", &rt_.taa_jitter_enabled);
         ImGui::SliderFloat("jitter strength", &rt_.taa_jitter_strength, 0.0f, 2.0f);
@@ -344,7 +340,6 @@ void VulkanEngine::build_menu_ui() {
             rt_.ao_samples = 32;     rt_.ao_radius = 4.0f;
             rt_.gi_samples = 16;     rt_.gi_strength = 1.0f;
             rt_.gi_radius = 200.0f;  rt_.gi_bounces = 4;
-            rt_.reflections_enabled = true; rt_.reflection_strength = 0.7f;
         }
     }
 

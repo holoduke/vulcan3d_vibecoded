@@ -111,7 +111,14 @@ FetchContent_Declare(miniaudio
     GIT_TAG 0.11.21
     GIT_SHALLOW TRUE)
 
-FetchContent_MakeAvailable(glfw glm vk_bootstrap vma Catch2 JoltPhysics imgui tinygltf tinyexr miniaudio)
+# FastNoiseLite — single-header noise (MIT). Used by the procedural
+# terrain generator (src/engine/terrain.cpp).
+FetchContent_Declare(fastnoiselite
+    GIT_REPOSITORY https://github.com/Auburn/FastNoiseLite.git
+    GIT_TAG v1.1.1
+    GIT_SHALLOW TRUE)
+
+FetchContent_MakeAvailable(glfw glm vk_bootstrap vma Catch2 JoltPhysics imgui tinygltf tinyexr miniaudio fastnoiselite)
 
 # Dear ImGui ships without CMakeLists; build our own target from its sources.
 add_library(imgui STATIC
@@ -167,12 +174,14 @@ add_library(qlike_engine STATIC
     src/engine/log.cpp
     src/engine/crash_handler.cpp
     src/engine/audio.cpp
+    src/engine/terrain.cpp
 )
 target_include_directories(qlike_engine PUBLIC src)
 target_include_directories(qlike_engine PRIVATE
     ${tinygltf_SOURCE_DIR}
     ${tinyexr_SOURCE_DIR}
-    ${miniaudio_SOURCE_DIR})
+    ${miniaudio_SOURCE_DIR}
+    ${fastnoiselite_SOURCE_DIR}/Cpp)
 target_link_libraries(qlike_engine PUBLIC
     qlike_core
     Vulkan::Vulkan
