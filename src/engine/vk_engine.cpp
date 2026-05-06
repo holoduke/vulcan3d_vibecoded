@@ -852,6 +852,21 @@ void VulkanEngine::run(const RunOptions& opts) {
         }
 
         update_scene_ubo();
+        // Heightmap sun-shadow is sun-direction-dependent; re-bake when
+        // the user has dragged the sun pitch/yaw beyond a small
+        // threshold (~1° change). The bake is multi-threaded so the
+        // hitch is short. Skipped if no terrain (terrain_data_ empty).
+        {
+            float p_rad = glm::radians(rt_.sun_pitch_deg);
+            float y_rad = glm::radians(rt_.sun_yaw_deg);
+            glm::vec3 cur_sun(std::sin(y_rad) * std::cos(p_rad),
+                              std::sin(p_rad),
+                              std::cos(y_rad) * std::cos(p_rad));
+            if (!terrain_data_.heights.empty() &&
+                glm::distance(cur_sun, terrain_shadow_sun_dir_) > 0.018f) {
+                rebuild_terrain_shadow_texture();
+            }
+        }
         // Audio listener follows the camera. Reaping drained one-shots
         // also runs here so the active-voice list stays small.
         if (audio_) {

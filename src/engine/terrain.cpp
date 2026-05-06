@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 #ifdef max
@@ -218,34 +219,46 @@ std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
     const float max_t = 400.0f;
     const int   max_steps = static_cast<int>(max_t / step);
 
-    for (int iz = 0; iz < H; ++iz) {
-        for (int ix = 0; ix < W; ++ix) {
-            float h0 = hm.at(ix, iz);
-            // Origin slightly above the terrain so the ray isn't on
-            // the surface (would always self-intersect step 1).
-            glm::vec3 p0(hm.origin_x + static_cast<float>(ix) * hm.cell,
-                         h0 + 0.20f,
-                         hm.origin_z + static_cast<float>(iz) * hm.cell);
-            bool shadowed = false;
-            for (int s = 1; s <= max_steps; ++s) {
-                float t = static_cast<float>(s) * step;
-                glm::vec3 p = p0 + L * t;
-                float h_at_p = hm.sample_world(p.x, p.z);
-                if (p.y < h_at_p) {
-                    shadowed = true;
-                    break;
+    // Multi-threaded — split rows across hardware threads. With 1024²
+    // cells × ~80 marching steps the single-threaded version was ~1s
+    // (too long for a slider re-bake to feel responsive); with 8-12
+    // worker threads it drops to ~100-150 ms.
+    auto bake_rows = [&](int z_lo, int z_hi) {
+        for (int iz = z_lo; iz < z_hi; ++iz) {
+            for (int ix = 0; ix < W; ++ix) {
+                float h0 = hm.at(ix, iz);
+                glm::vec3 p0(hm.origin_x + static_cast<float>(ix) * hm.cell,
+                             h0 + 0.20f,
+                             hm.origin_z + static_cast<float>(iz) * hm.cell);
+                bool shadowed = false;
+                for (int s = 1; s <= max_steps; ++s) {
+                    float t = static_cast<float>(s) * step;
+                    glm::vec3 p = p0 + L * t;
+                    float h_at_p = hm.sample_world(p.x, p.z);
+                    if (p.y < h_at_p) { shadowed = true; break; }
+                    if (p.y - h0 > 100.0f) break;
                 }
-                // Once the ray climbs higher than the terrain max in
-                // every direction, no more occluders possible — stop.
-                // (Cheap heuristic: stop once we're 100m above the
-                // starting height.)
-                if (p.y - h0 > 100.0f) break;
+                out[static_cast<size_t>(iz) * static_cast<size_t>(W) +
+                    static_cast<size_t>(ix)] = shadowed ? 255 : 0;
             }
-            out[static_cast<size_t>(iz) * static_cast<size_t>(W) +
-                static_cast<size_t>(ix)] = shadowed ? 255 : 0;
         }
+    };
+
+    unsigned n_threads = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::thread> workers;
+    workers.reserve(n_threads);
+    int rows_per = (H + static_cast<int>(n_threads) - 1) /
+                   static_cast<int>(n_threads);
+    for (unsigned t = 0; t < n_threads; ++t) {
+        int z_lo = static_cast<int>(t) * rows_per;
+        int z_hi = std::min(H, z_lo + rows_per);
+        if (z_lo >= z_hi) break;
+        workers.emplace_back(bake_rows, z_lo, z_hi);
     }
-    log::infof("[terrain] heightmap shadow baked: %dx%d", W, H);
+    for (auto& th : workers) th.join();
+
+    log::infof("[terrain] heightmap shadow baked: %dx%d (%u threads)",
+               W, H, n_threads);
     return out;
 }
 
