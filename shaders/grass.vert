@@ -69,19 +69,65 @@ void main() {
     vec3 lp = inPos;
     lp.y *= height_scale;
 
-    // Wind sway: bend the upper portion of the blade by a sin wave
-    // that varies per-blade (hash on world XZ). The `inUv.y` (height
-    // ratio 0..1) controls how much each vertex bends — the base is
-    // anchored, the tip sways most.
+    // ---- Wind: a moving wave (gust band) travelling across the world.
+    // The whole field doesn't bow at once — only blades the gust is
+    // currently passing through bend strongly, others stay still.
+    // Implementation:
+    //   1. Pick a wind direction (slowly rotating so gusts come from
+    //      different headings over time).
+    //   2. Project blade XZ onto that direction — `along` is metres
+    //      along the wind axis.
+    //   3. `phase = along - speed * t` slides the wave with time.
+    //   4. Multiple gust crests spaced `period` apart, each a smooth
+    //      pulse of `width` metres — pulse() goes from 0 outside the
+    //      band to 1 at the centre.
+    //   5. Modulate gust amplitude by low-frequency noise so each
+    //      gust has variable thickness/strength (some weak, some
+    //      strong). And add a small per-blade phase offset so
+    //      neighbours don't move in lock-step.
+    //   6. Bend = pulse * thickness * (height_ratio^2) so the base
+    //      anchors and the tip moves most.
     float wind_strength = pc.grass_params.y;
-    float t = pc.grass_params.z;
-    float phase = base_world.x * 0.13 + base_world.z * 0.21;
-    float sway_x = sin(t * 2.4 + phase) * wind_strength;
-    float sway_z = cos(t * 1.7 + phase * 1.3) * wind_strength * 0.6;
-    // Quadratic falloff so only the top half visibly bends.
-    float bend  = inUv.y * inUv.y;
-    lp.x += sway_x * bend;
-    lp.z += sway_z * bend;
+    float t             = pc.grass_params.z;
+
+    // Slow-rotating wind direction so the field doesn't always sway
+    // the same way. 0.04 rad/s ≈ a 26° drift over 10 sec.
+    float wind_yaw = 0.5 + sin(t * 0.04) * 0.3;
+    vec2  wind_dir = vec2(cos(wind_yaw), sin(wind_yaw));
+
+    float along = dot(base_world.xz, wind_dir);
+
+    // Wave period (metres between gust crests) and pulse width.
+    const float kPeriod = 28.0;
+    const float kWidth  = 7.0;
+    float speed = 8.0;
+
+    // Wrap phase into one period so we always evaluate the nearest
+    // gust crest (= 0 at centre).
+    float phase = mod(along - speed * t, kPeriod) - kPeriod * 0.5;
+    // Smooth pulse: cosine-window over [-width, +width].
+    float pulse = 0.0;
+    if (abs(phase) < kWidth) {
+        float u = phase / kWidth;            // -1..1
+        pulse = 0.5 + 0.5 * cos(u * 3.14159265);
+    }
+
+    // Variable thickness/strength: low-frequency hash on the gust's
+    // along-axis position so different gusts pack different punch.
+    float gust_id_pos = along - speed * t - phase;
+    float thickness = 0.45 + 0.55 *
+                      (0.5 + 0.5 * sin(gust_id_pos * 0.07 + 1.7));
+
+    // Per-blade tiny phase offset so adjacent blades don't move in
+    // lockstep — feels noisier and more natural.
+    float jitter = sin(base_world.x * 0.41 +
+                       base_world.z * 0.73 + t * 0.9) * 0.15;
+
+    float gust = pulse * thickness * (1.0 + jitter);
+    float bend = inUv.y * inUv.y;
+    vec2  sway_xz = wind_dir * gust * wind_strength;
+    lp.x += sway_xz.x * bend;
+    lp.z += sway_xz.y * bend;
 
     // Per-blade Y rotation, then translate to world.
     mat3 R = rotY(rotation);
