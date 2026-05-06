@@ -318,8 +318,15 @@ private:
     // over kDecalTtl. Rendered via the existing brush pipeline (cube
     // mesh scaled flat) so no new pipeline is needed.
     struct Decal {
+        // Position + normal in WORLD space if parent_body_id == 0
+        // (impact on static brush). For dyn-body impacts pos/normal are
+        // stored in the body's LOCAL space; render-time multiplies them
+        // by the parent's current world matrix so the decal travels
+        // with the moving crate.
         glm::vec3 pos;
         glm::vec3 normal;
+        uint32_t  parent_body_id = 0;   // 0 = static / world-space
+        uint32_t  parent_handle  = 0;   // cached BodyHandle for parent
         float     size;
         float     age = 0.0f;
         float     ttl;

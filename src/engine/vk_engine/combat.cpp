@@ -177,20 +177,23 @@ void VulkanEngine::update_projectiles(float dt) {
                 glm::vec3 reflect = glm::length(post_vel) > 0.5f
                                          ? glm::normalize(post_vel)
                                          : -it->initial_dir;
-                spawn_hit_particles(hit_pos, reflect, it->initial_dir);
-                // Scorch decal — short raycast back along the bullet's
-                // path to recover the actual surface normal at the
-                // contact point.
-                spawn_impact_decal(hit_pos, it->initial_dir);
+                glm::vec3 saved_dir = it->initial_dir;
+                uint32_t  saved_body = it->body_id;
+
+                // Order matters: remove the bullet body BEFORE the decal
+                // raycast so the ray doesn't hit the cylinder itself
+                // (that's what made decals float in midair). Then place
+                // the decal BEFORE spawning sparks so the ray doesn't
+                // hit the freshly-spawned spark spheres either.
+                physics_->remove_body(saved_body);
+                spawn_impact_decal(hit_pos, saved_dir);
+                spawn_hit_particles(hit_pos, reflect, saved_dir);
                 if (audio_) {
-                    // Impact is 3D — positioned at the hit so distant
-                    // ricochets attenuate naturally. Wider pitch jitter
-                    // so the same wav doesn't sound identical on every
-                    // hit.
                     audio_->play_at("impact", hit_pos, 0.8f, 0.10f, 0.08f);
                 }
+            } else {
+                physics_->remove_body(it->body_id);
             }
-            physics_->remove_body(it->body_id);
             it = projectiles_.erase(it);
         } else {
             ++it;
@@ -281,25 +284,35 @@ void VulkanEngine::spawn_hit_particles(glm::vec3 pos, glm::vec3 reflect_dir,
 void VulkanEngine::draw_decals(VkCommandBuffer cmd, const glm::mat4& vp) {
     if (decals_.empty()) return;
     for (const auto& d : decals_) {
-        // Fade decal alpha-curve via color modulation since the existing
-        // brush pipeline is opaque. Old decals just darken toward zero
-        // until they disappear at TTL.
         float life = 1.0f - (d.age / d.ttl);
         if (life <= 0.0f) continue;
-        // Place a flat scaled cube on the surface: align local +Y with the
-        // surface normal, scale (size, near-zero, size) so it reads as a
-        // thin disc parallel to the wall.
-        glm::mat4 model = align_local_y_to(d.pos, d.normal) *
+
+        glm::vec3 world_pos    = d.pos;
+        glm::vec3 world_normal = d.normal;
+        if (d.parent_body_id != 0) {
+            // Parented to a dyn body: transform local-frame pos+normal by
+            // the body's CURRENT world matrix so the decal travels with
+            // the crate. If the body has gone (despawn / FIFO eviction),
+            // skip drawing — update_decals will reap it next tick.
+            glm::mat4 body_world;
+            if (!physics_->get_body_world_matrix_h(d.parent_handle, body_world)) {
+                continue;
+            }
+            world_pos    = glm::vec3(body_world * glm::vec4(d.pos, 1.0f));
+            world_normal = glm::vec3(body_world * glm::vec4(d.normal, 0.0f));
+        }
+
+        glm::mat4 model = align_local_y_to(world_pos, world_normal) *
                           glm::scale(glm::mat4(1.0f),
                                      glm::vec3(d.size, 0.005f, d.size));
-        glm::vec3 col(0.04f * life);            // dark grey, fading to black
+        glm::vec3 col(0.04f * life);
         PushConstants pc{};
         pc.mvp = vp * model;
         pc.model = model;
-        pc.prev_mvp = pc.mvp;        // static decal, no motion
+        pc.prev_mvp = pc.mvp;
         pc.color = glm::vec4(col, 1.0f);
         pc.emissive = glm::vec4(0.0f);
-        pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);  // no textures
+        pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &pc);
@@ -376,9 +389,6 @@ void VulkanEngine::draw_spark_trails(VkCommandBuffer cmd, const glm::mat4& vp) {
 
 void VulkanEngine::spawn_impact_decal(glm::vec3 hit_pos, glm::vec3 incoming_dir) {
     if (!physics_) return;
-    // Recover the surface normal: raycast from a short distance behind
-    // the impact, along the bullet's travel direction. The first hit's
-    // normal is what we want. Falls back to -incoming if the ray misses.
     glm::vec3 dir = glm::length(incoming_dir) > 1e-3f
                         ? glm::normalize(incoming_dir)
                         : glm::vec3(0, 0, 1);
@@ -386,16 +396,30 @@ void VulkanEngine::spawn_impact_decal(glm::vec3 hit_pos, glm::vec3 incoming_dir)
     auto rh = physics_->raycast(from, dir, 1.0f);
     glm::vec3 normal = rh.hit ? rh.normal : -dir;
     glm::vec3 pos    = rh.hit ? rh.position : hit_pos;
+    pos += normal * 0.005f;     // anti-z-fight skin
 
     Decal d{};
-    // Push out by a few mm along the normal to keep us off the surface
-    // and avoid z-fighting with the underlying brush.
-    d.pos    = pos + normal * 0.005f;
-    d.normal = normal;
-    d.size   = frand_range(spawn_rng_state_, 0.10f, 0.18f);
-    d.ttl    = kDecalTtl;
+    d.size = frand_range(spawn_rng_state_, 0.10f, 0.18f);
+    d.ttl  = kDecalTtl;
+    if (rh.hit && rh.dynamic && rh.body_id != 0) {
+        // Hit a dyn box — parent the decal to it. Store pos/normal in
+        // the body's LOCAL frame so render-time multiplies by current
+        // world transform and the decal moves with the crate.
+        glm::mat4 body_world;
+        if (physics_->get_body_world_matrix(rh.body_id, body_world)) {
+            glm::mat4 inv = glm::inverse(body_world);
+            d.pos      = glm::vec3(inv * glm::vec4(pos, 1.0f));
+            d.normal   = glm::vec3(inv * glm::vec4(normal, 0.0f));
+            d.parent_body_id = rh.body_id;
+            d.parent_handle  = physics_->handle_of(rh.body_id);
+        } else {
+            d.pos = pos; d.normal = normal;
+        }
+    } else {
+        d.pos    = pos;
+        d.normal = normal;
+    }
     decals_.push_back(d);
-    // FIFO cap.
     while (static_cast<int>(decals_.size()) > kMaxDecals) {
         decals_.erase(decals_.begin());
     }
@@ -403,9 +427,20 @@ void VulkanEngine::spawn_impact_decal(glm::vec3 hit_pos, glm::vec3 incoming_dir)
 
 void VulkanEngine::update_decals(float dt) {
     for (auto& d : decals_) d.age += dt;
+    // Drop expired decals + decals whose parent body has been removed
+    // (FIFO eviction of the dyn prop they were stuck to).
     decals_.erase(
         std::remove_if(decals_.begin(), decals_.end(),
-                        [](const Decal& d) { return d.age >= d.ttl; }),
+                        [this](const Decal& d) {
+                            if (d.age >= d.ttl) return true;
+                            if (d.parent_body_id != 0 && physics_) {
+                                glm::mat4 m;
+                                if (!physics_->get_body_world_matrix_h(d.parent_handle, m)) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }),
         decals_.end());
 }
 
