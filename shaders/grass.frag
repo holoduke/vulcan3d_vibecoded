@@ -1,10 +1,12 @@
 #version 460
+#extension GL_EXT_ray_query : require
 
 layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec3 vColor;
 layout(location = 2) in vec2 vUv;
 layout(location = 3) in float vHeightRatio;
 layout(location = 4) in float vCullKill;
+layout(location = 5) in vec3 vWorldPos;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
@@ -28,6 +30,21 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  terrain_h_high;
 } scene;
 
+layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
+
+// Single shadow ray to the sun. cull-mask 0x01 keeps it consistent
+// with cube.frag's shadow tests — sparks and bullets stay out.
+bool sun_blocked(vec3 origin, vec3 dir) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, topLevelAS,
+                          gl_RayFlagsTerminateOnFirstHitEXT |
+                          gl_RayFlagsOpaqueEXT,
+                          0x01, origin, 0.05, dir, 200.0);
+    while (rayQueryProceedEXT(rq)) {}
+    return rayQueryGetIntersectionTypeEXT(rq, true) ==
+           gl_RayQueryCommittedIntersectionTriangleEXT;
+}
+
 void main() {
     if (vCullKill > 0.5) discard;
 
@@ -46,9 +63,22 @@ void main() {
     // Light intensity as a SCALAR — preserves the blade's green tint
     // regardless of the sun direction. Earlier per-channel sky-colour
     // multiplication crushed red/green and pulled shaded blades toward
-    // the blue sky tint (inside-the-castle blades read as black/blue).
+    // the blue sky tint.
     float sun_amt = scene.sun_color.a * 0.10 * n_dot_l;
     float sky_amt = 0.30;
+
+    // Shadow: one any-hit ray to the sun. The blade base ray origin
+    // sits at (vWorldPos + N * 0.05) so we don't immediately hit the
+    // terrain we're standing on. Distance to sun in scene metres is
+    // huge, but a 200m ray is enough to clear the tallest mountains.
+    // Result: blades in the shadow of the castle / mountains correctly
+    // darken to ambient-only.
+    if (n_dot_l > 0.0 && scene.rt_flags.x != 0) {
+        if (sun_blocked(vWorldPos + vec3(0.0, 0.05, 0.0),
+                        normalize(scene.sun_direction.xyz))) {
+            sun_amt = 0.0;
+        }
+    }
     float lum = sun_amt + sky_amt;
 
     vec3 tip_lift = mix(vec3(0.95), vec3(1.05, 1.0, 0.9), vHeightRatio);

@@ -50,6 +50,7 @@ layout(location = 1) out vec3 vColor;
 layout(location = 2) out vec2 vUv;
 layout(location = 3) out float vHeightRatio;
 layout(location = 4) out float vCullKill;
+layout(location = 5) out vec3 vWorldPos;
 
 mat3 rotY(float a) {
     float c = cos(a), s = sin(a);
@@ -178,6 +179,7 @@ void main() {
         vColor  = vec3(0.0);
         vUv     = vec2(0.0);
         vHeightRatio = 0.0;
+        vWorldPos = vec3(0.0);
         return;
     }
 
@@ -191,4 +193,5 @@ void main() {
     vColor  = inTint.xyz;
     vUv     = inUv;
     vHeightRatio = inUv.y;
+    vWorldPos = world;
 }

@@ -2,6 +2,8 @@
 
 #include "engine/log.h"
 
+#include <FastNoiseLite.h>
+
 #include <glm/glm.hpp>
 
 #include <algorithm>
@@ -92,6 +94,15 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
     std::mt19937 rng(static_cast<uint32_t>(params.seed));
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
     std::uniform_real_distribution<float> rot(0.0f, 6.28318530718f);
+
+    // Low-frequency simplex noise sampled at the candidate XZ — used
+    // to nudge the slope-acceptance threshold up/down by ~20% so the
+    // grass/cliff boundary dissolves into patches rather than tracing
+    // a single linear contour line.
+    FastNoiseLite slope_noise;
+    slope_noise.SetSeed(params.seed + 7);
+    slope_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+    slope_noise.SetFrequency(0.06f);
     // Tints: warm grass greens with occasional yellow + dark-green
     // outliers so big fields don't read as a single flat colour.
     auto random_tint = [&]() {
@@ -151,9 +162,25 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
 
         // Reject by altitude band.
         if (wy < params.height_min || wy > params.height_max) continue;
-        // Reject by slope.
+
+        // Slope acceptance — gradient + noise instead of a hard cut.
+        // Probability fades from 1.0 at flat ground to 0.0 below
+        // (min_normal_y - 0.15). Add a per-XZ simplex offset so the
+        // boundary breaks up into patches rather than tracing a clean
+        // contour line; without this the player saw an obvious linear
+        // gradient at the slope edge.
         glm::vec3 n = sample_n(ix, iz);
-        if (n.y < params.min_normal_y) continue;
+        const float slope_window = 0.15f;
+        float slope_t = (n.y - (params.min_normal_y - slope_window)) /
+                        slope_window;
+        slope_t = std::clamp(slope_t, 0.0f, 1.0f);
+        slope_t = slope_t * slope_t * (3.0f - 2.0f * slope_t);   // smoothstep
+        // ±0.2 noise modulation. >0 makes patches survive on slightly
+        // steeper slopes than the average; <0 thins out marginally OK
+        // slopes so the boundary isn't uniform.
+        float noise = slope_noise.GetNoise(wx, wz);              // -1..1
+        slope_t = std::clamp(slope_t + noise * 0.2f, 0.0f, 1.0f);
+        if (u01(rng) > slope_t) continue;
 
         // Per-blade jitter — rotation, height variation, tint.
         // Layout matches grass.vert: 3 vec4s (pos+pad, rot/height+pad,
