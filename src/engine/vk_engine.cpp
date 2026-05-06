@@ -461,7 +461,11 @@ void VulkanEngine::draw(uint32_t img_index) {
         // recovers most of the detail taa.frag's à-trous spatial filter
         // blurs away (default taa_spatial_strength can be 0.4–0.5). User
         // can override via `compose_sharpen_strength` in qlike_settings.cfg.
-        pc_data.sharpen_params = glm::vec4(rt_.compose_sharpen_strength, 0.0f, 0.0f, 0.0f);
+        // sharpen_params.y carries auto_exposure_strength so compose.frag
+        // can scale pre-tonemap HDR by (target / scene_avg). 0 = off.
+        pc_data.sharpen_params = glm::vec4(rt_.compose_sharpen_strength,
+                                            rt_.auto_exposure_strength,
+                                            0.0f, 0.0f);
         pc_data.inv_view_proj = glm::inverse(last_view_proj_);
         vkCmdPushConstants(frame.command_buffer, compose_pipeline_layout_,
                            VK_SHADER_STAGE_FRAGMENT_BIT, 0,

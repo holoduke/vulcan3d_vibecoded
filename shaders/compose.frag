@@ -329,6 +329,32 @@ void main() {
     vec2 flare_uv = gl_FragCoord.xy * pc.viewport.zw;
     hdr += lens_flare(flare_uv);
 
+    // Auto-exposure (eye adaptation). The smallest bloom mip is
+    // textureLod-sampled at uv=(0.5, 0.5) — that pixel is roughly the
+    // average of the bright-source signal across the screen, which
+    // correlates with overall scene brightness (interiors low, open
+    // sky high). Compute exposure = pow(target / avg, k) and scale hdr
+    // before tonemap. Bloom and lens flare ride along since they're
+    // already added; bright-outdoor bloom thus blooms HARDER once the
+    // exposure has lifted to compensate for indoor darkness.
+    //
+    // sharpen_params.y carries auto_exposure_strength (0 = off, 1 =
+    // full adaptation). 0.5 default is enough to get the "step out
+    // into sun and squint" effect without flattening contrast.
+    if (pc.sharpen_params.y > 0.0) {
+        // Sample the smallest mip for a coarse scene-luminance estimate.
+        // 6.0 = mip-6 (with kBloomMips=7 that's the smallest one).
+        float scene_avg = max(0.005,
+            lum(textureLod(u_bloom, vec2(0.5), 6.0).rgb));
+        const float kTarget = 0.18;        // mid-grey target
+        float ratio = kTarget / scene_avg;
+        ratio = clamp(ratio, 0.4, 4.0);    // bound the auto-correction
+        // strength = 0 -> ratio collapses to 1 (no scaling)
+        // strength = 1 -> full ratio applied
+        float exposure = pow(ratio, pc.sharpen_params.y);
+        hdr *= exposure;
+    }
+
     vec3 mapped = aces_fitted(hdr);
     outColor = vec4(to_srgb(mapped), 1.0);
 }

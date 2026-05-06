@@ -158,6 +158,7 @@ void VulkanEngine::save_settings() const {
     f << "gi_bounces = "         << rt_.gi_bounces         << "\n";
     f << "gi_shadow_max_bounce = " << rt_.gi_shadow_max_bounce << "\n";
     f << "ao_floor = "             << rt_.ao_floor             << "\n";
+    f << "auto_exposure_strength = " << rt_.auto_exposure_strength << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
     f << "reflections_enabled = "<< (rt_.reflections_enabled ? 1 : 0) << "\n";
@@ -230,6 +231,7 @@ void VulkanEngine::load_settings() {
             else if (key == "gi_bounces")          rt_.gi_bounces = std::stoi(val);
             else if (key == "gi_shadow_max_bounce") rt_.gi_shadow_max_bounce = std::stoi(val);
             else if (key == "ao_floor")             rt_.ao_floor = std::stof(val);
+            else if (key == "auto_exposure_strength") rt_.auto_exposure_strength = std::stof(val);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);
             else if (key == "reflections_enabled") rt_.reflections_enabled = std::stoi(val) != 0;
@@ -291,6 +293,7 @@ void VulkanEngine::load_settings() {
     clampi(rt_.gi_bounces,       1,        8);
     clampi(rt_.gi_shadow_max_bounce, 0,    8);
     clampf(rt_.ao_floor,         0.0f,    1.0f);
+    clampf(rt_.auto_exposure_strength, 0.0f, 1.5f);
     clampf(rt_.gi_strength,      0.0f,    8.0f);
     clampf(rt_.gi_radius,        0.5f,  500.0f);
     clampf(rt_.reflection_strength, 0.0f, 1.0f);

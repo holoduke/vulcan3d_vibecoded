@@ -580,6 +580,11 @@ private:
     VmaAllocation bloom_alloc_ = nullptr;
     VkImageView  bloom_mip_views_[kBloomMips]{};
     VkExtent2D   bloom_mip_extents_[kBloomMips]{};
+    // All-mips view of bloom_image_ used by compose so cube.frag can
+    // textureLod() to the smallest mip for an auto-exposure scene-avg
+    // proxy. Per-mip views above are still needed by the down/up passes
+    // which must rasterise into each mip individually.
+    VkImageView  bloom_full_view_ = VK_NULL_HANDLE;
 
     VkDescriptorPool       bloom_desc_pool_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout  bloom_desc_set_layout_ = VK_NULL_HANDLE;
@@ -659,6 +664,11 @@ private:
         // simple edges while preventing the "triple-darkness corner"
         // artifact.
         float ao_floor = 0.30f;
+        // Auto-exposure: scales pre-tonemap HDR by a target/scene-avg
+        // ratio so dark interiors lift while bright outdoor pixels seen
+        // through a doorway over-expose into bloom. Strength 0 = off,
+        // 1 = full eye-adaptation, ~0.5 = stylised (the default).
+        float auto_exposure_strength = 0.5f;
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;
         // Specular reflection on flagged surfaces (the pedestal).

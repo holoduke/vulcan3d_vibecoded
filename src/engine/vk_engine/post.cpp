@@ -288,7 +288,9 @@ void VulkanEngine::rewrite_compose_image_bindings() {
                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo i_sky { skybox_.sampler, skybox_.view,
                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkDescriptorImageInfo i_bloom{ linear_sampler_, bloom_mip_views_[0],
+        VkDescriptorImageInfo i_bloom{ linear_sampler_,
+                                        bloom_full_view_ ? bloom_full_view_
+                                                          : bloom_mip_views_[0],
                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkWriteDescriptorSet w[4]{};
         w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -310,6 +312,10 @@ void VulkanEngine::recreate_bloom_targets() {
             vkDestroyImageView(device_, bloom_mip_views_[i], nullptr);
             bloom_mip_views_[i] = VK_NULL_HANDLE;
         }
+    }
+    if (bloom_full_view_) {
+        vkDestroyImageView(device_, bloom_full_view_, nullptr);
+        bloom_full_view_ = VK_NULL_HANDLE;
     }
     if (bloom_image_) {
         vmaDestroyImage(allocator_, bloom_image_, bloom_alloc_);
@@ -367,6 +373,27 @@ void VulkanEngine::recreate_bloom_targets() {
         };
         vk_check(vkCreateImageView(device_, &vci, nullptr, &bloom_mip_views_[i]),
                  "bloom mip view");
+    }
+    // All-mips view for compose. Lets compose.frag textureLod into the
+    // smallest mip (kBloomMips-1) as a coarse scene-average proxy for
+    // auto-exposure.
+    if (bloom_full_view_) {
+        vkDestroyImageView(device_, bloom_full_view_, nullptr);
+        bloom_full_view_ = VK_NULL_HANDLE;
+    }
+    {
+        VkImageViewCreateInfo vci{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .image = bloom_image_,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = scene_color_format_,
+            .components = {},
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT,
+                                  0, static_cast<uint32_t>(kBloomMips), 0, 1 },
+        };
+        vk_check(vkCreateImageView(device_, &vci, nullptr, &bloom_full_view_),
+                 "bloom full view");
     }
 
     {
@@ -438,6 +465,7 @@ void VulkanEngine::destroy_bloom() {
     for (int i = 0; i < kBloomMips; ++i) {
         if (bloom_mip_views_[i]) vkDestroyImageView(device_, bloom_mip_views_[i], nullptr);
     }
+    if (bloom_full_view_) vkDestroyImageView(device_, bloom_full_view_, nullptr);
     if (bloom_image_) vmaDestroyImage(allocator_, bloom_image_, bloom_alloc_);
     bloom_down_pipeline_ = bloom_up_pipeline_ = VK_NULL_HANDLE;
     bloom_pipeline_layout_ = VK_NULL_HANDLE;
@@ -445,6 +473,7 @@ void VulkanEngine::destroy_bloom() {
     bloom_desc_set_layout_ = VK_NULL_HANDLE;
     bloom_desc_pool_ = VK_NULL_HANDLE;
     bloom_image_ = VK_NULL_HANDLE; bloom_alloc_ = nullptr;
+    bloom_full_view_ = VK_NULL_HANDLE;
     for (auto& v : bloom_mip_views_) v = VK_NULL_HANDLE;
 }
 
