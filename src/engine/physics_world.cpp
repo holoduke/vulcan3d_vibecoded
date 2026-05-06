@@ -352,31 +352,37 @@ void PhysicsWorld::apply_impulse(uint32_t id, glm::vec3 impulse) {
         it->second, JPH::Vec3(impulse.x, impulse.y, impulse.z));
 }
 
+// Read-only queries use GetBodyInterfaceNoLock(): all our physics
+// mutations (Update, AddImpulse, remove_body, spawn) happen on the main
+// thread between Update() calls, so no other thread is racing with these
+// reads. GetBodyInterface() takes a body mutex per call, which at 100+
+// bodies × multiple queries/frame is a measurable fraction of CPU time.
+
 glm::vec3 PhysicsWorld::get_linear_velocity(uint32_t id) const {
     auto it = impl_->ids.find(id);
     if (it == impl_->ids.end()) return glm::vec3(0.0f);
-    JPH::Vec3 v = impl_->system.GetBodyInterface().GetLinearVelocity(it->second);
+    JPH::Vec3 v = impl_->system.GetBodyInterfaceNoLock().GetLinearVelocity(it->second);
     return glm::vec3(v.GetX(), v.GetY(), v.GetZ());
 }
 
 bool PhysicsWorld::is_body_active(uint32_t id) const {
     auto it = impl_->ids.find(id);
     if (it == impl_->ids.end()) return false;
-    return impl_->system.GetBodyInterface().IsActive(it->second);
+    return impl_->system.GetBodyInterfaceNoLock().IsActive(it->second);
 }
 
 bool PhysicsWorld::get_body_world_matrix(uint32_t id, glm::mat4& out) const {
     auto it = impl_->ids.find(id);
     if (it == impl_->ids.end()) return false;
-    JPH::BodyInterface& bi = impl_->system.GetBodyInterface();
-    JPH::RVec3 p = bi.GetPosition(it->second);
-    JPH::Quat r = bi.GetRotation(it->second);
-    glm::quat gq(r.GetW(), r.GetX(), r.GetY(), r.GetZ());
-    out = glm::translate(glm::mat4(1.0f),
-                         glm::vec3(static_cast<float>(p.GetX()),
-                                   static_cast<float>(p.GetY()),
-                                   static_cast<float>(p.GetZ())))
-        * glm::mat4_cast(gq);
+    // Single GetWorldTransform call returns position+rotation as one
+    // RMat44, vs separate GetPosition + GetRotation which lock the body
+    // mutex twice.
+    JPH::RMat44 m = impl_->system.GetBodyInterfaceNoLock().GetWorldTransform(it->second);
+    out = glm::mat4(
+        m(0,0), m(1,0), m(2,0), m(3,0),
+        m(0,1), m(1,1), m(2,1), m(3,1),
+        m(0,2), m(1,2), m(2,2), m(3,2),
+        m(0,3), m(1,3), m(2,3), m(3,3));
     return true;
 }
 
