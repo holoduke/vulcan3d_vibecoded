@@ -152,9 +152,12 @@ void VulkanEngine::update_scene_ubo() {
     // skybox-distance cubes don't waste a full ray budget per pixel.
     // .z carries gi_shadow_max_bounce — see RtSettings; cast to int in
     // cube.frag where it gates the per-bounce sun shadow ray.
+    // .z = gi_shadow_max_bounce (cube.frag casts to int).
+    // .w = ao_floor — see RtSettings; cube.frag remaps raw AO to
+    //      [ao_floor, 1.0] so corner darkness doesn't compound.
     data.rt_lod = glm::vec4(15.0f, 50.0f,
                              static_cast<float>(rt_.gi_shadow_max_bounce),
-                             0.0f);
+                             rt_.ao_floor);
     {
         // cube.frag renders at render_extent_ (so does its motion-vec output);
         // gl_FragCoord.xy / viewport.zw is in render-resolution UV space.

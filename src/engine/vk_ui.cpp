@@ -268,6 +268,8 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SeparatorText("Ambient Occlusion (RT)");
         ImGui::SliderInt("AO samples (0=off)", &rt_.ao_samples, 0, 64);
         ImGui::SliderFloat("AO radius", &rt_.ao_radius, 0.1f, 8.0f);
+        ImGui::SliderFloat("AO floor (corner-pile-up cap)",
+                            &rt_.ao_floor, 0.0f, 1.0f);
 
         ImGui::SeparatorText("Path-traced GI (multi-bounce)");
         ImGui::SliderInt("GI samples (0=off)", &rt_.gi_samples, 0, 128);

@@ -651,6 +651,14 @@ private:
         // accurate but linearly more expensive (each level adds N_gi
         // any_hit rays per pixel).
         int   gi_shadow_max_bounce = 1;
+        // AO darkening floor. Raw AO is 0..1 (1 = clear, 0 = fully
+        // occluded); we remap to [ao_floor, 1.0] so corners where 2-3
+        // edges all block rays don't compound into near-black. 0 = AO
+        // can crush surfaces to pure black; 0.5 = AO darkens at most
+        // 50%; 1.0 = AO has no effect. 0.30 keeps clear contact AO at
+        // simple edges while preventing the "triple-darkness corner"
+        // artifact.
+        float ao_floor = 0.30f;
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;
         // Specular reflection on flagged surfaces (the pedestal).

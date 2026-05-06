@@ -428,7 +428,14 @@ void main() {
             if (any_hit(origin_ao, d, ao_radius)) occluded += 1.0;
             ++taken;
         }
-        ao = 1.0 - (occluded / float(taken));
+        // Remap raw [0..1] AO into [ao_floor..1.0]. ao_floor caps how
+        // dark fully-occluded surfaces get; without it, three coincident
+        // occlusions at an inner corner stacked into near-black. 0.30
+        // is a reasonable default — clear AO contrast at simple edges
+        // while corners stay believable instead of pitch-pure black.
+        float raw = 1.0 - (occluded / float(taken));
+        float ao_floor_v = scene.rt_lod.w;
+        ao = mix(ao_floor_v, 1.0, raw);
     }
 
     // --- Path-traced GI (1..N bounces) ---
