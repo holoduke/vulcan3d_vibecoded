@@ -99,7 +99,7 @@ struct SceneUBO {
     // Grass shader knobs (read by grass.vert / grass.frag):
     //   x: height_scale (multiplies per-blade Y, 0.3..2.0)
     //   y: alpha_cutoff (side-taper discard, 0..0.6)
-    //   z: unused
+    //   z: slope_n_min  (blade fades to 0 below this stored n.y)
     //   w: unused
     glm::vec4  grass_extra;
 };

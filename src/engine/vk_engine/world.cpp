@@ -267,9 +267,11 @@ void VulkanEngine::init_world() {
         // overlaps a brush stay invisible — the wall geometry occludes
         // them from outside views.
         gp.keep_out_xz = glm::vec2(4.0f, 4.0f);
-        // 500k blades caps the instance buffer at ~25 MB and gives
-        // dense coverage when concentrated. Vertex throughput is fine.
-        gp.max_blades  = 500000;
+        // 2M placed blades: density slider 0..4 maps to a render
+        // fraction of (density / 4) × placed. So density=1.0 (the
+        // visual default) renders 500k blades, and the user can crank
+        // to 4.0 for the full 2M when they want a thicker field.
+        gp.max_blades  = 2000000;
         grass_ = build_grass(device_, allocator_,
                              graphics_queue_, graphics_queue_family_,
                              hm, gp);
@@ -1075,12 +1077,15 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdPushConstants(cmd, pipeline_layout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &gpc);
-        // Density slider scales the rendered instance count. Blades
-        // were placed in a low-discrepancy random order so rendering
-        // only the first N gives a uniformly sparser distribution.
+        // Density slider goes 0..4. We map (density / 4.0) onto the
+        // [0, total_placed] range so density=1.0 gives 25% of the
+        // placed blades (the original visual default after the 2M
+        // bump) and density=4.0 unleashes the whole pile. Halton
+        // placement order means any prefix is a uniformly sparser
+        // sampling of the field.
+        const float frac = std::clamp(rt_.grass_density, 0.0f, 4.0f) * 0.25f;
         uint32_t inst_n = static_cast<uint32_t>(
-            static_cast<float>(grass_.instance_count) *
-            std::clamp(rt_.grass_density, 0.0f, 1.0f));
+            static_cast<float>(grass_.instance_count) * frac);
         if (inst_n > 0) {
             vkCmdDrawIndexed(cmd, grass_.blade_mesh.index_count,
                              inst_n, 0, 0, 0);

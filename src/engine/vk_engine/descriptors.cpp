@@ -197,7 +197,8 @@ void VulkanEngine::update_scene_ubo() {
                                     rt_.terrain_h_rock_snow_end);
     data.grass_extra = glm::vec4(rt_.grass_height_scale,
                                  rt_.grass_alpha_cutoff,
-                                 0.0f, 0.0f);
+                                 rt_.grass_slope_n_min,
+                                 0.0f);
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

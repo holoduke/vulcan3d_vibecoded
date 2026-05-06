@@ -162,14 +162,21 @@ void main() {
     // Per-blade Y rotation, then translate to world.
     mat3 R = rotY(rotation);
 
-    // Smooth distance fade: shrink blade height to zero over the last
-    // 25% of grass_params.x. The hard cull-to-NaN at exactly grass_params.x
-    // produced a visible "ring" where blades popped in/out of existence.
-    // Shrinking instead of popping makes the boundary invisible.
+    // Smooth distance fade — blades shrink to zero over the last 25%
+    // of the max-distance slider so the cull doesn't pop visibly.
     float view_dist_base = distance(base_world, scene.camera_pos.xyz);
     float fade_start = pc.grass_params.x * 0.75;
     float fade = 1.0 - smoothstep(fade_start, pc.grass_params.x, view_dist_base);
     lp.y *= fade;
+
+    // Slope fade — blades whose stored heightmap-normal Y is below
+    // the user threshold shrink toward 0 height. Smoothstep makes
+    // the slope-density transition gradual instead of cutting blades
+    // off cliff-flat at one slope value.
+    float slope_n  = inRotHeight.z;
+    float slope_th = scene.grass_extra.z;
+    float slope_fade = smoothstep(slope_th - 0.10, slope_th + 0.05, slope_n);
+    lp.y *= slope_fade;
 
     vec3 world = R * lp + base_world;
 

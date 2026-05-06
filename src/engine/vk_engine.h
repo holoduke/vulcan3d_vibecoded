@@ -811,6 +811,11 @@ private:
         // earlier near the edges (more "rounded" silhouette); lower
         // = blades read as fuller/blockier rectangles.
         float grass_alpha_cutoff   = 0.4f;
+        // Slope cutoff: blades whose stored heightmap-normal Y is
+        // below this fade their height to 0 (smoothstep window).
+        // 1.0 = only perfectly flat ground; 0.55 = up to ~57° slope.
+        // 0.85 (default) ≈ 32° max slope.
+        float grass_slope_n_min    = 0.85f;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;

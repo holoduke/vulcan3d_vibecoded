@@ -163,24 +163,17 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
         // Reject by altitude band.
         if (wy < params.height_min || wy > params.height_max) continue;
 
-        // Slope acceptance — gradient + noise instead of a hard cut.
-        // Probability fades from 1.0 at flat ground to 0.0 below
-        // (min_normal_y - 0.15). Add a per-XZ simplex offset so the
-        // boundary breaks up into patches rather than tracing a clean
-        // contour line; without this the player saw an obvious linear
-        // gradient at the slope edge.
+        // Slope sampling — placement keeps a generous superset of
+        // blades (n.y >= 0.55, ~57° max). The strict slope cutoff is
+        // applied at shader-time via the grass_slope_max uniform so
+        // the user's UI slider reshapes the field without rebuilding
+        // the instance buffer. The per-position simplex offset still
+        // breaks up the boundary into patches rather than a clean
+        // contour line.
         glm::vec3 n = sample_n(ix, iz);
-        const float slope_window = 0.15f;
-        float slope_t = (n.y - (params.min_normal_y - slope_window)) /
-                        slope_window;
-        slope_t = std::clamp(slope_t, 0.0f, 1.0f);
-        slope_t = slope_t * slope_t * (3.0f - 2.0f * slope_t);   // smoothstep
-        // ±0.2 noise modulation. >0 makes patches survive on slightly
-        // steeper slopes than the average; <0 thins out marginally OK
-        // slopes so the boundary isn't uniform.
-        float noise = slope_noise.GetNoise(wx, wz);              // -1..1
-        slope_t = std::clamp(slope_t + noise * 0.2f, 0.0f, 1.0f);
-        if (u01(rng) > slope_t) continue;
+        float noise = slope_noise.GetNoise(wx, wz);   // -1..1
+        float n_with_noise = n.y + noise * 0.10f;
+        if (n_with_noise < 0.55f) continue;
 
         // Per-blade jitter — rotation, height variation, tint.
         // Layout matches grass.vert: 3 vec4s (pos+pad, rot/height+pad,
@@ -191,7 +184,10 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
         b.pos_pad        = glm::vec4(wx, wy, wz, 0.0f);
         float rotation   = rot(rng);
         float h_factor   = 0.65f + u01(rng) * 0.7f;
-        b.rot_height_pad = glm::vec4(rotation, h_factor, 0.0f, 0.0f);
+        // .z = surface normal Y at the blade, fed to grass.vert so it
+        // can fade blades on slopes when the user tightens the slope
+        // threshold via the Settings slider.
+        b.rot_height_pad = glm::vec4(rotation, h_factor, n_with_noise, 0.0f);
         b.tint_pad       = glm::vec4(random_tint(), 0.0f);
         blades.push_back(b);
         ++kept;
