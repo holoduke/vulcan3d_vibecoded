@@ -32,15 +32,15 @@ void VulkanEngine::apply_player_pushes(glm::vec3 pre_velocity) {
 
     // Use the cached per-body AABB built by rebuild_tick_aabbs this tick —
     // saves a Jolt body-mutex acquire + 8-corner mat-vec per dyn prop.
-    // Falls back to a fresh query if the cache isn't populated yet.
-    const bool have_cache = dyn_tick_aabb_valid_.size() == dyn_props_.size() &&
-                             dyn_tick_aabb_cache_.size() == dyn_props_.size();
+    // Falls back to a fresh query if the cache slot is for a different body
+    // or isn't populated yet.
+    const bool have_cache = dyn_tick_aabb_cache_.size() == dyn_props_.size();
     for (size_t i = 0; i < dyn_props_.size(); ++i) {
         const auto& dp = dyn_props_[i];
         glm::vec3 b_min, b_max;
-        if (have_cache && dyn_tick_aabb_valid_[i]) {
-            b_min = dyn_tick_aabb_cache_[i].min;
-            b_max = dyn_tick_aabb_cache_[i].max;
+        if (have_cache && dyn_tick_aabb_cache_[i].body_id == dp.body_id) {
+            b_min = dyn_tick_aabb_cache_[i].aabb.min;
+            b_max = dyn_tick_aabb_cache_[i].aabb.max;
         } else {
             glm::mat4 m;
             if (!physics_->get_body_world_matrix(dp.body_id, m)) continue;

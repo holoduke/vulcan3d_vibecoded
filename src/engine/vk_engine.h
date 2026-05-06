@@ -351,11 +351,18 @@ private:
     std::vector<collision::AABB> tick_aabbs_;
     // Per-dyn-prop AABB cache. Sleeping bodies reuse their last-computed
     // AABB instead of re-running the 8-corner mat-vec each physics tick.
-    // At 200 dyn props × 6 ticks/frame × 8 corners that was 9600 mat-vec
-    // per frame; now most of those are skipped once the bodies settle.
-    // Indexing matches dyn_props_; resized in rebuild_tick_aabbs.
-    std::vector<collision::AABB> dyn_tick_aabb_cache_;
-    std::vector<bool>            dyn_tick_aabb_valid_;
+    // At 100 dyn props × 6 ticks/frame × 8 corners that's ~5k mat-vec
+    // per frame skipped once the bodies settle. Indexing matches
+    // dyn_props_; the cached body_id catches FIFO-eviction renumbering
+    // (front-erase shifts every other slot down by 1, so a slot's body
+    // identity can change without size changing — without the body_id
+    // check the cached AABB would describe a now-removed box and the
+    // player would walk through the new occupant).
+    struct DynTickAabb {
+        collision::AABB aabb{};
+        uint32_t body_id = 0;   // 0 = invalid / not populated
+    };
+    std::vector<DynTickAabb> dyn_tick_aabb_cache_;
     void rebuild_tick_aabbs();
 
     // Per-frame cache of dynamic-box render state. Computed once at the top of

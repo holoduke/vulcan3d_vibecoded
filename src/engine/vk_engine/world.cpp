@@ -421,26 +421,29 @@ void VulkanEngine::rebuild_tick_aabbs() {
     tick_aabbs_.reserve(world_.aabbs.size() + dyn_props_.size());
     for (const auto& a : world_.aabbs) tick_aabbs_.push_back(a);
     if (!physics_) return;
-    // Sync cache size to dyn_props_; previously valid entries stay valid as
-    // long as the slot still indexes into the same body. Caller (spawn /
-    // remove) is responsible for invalidating slots that change identity —
-    // we conservatively recheck via is_body_active here.
     if (dyn_tick_aabb_cache_.size() != dyn_props_.size()) {
         dyn_tick_aabb_cache_.resize(dyn_props_.size());
-        dyn_tick_aabb_valid_.assign(dyn_props_.size(), false);
     }
     for (size_t idx = 0; idx < dyn_props_.size(); ++idx) {
         const auto& dp = dyn_props_[idx];
-        // If we already have a cache entry AND Jolt put the body to sleep,
-        // its world-space AABB hasn't changed since last compute — reuse.
+        DynTickAabb& slot = dyn_tick_aabb_cache_[idx];
+        // Slot identity check: the cached entry is only valid if it was
+        // populated for THIS body. FIFO eviction (front-erase + push_back)
+        // shifts every other slot down by 1, so a slot's body identity can
+        // change without dyn_props_.size() changing. Without this guard the
+        // stale cached AABB describes a now-removed box and the player
+        // walks through the new occupant.
+        const bool slot_matches = slot.body_id == dp.body_id;
         const bool active = physics_->is_body_active(dp.body_id);
-        if (!active && dyn_tick_aabb_valid_[idx]) {
-            tick_aabbs_.push_back(dyn_tick_aabb_cache_[idx]);
+        if (slot_matches && !active) {
+            // Sleeping body in a slot we already populated → AABB hasn't
+            // moved since last compute, reuse.
+            tick_aabbs_.push_back(slot.aabb);
             continue;
         }
         glm::mat4 m;
         if (!physics_->get_body_world_matrix(dp.body_id, m)) {
-            dyn_tick_aabb_valid_[idx] = false;
+            slot.body_id = 0;   // mark invalid
             continue;
         }
         glm::vec3 he = dp.full_size * 0.5f;
@@ -454,10 +457,9 @@ void VulkanEngine::rebuild_tick_aabbs() {
             mn = glm::min(mn, wc);
             mx = glm::max(mx, wc);
         }
-        collision::AABB ab{mn, mx};
-        dyn_tick_aabb_cache_[idx] = ab;
-        dyn_tick_aabb_valid_[idx] = true;
-        tick_aabbs_.push_back(ab);
+        slot.aabb = {mn, mx};
+        slot.body_id = dp.body_id;
+        tick_aabbs_.push_back(slot.aabb);
     }
 }
 
