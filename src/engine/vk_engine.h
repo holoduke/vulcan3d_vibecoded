@@ -231,6 +231,13 @@ private:
     };
     TerrainData terrain_data_{};
 
+    // Bilinearly sample the terrain heightmap at world XZ. Returns 0 if
+    // the heightmap isn't loaded or (x, z) is outside its grid. Used by
+    // the player update to clamp the kinematic capsule to the ground —
+    // Jolt's HeightFieldShape collides with crates/projectiles but the
+    // player runs on a custom AABB-sliding path that doesn't query Jolt.
+    float sample_terrain_height(float x, float z) const;
+
     // PBR-ish material textures. kTextureCount must match the size of the
     // sampler arrays in cube.frag.
     static constexpr int kTextureCount = 5;

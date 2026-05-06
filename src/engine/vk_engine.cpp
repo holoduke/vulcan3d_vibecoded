@@ -729,6 +729,22 @@ void VulkanEngine::run(const RunOptions& opts) {
                 bool was_on_ground = player_.on_ground;
                 game::update_player(player_, pin, tick_aabbs_, kFixedDt,
                                      world_.aabbs.size());
+                // Terrain ground clamp. update_player only collides
+                // against the AABB list (static brushes + dyn props);
+                // the heightfield isn't an AABB so the player would
+                // free-fall through it. Sample bilinearly and snap up
+                // if the player's feet sank below the ground.
+                {
+                    constexpr float kHalfHeight = 0.9f;
+                    float ground = sample_terrain_height(player_.position.x,
+                                                          player_.position.z);
+                    float feet = player_.position.y - kHalfHeight;
+                    if (feet < ground) {
+                        player_.position.y = ground + kHalfHeight;
+                        if (player_.velocity.y < 0.0f) player_.velocity.y = 0.0f;
+                        player_.on_ground = true;
+                    }
+                }
                 // Audio triggers from the player tick.
                 if (audio_ && state_ == State::Playing) {
                     // Jump: rising edge of leaving ground while pressing jump.

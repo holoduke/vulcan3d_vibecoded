@@ -284,14 +284,17 @@ void PhysicsWorld::add_static_boxes(const StaticBox* boxes, size_t count) {
 void PhysicsWorld::add_static_heightfield(const float* samples, int dim,
                                            glm::vec2 origin_xz, float cell_size) {
     if (samples == nullptr || dim <= 0) return;
-    // Jolt's HeightFieldShape wants a power-of-two block size (must divide
-    // sample dim). For dim=256 we pick 8 (256/8=32 blocks). For other dims
-    // pick the largest power-of-two ≤ 16 that divides dim, or 1 as fallback.
-    int block_size = 1;
-    for (int b = 16; b >= 1; b >>= 1) {
-        if (dim % b == 0) { block_size = b; break; }
-    }
+    // Jolt's HeightFieldShape requires the block size to:
+    //   - be in the range [2, 8] (asserted by Jolt — outside that the
+    //     shape Create() returns an error and the body is never added,
+    //     so the player falls through forever);
+    //   - divide mSampleCount = sample_count (= dim+1), not dim.
+    // Pick the largest valid block size that divides sample_count.
     const int sample_count = dim + 1;
+    int block_size = 2;
+    for (int b = 8; b >= 2; b >>= 1) {
+        if (sample_count % b == 0) { block_size = b; break; }
+    }
 
     JPH::HeightFieldShapeSettings ss(
         samples, JPH::Vec3(origin_xz.x, 0.0f, origin_xz.y),

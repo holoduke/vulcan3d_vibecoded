@@ -140,9 +140,12 @@ Mesh build_terrain_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
             uint32_t i10 = i00 + 1;
             uint32_t i01 = i00 + static_cast<uint32_t>(W);
             uint32_t i11 = i01 + 1;
-            // CCW from +Y view. (0,0)->(1,0)->(1,1)->(0,1)
-            indices.push_back(i00); indices.push_back(i10); indices.push_back(i11);
-            indices.push_back(i00); indices.push_back(i11); indices.push_back(i01);
+            // CCW when viewed from +Y so the terrain's outward normal is
+            // up. With X × Z = -Y, the (i00, i10, i11) order produced
+            // -Y normals; (i00, i11, i10) produces +Y. Same flip on the
+            // diagonal-opposite triangle.
+            indices.push_back(i00); indices.push_back(i11); indices.push_back(i10);
+            indices.push_back(i00); indices.push_back(i01); indices.push_back(i11);
         }
     }
 

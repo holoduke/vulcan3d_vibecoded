@@ -19,6 +19,30 @@
 
 namespace qlike {
 
+float VulkanEngine::sample_terrain_height(float x, float z) const {
+    if (terrain_data_.heights.empty() || terrain_data_.dim <= 0) return 0.0f;
+    const int W = terrain_data_.dim + 1;
+    float fx = (x - terrain_data_.origin_x) / terrain_data_.cell;
+    float fz = (z - terrain_data_.origin_z) / terrain_data_.cell;
+    if (fx < 0.0f || fz < 0.0f) return 0.0f;
+    int ix = static_cast<int>(std::floor(fx));
+    int iz = static_cast<int>(std::floor(fz));
+    if (ix >= terrain_data_.dim || iz >= terrain_data_.dim) return 0.0f;
+    float tx = fx - static_cast<float>(ix);
+    float tz = fz - static_cast<float>(iz);
+    auto h = [&](int x_, int z_) {
+        return terrain_data_.heights[static_cast<size_t>(z_) * static_cast<size_t>(W) +
+                                     static_cast<size_t>(x_)];
+    };
+    float h00 = h(ix,     iz);
+    float h10 = h(ix + 1, iz);
+    float h01 = h(ix,     iz + 1);
+    float h11 = h(ix + 1, iz + 1);
+    float h0 = h00 * (1.0f - tx) + h10 * tx;
+    float h1 = h01 * (1.0f - tx) + h11 * tx;
+    return h0 * (1.0f - tz) + h1 * tz;
+}
+
 void VulkanEngine::init_world() {
     cube_mesh_ = create_cube_mesh(device_, allocator_, graphics_queue_, graphics_queue_family_);
     cylinder_mesh_ = create_cylinder_mesh(device_, allocator_,
@@ -31,8 +55,11 @@ void VulkanEngine::init_world() {
     // (~1km²). See docs/terrain_plan.md for streaming/LOD/sculpt phases.
     {
         HeightmapParams hp{};
-        hp.dim = 256;
-        hp.cell_size = 4.0f;          // 4m per cell × 256 = 1024m square
+        // dim+1 must be a power of 2 so Jolt's HeightFieldShape can pick
+        // a valid block_size that divides the sample count. 255 cells
+        // → 256 samples per side → block_size 16. ~1km terrain.
+        hp.dim = 255;
+        hp.cell_size = 4.0f;          // 4m per cell × 255 = 1020m square
         hp.height_scale = 90.0f;
         hp.plateau_extent = glm::vec2(20.0f, 20.0f);
         hp.plateau_height = 14.0f;     // castle base sits at this Y
