@@ -4,8 +4,21 @@
 // miniaudio is a single-header library. Define the implementation in
 // exactly this TU; every other audio.cpp consumer just sees the small
 // AudioEngine wrapper.
+//
+// Vorbis (.ogg) isn't supported by the core miniaudio decoders — you
+// have to bring your own. miniaudio ships extras/stb_vorbis.c for
+// exactly this purpose; the documented dance is "header-only declare
+// stb_vorbis BEFORE miniaudio's implementation, then include
+// stb_vorbis again WITHOUT the header-only flag for its definitions".
+// That way miniaudio's internal Vorbis path links cleanly.
+#define STB_VORBIS_HEADER_ONLY
+#include "extras/stb_vorbis.c"
+
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
+
+#undef STB_VORBIS_HEADER_ONLY
+#include "extras/stb_vorbis.c"
 
 #include <list>
 #include <random>

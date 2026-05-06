@@ -87,11 +87,11 @@ void VulkanEngine::init() {
     // means silence; the renderer keeps working. Clip files are loaded
     // by name from assets/sounds/; missing files are ignored.
     audio_ = std::make_unique<AudioEngine>();
-    audio_->load_clip("shot",     "assets/sounds/shot.wav");
-    audio_->load_clip("impact",   "assets/sounds/impact.wav");
-    audio_->load_clip("jump",     "assets/sounds/jump.wav");
-    audio_->load_clip("step",     "assets/sounds/step.wav");
-    audio_->load_clip("land",     "assets/sounds/land.wav");
+    audio_->load_clip("shot",     "assets/sounds/shot.ogg");
+    audio_->load_clip("impact",   "assets/sounds/impact.ogg");
+    audio_->load_clip("jump",     "assets/sounds/jump.ogg");
+    audio_->load_clip("step",     "assets/sounds/step.ogg");
+    audio_->load_clip("land",     "assets/sounds/land.ogg");
     init_vulkan();
     init_pipeline_cache();
     init_swapchain();
