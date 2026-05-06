@@ -28,6 +28,7 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  terrain_params;
     vec4  terrain_h_low;
     vec4  terrain_h_high;
+    vec4  grass_extra;   // x: height_scale, y: alpha_cutoff
 } scene;
 
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
@@ -97,12 +98,13 @@ void main() {
     // auto-exposure boosts.
     lit = min(lit, vec3(0.32));
 
-    // Soft alpha across the blade UV — slightly tapered sides so
-    // adjacent blades blend visually without needing alpha-blend +
-    // back-to-front sort. Clipping to 0.4 keeps the shape solid.
+    // Soft alpha across the blade UV — adjacent blades blend without
+    // back-to-front sorting. Discard threshold from grass_extra.y so
+    // the user can slide the silhouette between full rectangle and
+    // tapered tip.
     float side_taper = smoothstep(0.0, 0.18, vUv.x) *
                        (1.0 - smoothstep(0.82, 1.0, vUv.x));
-    if (side_taper < 0.4 && vHeightRatio > 0.85) discard;
+    if (side_taper < scene.grass_extra.y && vHeightRatio > 0.85) discard;
 
     outColor = vec4(lit, 1.0);
     outMotion = vec2(0.0);   // wind motion not tracked — TAA tolerates

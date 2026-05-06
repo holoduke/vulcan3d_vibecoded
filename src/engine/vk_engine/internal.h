@@ -96,6 +96,12 @@ struct SceneUBO {
     //   x..y: dirt → rock (default 58..80)
     //   z..w: rock → snow (default 95..120)
     glm::vec4  terrain_h_high;
+    // Grass shader knobs (read by grass.vert / grass.frag):
+    //   x: height_scale (multiplies per-blade Y, 0.3..2.0)
+    //   y: alpha_cutoff (side-taper discard, 0..0.6)
+    //   z: unused
+    //   w: unused
+    glm::vec4  grass_extra;
 };
 
 // ---- KHR ray tracing entry points ----

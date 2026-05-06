@@ -802,6 +802,15 @@ private:
         // Peak per-blade tip wind sway in metres. The sway is per-blade
         // sin/cos so neighbours move out of phase.
         float grass_wind           = 0.04f;
+        // Density: fraction of placed blades to actually draw (0..1).
+        // Drives instance count in vkCmdDrawIndexed — cheap perf knob.
+        float grass_density        = 1.0f;
+        // Per-blade Y multiplier (0.3..2.0). 1.0 = built-in 0.55 m blades.
+        float grass_height_scale   = 1.0f;
+        // Side-taper alpha-discard threshold. Higher = blades cut off
+        // earlier near the edges (more "rounded" silhouette); lower
+        // = blades read as fuller/blockier rectangles.
+        float grass_alpha_cutoff   = 0.4f;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;

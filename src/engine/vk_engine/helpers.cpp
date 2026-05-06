@@ -15,7 +15,7 @@ namespace qlike {
 // 256-byte limit every modern desktop GPU exposes. If a target device caps
 // at 128, this layout would need to spill into a small per-draw UBO.
 static_assert(sizeof(PushConstants) == 256, "push constant layout");
-static_assert(sizeof(SceneUBO) == 256, "scene ubo layout");
+static_assert(sizeof(SceneUBO) == 272, "scene ubo layout");
 
 RtFuncs g_rt;
 

@@ -28,6 +28,7 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  terrain_params;
     vec4  terrain_h_low;
     vec4  terrain_h_high;
+    vec4  grass_extra;   // x: height_scale, y: alpha_cutoff
 } scene;
 
 layout(push_constant) uniform PC {
@@ -66,9 +67,11 @@ void main() {
     float height_scale = inRotHeight.y;
     vec3  base_world   = inWorldPos.xyz;
 
-    // Local position scaled by per-blade height variation.
+    // Local position scaled by per-blade height variation × the
+    // global grass height slider so users can dial blade height
+    // up/down in real time.
     vec3 lp = inPos;
-    lp.y *= height_scale;
+    lp.y *= height_scale * scene.grass_extra.x;
 
     // ---- Wind: a moving wave (gust band) travelling across the world.
     // The whole field doesn't bow at once — only blades the gust is

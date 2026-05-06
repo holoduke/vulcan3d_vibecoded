@@ -1075,8 +1075,16 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdPushConstants(cmd, pipeline_layout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &gpc);
-        vkCmdDrawIndexed(cmd, grass_.blade_mesh.index_count,
-                         grass_.instance_count, 0, 0, 0);
+        // Density slider scales the rendered instance count. Blades
+        // were placed in a low-discrepancy random order so rendering
+        // only the first N gives a uniformly sparser distribution.
+        uint32_t inst_n = static_cast<uint32_t>(
+            static_cast<float>(grass_.instance_count) *
+            std::clamp(rt_.grass_density, 0.0f, 1.0f));
+        if (inst_n > 0) {
+            vkCmdDrawIndexed(cmd, grass_.blade_mesh.index_count,
+                             inst_n, 0, 0, 0);
+        }
         // Restore the world pipeline + cube mesh bindings for the
         // brush loop below.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);

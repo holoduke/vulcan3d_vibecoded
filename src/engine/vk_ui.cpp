@@ -183,8 +183,12 @@ void VulkanEngine::build_menu_ui() {
     ImGui::Spacing();
     if (ImGui::CollapsingHeader("Grass")) {
         ImGui::Checkbox("grass enabled", &rt_.grass_enabled);
-        ImGui::SliderFloat("grass distance (m)", &rt_.grass_distance, 10.0f, 200.0f);
-        ImGui::SliderFloat("grass wind (m)",     &rt_.grass_wind,      0.0f, 0.30f);
+        ImGui::SliderFloat("density",       &rt_.grass_density,      0.0f, 1.0f);
+        ImGui::SliderFloat("height scale",  &rt_.grass_height_scale, 0.30f, 2.0f);
+        ImGui::SliderFloat("distance (m)",  &rt_.grass_distance,    10.0f, 200.0f);
+        ImGui::SliderFloat("wind (m)",      &rt_.grass_wind,         0.0f, 0.30f);
+        ImGui::SliderFloat("alpha cutoff",  &rt_.grass_alpha_cutoff, 0.0f, 0.6f,
+                           "%.2f (lower = chunkier blade)");
     }
 
     ImGui::Spacing();
