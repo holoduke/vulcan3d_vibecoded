@@ -8,7 +8,6 @@ skipped — the game runs without sound if this dir is empty.
 | `shot.wav`    | Each fired bullet (local)   | 0.2-0.4 s        |
 | `impact.wav`  | Bullet hits surface (3D)    | 0.3-0.6 s        |
 | `jump.wav`    | Player leaves ground        | 0.2-0.4 s        |
-| `step.wav`    | Looping while walking       | 0.4-0.8 s seamless loop |
 | `land.wav`    | Player touches ground       | 0.2-0.4 s        |
 
 Files must be `.wav` (PCM 16-bit / float). miniaudio also accepts MP3 +

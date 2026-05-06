@@ -90,7 +90,6 @@ void VulkanEngine::init() {
     audio_->load_clip("shot",     "assets/sounds/shot.ogg");
     audio_->load_clip("impact",   "assets/sounds/impact.ogg");
     audio_->load_clip("jump",     "assets/sounds/jump.ogg");
-    audio_->load_clip("step",     "assets/sounds/step.ogg");
     audio_->load_clip("land",     "assets/sounds/land.ogg");
     init_vulkan();
     init_pipeline_cache();
@@ -739,15 +738,6 @@ void VulkanEngine::run(const RunOptions& opts) {
                     // Land: falling edge — touched ground after being airborne.
                     if (!was_on_ground && player_.on_ground) {
                         audio_->play_local("land", 0.6f, 0.05f, 0.10f);
-                    }
-                    // Footstep loop on while moving and grounded.
-                    glm::vec2 hv(player_.velocity.x, player_.velocity.z);
-                    bool moving = glm::length(hv) > 1.5f;
-                    bool want_step_loop = moving && player_.on_ground;
-                    if (want_step_loop && !audio_->is_loop_playing("step")) {
-                        audio_->start_loop("step", 0.4f);
-                    } else if (!want_step_loop && audio_->is_loop_playing("step")) {
-                        audio_->stop_loop("step");
                     }
                 }
                 apply_player_pushes(pre_vel);
