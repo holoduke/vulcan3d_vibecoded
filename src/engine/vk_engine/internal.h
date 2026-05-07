@@ -113,6 +113,12 @@ struct SceneUBO {
     // update_scene_ubo from sun_pitch/sun_yaw + the player position;
     // texel-grid-snapped so distant edges don't crawl as the camera moves.
     glm::mat4  light_vp;
+    // Misc terrain knobs:
+    //   x: shading contrast — power exponent on n_dot_l for terrain.
+    //      1.0 = pure Lambert (default), 2..6 sharpens the lit/shadow
+    //      transition by darkening grazing-angle areas.
+    //   y, z, w: unused.
+    glm::vec4  terrain_extra;
 };
 
 // ---- KHR ray tracing entry points ----

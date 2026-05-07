@@ -15,8 +15,8 @@ namespace qlike {
 // 256-byte limit every modern desktop GPU exposes. If a target device caps
 // at 128, this layout would need to spill into a small per-draw UBO.
 static_assert(sizeof(PushConstants) == 256, "push constant layout");
-// 288 → 352 with the addition of `mat4 light_vp` (sun shadow map view-proj).
-static_assert(sizeof(SceneUBO) == 352, "scene ubo layout");
+// 352 → 368 with the addition of `vec4 terrain_extra`.
+static_assert(sizeof(SceneUBO) == 368, "scene ubo layout");
 
 RtFuncs g_rt;
 

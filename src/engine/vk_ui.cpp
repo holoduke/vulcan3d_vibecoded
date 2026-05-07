@@ -326,6 +326,8 @@ void VulkanEngine::build_menu_ui() {
         if (ImGui::Combo("Shadow bake supersample", &ss_idx, ss_labels, 3)) {
             rt_.terrain_bake_supersample = ss_values[ss_idx];
         }
+        ImGui::SliderFloat("Terrain shading contrast",
+                            &rt_.terrain_shading_contrast, 0.5f, 6.0f, "%.2f");
         // Keep them ordered so the band logic stays valid.
         if (rt_.terrain_lod2 < rt_.terrain_lod1 + 20.0f)
             rt_.terrain_lod2 = rt_.terrain_lod1 + 20.0f;

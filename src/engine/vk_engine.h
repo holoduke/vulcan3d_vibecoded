@@ -965,6 +965,12 @@ private:
         // medium/far shadows). Memory: 1 = ~4MB, 2 = ~17MB, 4 = ~67MB.
         // Bake time scales linearly; worker thread handles it.
         int terrain_bake_supersample = 1;
+        // Power exponent on n_dot_l for terrain shading. 1 = standard
+        // Lambert (gradient is the natural cosine falloff). >1 sharpens
+        // the lit→shadow transition (grazing slopes go darker faster);
+        // <1 softens. Visible difference between e.g. 2.0 and 4.0 on
+        // mountain slopes.
+        float terrain_shading_contrast = 1.0f;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;

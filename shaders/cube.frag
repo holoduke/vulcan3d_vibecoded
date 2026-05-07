@@ -57,6 +57,8 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  terrain_h_high;
     vec4  grass_extra;       // unused in cube.frag вЂ” laid out so grass_extra2.w is reachable
     vec4  grass_extra2;      // .w = terrain_debug_mode (0=off, 1=Lambert, 2=normal, 3=face)
+    mat4  light_vp;          // unused in cube.frag — keeps UBO layout aligned
+    vec4  terrain_extra;     // .x = terrain shading contrast (n_dot_l power)
 } scene;
 
 // Distance-based sample LOD. fragments within lod_near get full samples;
@@ -570,6 +572,13 @@ void main() {
     // looking radically different is what the user reported.
     float n_dot_l_raw = max(dot(N, L), 0.0);
     float n_dot_l = n_dot_l_raw;
+    // Terrain shading contrast: pow on n_dot_l. exp=1 → standard
+    // Lambert; exp>1 sharpens the lit→shadow transition by darkening
+    // grazing slopes faster. Brushes/dyn-props keep linear Lambert.
+    if (is_terrain_pre) {
+        float contrast = max(0.25, scene.terrain_extra.x);
+        n_dot_l = pow(n_dot_l, contrast);
+    }
 
     // Per-pixel seed WITH the frame counter вЂ” TAA accumulates over ~8
     // frames, so animating the noise lets temporal averaging resolve the
