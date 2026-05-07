@@ -297,30 +297,33 @@ void main() {
             outColor = vec4(normalize(fn) * 0.5 + 0.5, 1.0);
             return;
         } else if (dbg == 4) {
-            // Lambert + sun shadow with hybrid RT/bake. RT shadow at
-            // close range (matches BLAS one-to-one), heightmap bake
-            // past 200 m (matches the rasterised LOD surface). The
-            // bake gives terrain self-shadow without false-hits from
-            // BLAS detail above the under-shooting LOD-2/3 raster.
+            // Lambert + sun shadow. Hybrid RT/bake: RT only for the
+            // first 40m where LOD 0 raster matches the BLAS exactly,
+            // then full heightmap bake. The bake was traced from the
+            // same heightmap so the shadow values match the rasterised
+            // surface at any LOD — no false hits.
             vec3 L = normalize(scene.sun_direction.xyz);
             float ndl = max(dot(N, L), 0.0);
             float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
-            // RT contribution.
-            vec3 origin = vWorldPos + N * 0.04;
-            float sh_rt = any_hit(origin, L, 200.0) ? 1.0 : 0.0;
-            // Bake contribution. World extent matches heightmap
-            // origin = -side/2 with 1m cells in the new layout.
+
+            // Bake — sample first so we always have it.
             ivec2 sz = textureSize(u_terrain_shadow, 0);
-            float side = float(sz.x) * 1.0;
+            float side = float(sz.x - 1) * 1.0;     // dim cells × cell_size
             vec2 uv = (vWorldPos.xz / side) + vec2(0.5);
             float sh_bake = 0.0;
             if (all(greaterThanEqual(uv, vec2(0.0))) &&
                 all(lessThanEqual(uv, vec2(1.0)))) {
                 sh_bake = step(0.5, texture(u_terrain_shadow, uv).r);
             }
-            // Blend: 0% bake near, 100% bake far.
-            float t = smoothstep(80.0, 200.0, dist_to_cam);
-            float sh = mix(sh_rt, sh_bake, t);
+            float sh = sh_bake;
+            // Mix in RT only at very close range to capture small
+            // castle/dyn-prop shadows the bake doesn't cover.
+            if (dist_to_cam < 80.0) {
+                vec3 origin = vWorldPos + N * 0.04;
+                float sh_rt = any_hit(origin, L, 200.0) ? 1.0 : 0.0;
+                float near_t = 1.0 - smoothstep(40.0, 80.0, dist_to_cam);
+                sh = mix(sh, sh_rt, near_t);
+            }
             vec3 lit = vec3(0.55) * (0.25 + 0.75 * ndl * (1.0 - sh));
             outColor = vec4(lit, 1.0);
             return;
