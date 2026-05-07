@@ -793,19 +793,55 @@ void VulkanEngine::run(const RunOptions& opts) {
                 bool was_on_ground = player_.on_ground;
                 game::update_player(player_, pin, tick_aabbs_, kFixedDt,
                                      world_.aabbs.size());
-                // Terrain ground clamp. update_player only collides
-                // against the AABB list (static brushes + dyn props);
-                // the heightfield isn't an AABB so the player would
-                // free-fall through it. Sample bilinearly and snap up
-                // if the player's feet sank below the ground.
+                // Terrain ground clamp. update_player collides only
+                // against AABBs; the heightfield isn't an AABB so the
+                // player would free-fall through it. We:
+                //   1. Sample terrain at player XZ.
+                //   2. Estimate slope normal from finite differences;
+                //      anything steeper than ~50° is a "wall" — no
+                //      ground-clamp, the player slides off.
+                //   3. If feet sank below ground, snap up.
+                //   4. STICKY GROUNDING: if the player WAS grounded
+                //      last tick and is still moving downward (or zero)
+                //      vertically and their feet sit within kStepDown
+                //      above the new ground sample, snap them DOWN.
+                //      Without this, walking down a slope alternates
+                //      airborne/grounded each frame — gravity accumulates
+                //      between snaps and the player slides faster than
+                //      they intended (the user's "weird sliding").
                 {
-                    constexpr float kHalfHeight = 0.9f;
-                    float ground = sample_terrain_height(player_.position.x,
-                                                          player_.position.z);
+                    constexpr float kHalfHeight   = 0.9f;
+                    constexpr float kStepDown     = 0.45f;
+                    constexpr float kMinGroundN   = 0.55f;  // ≈56° max walkable
+                    constexpr float kSampleDelta  = 1.0f;
+                    float gx = player_.position.x;
+                    float gz = player_.position.z;
+                    float h0  = sample_terrain_height(gx, gz);
+                    float hpx = sample_terrain_height(gx + kSampleDelta, gz);
+                    float hnx = sample_terrain_height(gx - kSampleDelta, gz);
+                    float hpz = sample_terrain_height(gx, gz + kSampleDelta);
+                    float hnz = sample_terrain_height(gx, gz - kSampleDelta);
+                    glm::vec3 n(-(hpx - hnx) / (2.0f * kSampleDelta),
+                                 1.0f,
+                                 -(hpz - hnz) / (2.0f * kSampleDelta));
+                    n = glm::normalize(n);
+                    bool walkable = n.y > kMinGroundN;
+
                     float feet = player_.position.y - kHalfHeight;
-                    if (feet < ground) {
-                        player_.position.y = ground + kHalfHeight;
+                    if (feet < h0) {
+                        // Snapped up onto terrain.
+                        player_.position.y = h0 + kHalfHeight;
                         if (player_.velocity.y < 0.0f) player_.velocity.y = 0.0f;
+                        if (walkable) player_.on_ground = true;
+                    } else if (walkable && was_on_ground &&
+                               player_.velocity.y <= 0.5f &&
+                               (feet - h0) < kStepDown) {
+                        // Sticky-ground: pull the player down onto the
+                        // surface they were just on. Keeps slopes and
+                        // stairs feeling "stuck to the ground" instead of
+                        // hopping on every step.
+                        player_.position.y = h0 + kHalfHeight;
+                        player_.velocity.y = 0.0f;
                         player_.on_ground = true;
                     }
                 }
