@@ -309,48 +309,6 @@ void VulkanEngine::build_menu_ui() {
         ImGui::Checkbox("debug overlay (frustum + bake bounds)",
                          &rt_.shadow_debug_overlay);
 
-        ImGui::SeparatorText("Terrain LOD distances");
-        // Master detail multiplier — scales all three LOD distances. The
-        // simple knob most users want; the three sliders below give fine
-        // control if needed.
-        ImGui::SliderFloat("Terrain detail (multiplier)",
-                            &rt_.terrain_lod_scale, 0.5f, 4.0f, "%.2fx");
-        ImGui::SliderFloat("LOD 0->1 (m)", &rt_.terrain_lod1,  20.0f, 1000.0f);
-        ImGui::SliderFloat("LOD 1->2 (m)", &rt_.terrain_lod2,  60.0f, 2000.0f);
-        ImGui::SliderFloat("LOD 2->3 (m)", &rt_.terrain_lod3, 120.0f, 4000.0f);
-
-        const char* ss_labels[] = { "1x (native)", "2x (sub-cell)", "4x (sharp far)" };
-        const int ss_values[] = { 1, 2, 4 };
-        int ss_idx = 0;
-        for (int i = 0; i < 3; ++i) if (rt_.terrain_bake_supersample == ss_values[i]) { ss_idx = i; break; }
-        if (ImGui::Combo("Shadow bake supersample", &ss_idx, ss_labels, 3)) {
-            rt_.terrain_bake_supersample = ss_values[ss_idx];
-        }
-        ImGui::SliderFloat("Terrain shading contrast",
-                            &rt_.terrain_shading_contrast, 0.5f, 6.0f, "%.2f");
-        // Keep them ordered so the band logic stays valid.
-        if (rt_.terrain_lod2 < rt_.terrain_lod1 + 20.0f)
-            rt_.terrain_lod2 = rt_.terrain_lod1 + 20.0f;
-        if (rt_.terrain_lod3 < rt_.terrain_lod2 + 20.0f)
-            rt_.terrain_lod3 = rt_.terrain_lod2 + 20.0f;
-
-        ImGui::SeparatorText("Terrain debug");
-        const char* terrain_debug_labels[] = {
-            "off (full shading)",
-            "simple Lambert (no RT/AO/GI)",
-            "show vertex normal",
-            "show face normal",
-            "4: Lambert + RT shadow",
-            "5: + height layers",
-            "6: + slope-rock",
-            "7: + cavity AO",
-            "8: + triplanar detail",
-            "9: + RTAO",
-            "10: + GI bounce",
-        };
-        ImGui::Combo("terrain debug", &rt_.terrain_debug_mode,
-                      terrain_debug_labels, 11);
-
         ImGui::SeparatorText("Ambient Occlusion (RT)");
         ImGui::SliderInt("AO samples (0=off)", &rt_.ao_samples, 0, 64);
         ImGui::SliderFloat("AO radius", &rt_.ao_radius, 0.1f, 8.0f);
@@ -366,49 +324,6 @@ void VulkanEngine::build_menu_ui() {
                           &rt_.gi_shadow_max_bounce, 0, 5);
         ImGui::SliderFloat("GI strength", &rt_.gi_strength, 0.0f, 3.0f);
         ImGui::SliderFloat("GI radius", &rt_.gi_radius, 1.0f, 400.0f);
-
-        ImGui::SeparatorText("Terrain shader");
-        ImGui::SliderFloat("atmospheric fog",  &rt_.terrain_fog_strength,    0.0f, 1.5f);
-        ImGui::SliderFloat("light wrap",       &rt_.terrain_wrap_strength,   0.0f, 1.0f);
-        ImGui::SliderFloat("detail brightness",&rt_.terrain_detail_strength, 0.0f, 3.0f);
-        ImGui::SliderFloat("shadow softness x",&rt_.terrain_shadow_softness_scale, 0.05f, 1.5f);
-        if (ImGui::TreeNode("layer transitions (height in metres)")) {
-            ImGui::SliderFloat("sand→grass start", &rt_.terrain_h_sand_grass_start,  -10.0f,  60.0f);
-            ImGui::SliderFloat("sand→grass end",   &rt_.terrain_h_sand_grass_end,    -10.0f,  60.0f);
-            ImGui::SliderFloat("grass→dirt start", &rt_.terrain_h_grass_dirt_start,    0.0f, 100.0f);
-            ImGui::SliderFloat("grass→dirt end",   &rt_.terrain_h_grass_dirt_end,      0.0f, 100.0f);
-            ImGui::SliderFloat("dirt→rock start",  &rt_.terrain_h_dirt_rock_start,    20.0f, 150.0f);
-            ImGui::SliderFloat("dirt→rock end",    &rt_.terrain_h_dirt_rock_end,      20.0f, 150.0f);
-            ImGui::SliderFloat("rock→snow start",  &rt_.terrain_h_rock_snow_start,    50.0f, 200.0f);
-            ImGui::SliderFloat("rock→snow end",    &rt_.terrain_h_rock_snow_end,      50.0f, 200.0f);
-            ImGui::TreePop();
-        }
-
-        ImGui::SeparatorText("Terrain sculpt (Phase 4)");
-        ImGui::Checkbox("Edit mode (left-click sculpts, not fires)",
-                        &terrain_edit_mode_);
-        if (terrain_edit_mode_) {
-            const char* modes[] = {"Raise", "Lower", "Smooth", "Flatten"};
-            int mode_i = static_cast<int>(terrain_brush_mode_);
-            if (ImGui::Combo("brush mode", &mode_i, modes, IM_ARRAYSIZE(modes))) {
-                terrain_brush_mode_ = static_cast<TerrainBrushMode>(mode_i);
-            }
-            ImGui::SliderFloat("brush radius (m)", &terrain_brush_radius_, 1.0f, 60.0f);
-            ImGui::SliderFloat("brush strength (m/s)", &terrain_brush_strength_,
-                               0.5f, 60.0f);
-            if (terrain_brush_mode_ == TerrainBrushMode::Flatten) {
-                ImGui::SliderFloat("flatten target Y",
-                                   &terrain_brush_flatten_target_, 0.0f, 200.0f);
-            }
-            if (terrain_brush_has_hit_) {
-                ImGui::Text("brush at: (%.1f, %.1f, %.1f)",
-                            terrain_brush_world_pos_.x,
-                            terrain_brush_world_pos_.y,
-                            terrain_brush_world_pos_.z);
-            } else {
-                ImGui::TextDisabled("aim at terrain to engage brush");
-            }
-        }
 
         ImGui::SeparatorText("Anti-aliasing (TAA + Halton sub-pixel jitter)");
         ImGui::Checkbox("sub-pixel jitter", &rt_.taa_jitter_enabled);
@@ -470,6 +385,91 @@ void VulkanEngine::build_menu_ui() {
             rt_.gi_samples = 16;     rt_.gi_strength = 1.0f;
             rt_.gi_radius = 200.0f;  rt_.gi_bounces = 4;
         }
+    }
+
+    if (ImGui::CollapsingHeader("Terrain", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SeparatorText("LOD distances");
+        ImGui::SliderFloat("Terrain detail (multiplier)",
+                            &rt_.terrain_lod_scale, 0.5f, 4.0f, "%.2fx");
+        ImGui::SliderFloat("LOD 0->1 (m)", &rt_.terrain_lod1,  20.0f, 1000.0f);
+        ImGui::SliderFloat("LOD 1->2 (m)", &rt_.terrain_lod2,  60.0f, 2000.0f);
+        ImGui::SliderFloat("LOD 2->3 (m)", &rt_.terrain_lod3, 120.0f, 4000.0f);
+        if (rt_.terrain_lod2 < rt_.terrain_lod1 + 20.0f)
+            rt_.terrain_lod2 = rt_.terrain_lod1 + 20.0f;
+        if (rt_.terrain_lod3 < rt_.terrain_lod2 + 20.0f)
+            rt_.terrain_lod3 = rt_.terrain_lod2 + 20.0f;
+
+        ImGui::SeparatorText("Shading");
+        ImGui::SliderFloat("atmospheric fog",  &rt_.terrain_fog_strength,    0.0f, 1.5f);
+        ImGui::SliderFloat("light wrap",       &rt_.terrain_wrap_strength,   0.0f, 1.0f);
+        ImGui::SliderFloat("detail brightness",&rt_.terrain_detail_strength, 0.0f, 3.0f);
+        ImGui::SliderFloat("shadow softness x",&rt_.terrain_shadow_softness_scale, 0.05f, 1.5f);
+        ImGui::SliderFloat("Terrain shading contrast",
+                            &rt_.terrain_shading_contrast, 0.5f, 6.0f, "%.2f");
+        {
+            const char* ss_labels[] = { "1x (native)", "2x (sub-cell)", "4x (sharp far)" };
+            const int ss_values[] = { 1, 2, 4 };
+            int ss_idx = 0;
+            for (int i = 0; i < 3; ++i) if (rt_.terrain_bake_supersample == ss_values[i]) { ss_idx = i; break; }
+            if (ImGui::Combo("Shadow bake supersample", &ss_idx, ss_labels, 3)) {
+                rt_.terrain_bake_supersample = ss_values[ss_idx];
+            }
+        }
+
+        if (ImGui::TreeNode("Layer transitions (height in metres)")) {
+            ImGui::SliderFloat("sand->grass start", &rt_.terrain_h_sand_grass_start,  -10.0f,  60.0f);
+            ImGui::SliderFloat("sand->grass end",   &rt_.terrain_h_sand_grass_end,    -10.0f,  60.0f);
+            ImGui::SliderFloat("grass->dirt start", &rt_.terrain_h_grass_dirt_start,    0.0f, 100.0f);
+            ImGui::SliderFloat("grass->dirt end",   &rt_.terrain_h_grass_dirt_end,      0.0f, 100.0f);
+            ImGui::SliderFloat("dirt->rock start",  &rt_.terrain_h_dirt_rock_start,    20.0f, 150.0f);
+            ImGui::SliderFloat("dirt->rock end",    &rt_.terrain_h_dirt_rock_end,      20.0f, 150.0f);
+            ImGui::SliderFloat("rock->snow start",  &rt_.terrain_h_rock_snow_start,    50.0f, 200.0f);
+            ImGui::SliderFloat("rock->snow end",    &rt_.terrain_h_rock_snow_end,      50.0f, 200.0f);
+            ImGui::TreePop();
+        }
+
+        ImGui::SeparatorText("Sculpt brush");
+        ImGui::Checkbox("Edit mode (left-click sculpts, not fires)",
+                        &terrain_edit_mode_);
+        if (terrain_edit_mode_) {
+            const char* modes[] = {"Raise", "Lower", "Smooth", "Flatten"};
+            int mode_i = static_cast<int>(terrain_brush_mode_);
+            if (ImGui::Combo("brush mode", &mode_i, modes, IM_ARRAYSIZE(modes))) {
+                terrain_brush_mode_ = static_cast<TerrainBrushMode>(mode_i);
+            }
+            ImGui::SliderFloat("brush radius (m)", &terrain_brush_radius_, 1.0f, 60.0f);
+            ImGui::SliderFloat("brush strength (m/s)", &terrain_brush_strength_,
+                               0.5f, 60.0f);
+            if (terrain_brush_mode_ == TerrainBrushMode::Flatten) {
+                ImGui::SliderFloat("flatten target Y",
+                                   &terrain_brush_flatten_target_, 0.0f, 200.0f);
+            }
+            if (terrain_brush_has_hit_) {
+                ImGui::Text("brush at: (%.1f, %.1f, %.1f)",
+                            terrain_brush_world_pos_.x,
+                            terrain_brush_world_pos_.y,
+                            terrain_brush_world_pos_.z);
+            } else {
+                ImGui::TextDisabled("aim at terrain to engage brush");
+            }
+        }
+
+        ImGui::SeparatorText("Debug");
+        const char* terrain_debug_labels[] = {
+            "off (full shading)",
+            "simple Lambert (no RT/AO/GI)",
+            "show vertex normal",
+            "show face normal",
+            "4: Lambert + RT shadow",
+            "5: + height layers",
+            "6: + slope-rock",
+            "7: + cavity AO",
+            "8: + triplanar detail",
+            "9: + RTAO",
+            "10: + GI bounce",
+        };
+        ImGui::Combo("terrain debug", &rt_.terrain_debug_mode,
+                      terrain_debug_labels, 11);
     }
 
     ImGui::Spacing();
