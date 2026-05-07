@@ -82,23 +82,29 @@ void bake_heightmap_shadow_tile(const Heightmap& hm, glm::vec3 sun_dir,
 
 // Phase 2 chunked terrain: split the heightmap into a grid of chunks,
 // each with its own full-LOD vertex+index buffer plus a sparser
-// half-LOD index buffer that re-indexes the same vertex buffer at every
-// other grid step. Per-frame, the renderer picks LOD per chunk based on
-// distance to the camera, frustum-culls invisible chunks, and draws.
+// stride-N index buffers that re-index the same vertex buffer (LOD 0 = full,
+// LOD 1 = stride 2, LOD 2 = stride 4, LOD 3 = stride 8). Per-frame, the
+// renderer picks LOD per chunk based on distance to the camera. Each LOD's
+// index buffer also includes a "skirt" — a thin downward strip around the
+// chunk perimeter — to hide cracks at LOD-mismatched chunk seams without
+// needing edge stitching.
 //
 // The vertex buffer is also kept on the host side (`positions` stores
 // per-vertex world Y) so Phase 4 sculpt can apply heightmap edits then
-// rebuild the affected chunk meshes incrementally.
+// rebuild the affected chunk meshes incrementally. Skirt vertices live
+// in the same buffer past the interior block (offset = sample_dim²).
+constexpr int kTerrainLodCount = 4;
 struct TerrainChunk {
-    Mesh mesh{};                       // full-LOD VBO + IBO
-    VkBuffer ibo_half = VK_NULL_HANDLE; // half-LOD index buffer
-    VmaAllocation ibo_half_alloc = nullptr;
-    uint32_t index_count_half = 0;
+    Mesh mesh{};                                // VBO (interior + skirt verts) and LOD-0 IBO
+    VkBuffer      ibo_lod[kTerrainLodCount - 1] = { VK_NULL_HANDLE };
+    VmaAllocation ibo_lod_alloc[kTerrainLodCount - 1] = { nullptr };
+    uint32_t      index_count_lod[kTerrainLodCount] = { 0 };  // [0] mirrors mesh.index_count
     int cx = 0, cz = 0;                // grid coords (0..N-1)
     int origin_ix = 0, origin_iz = 0;  // first heightmap sample
     int sample_dim = 0;                // samples per chunk side (chunk_cells+1)
     glm::vec3 aabb_min{0.0f};
     glm::vec3 aabb_max{0.0f};
+    glm::vec3 center{0.0f};            // world-space chunk centre — used for LOD distance
 };
 
 struct TerrainChunkSet {

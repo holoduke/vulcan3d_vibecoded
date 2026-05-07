@@ -22,6 +22,30 @@
 
 namespace qlike {
 
+// Distance-based LOD selector for terrain chunks. Used by all three
+// terrain draw paths (depth pre-pass, color pass, shadow pass) so LOD
+// stays consistent — if the pre-pass picked half-LOD and the color
+// pass picked full, the depth values would mismatch and the color
+// pass's LESS_OR_EQUAL test would discard fragments. Thresholds are
+// in metres of camera-XZ-to-chunk-centre-XZ distance.
+//
+//   < 80 m    full   (stride 1)
+//   < 160 m   half   (stride 2)
+//   < 320 m   quarter(stride 4)
+//   ≥ 320 m   eighth (stride 8)
+//
+// Skirts on each LOD's index buffer hide the cracks that would
+// otherwise appear at LOD-mismatched chunk seams.
+static int pick_terrain_lod(const TerrainChunk& c, glm::vec3 cam_xz) {
+    float dx = c.center.x - cam_xz.x;
+    float dz = c.center.z - cam_xz.z;
+    float d = std::sqrt(dx * dx + dz * dz);
+    if (d <  80.0f) return 0;
+    if (d < 160.0f) return 1;
+    if (d < 320.0f) return 2;
+    return 3;
+}
+
 void VulkanEngine::apply_terrain_brush(float dt) {
     if (!terrain_brush_has_hit_ || terrain_chunks_.chunks.empty()) return;
     if (terrain_data_.heights.empty()) return;
@@ -618,17 +642,21 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     }
 
-    // Terrain chunks — frustum-culled too. Without this every chunk got
-    // rasterised; with ~100 chunks at high LOD that flooded the depth
-    // pipeline and triggered TDR after a few seconds of moving.
+    // Terrain chunks — frustum-culled, distance-LOD'd. Distance metric is
+    // camera-to-chunk (not light-to-chunk) so terrain casters share the
+    // same LOD selection as the main render — keeps the cost bounded
+    // and matches the resolution the user actually sees.
     if (!terrain_chunks_.chunks.empty()) {
+        glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(light_frustum, c.aabb_min, c.aabb_max)) continue;
+            int lod = pick_terrain_lod(c, cam);
             VkDeviceSize toff = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
-            vkCmdBindIndexBuffer(cmd, c.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+            VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
+            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
             push_shadow(glm::mat4(1.0f));
-            vkCmdDrawIndexed(cmd, c.mesh.index_count, 1, 0, 0, 0);
+            vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
         }
     }
 
@@ -846,11 +874,14 @@ void VulkanEngine::init_world() {
         HeightmapParams hp{};
         // dim+1 must be a power of 2 so Jolt's HeightFieldShape can pick
         // a valid block_size that divides the sample count, AND dim must
-        // be divisible by the chunked-renderer's chunks_per_side. 1023
-        // cells → 1024 samples (block_size 8 ✓), divisible by 33 (chunks
-        // per side, giving chunk_cells = 31 ≈ 62m chunks) and 11 etc.
-        hp.dim = 1023;
-        hp.cell_size = 2.0f;           // 2m per cell × 1023 ≈ 2046m square
+        // be divisible by the chunked-renderer's chunks_per_side.
+        // 2047 cells → 2048 samples (block_size 8 ✓); 2047 = 23 × 89, so
+        // 23 chunks/side gives chunk_cells = 89 (= 89m at 1 m cells).
+        // World extent 2047m matches the previous 1023×2 m setup, just
+        // 4× more samples (2× per axis) — paired with the four-LOD
+        // skirted chunks the per-frame triangle count actually drops.
+        hp.dim = 2047;
+        hp.cell_size = 1.0f;           // 1 m per cell × 2047 = 2047 m square
         hp.height_scale = 140.0f;
         hp.plateau_extent = glm::vec2(28.0f, 28.0f);
         hp.plateau_height = 22.0f;
@@ -865,11 +896,11 @@ void VulkanEngine::init_world() {
         terrain_data_.heights = hm.heights;
         terrain_mesh_ = build_terrain_mesh(device_, allocator_,
                                            graphics_queue_, graphics_queue_family_, hm);
-        // Chunked raster terrain: 33×33 chunks of 31 cells each on a
-        // 2km world (~62m / chunk). Each chunk has full + half LOD
-        // index buffers; the renderer picks per-frame based on distance
-        // to the camera.
-        const int chunks_per_side = 33;
+        // Chunked raster terrain: 23×23 chunks of 89 cells each on the
+        // 2047m world (≈89m / chunk at 1m cells). Each chunk now has
+        // four LOD index buffers (stride 1/2/4/8) plus a skirt strip
+        // around its edge that hides cracks at LOD boundaries.
+        const int chunks_per_side = 23;
         terrain_chunks_ = build_terrain_chunks(device_, allocator_,
                                                graphics_queue_, graphics_queue_family_,
                                                hm, chunks_per_side);
@@ -1527,28 +1558,27 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         glm::mat4 model = dr.world * glm::scale(glm::mat4(1.0f), dyn_props_[i].full_size);
         push_depth(model);
     }
-    // Terrain: full-LOD (matching the color pass — color pass renders
-    // every chunk at full LOD until stitched-LOD lands). If the prepass
-    // used half-LOD here, its rasterized depth would be the linear
-    // interp of every-other vertex, while the color pass renders the
-    // real heightmap surface at full density. Where the full-LOD
-    // mid-vert sits BELOW the half-LOD straight line (a valley between
-    // two ridge verts), the color pass's depth is GREATER than the
-    // prepass's depth, the LESS_OR_EQUAL test fails, and the pixel is
-    // discarded → "missing triangles" exactly as the user reported.
+    // Terrain: distance-LOD per chunk. Pre-pass and color pass MUST
+    // pick the same LOD per chunk so the rasterised depth values match
+    // — otherwise the LESS_OR_EQUAL test in the color pass would
+    // discard fragments where pre-pass interpolation differs from
+    // color-pass interpolation. pick_terrain_lod() is shared.
     if (!terrain_chunks_.chunks.empty()) {
+        glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
+            int lod = pick_terrain_lod(c, cam);
             VkDeviceSize toff = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
-            vkCmdBindIndexBuffer(cmd, c.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+            VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
+            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
             PushConstants pc{};
             pc.mvp = vp;
             pc.model = glm::mat4(1.0f);
             vkCmdPushConstants(cmd, pipeline_layout_,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(PushConstants), &pc);
-            vkCmdDrawIndexed(cmd, c.mesh.index_count, 1, 0, 0, 0);
+            vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
         }
     }
 }
@@ -1658,19 +1688,18 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // RT path; for raster we want LOD + frustum cull per chunk so the
     // 2km terrain stays cheap from any viewpoint.
     if (!terrain_chunks_.chunks.empty()) {
-        // FULL LOD only — half-LOD path produces visible LOD-boundary
-        // cracks because neighbouring full-LOD chunks have edge verts at
-        // every step while half-LOD has every-other. The middle vert's
-        // actual height differs from the straight-line interp, leaving
-        // a vertical gap. Proper fix is stitched LOD (full-density edge
-        // ring + fan triangulation to step-2 interior); queued as a
-        // follow-up. At 1089 chunks @ ~62m each, frustum cull alone
-        // keeps the per-frame cost well under budget on a modern GPU.
+        // Distance-LOD with skirt strips: each chunk picks one of 4 LODs
+        // (stride 1/2/4/8) by camera-XZ distance to chunk centre. The
+        // skirt strips on each LOD's index buffer hide the cracks that
+        // would otherwise appear at LOD-mismatched chunk seams.
+        glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
+            int lod = pick_terrain_lod(c, cam);
             VkDeviceSize toff = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
-            vkCmdBindIndexBuffer(cmd, c.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+            VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
+            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
             PushConstants pc{};
             pc.mvp = vp;
             pc.model = glm::mat4(1.0f);
@@ -1683,7 +1712,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             vkCmdPushConstants(cmd, pipeline_layout_,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(PushConstants), &pc);
-            vkCmdDrawIndexed(cmd, c.mesh.index_count, 1, 0, 0, 0);
+            vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
         }
         // Rebind cube for the brush loop.
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);

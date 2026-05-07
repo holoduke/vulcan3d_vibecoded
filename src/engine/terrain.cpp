@@ -122,12 +122,20 @@ namespace {
 // differences) so adjacent chunks agree on shared-edge normals — face-
 // average accumulation only saw triangles WITHIN a chunk and produced
 // faint shading seams at chunk boundaries.
+// Skirt depth in metres. Each chunk-edge vertex has a "twin" vertex at the
+// same XZ but lowered Y by this amount; the skirt strip connects them so
+// that LOD-mismatch cracks at chunk boundaries are hidden by a vertical
+// wall rather than producing a see-through gap. 8 m is enough to cover
+// worst-case adjacent-cell height jumps on the steepest mountains.
+constexpr float kTerrainSkirtDepth = 8.0f;
+
 void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
                      int sample_dim,
                      std::vector<Vertex>& verts,
                      glm::vec3& aabb_min, glm::vec3& aabb_max) {
     verts.clear();
-    verts.reserve(static_cast<size_t>(sample_dim) * static_cast<size_t>(sample_dim));
+    verts.reserve(static_cast<size_t>(sample_dim) * static_cast<size_t>(sample_dim) +
+                   static_cast<size_t>(4) * static_cast<size_t>(sample_dim));
     aabb_min = glm::vec3( 1e9f);
     aabb_max = glm::vec3(-1e9f);
     auto sample_normal = [&](int gx, int gz) {
@@ -141,6 +149,7 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
         float dhdz = (hm.at(gx, zp) - hm.at(gx, zm)) * inv_2dz;
         return glm::normalize(glm::vec3(-dhdx, 1.0f, -dhdz));
     };
+    // Interior (sample_dim × sample_dim).
     for (int iz = 0; iz < sample_dim; ++iz) {
         for (int ix = 0; ix < sample_dim; ++ix) {
             int gx = std::clamp(origin_ix + ix, 0, hm.width()  - 1);
@@ -153,6 +162,108 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
             aabb_min = glm::min(aabb_min, p);
             aabb_max = glm::max(aabb_max, p);
         }
+    }
+    // Skirt twins: 4 edges × sample_dim verts. Each one is the interior
+    // edge vertex with Y dropped by kTerrainSkirtDepth. The normal is
+    // outward-perpendicular to the edge so they're shaded as side walls.
+    auto add_skirt_edge = [&](int ix0, int iz0, int dx, int dz, glm::vec3 n) {
+        for (int k = 0; k < sample_dim; ++k) {
+            int ix = ix0 + dx * k;
+            int iz = iz0 + dz * k;
+            int gx = std::clamp(origin_ix + ix, 0, hm.width()  - 1);
+            int gz = std::clamp(origin_iz + iz, 0, hm.height() - 1);
+            glm::vec3 p(hm.origin_x + static_cast<float>(gx) * hm.cell,
+                        hm.at(gx, gz) - kTerrainSkirtDepth,
+                        hm.origin_z + static_cast<float>(gz) * hm.cell);
+            verts.push_back({p, n, glm::vec2(p.x, p.z)});
+        }
+    };
+    add_skirt_edge(0,             0,             1, 0, glm::vec3( 0, 0, -1));  // top  (z=0)
+    add_skirt_edge(sample_dim - 1, 0,             0, 1, glm::vec3( 1, 0,  0));  // right(x=N-1)
+    add_skirt_edge(0,             sample_dim - 1, 1, 0, glm::vec3( 0, 0,  1));  // bot  (z=N-1)
+    add_skirt_edge(0,             0,             0, 1, glm::vec3(-1, 0,  0));  // left (x=0)
+}
+
+// LOD-stride index buffer + skirt strips. Stride 1 = full LOD (every
+// vertex), stride 2 = half (every other), 4 = quarter, 8 = eighth.
+// Skirt indexing: 4 edges × sample_dim skirt-twin verts laid out at
+// offset M = sample_dim². Each LOD stride sweeps the same edge but
+// only references the strided subset, while the skirt twins exist at
+// every position so any neighbour LOD finds matching X,Z corners.
+void gen_indices_for_lod(int sample_dim, int stride, std::vector<uint32_t>& out) {
+    const int N = sample_dim;
+    if (stride < 1) stride = 1;
+    if (stride > N - 1) stride = N - 1;
+    const int s = stride;
+    const uint32_t M = static_cast<uint32_t>(N) * static_cast<uint32_t>(N);
+    out.clear();
+    // Approximate index count: (N/s)² quads × 6 + 4 edges × (N/s) quads × 6.
+    out.reserve(static_cast<size_t>((N / s) * (N / s)) * 6u +
+                 static_cast<size_t>(4 * (N / s)) * 6u);
+    auto V = [N](int ix, int iz) {
+        return static_cast<uint32_t>(iz * N + ix);
+    };
+    // Interior triangles at stride s. Cells whose +s neighbour falls past
+    // N-1 are skipped — the skirt fills the resulting edge gap.
+    for (int iz = 0; iz < N - s; iz += s) {
+        for (int ix = 0; ix < N - s; ix += s) {
+            uint32_t i00 = V(ix,     iz);
+            uint32_t i10 = V(ix + s, iz);
+            uint32_t i01 = V(ix,     iz + s);
+            uint32_t i11 = V(ix + s, iz + s);
+            out.push_back(i00); out.push_back(i11); out.push_back(i10);
+            out.push_back(i00); out.push_back(i01); out.push_back(i11);
+        }
+    }
+    // Skirt strips. Winding chosen so each strip's outward normal points
+    // away from the chunk (so backface culling keeps the visible side).
+    auto skirt_top = [&](int ix) {
+        return M + 0u * static_cast<uint32_t>(N) + static_cast<uint32_t>(ix);
+    };
+    auto skirt_right = [&](int iz) {
+        return M + 1u * static_cast<uint32_t>(N) + static_cast<uint32_t>(iz);
+    };
+    auto skirt_bot = [&](int ix) {
+        return M + 2u * static_cast<uint32_t>(N) + static_cast<uint32_t>(ix);
+    };
+    auto skirt_left = [&](int iz) {
+        return M + 3u * static_cast<uint32_t>(N) + static_cast<uint32_t>(iz);
+    };
+    // Top (z=0, outward -Z)
+    for (int ix = 0; ix < N - s; ix += s) {
+        uint32_t a  = V(ix,     0);
+        uint32_t b  = V(ix + s, 0);
+        uint32_t sa = skirt_top(ix);
+        uint32_t sb = skirt_top(ix + s);
+        out.push_back(a);  out.push_back(b);  out.push_back(sa);
+        out.push_back(sa); out.push_back(b);  out.push_back(sb);
+    }
+    // Right (x=N-1, outward +X)
+    for (int iz = 0; iz < N - s; iz += s) {
+        uint32_t a  = V(N - 1, iz);
+        uint32_t b  = V(N - 1, iz + s);
+        uint32_t sa = skirt_right(iz);
+        uint32_t sb = skirt_right(iz + s);
+        out.push_back(a);  out.push_back(b);  out.push_back(sa);
+        out.push_back(sa); out.push_back(b);  out.push_back(sb);
+    }
+    // Bottom (z=N-1, outward +Z)
+    for (int ix = 0; ix < N - s; ix += s) {
+        uint32_t a  = V(ix,     N - 1);
+        uint32_t b  = V(ix + s, N - 1);
+        uint32_t sa = skirt_bot(ix);
+        uint32_t sb = skirt_bot(ix + s);
+        out.push_back(a);  out.push_back(sa); out.push_back(b);
+        out.push_back(sa); out.push_back(sb); out.push_back(b);
+    }
+    // Left (x=0, outward -X)
+    for (int iz = 0; iz < N - s; iz += s) {
+        uint32_t a  = V(0, iz);
+        uint32_t b  = V(0, iz + s);
+        uint32_t sa = skirt_left(iz);
+        uint32_t sb = skirt_left(iz + s);
+        out.push_back(a);  out.push_back(sa); out.push_back(b);
+        out.push_back(sa); out.push_back(sb); out.push_back(b);
     }
 }
 
@@ -393,13 +504,14 @@ TerrainChunkSet build_terrain_chunks(VkDevice device, VmaAllocator alloc,
     set.chunk_cells = hm.dim / chunks_per_side;
     const int sample_dim = set.chunk_cells + 1;
 
-    // Pre-build the index buffers (full + half) — they're identical for
-    // every chunk so we share contents but each chunk gets its own GPU
-    // buffer (the rasterizer doesn't deduplicate buffers across draws).
-    std::vector<uint32_t> idx_full;
-    std::vector<uint32_t> idx_half;
-    gen_full_indices(sample_dim, idx_full);
-    gen_half_indices(sample_dim, idx_half);
+    // Pre-build the four LOD index buffers (stride 1, 2, 4, 8). They're
+    // identical for every chunk (same topology), so we share the host
+    // arrays but each chunk gets its own GPU buffer for cache locality.
+    std::vector<uint32_t> idx_lod[kTerrainLodCount];
+    int strides[kTerrainLodCount] = { 1, 2, 4, 8 };
+    for (int i = 0; i < kTerrainLodCount; ++i) {
+        gen_indices_for_lod(sample_dim, strides[i], idx_lod[i]);
+    }
 
     set.chunks.reserve(static_cast<size_t>(chunks_per_side) *
                        static_cast<size_t>(chunks_per_side));
@@ -414,29 +526,37 @@ TerrainChunkSet build_terrain_chunks(VkDevice device, VmaAllocator alloc,
 
             gen_chunk_verts(hm, c.origin_ix, c.origin_iz, sample_dim,
                             verts, c.aabb_min, c.aabb_max);
+            c.center = 0.5f * (c.aabb_min + c.aabb_max);
 
+            // LOD 0 lives in the main mesh's index buffer.
             c.mesh = create_mesh_from_data(
                 device, alloc, queue, queue_family,
                 verts.data(), static_cast<uint32_t>(verts.size()),
-                idx_full.data(), static_cast<uint32_t>(idx_full.size()));
+                idx_lod[0].data(), static_cast<uint32_t>(idx_lod[0].size()));
+            c.index_count_lod[0] = static_cast<uint32_t>(idx_lod[0].size());
 
-            upload_index_buffer(device, alloc, queue, queue_family,
-                                idx_half.data(),
-                                static_cast<uint32_t>(idx_half.size()),
-                                c.ibo_half, c.ibo_half_alloc);
-            c.index_count_half = static_cast<uint32_t>(idx_half.size());
+            // LODs 1..N-1 each get a standalone index buffer.
+            for (int lod = 1; lod < kTerrainLodCount; ++lod) {
+                upload_index_buffer(device, alloc, queue, queue_family,
+                                     idx_lod[lod].data(),
+                                     static_cast<uint32_t>(idx_lod[lod].size()),
+                                     c.ibo_lod[lod - 1], c.ibo_lod_alloc[lod - 1]);
+                c.index_count_lod[lod] = static_cast<uint32_t>(idx_lod[lod].size());
+            }
 
             set.chunks.push_back(std::move(c));
         }
     }
-    log::infof("[terrain] chunks: %d × %d (= %d) at %d cells/chunk; "
-               "verts/chunk=%d full_tris/chunk=%d half_tris/chunk=%d",
+    log::infof("[terrain] chunks: %dx%d (= %d) at %d cells/chunk; verts/chunk=%d "
+               "lod0_tris=%u lod1=%u lod2=%u lod3=%u",
                chunks_per_side, chunks_per_side,
                static_cast<int>(set.chunks.size()),
                set.chunk_cells,
-               sample_dim * sample_dim,
-               static_cast<int>(idx_full.size() / 3u),
-               static_cast<int>(idx_half.size() / 3u));
+               sample_dim * sample_dim + 4 * sample_dim,
+               static_cast<unsigned>(idx_lod[0].size() / 3u),
+               static_cast<unsigned>(idx_lod[1].size() / 3u),
+               static_cast<unsigned>(idx_lod[2].size() / 3u),
+               static_cast<unsigned>(idx_lod[3].size() / 3u));
     return set;
 }
 
@@ -445,10 +565,12 @@ void destroy_terrain_chunks(VkDevice device, VmaAllocator alloc,
     (void)device;
     for (auto& c : set.chunks) {
         if (c.mesh.vertex_buffer) destroy_mesh(alloc, c.mesh);
-        if (c.ibo_half) {
-            vmaDestroyBuffer(alloc, c.ibo_half, c.ibo_half_alloc);
-            c.ibo_half = VK_NULL_HANDLE;
-            c.ibo_half_alloc = nullptr;
+        for (int lod = 0; lod < kTerrainLodCount - 1; ++lod) {
+            if (c.ibo_lod[lod]) {
+                vmaDestroyBuffer(alloc, c.ibo_lod[lod], c.ibo_lod_alloc[lod]);
+                c.ibo_lod[lod] = VK_NULL_HANDLE;
+                c.ibo_lod_alloc[lod] = nullptr;
+            }
         }
     }
     set.chunks.clear();
