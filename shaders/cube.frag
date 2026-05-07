@@ -926,12 +926,18 @@ void main() {
         sky_total = taken;
         sky_vis = float(sky_misses) / float(max(1, sky_total));
 
-        // Mild far fade — origin-lift above is the primary fix;
-        // this just smooths out any residual long-distance noise.
+        // GI on terrain is disabled. cos_hemi() uses N as the basis,
+        // so adjacent triangles' GI ray directions diverge per-N → ray
+        // paths through BLAS detail differ → per-triangle hit/miss
+        // flips → patchy bright/dark faces. Origin-lift fixes this at
+        // distance but not at close range where N still varies fast.
+        // Bake provides the directional shadow; ambient fills the rest.
+        // sky_vis still computed (for ambient sky vs ground term) but
+        // forced to 1 (open sky) so it can't introduce the same
+        // patchiness through sky_factor.
         if (is_terrain_pre) {
-            float gi_far_t = smoothstep(150.0, 400.0, cam_dist);
-            gi_indirect = mix(gi_indirect, vec3(0.0), gi_far_t);
-            sky_vis = mix(sky_vis, 1.0, gi_far_t);
+            gi_indirect = vec3(0.0);
+            sky_vis = 1.0;
         }
     }
 
