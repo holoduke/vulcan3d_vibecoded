@@ -950,6 +950,11 @@ private:
         float terrain_lod1 = 80.0f;
         float terrain_lod2 = 160.0f;
         float terrain_lod3 = 320.0f;
+        // Master multiplier on all three LOD distances. 1.0 = defaults
+        // above. Crank up to push distant terrain to higher LOD (more
+        // triangles, more detail). 4.0 means LOD 0 reaches 320m, LOD 1
+        // 640m, LOD 2 1280m.
+        float terrain_lod_scale = 1.0f;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;

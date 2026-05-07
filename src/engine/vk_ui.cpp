@@ -310,6 +310,11 @@ void VulkanEngine::build_menu_ui() {
                          &rt_.shadow_debug_overlay);
 
         ImGui::SeparatorText("Terrain LOD distances");
+        // Master detail multiplier — scales all three LOD distances. The
+        // simple knob most users want; the three sliders below give fine
+        // control if needed.
+        ImGui::SliderFloat("Terrain detail (multiplier)",
+                            &rt_.terrain_lod_scale, 0.5f, 4.0f, "%.2fx");
         ImGui::SliderFloat("LOD 0->1 (m)", &rt_.terrain_lod1,  20.0f,  400.0f);
         ImGui::SliderFloat("LOD 1->2 (m)", &rt_.terrain_lod2,  60.0f,  800.0f);
         ImGui::SliderFloat("LOD 2->3 (m)", &rt_.terrain_lod3, 120.0f, 1600.0f);

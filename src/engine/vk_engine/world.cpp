@@ -688,7 +688,7 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
         glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(light_frustum, c.aabb_min, c.aabb_max)) continue;
-            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1, rt_.terrain_lod2, rt_.terrain_lod3);
+            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1 * rt_.terrain_lod_scale, rt_.terrain_lod2 * rt_.terrain_lod_scale, rt_.terrain_lod3 * rt_.terrain_lod_scale);
             VkDeviceSize toff = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
             VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
@@ -1796,8 +1796,8 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
-            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1, rt_.terrain_lod2, rt_.terrain_lod3);
-            float morph = pick_terrain_morph(c, cam, lod, rt_.terrain_lod1);
+            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1 * rt_.terrain_lod_scale, rt_.terrain_lod2 * rt_.terrain_lod_scale, rt_.terrain_lod3 * rt_.terrain_lod_scale);
+            float morph = pick_terrain_morph(c, cam, lod, rt_.terrain_lod1 * rt_.terrain_lod_scale);
             VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
             VkDeviceSize voffs[2] = { 0, 0 };
             vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
@@ -1932,8 +1932,8 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
-            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1, rt_.terrain_lod2, rt_.terrain_lod3);
-            float morph = pick_terrain_morph(c, cam, lod, rt_.terrain_lod1);
+            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1 * rt_.terrain_lod_scale, rt_.terrain_lod2 * rt_.terrain_lod_scale, rt_.terrain_lod3 * rt_.terrain_lod_scale);
+            float morph = pick_terrain_morph(c, cam, lod, rt_.terrain_lod1 * rt_.terrain_lod_scale);
             VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
             VkDeviceSize voffs[2] = { 0, 0 };
             vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
@@ -2093,4 +2093,5 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
 }
 
 } // namespace qlike
+
 

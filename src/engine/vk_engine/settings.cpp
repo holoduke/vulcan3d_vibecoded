@@ -197,6 +197,7 @@ void VulkanEngine::save_settings() const {
     f << "terrain_lod1 = " << rt_.terrain_lod1 << "\n";
     f << "terrain_lod2 = " << rt_.terrain_lod2 << "\n";
     f << "terrain_lod3 = " << rt_.terrain_lod3 << "\n";
+    f << "terrain_lod_scale = " << rt_.terrain_lod_scale << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
     f << "reflections_enabled = "<< (rt_.reflections_enabled ? 1 : 0) << "\n";
@@ -315,6 +316,7 @@ void VulkanEngine::load_settings() {
             else if (key == "terrain_lod1")  rt_.terrain_lod1 = std::stof(val);
             else if (key == "terrain_lod2")  rt_.terrain_lod2 = std::stof(val);
             else if (key == "terrain_lod3")  rt_.terrain_lod3 = std::stof(val);
+            else if (key == "terrain_lod_scale") rt_.terrain_lod_scale = std::stof(val);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);
             else if (key == "reflections_enabled") rt_.reflections_enabled = std::stoi(val) != 0;
