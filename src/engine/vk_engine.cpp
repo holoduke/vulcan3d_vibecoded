@@ -115,6 +115,7 @@ void VulkanEngine::init() {
                                      alb, nrm, kTextureCount, texture_sampler_);
     }
     init_pipeline();
+    init_terrain_pipelines();
     init_sun_shadow_pipeline();
     init_grass_pipeline();
     // Heightmap shadow texture must be baked AFTER descriptors and the
@@ -1045,6 +1046,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_skybox", [&]{ destroy_skybox_resources(); });
     guarded("destroy_textures", [&]{ destroy_textures(); });
     guarded("destroy_grass_pipeline", [&]{ destroy_grass_pipeline(); });
+    guarded("destroy_terrain_pipelines", [&]{ destroy_terrain_pipelines(); });
     guarded("destroy_sun_shadow_pipeline", [&]{ destroy_sun_shadow_pipeline(); });
     guarded("destroy_pipeline", [&]{ destroy_pipeline(); });
     guarded("destroy_grass", [&]{ destroy_grass(allocator_, grass_); });

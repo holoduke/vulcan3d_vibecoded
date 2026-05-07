@@ -216,6 +216,15 @@ private:
     // Depth-only pipeline used for the early-Z pre-pass; shares pipeline
     // layout + vertex shader with `pipeline_`.
     VkPipeline depth_pipeline_ = VK_NULL_HANDLE;
+    // Terrain-specific pipelines that bind a second vertex stream (parent_y)
+    // and morph between LOD 0 and LOD 1 in the vertex shader. Color and
+    // depth-prepass variants must both morph or their depth values
+    // diverge and the LESS_OR_EQUAL test would discard fragments.
+    VkPipeline      terrain_pipeline_       = VK_NULL_HANDLE;
+    VkPipeline      terrain_depth_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule  terrain_vert_module_    = VK_NULL_HANDLE;
+    void init_terrain_pipelines();
+    void destroy_terrain_pipelines();
     VkShaderModule depth_frag_module_ = VK_NULL_HANDLE;
 
     Mesh cube_mesh_{};

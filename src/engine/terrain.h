@@ -99,6 +99,12 @@ struct TerrainChunk {
     VkBuffer      ibo_lod[kTerrainLodCount - 1] = { VK_NULL_HANDLE };
     VmaAllocation ibo_lod_alloc[kTerrainLodCount - 1] = { nullptr };
     uint32_t      index_count_lod[kTerrainLodCount] = { 0 };  // [0] mirrors mesh.index_count
+    // Per-vertex "parent Y" for CD-LOD morphing — see gen_chunk_parent_y.
+    // One float per vertex (same vertex order as the mesh's VBO), bound at
+    // vertex binding 1 by the terrain pipeline. Stays VK_NULL_HANDLE if
+    // morphing is disabled.
+    VkBuffer      parent_y_buffer = VK_NULL_HANDLE;
+    VmaAllocation parent_y_alloc  = nullptr;
     int cx = 0, cz = 0;                // grid coords (0..N-1)
     int origin_ix = 0, origin_iz = 0;  // first heightmap sample
     int sample_dim = 0;                // samples per chunk side (chunk_cells+1)

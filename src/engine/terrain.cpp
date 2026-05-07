@@ -184,6 +184,70 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
     add_skirt_edge(0,             0,             0, 1, glm::vec3(-1, 0,  0));  // left (x=0)
 }
 
+// Per-vertex "parent Y" for CD-LOD morphing between LOD 0 and LOD 1.
+// For each vertex (ix, iz) in a chunk:
+//   - Both indices even → vertex is part of the LOD 1 grid, parent = self.
+//   - Otherwise         → linear interpolation of the stride-2 neighbours
+//                         that bracket this vertex, matching what LOD 1's
+//                         stride-2 triangulation would render at this XZ.
+// At runtime the vertex shader does lerp(actual_y, parent_y, morph_factor).
+// morph_factor → 1 produces the LOD-1 surface; → 0 keeps the full LOD-0
+// surface. Smooth transition with no popping. Skirt verts (after the N²
+// interior block) inherit parent_y == self_y so the skirt stays put.
+void gen_chunk_parent_y(const Heightmap& hm, int origin_ix, int origin_iz,
+                        int sample_dim, std::vector<float>& out) {
+    const int N = sample_dim;
+    out.clear();
+    out.resize(static_cast<size_t>(N) * static_cast<size_t>(N) +
+                static_cast<size_t>(4) * static_cast<size_t>(N));
+    auto h_at = [&](int lx, int lz) {
+        int gx = std::clamp(origin_ix + lx, 0, hm.width()  - 1);
+        int gz = std::clamp(origin_iz + lz, 0, hm.height() - 1);
+        return hm.at(gx, gz);
+    };
+    for (int iz = 0; iz < N; ++iz) {
+        for (int ix = 0; ix < N; ++ix) {
+            float self_y = h_at(ix, iz);
+            float py;
+            int evx = ix - (ix & 1);
+            int evz = iz - (iz & 1);
+            int ex2 = std::min(evx + 2, N - 1);
+            int ez2 = std::min(evz + 2, N - 1);
+            if ((ix & 1) == 0 && (iz & 1) == 0) {
+                py = self_y;
+            } else if ((iz & 1) == 0) {
+                py = 0.5f * (h_at(evx, iz) + h_at(ex2, iz));
+            } else if ((ix & 1) == 0) {
+                py = 0.5f * (h_at(ix, evz) + h_at(ix, ez2));
+            } else {
+                py = 0.25f * (h_at(evx, evz) + h_at(ex2, evz) +
+                              h_at(evx, ez2) + h_at(ex2, ez2));
+            }
+            out[static_cast<size_t>(iz) * static_cast<size_t>(N) +
+                 static_cast<size_t>(ix)] = py;
+        }
+    }
+    // Skirt twins keep their own Y; morphing them would lift the skirt
+    // base above the surface and reveal cracks.
+    size_t skirt_base = static_cast<size_t>(N) * static_cast<size_t>(N);
+    auto skirt_self = [&](int ix0, int iz0, int dx, int dz, size_t edge) {
+        for (int k = 0; k < N; ++k) {
+            int ix = ix0 + dx * k;
+            int iz = iz0 + dz * k;
+            float y = h_at(ix, iz);
+            // Skirt stores its dropped Y; parent_y here matches so morph
+            // doesn't lift it (we use the pre-drop self height which the
+            // vertex shader will further drop via the actual Y baked in).
+            out[skirt_base + edge * static_cast<size_t>(N) +
+                 static_cast<size_t>(k)] = y;
+        }
+    };
+    skirt_self(0,             0,             1, 0, 0);
+    skirt_self(sample_dim - 1, 0,             0, 1, 1);
+    skirt_self(0,             sample_dim - 1, 1, 0, 2);
+    skirt_self(0,             0,             0, 1, 3);
+}
+
 // LOD-stride index buffer + skirt strips. Stride 1 = full LOD (every
 // vertex), stride 2 = half (every other), 4 = quarter, 8 = eighth.
 // Skirt indexing: 4 edges × sample_dim skirt-twin verts laid out at
@@ -412,14 +476,14 @@ Mesh build_terrain_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
 }
 
 namespace {
-// Upload a uint32_t index buffer as a device-local read-only IBO.
-// Tiny helper since create_mesh_from_data couples vert + index uploads.
-void upload_index_buffer(VkDevice device, VmaAllocator alloc, VkQueue queue,
+// Upload an arbitrary host-resident byte buffer to a device-local
+// read-only buffer with the given usage flags. Used by both
+// upload_index_buffer (UINT32 IBO) and the parent_y vertex stream.
+void upload_typed_buffer(VkDevice device, VmaAllocator alloc, VkQueue queue,
                          uint32_t queue_family,
-                         const uint32_t* data, uint32_t count,
+                         const void* data, VkDeviceSize size,
+                         VkBufferUsageFlags usage,
                          VkBuffer& out_buf, VmaAllocation& out_alloc) {
-    const VkDeviceSize size = sizeof(uint32_t) * static_cast<VkDeviceSize>(count);
-    // Stage on host then copy to device-local — same pattern as mesh.cpp.
     VkBufferCreateInfo bci_stage{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr, .flags = 0, .size = size,
@@ -440,8 +504,7 @@ void upload_index_buffer(VkDevice device, VmaAllocator alloc, VkQueue queue,
     VkBufferCreateInfo bci_dst{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr, .flags = 0, .size = size,
-        .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
     };
@@ -473,11 +536,12 @@ void upload_index_buffer(VkDevice device, VmaAllocator alloc, VkQueue queue,
         .pInheritanceInfo = nullptr,
     };
     vkBeginCommandBuffer(cb, &bi);
-    VkBufferCopy region{0, 0, size};
-    vkCmdCopyBuffer(cb, stage, out_buf, 1, &region);
+    VkBufferCopy copy{ 0, 0, size };
+    vkCmdCopyBuffer(cb, stage, out_buf, 1, &copy);
     vkEndCommandBuffer(cb);
     VkSubmitInfo si{
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = nullptr,
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = nullptr,
         .waitSemaphoreCount = 0, .pWaitSemaphores = nullptr,
         .pWaitDstStageMask = nullptr,
         .commandBufferCount = 1, .pCommandBuffers = &cb,
@@ -487,6 +551,16 @@ void upload_index_buffer(VkDevice device, VmaAllocator alloc, VkQueue queue,
     vkQueueWaitIdle(queue);
     vkDestroyCommandPool(device, pool, nullptr);
     vmaDestroyBuffer(alloc, stage, stage_alloc);
+}
+
+// Upload a uint32_t index buffer as a device-local read-only IBO.
+void upload_index_buffer(VkDevice device, VmaAllocator alloc, VkQueue queue,
+                         uint32_t queue_family,
+                         const uint32_t* data, uint32_t count,
+                         VkBuffer& out_buf, VmaAllocation& out_alloc) {
+    const VkDeviceSize size = sizeof(uint32_t) * static_cast<VkDeviceSize>(count);
+    upload_typed_buffer(device, alloc, queue, queue_family, data, size,
+                         VK_BUFFER_USAGE_INDEX_BUFFER_BIT, out_buf, out_alloc);
 }
 } // namespace
 
@@ -516,6 +590,7 @@ TerrainChunkSet build_terrain_chunks(VkDevice device, VmaAllocator alloc,
     set.chunks.reserve(static_cast<size_t>(chunks_per_side) *
                        static_cast<size_t>(chunks_per_side));
     std::vector<Vertex> verts;
+    std::vector<float>  parent_y;
     for (int cz = 0; cz < chunks_per_side; ++cz) {
         for (int cx = 0; cx < chunks_per_side; ++cx) {
             TerrainChunk c{};
@@ -544,6 +619,17 @@ TerrainChunkSet build_terrain_chunks(VkDevice device, VmaAllocator alloc,
                 c.index_count_lod[lod] = static_cast<uint32_t>(idx_lod[lod].size());
             }
 
+            // CD-LOD parent_y stream — one float per vertex (interior +
+            // skirt verts), bound at vertex binding 1 by the terrain
+            // pipeline. Drives the LOD 0 ↔ LOD 1 morph in terrain.vert.
+            gen_chunk_parent_y(hm, c.origin_ix, c.origin_iz, sample_dim, parent_y);
+            upload_typed_buffer(device, alloc, queue, queue_family,
+                                 parent_y.data(),
+                                 static_cast<VkDeviceSize>(parent_y.size()) *
+                                 sizeof(float),
+                                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                 c.parent_y_buffer, c.parent_y_alloc);
+
             set.chunks.push_back(std::move(c));
         }
     }
@@ -571,6 +657,11 @@ void destroy_terrain_chunks(VkDevice device, VmaAllocator alloc,
                 c.ibo_lod[lod] = VK_NULL_HANDLE;
                 c.ibo_lod_alloc[lod] = nullptr;
             }
+        }
+        if (c.parent_y_buffer) {
+            vmaDestroyBuffer(alloc, c.parent_y_buffer, c.parent_y_alloc);
+            c.parent_y_buffer = VK_NULL_HANDLE;
+            c.parent_y_alloc = nullptr;
         }
     }
     set.chunks.clear();

@@ -33,9 +33,6 @@ namespace qlike {
 //   < 160 m   half   (stride 2)
 //   < 320 m   quarter(stride 4)
 //   ≥ 320 m   eighth (stride 8)
-//
-// Skirts on each LOD's index buffer hide the cracks that would
-// otherwise appear at LOD-mismatched chunk seams.
 static int pick_terrain_lod(const TerrainChunk& c, glm::vec3 cam_xz) {
     float dx = c.center.x - cam_xz.x;
     float dz = c.center.z - cam_xz.z;
@@ -44,6 +41,27 @@ static int pick_terrain_lod(const TerrainChunk& c, glm::vec3 cam_xz) {
     if (d < 160.0f) return 1;
     if (d < 320.0f) return 2;
     return 3;
+}
+
+// CD-LOD morph factor for a chunk currently rendered at LOD 0. As the
+// chunk approaches the LOD 0 → LOD 1 transition (last 25 % of the LOD-0
+// distance band), morph_factor ramps from 0 (full LOD-0 surface) to 1
+// (LOD-1 stride-2 linear interp). At factor 1 the surface is identical
+// to LOD 1's, so the actual switch to LOD 1 produces no visual pop.
+// Returns 0 for LOD ≥ 1 (the morph is conceptual only between adjacent
+// LODs, and higher LODs snap — far enough from the camera that the
+// pop isn't visible).
+static float pick_terrain_morph(const TerrainChunk& c, glm::vec3 cam_xz, int lod) {
+    if (lod != 0) return 0.0f;
+    float dx = c.center.x - cam_xz.x;
+    float dz = c.center.z - cam_xz.z;
+    float d = std::sqrt(dx * dx + dz * dz);
+    constexpr float kFadeStart = 60.0f;
+    constexpr float kFadeEnd   = 80.0f;
+    if (d <= kFadeStart) return 0.0f;
+    if (d >= kFadeEnd)   return 1.0f;
+    float t = (d - kFadeStart) / (kFadeEnd - kFadeStart);
+    return t * t * (3.0f - 2.0f * t);  // smoothstep
 }
 
 void VulkanEngine::apply_terrain_brush(float dt) {
@@ -1613,27 +1631,35 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         push_depth(model);
     }
     // Terrain: distance-LOD per chunk. Pre-pass and color pass MUST
-    // pick the same LOD per chunk so the rasterised depth values match
-    // — otherwise the LESS_OR_EQUAL test in the color pass would
-    // discard fragments where pre-pass interpolation differs from
-    // color-pass interpolation. pick_terrain_lod() is shared.
+    // pick the same LOD AND morph factor per chunk so the rasterised
+    // depth values match — otherwise the LESS_OR_EQUAL test in the
+    // color pass would discard fragments. We bind terrain_depth_pipeline_
+    // (same terrain.vert as the color pass, just routed to depth-only).
     if (!terrain_chunks_.chunks.empty()) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrain_depth_pipeline_);
         glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
             int lod = pick_terrain_lod(c, cam);
-            VkDeviceSize toff = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
+            float morph = pick_terrain_morph(c, cam, lod);
+            VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
+            VkDeviceSize voffs[2] = { 0, 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
             VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
             vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
             PushConstants pc{};
             pc.mvp = vp;
             pc.model = glm::mat4(1.0f);
+            pc.color = glm::vec4(1.0f, 1.0f, 1.0f, morph);
             vkCmdPushConstants(cmd, pipeline_layout_,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(PushConstants), &pc);
             vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
         }
+        // Caller binds depth_pipeline_ before invoking us; it will
+        // continue using that for any non-terrain post-terrain draws.
+        // Re-bind so the rest of the depth pre-pass goes through it.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, depth_pipeline_);
     }
 }
 
@@ -1742,23 +1768,27 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // RT path; for raster we want LOD + frustum cull per chunk so the
     // 2km terrain stays cheap from any viewpoint.
     if (!terrain_chunks_.chunks.empty()) {
-        // Distance-LOD with skirt strips: each chunk picks one of 4 LODs
-        // (stride 1/2/4/8) by camera-XZ distance to chunk centre. The
-        // skirt strips on each LOD's index buffer hide the cracks that
-        // would otherwise appear at LOD-mismatched chunk seams.
+        // Switch to the terrain-specific pipeline (terrain.vert + cube.frag,
+        // 2 vertex bindings — pos/norm/uv + parent_y) so we can morph
+        // between LOD 0 and LOD 1 in the vertex shader. Skirts still hide
+        // LOD-mismatch cracks at higher LOD seams.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrain_pipeline_);
         glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
             int lod = pick_terrain_lod(c, cam);
-            VkDeviceSize toff = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
+            float morph = pick_terrain_morph(c, cam, lod);
+            VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
+            VkDeviceSize voffs[2] = { 0, 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
             VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
             vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
             PushConstants pc{};
             pc.mvp = vp;
             pc.model = glm::mat4(1.0f);
             pc.prev_mvp = prev_vp;
-            pc.color = glm::vec4(1.0f);
+            // .w doubles as the morph factor — terrain.vert lerps Y by it.
+            pc.color = glm::vec4(1.0f, 1.0f, 1.0f, morph);
             pc.emissive = glm::vec4(0.0f);
             pc.tex_params = tex_on
                 ? glm::vec4(0.0f, 0.0f, 16.0f, 2.0f)
@@ -1768,7 +1798,8 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                                0, sizeof(PushConstants), &pc);
             vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
         }
-        // Rebind cube for the brush loop.
+        // Switch back to the cube pipeline + cube mesh for the brush loop.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }

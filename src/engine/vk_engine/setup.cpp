@@ -415,6 +415,67 @@ void VulkanEngine::init_pipeline() {
     log::info("graphics + depth-prepass pipelines built");
 }
 
+void VulkanEngine::init_terrain_pipelines() {
+    std::string sd = QLIKE_SHADER_DIR;
+    terrain_vert_module_ = vkpipe::load_shader_module(device_, sd + "/terrain.vert.spv");
+
+    // Vertex bindings: 0 = Vertex (pos/normal/uv), 1 = parent_y (float).
+    VkVertexInputBindingDescription b0{};
+    b0.binding = 0; b0.stride = sizeof(Vertex);
+    b0.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputBindingDescription b1{};
+    b1.binding = 1; b1.stride = sizeof(float);
+    b1.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    auto attr = [](uint32_t loc, uint32_t binding, VkFormat fmt, uint32_t off) {
+        VkVertexInputAttributeDescription a{};
+        a.location = loc; a.binding = binding; a.format = fmt; a.offset = off;
+        return a;
+    };
+    std::vector<VkVertexInputAttributeDescription> vattrs = {
+        attr(0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)),
+        attr(1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)),
+        attr(2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(Vertex, uv)),
+        attr(3, 1, VK_FORMAT_R32_SFLOAT,       0),
+    };
+
+    // Color pass — same color/depth formats as cube pipeline.
+    {
+        vkpipe::GraphicsPipelineConfig cfg{};
+        cfg.vert = terrain_vert_module_;
+        cfg.frag = frag_module_;       // shared cube.frag
+        cfg.layout = pipeline_layout_;
+        cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+        cfg.depth_format = depth_format_;
+        cfg.vbindings = { b0, b1 };
+        cfg.vattrs = vattrs;
+        terrain_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    }
+
+    // Depth pre-pass — same morph as color pass so LESS_OR_EQUAL passes.
+    {
+        vkpipe::GraphicsPipelineConfig cfg{};
+        cfg.vert = terrain_vert_module_;
+        cfg.frag = depth_frag_module_;
+        cfg.layout = pipeline_layout_;
+        cfg.color_attachment_count = 0;
+        cfg.depth_format = depth_format_;
+        cfg.depth_compare = VK_COMPARE_OP_LESS;
+        cfg.vbindings = { b0, b1 };
+        cfg.vattrs = vattrs;
+        terrain_depth_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    }
+    log::info("terrain pipelines built (CD-LOD morph)");
+}
+
+void VulkanEngine::destroy_terrain_pipelines() {
+    if (terrain_pipeline_)       vkDestroyPipeline(device_, terrain_pipeline_, nullptr);
+    if (terrain_depth_pipeline_) vkDestroyPipeline(device_, terrain_depth_pipeline_, nullptr);
+    if (terrain_vert_module_)    vkDestroyShaderModule(device_, terrain_vert_module_, nullptr);
+    terrain_pipeline_ = terrain_depth_pipeline_ = VK_NULL_HANDLE;
+    terrain_vert_module_ = VK_NULL_HANDLE;
+}
+
 void VulkanEngine::init_sun_shadow_pipeline() {
     std::string sd = QLIKE_SHADER_DIR;
     sun_shadow_vert_module_ = vkpipe::load_shader_module(device_, sd + "/shadow.vert.spv");
