@@ -191,6 +191,8 @@ void VulkanEngine::save_settings() const {
     f << "grass_distance_density = " << rt_.grass_distance_density << "\n";
     f << "grass_alt_min = " << rt_.grass_alt_min << "\n";
     f << "grass_alt_max = " << rt_.grass_alt_max << "\n";
+    f << "shadow_map_resolution = " << rt_.shadow_map_resolution << "\n";
+    f << "shadow_map_world_half = " << rt_.shadow_map_world_half << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
     f << "reflections_enabled = "<< (rt_.reflections_enabled ? 1 : 0) << "\n";
@@ -294,6 +296,8 @@ void VulkanEngine::load_settings() {
             else if (key == "grass_distance_density") rt_.grass_distance_density = std::stof(val);
             else if (key == "grass_alt_min")  rt_.grass_alt_min  = std::stof(val);
             else if (key == "grass_alt_max")  rt_.grass_alt_max  = std::stof(val);
+            else if (key == "shadow_map_resolution") rt_.shadow_map_resolution = std::stoi(val);
+            else if (key == "shadow_map_world_half") rt_.shadow_map_world_half = std::stof(val);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);
             else if (key == "reflections_enabled") rt_.reflections_enabled = std::stoi(val) != 0;

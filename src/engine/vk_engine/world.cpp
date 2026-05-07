@@ -371,7 +371,18 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
 // (grass) is right under the camera. Texel-snapped each frame to avoid
 // crawling shadow edges as the player walks.
 void VulkanEngine::init_sun_shadow_resources() {
-    const uint32_t W = kShadowMapSize;
+    // Snap requested resolution to the allowed list. Default 1024 if a
+    // settings file from before this slider existed lacks the field.
+    int requested = rt_.shadow_map_resolution;
+    int snapped = kShadowMapResolutions[1];  // 1024
+    int best_diff = std::abs(requested - snapped);
+    for (int v : kShadowMapResolutions) {
+        int d = std::abs(requested - v);
+        if (d < best_diff) { best_diff = d; snapped = v; }
+    }
+    sun_shadow_dim_ = snapped;
+    rt_.shadow_map_resolution = snapped;  // write-back so the UI shows the snapped value
+    const uint32_t W = static_cast<uint32_t>(sun_shadow_dim_);
 
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -476,14 +487,12 @@ void VulkanEngine::update_sun_shadow_light_vp() {
         std::sin(p_rad),
         std::cos(y_rad) * std::cos(p_rad)));
 
-    // Half-extent of the ortho box in the light's view plane. Cover the
-    // grass distance plus a margin so nearby brushes / dyn-props still
-    // appear as casters even when the player is at the edge of grass.
-    const float half = std::max(rt_.grass_distance, 80.0f) + 40.0f;
+    // Half-extent of the ortho box, slider-controlled.
+    const float half = std::max(rt_.shadow_map_world_half, 30.0f);
     // Sun-axis depth: large so the shadow camera can sit far back along
     // the sun direction and still capture distant cliff peaks.
-    const float depth_back  = 600.0f;  // distance behind the player along sun
-    const float depth_front = 400.0f;  // distance in front (receivers below)
+    const float depth_back  = 600.0f;
+    const float depth_front = 400.0f;
 
     glm::vec3 cam = player_.eye_position();
 
@@ -496,7 +505,7 @@ void VulkanEngine::update_sun_shadow_light_vp() {
         : glm::vec3(0.0f, 1.0f, 0.0f);
     glm::vec3 right_axis = glm::normalize(glm::cross(up_ref, sun_dir));
     glm::vec3 up_axis    = glm::normalize(glm::cross(sun_dir, right_axis));
-    float texel = (2.0f * half) / static_cast<float>(kShadowMapSize);
+    float texel = (2.0f * half) / static_cast<float>(sun_shadow_dim_);
     float u = glm::dot(cam, right_axis);
     float v = glm::dot(cam, up_axis);
     u = std::round(u / texel) * texel;
@@ -537,7 +546,8 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
         .clearValue = clear_depth,
     };
-    VkExtent2D ext{ kShadowMapSize, kShadowMapSize };
+    VkExtent2D ext{ static_cast<uint32_t>(sun_shadow_dim_),
+                    static_cast<uint32_t>(sun_shadow_dim_) };
     VkRenderingInfo ri{
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .pNext = nullptr, .flags = 0,
@@ -550,8 +560,8 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
 
     VkViewport vp_state{};
     vp_state.x = 0.0f; vp_state.y = 0.0f;
-    vp_state.width = static_cast<float>(kShadowMapSize);
-    vp_state.height = static_cast<float>(kShadowMapSize);
+    vp_state.width = static_cast<float>(sun_shadow_dim_);
+    vp_state.height = static_cast<float>(sun_shadow_dim_);
     vp_state.minDepth = 0.0f; vp_state.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &vp_state);
     VkRect2D scissor{ {0, 0}, ext };

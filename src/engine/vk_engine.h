@@ -577,11 +577,11 @@ private:
     // grass.vert at scene_desc binding 7 as a sampler2DShadow (hardware
     // PCF). Cube.frag continues to use RT shadow rays — the shadow map
     // here is grass-only for now.
-    // 1024² is a balance: at ~120m half-extent that's ~24cm/texel — still
-    // sharp enough for grass-scale shadows, half the fragment cost of
-    // 2048² (which TDR'd on the first heavy-load test). Bump back up if
-    // we add cube.frag as a receiver later.
-    static constexpr uint32_t kShadowMapSize = 1024;
+    // Allowed resolutions for the rt_.shadow_map_resolution slider. Anything
+    // else snaps to the nearest. 4096 is borderline on weak GPUs; the cap
+    // keeps a typo from forcing a huge alloc.
+    static constexpr int kShadowMapResolutions[] = { 512, 1024, 2048, 4096 };
+    int             sun_shadow_dim_     = 1024;     // current image side
     VkImage         sun_shadow_image_   = VK_NULL_HANDLE;
     VmaAllocation   sun_shadow_alloc_   = nullptr;
     VkImageView     sun_shadow_view_    = VK_NULL_HANDLE;
@@ -880,6 +880,17 @@ private:
         // so the slider can reshape the band live without rebake.
         float grass_alt_min = -2.0f;
         float grass_alt_max = 35.0f;
+
+        // Sun shadow map (binding 7). Two knobs:
+        //   shadow_map_resolution: square texture side. Snapped at apply
+        //     time to {512, 1024, 2048, 4096}. Higher = sharper edges,
+        //     more VRAM + fragment cost. Image is destroyed and recreated
+        //     when changed (requires a vkDeviceWaitIdle).
+        //   shadow_map_world_half: half-width of the ortho frustum in
+        //     world metres. Bigger = far-off ridges still cast on grass
+        //     under your feet, but per-texel coverage gets coarser.
+        int   shadow_map_resolution  = 1024;
+        float shadow_map_world_half  = 120.0f;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;

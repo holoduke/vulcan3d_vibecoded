@@ -862,6 +862,14 @@ void VulkanEngine::run(const RunOptions& opts) {
         // so the matrix copied into the UBO this frame matches the geometry
         // we'll draw into the shadow target.
         update_sun_shadow_light_vp();
+        // If the user changed the shadow-map resolution slider, recreate the
+        // image at the new size. Cheap (one vkDeviceWaitIdle + a 4-16MB
+        // alloc); only fires when the slider actually moves.
+        if (rt_.shadow_map_resolution != sun_shadow_dim_) {
+            vkDeviceWaitIdle(device_);
+            destroy_sun_shadow_resources();
+            init_sun_shadow_resources();
+        }
         update_scene_ubo();
         // Heightmap sun-shadow is sun-direction-dependent. Instead of
         // re-baking the whole 1024² texture in one go (~100 ms hitch),
