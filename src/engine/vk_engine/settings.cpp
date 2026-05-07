@@ -201,6 +201,7 @@ void VulkanEngine::save_settings() const {
     f << "terrain_bake_supersample = " << rt_.terrain_bake_supersample << "\n";
     f << "terrain_shading_contrast = " << rt_.terrain_shading_contrast << "\n";
     f << "terrain_heightmap_scale = " << rt_.terrain_heightmap_scale << "\n";
+    f << "shadow_near_mult = " << rt_.shadow_near_mult << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
     f << "reflections_enabled = "<< (rt_.reflections_enabled ? 1 : 0) << "\n";
@@ -323,6 +324,7 @@ void VulkanEngine::load_settings() {
             else if (key == "terrain_bake_supersample") rt_.terrain_bake_supersample = std::stoi(val);
             else if (key == "terrain_shading_contrast") rt_.terrain_shading_contrast = std::stof(val);
             else if (key == "terrain_heightmap_scale") rt_.terrain_heightmap_scale = std::stoi(val);
+            else if (key == "shadow_near_mult") rt_.shadow_near_mult = std::stof(val);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);
             else if (key == "reflections_enabled") rt_.reflections_enabled = std::stoi(val) != 0;

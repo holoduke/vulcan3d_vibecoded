@@ -285,7 +285,8 @@ void VulkanEngine::build_menu_ui() {
 
         ImGui::SeparatorText("Shadows (RT, contact-hardening)");
         ImGui::Checkbox("enabled", &rt_.shadow_enabled);
-        ImGui::SliderInt("samples", &rt_.shadow_samples, 1, 64);
+        ImGui::SliderInt("samples", &rt_.shadow_samples, 1, 128);
+        ImGui::SliderFloat("near samples multiplier", &rt_.shadow_near_mult, 1.0f, 8.0f, "%.2fx");
         ImGui::SliderFloat("softness", &rt_.shadow_softness, 0.0f, 0.15f);
         ImGui::SliderFloat("strength", &rt_.shadow_strength, 0.0f, 1.0f);
         ImGui::SliderFloat("curve (linear→expo)", &rt_.shadow_curve, 0.0f, 1.0f);
@@ -294,14 +295,15 @@ void VulkanEngine::build_menu_ui() {
         // Resolution dropdown — apply triggers a vkDeviceWaitIdle + image
         // recreation in the next frame's tick. 4096 doubles VRAM, halves
         // texel size; 512 quarters fragment cost vs 1024.
-        const char* res_labels[] = { "512", "1024", "2048", "4096" };
+        const char* res_labels[] = { "512", "1024", "2048", "4096", "8192" };
         int res_idx = 1;
         if      (rt_.shadow_map_resolution <= 512)  res_idx = 0;
         else if (rt_.shadow_map_resolution <= 1024) res_idx = 1;
         else if (rt_.shadow_map_resolution <= 2048) res_idx = 2;
-        else                                         res_idx = 3;
-        if (ImGui::Combo("shadow map resolution", &res_idx, res_labels, 4)) {
-            const int values[] = { 512, 1024, 2048, 4096 };
+        else if (rt_.shadow_map_resolution <= 4096) res_idx = 3;
+        else                                         res_idx = 4;
+        if (ImGui::Combo("shadow map resolution", &res_idx, res_labels, 5)) {
+            const int values[] = { 512, 1024, 2048, 4096, 8192 };
             rt_.shadow_map_resolution = values[res_idx];
         }
         ImGui::SliderFloat("shadow map world size (m)",

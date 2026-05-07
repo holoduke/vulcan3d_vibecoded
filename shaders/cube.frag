@@ -491,6 +491,20 @@ void main() {
         base = mix(base, rock, t_rock);
         base = mix(base, snow, t_snow);
 
+        // ---- Procedural surface detail noise ----
+        // Two-octave value noise on world XZ. Fine octave (0.45 m
+        // freq) modulates albedo within ±8% so flat patches don't
+        // read as a single uniform colour; coarser octave (3 m freq)
+        // adds large-scale tonal variation that survives at distance.
+        // Cheap (4 ign() calls) and unlike the triplanar detail it
+        // doesn't depend on N so it's stable across LOD-mismatched
+        // triangle edges.
+        float dn_fine = ign(vWorldPos.xz * 2.2 + vec2(11.0, 23.0));
+        float dn_far  = ign(vWorldPos.xz * 0.33 + vec2(91.0, 47.0));
+        float dn = mix(dn_far, dn_fine, 0.6);          // 0..1
+        float noise_amp = 0.16;                        // ±8% albedo swing
+        base *= 1.0 + (dn - 0.5) * noise_amp;
+
         // Steep faces become rocky regardless of altitude. Slope jitter
         // breaks up the cliff/grass border the same way the height
         // jitter breaks up horizontal layer transitions.
@@ -610,7 +624,13 @@ void main() {
     // 3. SHADOW RAYS: stratified sampling inside the size-adapted cone.
     float shadow = 0.0;
     if (n_dot_l_raw > 0.0 && scene.rt_flags.x != 0) {
-        int  N_s = lod_samples(max(1, scene.rt_flags.y), cam_dist);
+        // Base sample count from slider, distance-LOD'd. terrain_extra.y
+        // is a multiplier on the BASE count that's applied before LOD
+        // reduction, so close fragments get N×multiplier rays while far
+        // ones still drop toward 1.
+        float near_mult = max(1.0, scene.terrain_extra.y);
+        int  base_s = int(ceil(float(scene.rt_flags.y) * near_mult));
+        int  N_s = lod_samples(max(1, base_s), cam_dist);
         // Per-pixel softness вЂ” terrain optionally tightens the cone via
         // the Settings UI to reduce PCSS dither. Tightening trades soft
         // shadow edges for cleaner per-pixel results at the same sample

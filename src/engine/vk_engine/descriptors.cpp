@@ -224,7 +224,9 @@ void VulkanEngine::update_scene_ubo() {
                                   rt_.shadow_map_world_half,
                                   static_cast<float>(rt_.terrain_debug_mode));
     data.light_vp = sun_shadow_light_vp_;
-    data.terrain_extra = glm::vec4(rt_.terrain_shading_contrast, 0.0f, 0.0f, 0.0f);
+    data.terrain_extra = glm::vec4(rt_.terrain_shading_contrast,
+                                    rt_.shadow_near_mult,
+                                    0.0f, 0.0f);
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

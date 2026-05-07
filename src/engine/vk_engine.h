@@ -617,7 +617,7 @@ private:
     // Allowed resolutions for the rt_.shadow_map_resolution slider. Anything
     // else snaps to the nearest. 4096 is borderline on weak GPUs; the cap
     // keeps a typo from forcing a huge alloc.
-    static constexpr int kShadowMapResolutions[] = { 512, 1024, 2048, 4096 };
+    static constexpr int kShadowMapResolutions[] = { 512, 1024, 2048, 4096, 8192 };
     int             sun_shadow_dim_     = 1024;     // current image side
     VkImage         sun_shadow_image_   = VK_NULL_HANDLE;
     VmaAllocation   sun_shadow_alloc_   = nullptr;
@@ -978,6 +978,12 @@ private:
         // ~2GB of GPU memory on the chunk meshes alone). Applied at
         // level load — change requires a restart.
         int terrain_heightmap_scale = 1;
+        // Multiplier on the RT shadow ray count for fragments within
+        // rt_lod.x (close to the camera). 1 = unchanged, higher = more
+        // rays close-by for smoother penumbras under boxes / castle.
+        // Costs extra rays only on the closest pixels; distance LOD
+        // continues to drop samples toward 1 ray past rt_lod.y.
+        float shadow_near_mult = 1.0f;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;
