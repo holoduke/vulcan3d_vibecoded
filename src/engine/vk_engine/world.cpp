@@ -659,7 +659,14 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
     // Slope-scale + constant bias to combat acne. Tuned conservatively;
     // peter-panning at thin geometry edges is the lesser evil here vs
     // shadow acne scrolling across grass as the sun rotates.
-    vkCmdSetDepthBias(cmd, /*const*/ 1.5f, /*clamp*/ 0.0f, /*slope*/ 4.0f);
+    // Bias values: slope was 4 — too aggressive on slanted caster faces
+    // (oblique mountain slopes, rotated boxes), which pushed their depth
+    // far "behind" the actual surface and detached the shadow from the
+    // contact line. The user reported a band/gap of unshadowed terrain
+    // right next to box/castle bases. 1.0/1.5 is conservative for D32
+    // depth and keeps flat-surface acne in check while letting the
+    // shadow start at the actual contact point.
+    vkCmdSetDepthBias(cmd, /*const*/ 1.0f, /*clamp*/ 0.0f, /*slope*/ 1.5f);
 
     glm::mat4 vp = sun_shadow_light_vp_;
     Frustum light_frustum = extract_frustum(vp);
