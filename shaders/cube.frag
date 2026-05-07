@@ -172,6 +172,23 @@ bool any_hit(vec3 origin, vec3 dir, float t_max) {
            gl_RayQueryCommittedIntersectionTriangleEXT;
 }
 
+// Shadow-ray variant for TERRAIN receivers. Uses cull-mask 0x02 which
+// the terrain BLAS instance does NOT have set — so the ray only finds
+// castle / dyn-prop occluders, not the terrain itself. The terrain BLAS
+// would otherwise produce per-triangle false-hits because its full-
+// resolution geometry sits above the rasterised LOD surface. Terrain
+// self-shadow comes from the heightmap bake instead.
+bool any_hit_no_terrain(vec3 origin, vec3 dir, float t_max) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, topLevelAS,
+                          gl_RayFlagsTerminateOnFirstHitEXT |
+                          gl_RayFlagsOpaqueEXT,
+                          0x02, origin, 0.001, dir, t_max);
+    while (rayQueryProceedEXT(rq)) {}
+    return rayQueryGetIntersectionTypeEXT(rq, true) ==
+           gl_RayQueryCommittedIntersectionTriangleEXT;
+}
+
 // Sky tint without the sun halo вЂ” for atmospheric fog where adding
 // the localized halo brightness on distant terrain pixels makes them
 // glow blindingly when looking near the sun. Same horizonв†’zenith
@@ -679,16 +696,30 @@ void main() {
         // eliminates the false hits while RT keeps crisp near-shadows
         // (incl. boxes / castle on terrain) within ~40 m of the camera.
         if (is_terrain_pre) {
-            // Pure bake вЂ” RT shadow disabled entirely on terrain (matches
-            // debug mode 4 which is the only artifact-free path). The RT
-            // PCSS shadow's per-fragment jitter combined with N-driven
-            // ray-direction variation produces per-triangle hit/miss
-            // flips at any distance on the BLAS-vs-LOD-raster mismatch.
-            // Bake gives smooth terrain self-shadow; we lose box/castle
-            // shadows on terrain (visually a small loss compared to the
-            // patchwork). Soft via 5-tap PCF.
+            // Hybrid: terrain self-shadow comes from the bake, castle/
+            // dyn-prop shadows on terrain come from RT shadow rays
+            // fired with cull-mask 0x02. The terrain BLAS doesn't have
+            // bit 1 set so it can't false-hit; only non-terrain
+            // occluders contribute. Combine via max() so each source
+            // adds its share of darkening without amplification.
+            float sh_rt_t = 0.0;
+            if (n_dot_l_raw > 0.0 && scene.rt_flags.x != 0) {
+                vec3 origin_t = vWorldPos + N * 0.04;
+                int N_ts = max(1, lod_samples(scene.rt_flags.y, cam_dist));
+                float blocked_t = 0.0;
+                for (int i = 0; i < N_ts; ++i) {
+                    float r1 = rand(seed_base + uvec3(i, 113u, 17u));
+                    float r2 = rand(seed_base + uvec3(i, 31u, 89u));
+                    float r   = sqrt(r1) * scene.rt_params.x;
+                    float phi = 6.28318530718 * r2;
+                    vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
+                    vec3 dir = normalize(L + jitter);
+                    if (any_hit_no_terrain(origin_t, dir, 200.0)) blocked_t += 1.0;
+                }
+                sh_rt_t = (blocked_t / float(N_ts)) * scene.rt_params.w;
+            }
             ivec2 sz_b = textureSize(u_terrain_shadow, 0);
-            const float side_b = 2048.0; // terrain world extent (supersample-invariant)
+            const float side_b = 2048.0;
             vec2 uv_b = (vWorldPos.xz / side_b) + vec2(0.5);
             float sh_bake = 0.0;
             if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
@@ -699,9 +730,9 @@ void main() {
                 s += texture(u_terrain_shadow, uv_b + texel * vec2(-1.0,  0.0)).r;
                 s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0,  1.0)).r;
                 s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0, -1.0)).r;
-                sh_bake = s * 0.2;
+                sh_bake = s * 0.2 * scene.rt_params.w;
             }
-            shadow = sh_bake * scene.rt_params.w;
+            shadow = max(sh_rt_t, sh_bake);
         }
     }
 

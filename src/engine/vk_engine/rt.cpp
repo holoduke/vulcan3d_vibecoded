@@ -733,7 +733,16 @@ void VulkanEngine::bake_static_brushes() {
         tinst.transform.matrix[1][1] = 1.0f;
         tinst.transform.matrix[2][2] = 1.0f;
         tinst.instanceCustomIndex = static_cast<uint32_t>(world_.brushes.size());
-        tinst.mask = 0xFF;
+        // Mask convention extended for the terrain receiver case:
+        //   bit 0 = "shadow caster, ray-mask 0x01 sees it" (legacy)
+        //   bit 1 = "non-terrain shadow caster" — terrain receivers
+        //           use ray mask 0x02 to fire RT shadow rays that
+        //           skip the terrain BLAS (so the BLAS-vs-LOD-raster
+        //           mismatch can't false-hit per triangle), but still
+        //           hit castle / dyn-props for box-shadow-on-ground.
+        // Terrain BLAS keeps bit 0 (non-terrain receivers still see it
+        // for mountain-shadow-on-castle) but clears bit 1.
+        tinst.mask = 0x01;
         tinst.instanceShaderBindingTableRecordOffset = 0;
         tinst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         tinst.accelerationStructureReference = terrain_blas_device_address_;
@@ -913,13 +922,15 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         glm::mat4 scale_m = glm::scale(glm::mat4(1.0f),
                                        glm::vec3(p.radius, p.half_length, p.radius));
         glm::mat4 m = align * scale_m;
-        // 0xFE: bullets are sub-mm cylinders moving at 600 m/s — their
-        // contact-shadow streaks alias visibly in the soft-shadow penumbra
-        // before they hit. Reflections/GI still see them so the tracer line
-        // shows up in shiny pedestals.
+        // Mask 0xFC: clears bit 0 (no shadow-caster for non-terrain
+        // receivers) AND bit 1 (no shadow-caster for terrain receivers).
+        // Bullets are sub-mm cylinders moving at 600 m/s — their contact
+        // shadow streaks alias visibly in the soft-shadow penumbra. GI/
+        // reflection rays still see them via mask 0xFF so the tracer
+        // line shows up in shiny surfaces.
         write_instance(m, m, p.color, p.emissive,
                        /*full_emissive=*/true, cylinder_blas_device_address_,
-                       kNoTex, 0xFE);
+                       kNoTex, 0xFC);
     }
 
     VkAccelerationStructureGeometryInstancesDataKHR inst_data{};
