@@ -164,9 +164,13 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
         }
     }
     // Skirt twins: 4 edges × sample_dim verts. Each one is the interior
-    // edge vertex with Y dropped by kTerrainSkirtDepth. The normal is
-    // outward-perpendicular to the edge so they're shaded as side walls.
-    auto add_skirt_edge = [&](int ix0, int iz0, int dx, int dz, glm::vec3 n) {
+    // edge vertex with Y dropped by kTerrainSkirtDepth. Normal inherits
+    // from the corresponding interior vertex (heightmap-gradient normal,
+    // mostly upward) so the skirt shades like the terrain above it
+    // rather than reading as a dark vertical wall — distant chunks at
+    // low LOD would otherwise show their outward-facing skirts as
+    // visible dark faces against the sky.
+    auto add_skirt_edge = [&](int ix0, int iz0, int dx, int dz) {
         for (int k = 0; k < sample_dim; ++k) {
             int ix = ix0 + dx * k;
             int iz = iz0 + dz * k;
@@ -175,13 +179,13 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
             glm::vec3 p(hm.origin_x + static_cast<float>(gx) * hm.cell,
                         hm.at(gx, gz) - kTerrainSkirtDepth,
                         hm.origin_z + static_cast<float>(gz) * hm.cell);
-            verts.push_back({p, n, glm::vec2(p.x, p.z)});
+            verts.push_back({p, sample_normal(gx, gz), glm::vec2(p.x, p.z)});
         }
     };
-    add_skirt_edge(0,             0,             1, 0, glm::vec3( 0, 0, -1));  // top  (z=0)
-    add_skirt_edge(sample_dim - 1, 0,             0, 1, glm::vec3( 1, 0,  0));  // right(x=N-1)
-    add_skirt_edge(0,             sample_dim - 1, 1, 0, glm::vec3( 0, 0,  1));  // bot  (z=N-1)
-    add_skirt_edge(0,             0,             0, 1, glm::vec3(-1, 0,  0));  // left (x=0)
+    add_skirt_edge(0,             0,             1, 0);  // top  (z=0)
+    add_skirt_edge(sample_dim - 1, 0,             0, 1);  // right(x=N-1)
+    add_skirt_edge(0,             sample_dim - 1, 1, 0);  // bot  (z=N-1)
+    add_skirt_edge(0,             0,             0, 1);  // left (x=0)
 }
 
 // Per-vertex "parent Y" for CD-LOD morphing between LOD 0 and LOD 1.
