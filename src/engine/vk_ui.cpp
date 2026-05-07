@@ -306,6 +306,8 @@ void VulkanEngine::build_menu_ui() {
         }
         ImGui::SliderFloat("shadow map world size (m)",
                             &rt_.shadow_map_world_half, 30.0f, 400.0f);
+        ImGui::Checkbox("debug overlay (frustum + bake bounds)",
+                         &rt_.shadow_debug_overlay);
 
         ImGui::SeparatorText("Ambient Occlusion (RT)");
         ImGui::SliderInt("AO samples (0=off)", &rt_.ao_samples, 0, 64);

@@ -332,6 +332,11 @@ private:
                              glm::vec3 incoming_dir);
     void update_particles(float dt);
     void draw_spark_trails(VkCommandBuffer cmd, const glm::mat4& vp);
+    // Renders shadow-map debug visuals when rt_.shadow_debug_overlay is on:
+    // wireframe of the light ortho frustum, sun-direction line at the
+    // player, and a circle at the bake/shadow-map cross-fade boundary.
+    // Lines are drawn as thin emissive cylinders (re-uses cylinder mesh).
+    void draw_shadow_debug(VkCommandBuffer cmd, const glm::mat4& vp);
     static constexpr int   kParticlesPerHit   = 14;
     static constexpr float kParticleTtl       = 0.6f;
     static constexpr float kParticleColRad    = 0.018f;  // collision sphere
@@ -891,6 +896,11 @@ private:
         //     under your feet, but per-texel coverage gets coarser.
         int   shadow_map_resolution  = 1024;
         float shadow_map_world_half  = 120.0f;
+        // Debug overlay: draws a wireframe of the shadow ortho frustum
+        // and the bake/shadow-map cross-fade boundary on top of the
+        // world. Useful for tuning shadow_map_world_half and seeing
+        // exactly which casters land inside the shadow map.
+        bool  shadow_debug_overlay = false;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;

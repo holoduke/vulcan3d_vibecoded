@@ -1782,6 +1782,8 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdBindIndexBuffer(cmd, cylinder_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
         draw_spark_trails(cmd, vp);
     }
+    // Shadow debug overlay (gated by rt_.shadow_debug_overlay).
+    draw_shadow_debug(cmd, vp);
 
     // Projectiles: switch to cylinder mesh, draw each in-flight bullet.
     if (!projectiles_.empty() && physics_) {

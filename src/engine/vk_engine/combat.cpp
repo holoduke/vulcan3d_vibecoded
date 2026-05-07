@@ -396,6 +396,113 @@ void VulkanEngine::draw_spark_trails(VkCommandBuffer cmd, const glm::mat4& vp) {
     }
 }
 
+void VulkanEngine::draw_shadow_debug(VkCommandBuffer cmd, const glm::mat4& vp) {
+    if (!rt_.shadow_debug_overlay) return;
+
+    // Re-use the cylinder mesh as a "line": thin radius, scaled along Y.
+    auto draw_line = [&](glm::vec3 a, glm::vec3 b, glm::vec3 emissive,
+                          float radius = 0.06f) {
+        glm::vec3 mid = (a + b) * 0.5f;
+        glm::vec3 d = b - a;
+        float len = glm::length(d);
+        if (len < 1e-3f) return;
+        glm::vec3 dir = d / len;
+        glm::mat4 model = align_local_y_to(mid, dir) *
+                          glm::scale(glm::mat4(1.0f),
+                                     glm::vec3(radius, len * 0.5f, radius));
+        PushConstants pc{};
+        pc.mvp = vp * model;
+        pc.model = model;
+        pc.prev_mvp = pc.mvp;
+        pc.color = glm::vec4(glm::min(emissive, glm::vec3(1.0f)), 1.0f);
+        pc.emissive = glm::vec4(emissive, 1.0f);  // .a > 0 → skip lighting in cube.frag
+        vkCmdPushConstants(cmd, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
+    };
+
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &cylinder_mesh_.vertex_buffer, &off);
+    vkCmdBindIndexBuffer(cmd, cylinder_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+
+    // -------- Shadow ortho frustum (8 corners → 12 edges) --------
+    // Recover world-space corners by inverting light_vp and projecting
+    // the 8 NDC cube corners. Vulkan NDC: x,y ∈ [-1, 1], z ∈ [0, 1].
+    glm::mat4 inv_light = glm::inverse(sun_shadow_light_vp_);
+    glm::vec3 corners[8];
+    int idx = 0;
+    for (int z = 0; z <= 1; ++z) {
+        for (int y = -1; y <= 1; y += 2) {
+            for (int x = -1; x <= 1; x += 2) {
+                glm::vec4 c = inv_light * glm::vec4(static_cast<float>(x),
+                                                     static_cast<float>(y),
+                                                     static_cast<float>(z),
+                                                     1.0f);
+                corners[idx++] = glm::vec3(c) / c.w;
+            }
+        }
+    }
+    // Edge index pairs for a [-1,1]³ cube ordered (x_low/high, y_low/high,
+    // z_low/high): bottom 4, top 4, vertical 4.
+    const int kEdges[12][2] = {
+        {0,1}, {1,3}, {3,2}, {2,0},   // near plane (z=0)
+        {4,5}, {5,7}, {7,6}, {6,4},   // far plane (z=1)
+        {0,4}, {1,5}, {2,6}, {3,7},   // connecting verticals
+    };
+    const glm::vec3 kFrustumColor(2.0f, 2.0f, 0.0f);  // bright yellow
+    for (const auto& e : kEdges) {
+        draw_line(corners[e[0]], corners[e[1]], kFrustumColor, 0.08f);
+    }
+
+    // -------- Cross-fade boundary circle (bake / shadow-map seam) ----
+    // Approximate the smoothstep boundary as a horizontal circle around
+    // the player at height = camera Y, radius = shadow_map_world_half.
+    // Visualises where grass switches from shadow map → bake.
+    glm::vec3 cam = player_.eye_position();
+    const float kBoundaryR = std::max(rt_.shadow_map_world_half, 30.0f);
+    const int kSegs = 48;
+    const glm::vec3 kBoundaryColor(0.4f, 0.4f, 3.0f);  // bright blue
+    glm::vec3 prev = cam + glm::vec3(kBoundaryR, 0.0f, 0.0f);
+    for (int i = 1; i <= kSegs; ++i) {
+        float a = (static_cast<float>(i) / kSegs) * 6.2831853f;
+        glm::vec3 cur = cam + glm::vec3(std::cos(a) * kBoundaryR,
+                                          0.0f,
+                                          std::sin(a) * kBoundaryR);
+        draw_line(prev, cur, kBoundaryColor, 0.10f);
+        prev = cur;
+    }
+
+    // -------- Sun direction line (shadow camera "look") --------------
+    // Anchor at the player; length matches the light eye distance.
+    float p_rad = glm::radians(rt_.sun_pitch_deg);
+    float y_rad = glm::radians(rt_.sun_yaw_deg);
+    glm::vec3 sun_dir = glm::normalize(glm::vec3(
+        std::sin(y_rad) * std::cos(p_rad), std::sin(p_rad),
+        std::cos(y_rad) * std::cos(p_rad)));
+    draw_line(cam, cam + sun_dir * 20.0f,
+              glm::vec3(3.0f, 1.5f, 0.0f),  // orange — sunwards
+              0.12f);
+
+    // -------- Heightmap bake world bounds (outermost reach) ----------
+    // The bake covers [-side/2, +side/2] in X and Z. Drawn as a light
+    // grey square at terrain Y so the user can see how far the bake
+    // extends compared to the shadow map.
+    if (terrain_data_.dim > 0) {
+        float side = static_cast<float>(terrain_data_.dim) * terrain_data_.cell;
+        float h = 0.5f;
+        glm::vec3 a(-side * 0.5f, h, -side * 0.5f);
+        glm::vec3 b( side * 0.5f, h, -side * 0.5f);
+        glm::vec3 c( side * 0.5f, h,  side * 0.5f);
+        glm::vec3 d(-side * 0.5f, h,  side * 0.5f);
+        const glm::vec3 kBakeColor(1.5f, 1.5f, 1.5f);
+        draw_line(a, b, kBakeColor, 0.15f);
+        draw_line(b, c, kBakeColor, 0.15f);
+        draw_line(c, d, kBakeColor, 0.15f);
+        draw_line(d, a, kBakeColor, 0.15f);
+    }
+}
+
 void VulkanEngine::spawn_impact_decal(glm::vec3 hit_pos, glm::vec3 incoming_dir) {
     if (!physics_) return;
     glm::vec3 dir = glm::length(incoming_dir) > 1e-3f
