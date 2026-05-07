@@ -312,26 +312,16 @@ void main() {
             float ndl = max(dot(N, L), 0.0);
             float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
 
-            // Hybrid shadow — RT only very close (<20 m where LOD 0 is
-            // certain and BLAS matches the raster precisely), bake
-            // beyond. Tightened from earlier 40-80 m because adjacent
-            // LOD 1 chunk triangles in the blend zone could land on
-            // opposite sides of "ray hits BLAS detail" → per-triangle
-            // shadow flips → dark triangles.
+            // PURE BAKE — RT shadow disabled on terrain entirely for
+            // diagnosis. If artifacts persist with this, RT is not the
+            // source; the bake or something else is the issue.
             ivec2 sz = textureSize(u_terrain_shadow, 0);
             float side_b = float(sz.x - 1) * 1.0;
             vec2 uv_b = (vWorldPos.xz / side_b) + vec2(0.5);
-            float sh_bake = 0.0;
+            float sh = 0.0;
             if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
                 all(lessThanEqual(uv_b, vec2(1.0)))) {
-                sh_bake = step(0.5, texture(u_terrain_shadow, uv_b).r);
-            }
-            float sh = sh_bake;
-            if (dist_to_cam < 50.0) {
-                vec3 origin = vWorldPos + N * 0.04;
-                float sh_rt = any_hit(origin, L, 200.0) ? 1.0 : 0.0;
-                float near_t = 1.0 - smoothstep(20.0, 50.0, dist_to_cam);
-                sh = mix(sh, sh_rt, near_t);
+                sh = step(0.5, texture(u_terrain_shadow, uv_b).r);
             }
 
             // Albedo: grey at base, layer-blend from mode 5.
