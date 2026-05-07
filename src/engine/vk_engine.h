@@ -577,7 +577,11 @@ private:
     // grass.vert at scene_desc binding 7 as a sampler2DShadow (hardware
     // PCF). Cube.frag continues to use RT shadow rays — the shadow map
     // here is grass-only for now.
-    static constexpr uint32_t kShadowMapSize = 2048;
+    // 1024² is a balance: at ~120m half-extent that's ~24cm/texel — still
+    // sharp enough for grass-scale shadows, half the fragment cost of
+    // 2048² (which TDR'd on the first heavy-load test). Bump back up if
+    // we add cube.frag as a receiver later.
+    static constexpr uint32_t kShadowMapSize = 1024;
     VkImage         sun_shadow_image_   = VK_NULL_HANDLE;
     VmaAllocation   sun_shadow_alloc_   = nullptr;
     VkImageView     sun_shadow_view_    = VK_NULL_HANDLE;

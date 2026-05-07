@@ -567,6 +567,7 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
     vkCmdSetDepthBias(cmd, /*const*/ 1.5f, /*clamp*/ 0.0f, /*slope*/ 4.0f);
 
     glm::mat4 vp = sun_shadow_light_vp_;
+    Frustum light_frustum = extract_frustum(vp);
 
     auto push_shadow = [&](const glm::mat4& model) {
         PushConstants pc{};
@@ -577,12 +578,17 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
                            0, sizeof(PushConstants), &pc);
     };
 
-    // Static brushes (castle, towers).
+    // Static brushes (castle, towers). Light-frustum cull: only brushes
+    // whose AABB intersects the ortho box need rasterising. Cuts ~80%
+    // of brush draws when the player isn't inside the keep — was the
+    // dominant cost behind the 14-second TDR repro.
     VkDeviceSize cube_off = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &cube_off);
     vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     for (size_t i = 0; i < world_.brushes.size(); ++i) {
         const auto& b = world_.brushes[i];
+        const auto& a = world_.aabbs[i];
+        if (!aabb_visible(light_frustum, a.min, a.max)) continue;
         glm::mat4 model = glm::translate(glm::mat4(1.0f), b.center) *
                           glm::scale(glm::mat4(1.0f), b.size);
         push_shadow(model);
@@ -590,26 +596,24 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
     }
 
     // Dyn-props — same cube BLAS is the cube mesh; cylinders use their
-    // own mesh. For simplicity we render every dyn-prop as its actual
-    // mesh: the existing render path already binds per-prop mesh buffers,
-    // we mirror that.
+    // own mesh. Light-frustum cull mirrors the brushes path.
     for (size_t i = 0; i < dyn_props_.size(); ++i) {
         const DynRender& dr = i < dyn_render_cache_.size() ? dyn_render_cache_[i]
                                                             : DynRender{};
         if (!dr.valid) continue;
+        if (!aabb_visible(light_frustum, dr.aabb_min, dr.aabb_max)) continue;
         glm::mat4 model = dr.world * glm::scale(glm::mat4(1.0f),
                                                  dyn_props_[i].full_size);
         push_shadow(model);
-        // dyn-prop mesh index — same vbuffer (cube_mesh_) was bound; if a
-        // future cylinder/sphere prop ships we'd need per-prop mesh
-        // bindings here. Cubes use the bound cube mesh, which is correct.
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     }
 
-    // Terrain chunks. No per-chunk frustum cull against the light frustum
-    // for now — the chunk count is modest and depth-only is cheap.
+    // Terrain chunks — frustum-culled too. Without this every chunk got
+    // rasterised; with ~100 chunks at high LOD that flooded the depth
+    // pipeline and triggered TDR after a few seconds of moving.
     if (!terrain_chunks_.chunks.empty()) {
         for (const auto& c : terrain_chunks_.chunks) {
+            if (!aabb_visible(light_frustum, c.aabb_min, c.aabb_max)) continue;
             VkDeviceSize toff = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
             vkCmdBindIndexBuffer(cmd, c.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
