@@ -751,7 +751,18 @@ void main() {
         // mode 1 halves the search radius — bias toward contact AO rather
         // than ambient occlusion of the whole hemisphere.
         float ao_radius = scene.rt_params.y * (ao_mode == 1 ? 0.5 : 1.0);
-        vec3 origin_ao = vWorldPos + N * 0.01;
+        // Distance-scaled origin lift for terrain — pushes the AO ray's
+        // origin above the BLAS detail that the rasterised LOD-1+ raster
+        // sits below. Without this, AO rays from the under-shooting
+        // raster surface false-hit BLAS peaks → patchy darkening per
+        // triangle. Lift ramps with distance, capped at ~6m which clears
+        // typical LOD-2 peak undershoot.
+        float ao_lift = 0.01;
+        if (is_terrain_pre) {
+            float t = clamp((cam_dist - 40.0) / 200.0, 0.0, 1.0);
+            ao_lift = mix(0.01, 6.0, t);
+        }
+        vec3 origin_ao = vWorldPos + N * ao_lift;
         // Unstratified random samples driven by IGN + temporal frame seed.
         // The stratified version (ceil(sqrt(N))²-cell grid) was biased
         // when N wasn't a perfect square — at N=2 strata=2 picked only
@@ -780,17 +791,11 @@ void main() {
         raw = sqrt(raw);
         float ao_floor_v = scene.rt_lod.w;
         ao = mix(ao_floor_v, 1.0, raw);
-        // Terrain at distance: the rasterised LOD 1+ surface sits BELOW
-        // the BLAS detail. AO rays from vWorldPos hit BLAS peaks the
-        // raster doesn't show → adjacent large triangles get different
-        // occluded-ray fractions → patchy dark "faces". LOD 1 starts at
-        // 80 m so we have to begin fading there or even earlier — at
-        // 80 m a chunk has already switched to stride-2 cells and AO
-        // rays start finding BLAS detail the raster missed. Fade
-        // 40 → 100 m so AO is fully off (=1.0) by the time LOD 1 is
-        // anywhere near the camera.
+        // Mild AO fade only — the origin-lift above is the primary
+        // false-hit fix; this just softens any residual mid-distance
+        // patchiness without flattening the look entirely.
         if (is_terrain_pre) {
-            float ao_far_t = smoothstep(40.0, 100.0,
+            float ao_far_t = smoothstep(150.0, 400.0,
                                          distance(vWorldPos, scene.camera_pos.xyz));
             ao = mix(ao, 1.0, ao_far_t);
         }
@@ -839,7 +844,16 @@ void main() {
                 float u2 = (float(sy) + r2) * inv_strata;
 
                 vec3 ray_dir = cos_hemi(u1, u2, N);
-                vec3 ray_origin = vWorldPos + N * 0.01;
+                // Same origin lift as AO above: pushes the ray above
+                // BLAS detail that the rasterised LOD-1+ raster sits
+                // below, so GI rays from distant terrain don't false-
+                // hit BLAS peaks the user can't see.
+                float gi_lift = 0.01;
+                if (is_terrain_pre) {
+                    float t_o = clamp((cam_dist - 40.0) / 200.0, 0.0, 1.0);
+                    gi_lift = mix(0.01, 6.0, t_o);
+                }
+                vec3 ray_origin = vWorldPos + N * gi_lift;
                 vec3 throughput = vec3(1.0);
                 vec3 path = vec3(0.0);
 
@@ -904,13 +918,10 @@ void main() {
         sky_total = taken;
         sky_vis = float(sky_misses) / float(max(1, sky_total));
 
-        // Distant terrain: BLAS-vs-LOD-raster mismatch poisons both
-        // the GI accumulation AND the sky_vis count. Same boundary
-        // as the AO fade — LOD 1 starts at 80 m so we have to be
-        // fully off by then. Fade 40 → 100 m so GI is gone before
-        // LOD 1 chunks become a problem.
+        // Mild far fade — origin-lift above is the primary fix;
+        // this just smooths out any residual long-distance noise.
         if (is_terrain_pre) {
-            float gi_far_t = smoothstep(40.0, 100.0, cam_dist);
+            float gi_far_t = smoothstep(150.0, 400.0, cam_dist);
             gi_indirect = mix(gi_indirect, vec3(0.0), gi_far_t);
             sky_vis = mix(sky_vis, 1.0, gi_far_t);
         }
