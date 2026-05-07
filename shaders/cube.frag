@@ -92,6 +92,12 @@ layout(set = 0, binding = 4) uniform sampler2D u_normal[5];
 // bake was traced against the heightmap directly so it matches the
 // rasterised LOD surface at distance with no false hits.
 layout(set = 0, binding = 6) uniform sampler2D u_terrain_shadow;
+// Sun shadow map (single-cascade ortho, rendered each frame from the
+// sun's POV with castle / dyn-props / terrain as casters). 1024² over
+// ~120m world half = ~12cm per texel close to the camera. We sample
+// this for terrain receivers within the shadow map's frustum — much
+// sharper than the bake's 1m texels.
+layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 
 // Triplanar projection sample. Avoids the "what UV does this cube face
 // use" problem and works correctly on every brush size вЂ” the texture stays
@@ -705,27 +711,35 @@ void main() {
         // eliminates the false hits while RT keeps crisp near-shadows
         // (incl. boxes / castle on terrain) within ~40 m of the camera.
         if (is_terrain_pre) {
-            // Hybrid: terrain self-shadow comes from the bake, castle/
-            // dyn-prop shadows on terrain come from RT shadow rays
-            // fired with cull-mask 0x02. The terrain BLAS doesn't have
-            // bit 1 set so it can't false-hit; only non-terrain
-            // occluders contribute. Combine via max() so each source
-            // adds its share of darkening without amplification.
-            float sh_rt_t = 0.0;
-            if (n_dot_l_raw > 0.0 && scene.rt_flags.x != 0) {
-                vec3 origin_t = vWorldPos + N * 0.04;
-                int N_ts = max(1, lod_samples(scene.rt_flags.y, cam_dist));
-                float blocked_t = 0.0;
-                for (int i = 0; i < N_ts; ++i) {
-                    float r1 = rand(seed_base + uvec3(i, 113u, 17u));
-                    float r2 = rand(seed_base + uvec3(i, 31u, 89u));
-                    float r   = sqrt(r1) * scene.rt_params.x;
-                    float phi = 6.28318530718 * r2;
-                    vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
-                    vec3 dir = normalize(L + jitter);
-                    if (any_hit_no_terrain(origin_t, dir, 200.0)) blocked_t += 1.0;
+            // Hybrid: shadow map close-by (high-res, includes castle /
+            // dyn-props / terrain self-shadow), bake far (covers the
+            // whole world but coarse). Shadow map is cheaper and
+            // sharper than the RT shadow path inside its frustum.
+            //
+            // Light-clip projection: world → light-NDC → [0,1] uv.
+            // Out-of-frustum = no shadow contribution from the map; the
+            // bake handles those fragments.
+            vec4 lc = scene.light_vp * vec4(vWorldPos, 1.0);
+            vec3 lndc = lc.xyz / lc.w;
+            float sh_smap = 0.0;
+            float smap_w = 0.0;
+            if (lndc.z >= 0.0 && lndc.z <= 1.0) {
+                vec2 luv = lndc.xy * 0.5 + 0.5;
+                if (all(greaterThanEqual(luv, vec2(0.0))) &&
+                    all(lessThanEqual(luv, vec2(1.0)))) {
+                    // sampler2DShadow with LESS_OR_EQUAL: returns 1 when
+                    // the receiver passes (lit), 0 when blocked. Bias
+                    // the receiver depth slightly to combat acne.
+                    const float kRecvBias = 0.0008;
+                    float lit = textureLod(u_sun_shadow_map,
+                                            vec3(luv, lndc.z - kRecvBias), 0.0);
+                    sh_smap = (1.0 - lit) * scene.rt_params.w;
+                    // Smooth fade-to-bake near the frustum edge so the
+                    // boundary isn't visible.
+                    vec2 edge = min(luv, vec2(1.0) - luv);
+                    float e = min(edge.x, edge.y);
+                    smap_w = smoothstep(0.0, 0.05, e);
                 }
-                sh_rt_t = (blocked_t / float(N_ts)) * scene.rt_params.w;
             }
             ivec2 sz_b = textureSize(u_terrain_shadow, 0);
             const float side_b = 2048.0;
@@ -747,7 +761,9 @@ void main() {
                 }
                 sh_bake = (s / 9.0) * scene.rt_params.w;
             }
-            shadow = max(sh_rt_t, sh_bake);
+            // Inside shadow-map frustum: use the high-res shadow map
+            // result. Outside: bake. Smooth crossfade at the edge.
+            shadow = mix(sh_bake, sh_smap, smap_w);
         }
     }
 
