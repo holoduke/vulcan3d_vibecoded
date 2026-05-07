@@ -911,6 +911,24 @@ void VulkanEngine::run(const RunOptions& opts) {
             destroy_sun_shadow_resources();
             init_sun_shadow_resources();
         }
+        // Heightmap-bake supersample changed → recreate texture and
+        // restart the worker so subsequent jobs run at the new ss.
+        // The user can flip 1x/2x/4x freely; texture realloc is cheap.
+        if (rt_.terrain_bake_supersample != terrain_shadow_active_ss_) {
+            vkDeviceWaitIdle(device_);
+            stop_terrain_shadow_worker();
+            destroy_terrain_shadow_texture();
+            rebuild_terrain_shadow_texture();
+            start_terrain_shadow_worker();
+            // Trigger an immediate re-bake at the new ss so the worker
+            // refines beyond the SS=1 fallback the sync-bake replicated.
+            float p_rad = glm::radians(rt_.sun_pitch_deg);
+            float y_rad = glm::radians(rt_.sun_yaw_deg);
+            glm::vec3 cur(std::sin(y_rad) * std::cos(p_rad),
+                          std::sin(p_rad),
+                          std::cos(y_rad) * std::cos(p_rad));
+            enqueue_terrain_shadow_rebake(cur);
+        }
         update_scene_ubo();
         // Heightmap sun-shadow is sun-direction-dependent. Instead of
         // re-baking the whole 1024² texture in one go (~100 ms hitch),

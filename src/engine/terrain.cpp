@@ -443,6 +443,41 @@ void bake_heightmap_shadow_tile(const Heightmap& hm, glm::vec3 sun_dir,
     bake_shadow_region(hm, glm::normalize(sun_dir), ix0, iz0, w, h, out_tile, w);
 }
 
+void bake_heightmap_shadow_tile_ss(const Heightmap& hm, glm::vec3 sun_dir,
+                                    int tx0, int tz0, int w, int h, int ss,
+                                    uint8_t* out_tile) {
+    if (ss < 1) ss = 1;
+    glm::vec3 L = glm::normalize(sun_dir);
+    if (L.y < 0.05f) {
+        std::fill_n(out_tile, static_cast<size_t>(w) * static_cast<size_t>(h),
+                     uint8_t(255));
+        return;
+    }
+    const float sub_cell = hm.cell / static_cast<float>(ss);
+    const float step = sub_cell * 0.5f;
+    const float max_t = 400.0f;
+    const int   max_steps = static_cast<int>(max_t / step);
+    for (int dz = 0; dz < h; ++dz) {
+        uint8_t* row = out_tile + static_cast<size_t>(dz) *
+                                   static_cast<size_t>(w);
+        for (int dx = 0; dx < w; ++dx) {
+            float wx = hm.origin_x + (static_cast<float>(tx0 + dx) + 0.5f) * sub_cell;
+            float wz = hm.origin_z + (static_cast<float>(tz0 + dz) + 0.5f) * sub_cell;
+            float h0 = hm.sample_world(wx, wz);
+            glm::vec3 p0(wx, h0 + 0.20f, wz);
+            bool shadowed = false;
+            for (int s = 1; s <= max_steps; ++s) {
+                float t = static_cast<float>(s) * step;
+                glm::vec3 p = p0 + L * t;
+                float h_at_p = hm.sample_world(p.x, p.z);
+                if (p.y < h_at_p) { shadowed = true; break; }
+                if (p.y - h0 > 100.0f) break;
+            }
+            row[dx] = shadowed ? 255 : 0;
+        }
+    }
+}
+
 std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
                                            glm::vec3 sun_dir) {
     const int W = hm.width();

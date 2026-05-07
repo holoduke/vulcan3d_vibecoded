@@ -80,6 +80,16 @@ void bake_heightmap_shadow_tile(const Heightmap& hm, glm::vec3 sun_dir,
                                 int ix0, int iz0, int w, int h,
                                 uint8_t* out_tile);
 
+// Supersampled tile bake. tx0, tz0 are texel coords on a virtual
+// `(hm.dim+1) * ss` × `(hm.dim+1) * ss` grid; the world XZ for each
+// texel is `origin + (tx + 0.5) * (cell / ss)` so the bake captures
+// sub-cell shadow precision (smoother edges, finer medium/far
+// detail). Heights are sampled via Heightmap::sample_world (bilinear)
+// — no extra heightmap data needed. ss must be ≥ 1.
+void bake_heightmap_shadow_tile_ss(const Heightmap& hm, glm::vec3 sun_dir,
+                                    int tx0, int tz0, int w, int h, int ss,
+                                    uint8_t* out_tile);
+
 // Phase 2 chunked terrain: split the heightmap into a grid of chunks,
 // each with its own full-LOD vertex+index buffer plus a sparser
 // stride-N index buffers that re-index the same vertex buffer (LOD 0 = full,

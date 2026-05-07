@@ -318,6 +318,14 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("LOD 0->1 (m)", &rt_.terrain_lod1,  20.0f,  400.0f);
         ImGui::SliderFloat("LOD 1->2 (m)", &rt_.terrain_lod2,  60.0f,  800.0f);
         ImGui::SliderFloat("LOD 2->3 (m)", &rt_.terrain_lod3, 120.0f, 1600.0f);
+
+        const char* ss_labels[] = { "1x (native)", "2x (sub-cell)", "4x (sharp far)" };
+        const int ss_values[] = { 1, 2, 4 };
+        int ss_idx = 0;
+        for (int i = 0; i < 3; ++i) if (rt_.terrain_bake_supersample == ss_values[i]) { ss_idx = i; break; }
+        if (ImGui::Combo("Shadow bake supersample", &ss_idx, ss_labels, 3)) {
+            rt_.terrain_bake_supersample = ss_values[ss_idx];
+        }
         // Keep them ordered so the band logic stays valid.
         if (rt_.terrain_lod2 < rt_.terrain_lod1 + 20.0f)
             rt_.terrain_lod2 = rt_.terrain_lod1 + 20.0f;

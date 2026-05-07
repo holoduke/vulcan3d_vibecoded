@@ -2,7 +2,7 @@
 #extension GL_EXT_ray_query : require
 
 layout(location = 0) in vec3 vNormal;
-// flat — see cube.vert for the rationale (these are push-constant values
+// flat вЂ” see cube.vert for the rationale (these are push-constant values
 // that must not perspective-interpolate; the vTexParams.x precision drift
 // was silently enabling texture sampling when textures were "off").
 layout(location = 1) flat in vec3 vColor;
@@ -15,11 +15,11 @@ layout(location = 5) flat in vec4 vTexParams;  // x: albedo idx, y: normal idx,
                                                //    1 = object-space triplanar
 layout(location = 6) in vec3 vObjectPos;
 layout(location = 7) in vec3 vObjectNormal;
-layout(location = 8) in vec4 vPrevClip;  // prev_view_proj × prev_model × local_pos
+layout(location = 8) in vec4 vPrevClip;  // prev_view_proj Г— prev_model Г— local_pos
 layout(location = 0) out vec4 outColor;
-// Per-pixel screen-space motion vector — current_uv minus prev_uv. Dynamic
+// Per-pixel screen-space motion vector вЂ” current_uv minus prev_uv. Dynamic
 // surfaces get correct reprojection because cube.vert applied prev_model
-// (DynRender::prev_world × scale for dyn boxes; current model for static
+// (DynRender::prev_world Г— scale for dyn boxes; current model for static
 // brushes / camera-attached viewmodel / sub-pixel particles). Future SVGF
 // pass reads motion_vec_image_ + uses this delta to walk into history.
 layout(location = 1) out vec2 outMotion;
@@ -37,7 +37,7 @@ layout(set = 0, binding = 0) uniform SceneUBO {
                         // w:shadow_curve (0=linear, 1=cubic)
     vec4  camera_pos;   // xyz = world-space eye
     vec4  rt_lod;       // x:lod_near, y:lod_far
-    vec4  viewport;     // x:w, y:h, z:1/w, w:1/h — used by motion-vec output
+    vec4  viewport;     // x:w, y:h, z:1/w, w:1/h вЂ” used by motion-vec output
     // Muzzle flash dynamic light. xyz = world-space origin, .w = intensity
     // (0 disables the contribution). Color/radius live in muzzle_color.
     vec4  muzzle_pos;
@@ -46,16 +46,16 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     //   terrain_params.x = fog_strength (atmospheric perspective)
     //   terrain_params.y = wrap_strength (half-Lambert)
     //   terrain_params.z = detail_strength (texture brightness)
-    //   terrain_params.w = shadow_softness_scale (PCSS cone × this)
+    //   terrain_params.w = shadow_softness_scale (PCSS cone Г— this)
     vec4  terrain_params;
     // Per-layer height-blend smoothstep edges:
-    //   terrain_h_low.xy  = sand→grass start..end
-    //   terrain_h_low.zw  = grass→dirt start..end
-    //   terrain_h_high.xy = dirt→rock start..end
-    //   terrain_h_high.zw = rock→snow start..end
+    //   terrain_h_low.xy  = sandв†’grass start..end
+    //   terrain_h_low.zw  = grassв†’dirt start..end
+    //   terrain_h_high.xy = dirtв†’rock start..end
+    //   terrain_h_high.zw = rockв†’snow start..end
     vec4  terrain_h_low;
     vec4  terrain_h_high;
-    vec4  grass_extra;       // unused in cube.frag — laid out so grass_extra2.w is reachable
+    vec4  grass_extra;       // unused in cube.frag вЂ” laid out so grass_extra2.w is reachable
     vec4  grass_extra2;      // .w = terrain_debug_mode (0=off, 1=Lambert, 2=normal, 3=face)
 } scene;
 
@@ -84,7 +84,7 @@ layout(set = 0, binding = 2, std430) readonly buffer Materials {
 layout(set = 0, binding = 3) uniform sampler2D u_albedo[5];
 layout(set = 0, binding = 4) uniform sampler2D u_normal[5];
 // Pre-baked heightmap sun-shadow texture (R8, 0 = lit, 255 = shadowed).
-// Sampled here as a distance fallback for terrain self-shadow — the
+// Sampled here as a distance fallback for terrain self-shadow вЂ” the
 // BLAS holds the full heightmap detail, so RT shadow rays from a low-
 // LOD rasterised surface false-hit BLAS peaks the raster missed. The
 // bake was traced against the heightmap directly so it matches the
@@ -92,7 +92,7 @@ layout(set = 0, binding = 4) uniform sampler2D u_normal[5];
 layout(set = 0, binding = 6) uniform sampler2D u_terrain_shadow;
 
 // Triplanar projection sample. Avoids the "what UV does this cube face
-// use" problem and works correctly on every brush size — the texture stays
+// use" problem and works correctly on every brush size вЂ” the texture stays
 // world-aligned regardless of brush dimensions. Cost is 3 samples per pass,
 // which is fine for the coverage we have.
 vec3 triplanar_sample(sampler2D tex, vec3 wp, vec3 N) {
@@ -100,8 +100,8 @@ vec3 triplanar_sample(sampler2D tex, vec3 wp, vec3 N) {
     blend /= max(blend.x + blend.y + blend.z, 1e-3);
     // Now that mipmaps exist (texture.cpp generates them via blit chain) and
     // vTexParams is `flat` so the sampler-array index is dynamically uniform,
-    // standard `texture()` is correct — derivatives select the right mip and
-    // far-distance moiré disappears.
+    // standard `texture()` is correct вЂ” derivatives select the right mip and
+    // far-distance moirГ© disappears.
     vec3 cx = texture(tex, wp.zy).rgb;
     vec3 cy = texture(tex, wp.xz).rgb;
     vec3 cz = texture(tex, wp.xy).rgb;
@@ -133,7 +133,7 @@ vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
 // in Call of Duty: Advanced Warfare", SIGGRAPH 2014).
 // Adjacent pixels see *smoothly varying* random values rather than hash-style
 // uncorrelated jumps, so the per-pixel integration error has low spatial
-// frequency — looks like a smooth gradient rather than a dotted dither.
+// frequency вЂ” looks like a smooth gradient rather than a dotted dither.
 float ign(vec2 p) {
     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
@@ -159,7 +159,7 @@ vec3 cos_hemi(float u1, float u2, vec3 n) {
 
 // Shadow + AO test. Cull-mask 0x01 picks up only instances marked as
 // shadow-casters (bit 0). Sparks and projectiles are flagged 0xFE on the
-// host — they're tiny visual effects whose hard shadow streaks looked wrong
+// host вЂ” they're tiny visual effects whose hard shadow streaks looked wrong
 // and whose AO darkening produced visible halos around hits.
 bool any_hit(vec3 origin, vec3 dir, float t_max) {
     rayQueryEXT rq;
@@ -172,9 +172,9 @@ bool any_hit(vec3 origin, vec3 dir, float t_max) {
            gl_RayQueryCommittedIntersectionTriangleEXT;
 }
 
-// Sky tint without the sun halo — for atmospheric fog where adding
+// Sky tint without the sun halo вЂ” for atmospheric fog where adding
 // the localized halo brightness on distant terrain pixels makes them
-// glow blindingly when looking near the sun. Same horizon→zenith
+// glow blindingly when looking near the sun. Same horizonв†’zenith
 // gradient as `sample_sky` but no halo term.
 vec3 sample_sky_atmosphere(vec3 dir) {
     float up = clamp(dir.y, 0.0, 1.0);
@@ -183,7 +183,7 @@ vec3 sample_sky_atmosphere(vec3 dir) {
     return mix(horizon, zenith, pow(up, 0.45));
 }
 
-// Procedural sky: warm low horizon → cool zenith, brighter near sun.
+// Procedural sky: warm low horizon в†’ cool zenith, brighter near sun.
 vec3 sample_sky(vec3 dir) {
     vec3 L = normalize(scene.sun_direction.xyz);
     float up = clamp(dir.y, 0.0, 1.0);
@@ -231,7 +231,7 @@ bool closest_hit_material(vec3 origin, vec3 dir, float t_max,
     return true;
 }
 
-// Sentinel for the merged-static BLAS instance — must match
+// Sentinel for the merged-static BLAS instance вЂ” must match
 // `kStaticBlasInstSentinel` in src/engine/vk_engine/rt.cpp. Picked at the
 // top of the 24-bit instanceCustomIndex range so it never collides with a
 // real materials-buffer slot.
@@ -239,9 +239,9 @@ const int kStaticBlasSentinel = 0xFFFFFF;
 const int kCubeTrisPerBox     = 12;
 
 void main() {
-    // Screen-space motion vector — current_uv − prev_uv. prev_uv comes from
+    // Screen-space motion vector вЂ” current_uv в€’ prev_uv. prev_uv comes from
     // perspective-divided prev_clip (smooth-interpolated by the rasterizer).
-    // Behind-camera prev pixels (prev_clip.w ≤ 0) have no valid prev_uv —
+    // Behind-camera prev pixels (prev_clip.w в‰¤ 0) have no valid prev_uv вЂ”
     // fall back to zero motion; the future SVGF pass treats sentinel as
     // "no history available" and rebuilds variance from current-frame
     // neighborhood instead of reprojecting.
@@ -284,13 +284,13 @@ void main() {
         } else if (dbg == 2) {
             // Per-vertex normal as RGB. Adjacent triangles with
             // mismatched corner normals will show as visible colour
-            // jumps — direct view into the LOD/Gouraud issue.
+            // jumps вЂ” direct view into the LOD/Gouraud issue.
             outColor = vec4(N * 0.5 + 0.5, 1.0);
             return;
         } else if (dbg == 3) {
             // Geometric face normal (cross of world-pos derivatives,
             // sign-guarded for Vulkan y-down). Each large LOD triangle
-            // is a uniform colour — confirms what flat-shaded geometry
+            // is a uniform colour вЂ” confirms what flat-shaded geometry
             // looks like at distance.
             vec3 fn = cross(dFdx(vWorldPos), dFdy(vWorldPos));
             if (fn.y < 0.0) fn = -fn;
@@ -312,12 +312,12 @@ void main() {
             float ndl = max(dot(N, L), 0.0);
             float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
 
-            // PURE BAKE with PCF — 5-tap kernel and no threshold so
+            // PURE BAKE with PCF вЂ” 5-tap kernel and no threshold so
             // shadow edges blend smoothly across triangles instead of
             // snapping at the 0.5 step boundary (which looked like
             // adjacent triangles flipping fully-lit / fully-shadowed).
             ivec2 sz = textureSize(u_terrain_shadow, 0);
-            float side_b = float(sz.x - 1) * 1.0;
+            const float side_b = 2048.0; // terrain world extent (supersample-invariant)
             vec2 uv_b = (vWorldPos.xz / side_b) + vec2(0.5);
             float sh = 0.0;
             if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
@@ -406,15 +406,15 @@ void main() {
     int   normal_idx_raw = int(vTexParams.y);
     float scale          = max(0.001, vTexParams.z);
     // tex_params.w convention:
-    //   0 = world-space triplanar (default — castle brushes)
+    //   0 = world-space triplanar (default вЂ” castle brushes)
     //   1 = object-space triplanar (dynamic crates so the texture
     //       rotates with the body)
-    //   2 = terrain shading: sand→grass→dirt→rock→snow blended by
+    //   2 = terrain shading: sandв†’grassв†’dirtв†’rockв†’snow blended by
     //       world height + slope, with optional triplanar Ground054
     //       detail multiplied on top.
     bool  is_terrain     = vTexParams.w > 1.5;
     bool  obj_space      = !is_terrain && vTexParams.w > 0.5;
-    // Terrain uses world-space triplanar like the static brushes — the
+    // Terrain uses world-space triplanar like the static brushes вЂ” the
     // mesh model is identity so vObjectPos == vWorldPos already, but we
     // pick world-space explicitly so the height read uses true world Y.
     vec3  sample_pos     = (obj_space ? vObjectPos : vWorldPos) * scale;
@@ -429,7 +429,7 @@ void main() {
     vec3 albedo = vColor;
     if (is_terrain) {
         // ---- Terrain layer blend (height + slope) ----
-        // Layer palette tuned for "natural earth" — desaturated, not too
+        // Layer palette tuned for "natural earth" вЂ” desaturated, not too
         // toy-coloured. Heights match the heightmap params:
         //   plateau ~22, mountain crests ~120-140 (height_scale=140 in
         //   the generator). Sea level isn't real here, but we still
@@ -448,14 +448,14 @@ void main() {
         // Without a per-pixel offset, layer boundaries form perfectly
         // horizontal contour lines that read as obvious "stripes" on
         // gentle slopes. We jitter each transition's effective height
-        // by a low-frequency hash on world XZ — same as how natural
+        // by a low-frequency hash on world XZ вЂ” same as how natural
         // soils don't change at exactly the same elevation everywhere.
         // The jitter is in metres and matched to ~half the smoothstep
         // width so it breaks up the line without erasing the gradient.
-        float n0 = ign(vWorldPos.xz * 0.04) - 0.5;   // ±0.5 noise
+        float n0 = ign(vWorldPos.xz * 0.04) - 0.5;   // В±0.5 noise
         float n1 = ign(vWorldPos.xz * 0.13 + vec2(13.7, 41.3)) - 0.5;
-        float jitter = (n0 + 0.5 * n1);              // ~±0.75
-        float jh = h + jitter * 4.0;                 // ±3m offset
+        float jitter = (n0 + 0.5 * n1);              // ~В±0.75
+        float jh = h + jitter * 4.0;                 // В±3m offset
         float t_sand = smoothstep(scene.terrain_h_low.x,  scene.terrain_h_low.y,  jh);
         float t_dirt = smoothstep(scene.terrain_h_low.z,  scene.terrain_h_low.w,  jh);
         float t_rock = smoothstep(scene.terrain_h_high.x, scene.terrain_h_high.y, jh);
@@ -474,7 +474,7 @@ void main() {
         // produce per-triangle slope swings, and adjacent large
         // triangles end up classified as rock vs grass at random,
         // reading as patchy "different faces". Past ~120 m we let the
-        // height-band layering carry the look — visually identical at
+        // height-band layering carry the look вЂ” visually identical at
         // distance, no per-triangle classification noise.
         float slope_jitter = (ign(vWorldPos.xz * 0.09 + vec2(7.0, 19.0)) - 0.5) * 0.10;
         float steep_raw = smoothstep(0.45 + slope_jitter, 0.75 + slope_jitter, slope);
@@ -484,12 +484,12 @@ void main() {
         base = mix(base, rock, steep);
 
         // ---- Cavity AO from local height curvature ----
-        // dFdx(N)·dFdx(vWorldPos) gives concavity per fragment. Adds
+        // dFdx(N)В·dFdx(vWorldPos) gives concavity per fragment. Adds
         // "natural shadowing in cracks" for free near the camera, but
         // on distant LOD-2/3 chunks the screen-space derivatives of
         // Gouraud-interpolated normals between widely-spaced verts
         // become erratic (large per-pixel jumps), and the cavity term
-        // oscillates 0.45↔1.0 across adjacent triangles — visible as
+        // oscillates 0.45в†”1.0 across adjacent triangles вЂ” visible as
         // patchy dark faces on far ridges. Fade the effect out past
         // ~120 m so distant terrain reads as smooth.
         float curvature = -dot(dFdx(N), dFdx(vWorldPos)) -
@@ -509,7 +509,7 @@ void main() {
             // Triplanar blend uses pow(abs(N), 4) weights, so per-pixel
             // N from Gouraud interpolation feeds into the texture mix.
             // Across LOD-mismatched chunk seams, adjacent triangles get
-            // different N → different mixes → texture-driven patchy
+            // different N в†’ different mixes в†’ texture-driven patchy
             // brightness. Fade detail out past 80 m so distant terrain
             // shows just the smooth height-band layer colour.
             float td = distance(vWorldPos, scene.camera_pos.xyz);
@@ -534,7 +534,7 @@ void main() {
 
     float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
     // Split ambient into a sky-derived component (fades when the surface
-    // is enclosed — sky_factor below) and a constant ground/reflected
+    // is enclosed вЂ” sky_factor below) and a constant ground/reflected
     // component that exists indoors too (a real room has a floor that
     // reflects light, not a black void). Combining them later avoids
     // the "AO * sky_factor" double-darkening that crushed interior
@@ -542,9 +542,9 @@ void main() {
     vec3 ambient_ground = scene.ambient.rgb * scene.rt_params.z;
     vec3 ambient_sky    = scene.sky_color.rgb * 0.45 * scene.rt_params.z;
 
-    // Direct lighting uses pure Lambert (max(0, N·L)). The "wrap" lift
+    // Direct lighting uses pure Lambert (max(0, NВ·L)). The "wrap" lift
     // for back-of-mountain pixels is applied LATER as a sky-tinted
-    // ambient bounce — applying it to direct here would produce the
+    // ambient bounce вЂ” applying it to direct here would produce the
     // "back-face fully lit while front-face shadow-rayed" artifact:
     // back faces have n_dot_l_raw = 0 so no shadow ray fires, but the
     // wrap pushes their effective n_dot_l above zero and the missing
@@ -554,7 +554,7 @@ void main() {
     float n_dot_l_raw = max(dot(N, L), 0.0);
     float n_dot_l = n_dot_l_raw;
 
-    // Per-pixel seed WITH the frame counter — TAA accumulates over ~8
+    // Per-pixel seed WITH the frame counter вЂ” TAA accumulates over ~8
     // frames, so animating the noise lets temporal averaging resolve the
     // residual dither into a clean signal. We tried a frame-stable seed
     // earlier (less moment-to-moment shimmer) but it left a fixed dither
@@ -571,7 +571,7 @@ void main() {
     // --- Sun shadow (RT, contact-hardening / PCSS-style) ---
     // 1. BLOCKER SEARCH: a handful of cheap closest-hit rays in a wide cone
     //    around L; record the average distance to the occluder.
-    // 2. PENUMBRA ESTIMATE: cone half-angle ∝ avg_blocker_distance × softness.
+    // 2. PENUMBRA ESTIMATE: cone half-angle в€ќ avg_blocker_distance Г— softness.
     //    Close-by occluders give a small cone (sharp shadow); far ones give
     //    a wide cone (soft shadow). Real-world effect: shadow under a pole
     //    is razor-sharp, the same shadow stretched across the floor is fuzzy.
@@ -579,7 +579,7 @@ void main() {
     float shadow = 0.0;
     if (n_dot_l_raw > 0.0 && scene.rt_flags.x != 0) {
         int  N_s = lod_samples(max(1, scene.rt_flags.y), cam_dist);
-        // Per-pixel softness — terrain optionally tightens the cone via
+        // Per-pixel softness вЂ” terrain optionally tightens the cone via
         // the Settings UI to reduce PCSS dither. Tightening trades soft
         // shadow edges for cleaner per-pixel results at the same sample
         // count. Brushes/dyn props always use the global slider value.
@@ -595,23 +595,23 @@ void main() {
         // Terrain shadow-ray bias has a non-linear ramp with camera
         // distance because the chunked raster mesh uses distance-LOD
         // (stride 1/2/4/8) while the BLAS holds the full heightmap.
-        // At LOD 3 (≥320 m) the rasterised straight-line interpolation
-        // can sit 5–15 m BELOW true heightmap peaks; shadow rays fired
-        // upward then false-hit those missed peaks → dark patches on
+        // At LOD 3 (в‰Ґ320 m) the rasterised straight-line interpolation
+        // can sit 5вЂ“15 m BELOW true heightmap peaks; shadow rays fired
+        // upward then false-hit those missed peaks в†’ dark patches on
         // distant ridges. We hold near bias tight (no peter-panning on
         // close shadows) and ramp hard past LOD 0's range:
-        //   ≤ 80 m  : 0.04 m (matches the LOD-0 / BLAS gap)
+        //   в‰¤ 80 m  : 0.04 m (matches the LOD-0 / BLAS gap)
         //   320 m   : ~6 m  (covers typical LOD-3 peak undershoot)
-        //   ≥ 600 m : ~12 m (covers worst-case)
+        //   в‰Ґ 600 m : ~12 m (covers worst-case)
         float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
         float far_t = clamp((dist_to_cam - 80.0) / 320.0, 0.0, 1.0);
-        float terrain_far_bias = far_t * far_t * 8.0;   // 0 → 8 across the ramp
+        float terrain_far_bias = far_t * far_t * 8.0;   // 0 в†’ 8 across the ramp
         float bias = is_terrain_pre
             ? (max(0.04, terrain_far_bias) + 0.10 * (1.0 - n_dot_l_raw))
             : (0.005 + 0.02 * (1.0 - n_dot_l_raw));
         vec3 origin = vWorldPos + N * bias;
 
-        // 1. Blocker search — 4 rays in a wider cone (4× base softness) so we
+        // 1. Blocker search вЂ” 4 rays in a wider cone (4Г— base softness) so we
         //    actually catch occluders even when the surface is close to lit.
         const int kBlockerSearch = 4;
         float sum_t = 0.0;
@@ -631,12 +631,12 @@ void main() {
         }
 
         if (hits == 0) {
-            // No occluder anywhere in the wide cone → fully lit.
+            // No occluder anywhere in the wide cone в†’ fully lit.
             shadow = 0.0;
         } else {
             // 2. Penumbra estimate. Distance is normalised against a 10m
             //    reference, then raised to a power between 1 (linear, the
-            //    classic PCSS) and 3 (cubic — very contact-sharp close-up,
+            //    classic PCSS) and 3 (cubic вЂ” very contact-sharp close-up,
             //    very soft far away). The exponent comes from the
             //    shadow_curve slider in the menu.
             float avg_t = sum_t / float(hits);
@@ -672,14 +672,14 @@ void main() {
         // Terrain hybrid: blend the RT PCSS result toward the heightmap
         // shadow bake at distance. The BLAS holds the full heightmap
         // detail while the rasterised LOD-2/3 surface under-shoots
-        // peaks → upward shadow rays false-hit the BLAS, producing
+        // peaks в†’ upward shadow rays false-hit the BLAS, producing
         // patchy dark "faces" on far ridges. The bake was traced
         // directly against the heightmap so its values match the
         // rasterised surface at any LOD; using it past 80 m
         // eliminates the false hits while RT keeps crisp near-shadows
         // (incl. boxes / castle on terrain) within ~40 m of the camera.
         if (is_terrain_pre) {
-            // Pure bake — RT shadow disabled entirely on terrain (matches
+            // Pure bake вЂ” RT shadow disabled entirely on terrain (matches
             // debug mode 4 which is the only artifact-free path). The RT
             // PCSS shadow's per-fragment jitter combined with N-driven
             // ray-direction variation produces per-triangle hit/miss
@@ -688,7 +688,7 @@ void main() {
             // shadows on terrain (visually a small loss compared to the
             // patchwork). Soft via 5-tap PCF.
             ivec2 sz_b = textureSize(u_terrain_shadow, 0);
-            float side_b = float(sz_b.x - 1) * 1.0;
+            const float side_b = 2048.0; // terrain world extent (supersample-invariant)
             vec2 uv_b = (vWorldPos.xz / side_b) + vec2(0.5);
             float sh_bake = 0.0;
             if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
@@ -711,7 +711,7 @@ void main() {
     // --- Muzzle flash: dynamic point light + RT shadow ---
     // Active for kMuzzleFlashDuration on each shot; CPU sets intensity > 0
     // and a position just in front of the eye. One shadow ray per pixel,
-    // gated by N·L > 0 and within the falloff radius — keeps the cost
+    // gated by NВ·L > 0 and within the falloff radius вЂ” keeps the cost
     // negligible when no shot is firing. Inverse-square attenuation with
     // a smooth cutoff at the radius so contributions don't pop.
     if (scene.muzzle_pos.w > 0.0) {
@@ -726,7 +726,7 @@ void main() {
             vec3 L_m       = to_light / max(dist, 1e-3);
             float n_dot_lm = max(dot(N, L_m), 0.0);
             if (n_dot_lm > 0.0) {
-                // Smooth falloff: 1/(1 + d²)·(1 - d/r)². The window term zeroes
+                // Smooth falloff: 1/(1 + dВІ)В·(1 - d/r)ВІ. The window term zeroes
                 // contribution exactly at the radius, no hard edge.
                 float window = 1.0 - dist / m_radius;
                 float atten  = (window * window) / (1.0 + dist * dist);
@@ -747,12 +747,12 @@ void main() {
     // --- AO (stratified hemisphere) ---
     //
     // ao_mode (rt_flags2.w):
-    //   0 = off — no AO, ao = 1.0 (lighting reads as fully lit at concavities)
-    //   1 = "fast contact AO" — short hemisphere rays at HALF the radius and
+    //   0 = off вЂ” no AO, ao = 1.0 (lighting reads as fully lit at concavities)
+    //   1 = "fast contact AO" вЂ” short hemisphere rays at HALF the radius and
     //       capped to 2 samples. Reads similar to GTAO at far less cost
     //       than full RTAO, but is still inline ray-traced (true GTAO needs
     //       a separate screen-space pass with depth+normal bound; deferred).
-    //   2 = full RTAO — N hemisphere rays at user-set radius, the original
+    //   2 = full RTAO вЂ” N hemisphere rays at user-set radius, the original
     //       quality path. Picks up off-screen occluders correctly.
     float ao = 1.0;
     int ao_mode = scene.rt_flags2.w;
@@ -761,13 +761,13 @@ void main() {
         int requested = (ao_mode == 1) ? min(scene.rt_flags.z, 2)
                                        : scene.rt_flags.z;
         int N_ao = lod_samples(requested, cam_dist);
-        // mode 1 halves the search radius — bias toward contact AO rather
+        // mode 1 halves the search radius вЂ” bias toward contact AO rather
         // than ambient occlusion of the whole hemisphere.
         float ao_radius = scene.rt_params.y * (ao_mode == 1 ? 0.5 : 1.0);
-        // Distance-scaled origin lift for terrain — pushes the AO ray's
+        // Distance-scaled origin lift for terrain вЂ” pushes the AO ray's
         // origin above the BLAS detail that the rasterised LOD-1+ raster
         // sits below. Without this, AO rays from the under-shooting
-        // raster surface false-hit BLAS peaks → patchy darkening per
+        // raster surface false-hit BLAS peaks в†’ patchy darkening per
         // triangle. Lift ramps with distance, capped at ~6m which clears
         // typical LOD-2 peak undershoot.
         float ao_lift = 0.01;
@@ -777,9 +777,9 @@ void main() {
         }
         vec3 origin_ao = vWorldPos + N * ao_lift;
         // Unstratified random samples driven by IGN + temporal frame seed.
-        // The stratified version (ceil(sqrt(N))²-cell grid) was biased
-        // when N wasn't a perfect square — at N=2 strata=2 picked only
-        // the cells with sy=0 → all rays in one half of the hemisphere
+        // The stratified version (ceil(sqrt(N))ВІ-cell grid) was biased
+        // when N wasn't a perfect square вЂ” at N=2 strata=2 picked only
+        // the cells with sy=0 в†’ all rays in one half of the hemisphere
         // azimuth, which read as systematically darker edges. Random +
         // TAA temporal accumulation converges to true AO over ~8 frames
         // regardless of N.
@@ -793,7 +793,7 @@ void main() {
             ++taken;
         }
         // Two-step shaping to control corner overlap-darkness:
-        //   1. sqrt curve on raw AO — compresses the [0..1] range so the
+        //   1. sqrt curve on raw AO вЂ” compresses the [0..1] range so the
         //      delta between 30% occluded (1 edge) and 60% (2 edges
         //      overlapping) reads as a small darkening step instead of
         //      "twice as dark". Linear AO stacked occlusions
@@ -804,7 +804,7 @@ void main() {
         raw = sqrt(raw);
         float ao_floor_v = scene.rt_lod.w;
         ao = mix(ao_floor_v, 1.0, raw);
-        // Mild AO fade only — the origin-lift above is the primary
+        // Mild AO fade only вЂ” the origin-lift above is the primary
         // false-hit fix; this just softens any residual mid-distance
         // patchiness without flattening the look entirely.
         if (is_terrain_pre) {
@@ -816,16 +816,16 @@ void main() {
 
     // --- Path-traced GI (1..N bounces) ---
     // Each sample follows a path of up to N_bounces ray segments.
-    //   - On a surface hit: accumulate emissive + albedo×scene_light (a cheap
+    //   - On a surface hit: accumulate emissive + albedoГ—scene_light (a cheap
     //     local-light approximation), tint the throughput by surface albedo,
     //     bounce in a cosine-weighted hemisphere oriented around the
     //     approximate hit normal (-ray_dir).
-    //   - On a miss (sky): accumulate throughput × procedural sky and stop.
-    // Samples are stratified on a sqrt(N)×sqrt(N) grid for clean low-N look.
+    //   - On a miss (sky): accumulate throughput Г— procedural sky and stop.
+    // Samples are stratified on a sqrt(N)Г—sqrt(N) grid for clean low-N look.
     vec3 gi_indirect = vec3(0.0);
-    // Sky visibility — fraction of first-bounce GI rays that escape the
+    // Sky visibility вЂ” fraction of first-bounce GI rays that escape the
     // scene. Used after the GI loop to attenuate the (sky-derived) ambient
-    // term: enclosed surfaces (e.g. inside the keep) get sky_vis ≈ 0 and
+    // term: enclosed surfaces (e.g. inside the keep) get sky_vis в‰€ 0 and
     // their ambient drops to near zero, giving the room a real "interior"
     // feel instead of the same flat brightness as outdoors. Default 1.0
     // when GI is disabled so existing behaviour is unchanged.
@@ -837,7 +837,7 @@ void main() {
     if (N_gi > 0) {
         float gi_radius = scene.rt_params2.y;
 
-        // Sky-only ambient term — used when a GI bounce hits a surface
+        // Sky-only ambient term вЂ” used when a GI bounce hits a surface
         // that CANNOT see the sun. Approximates the soft fill light from
         // the sky dome that reaches indoor surfaces near openings. 0.05
         // (~5% of sky color) keeps deep interiors believably dark; the
@@ -883,7 +883,7 @@ void main() {
                         break;
                     }
                     // Static-castle hit: 1 BLAS instance covers all brushes
-                    // — recover the per-brush material slot via primitive id.
+                    // вЂ” recover the per-brush material slot via primitive id.
                     int mat_idx = (idx == kStaticBlasSentinel)
                                     ? (prim / kCubeTrisPerBox)
                                     : idx;
@@ -891,7 +891,7 @@ void main() {
                     vec3 hit_pos = ray_origin + ray_dir * t;
                     vec3 hit_n = -ray_dir;  // approximate outward normal
 
-                    // *** GI bounce lighting *** — fires a shadow ray
+                    // *** GI bounce lighting *** вЂ” fires a shadow ray
                     // from the hit point to the sun for bounce levels up
                     // to gi_shadow_max_bounce (rt_lod.z). Bounces beyond
                     // that fall back to sky_fill alone. 0 = no GI sun
@@ -932,9 +932,9 @@ void main() {
         sky_vis = float(sky_misses) / float(max(1, sky_total));
 
         // GI on terrain is disabled. cos_hemi() uses N as the basis,
-        // so adjacent triangles' GI ray directions diverge per-N → ray
-        // paths through BLAS detail differ → per-triangle hit/miss
-        // flips → patchy bright/dark faces. Origin-lift fixes this at
+        // so adjacent triangles' GI ray directions diverge per-N в†’ ray
+        // paths through BLAS detail differ в†’ per-triangle hit/miss
+        // flips в†’ patchy bright/dark faces. Origin-lift fixes this at
         // distance but not at close range where N still varies fast.
         // Bake provides the directional shadow; ambient fills the rest.
         // sky_vis still computed (for ambient sky vs ground term) but
@@ -950,7 +950,7 @@ void main() {
     // [moved below, recomputed from N_ao]
 
     // Sky-occlusion term. Surfaces that can't see the sky get a much
-    // darker ambient — that's the natural look of an enclosed room. The
+    // darker ambient вЂ” that's the natural look of an enclosed room. The
     // 0.15 floor stops pure-interior pixels from going completely black
     // (real rooms have some bounced light), and the smoothstep curve
     // rolls in the sky contribution faster than linear so the open arena
@@ -965,7 +965,7 @@ void main() {
     vec3 ambient_combined = mix(ambient_ground,
                                  ambient_sky * sky_factor, up);
     vec3 indirect = albedo * ambient_combined * ao + gi_indirect;
-    // Terrain sky-bounce wrap. Back-facing pixels (-N·L > 0) pick up a
+    // Terrain sky-bounce wrap. Back-facing pixels (-NВ·L > 0) pick up a
     // sky-tinted lift to model atmospheric scattering bouncing onto the
     // shadow side of mountains. Applied as ambient here (not as direct)
     // so it never overrides a real shadow-ray result. wrap_strength
@@ -978,7 +978,7 @@ void main() {
     vec3 final = direct + indirect + vEmissive.rgb;
 
     // Atmospheric perspective for terrain. Distant ground fades toward
-    // the sky tint along the view direction — the standard "real
+    // the sky tint along the view direction вЂ” the standard "real
     // mountains" look. Onset starts at 200m and reaches 75% blend at
     // 1500m; never fully hides the silhouette so the scene retains
     // depth. Cheaper than volumetric fog and visually indistinguishable
@@ -988,11 +988,11 @@ void main() {
         // sample_sky_atmosphere: no sun halo. The halo is fine for the
         // actual sky pixels (compose pass / GI rays), but applying it
         // to FOG made distant terrain near the sun direction look like
-        // glowing white blobs — sun's halo × intensity 2 was multiplied
+        // glowing white blobs вЂ” sun's halo Г— intensity 2 was multiplied
         // INTO the fog tint and bled bright-white over the mountains.
         vec3 fog_color = sample_sky_atmosphere(view_dir);
-        // 95% sky by ~1.3km — both edges (corner ray reaches ~2km of
-        // world at 80° FOV / far=1500m) AND centre (clipped at 1500m
+        // 95% sky by ~1.3km вЂ” both edges (corner ray reaches ~2km of
+        // world at 80В° FOV / far=1500m) AND centre (clipped at 1500m
         // hard) are deep into fog before the cut, so the asymmetric
         // visible disc is invisible.
         float fog_t = clamp((cam_dist - 250.0) / 1100.0, 0.0, 0.95);
@@ -1003,3 +1003,4 @@ void main() {
 
     outColor = vec4(final, 1.0);
 }
+

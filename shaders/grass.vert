@@ -259,12 +259,12 @@ void main() {
             textureLod(u_sun_shadow_map,
                        vec3(luv, lndc.z - kReceiverBias), 0.0);
 
-        // Heightmap bake sample (far). Texture is centred on origin
-        // (heightmap origin = -side/2). 2m per cell; out-of-bounds reads
-        // as lit.
-        ivec2 texSize = textureSize(u_terrain_shadow, 0);
-        float side = float(texSize.x) * 2.0;
-        vec2 buv = (base_world.xz / side) + vec2(0.5);
+        // Heightmap bake sample (far). Texture covers the same world
+        // extent regardless of supersample factor, so we hardcode the
+        // world side instead of deriving from texSize (which scales
+        // with supersample). 2048 = terrain_data_.dim × cell_size.
+        const float kBakeSide = 2048.0;
+        vec2 buv = (base_world.xz / kBakeSide) + vec2(0.5);
         float bake_val = 0.0;
         if (all(greaterThanEqual(buv, vec2(0.0))) &&
             all(lessThanEqual(buv, vec2(1.0)))) {

@@ -339,9 +339,32 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
         terrain_shadow_results_.clear();
     }
 
-    std::vector<uint8_t> shadow = bake_heightmap_shadow(hm, sun_dir);
-    const int W = hm.width();
-    const int H = hm.height();
+    // Sync bake stays at SS=1 for fast level load (~150ms). When the
+    // user has supersample > 1 the texture is created at SS×heightmap-dim,
+    // and we replicate each SS=1 texel into an SS×SS block so the
+    // texture is fully populated from frame 1 — the worker then
+    // re-bakes properly at the user's SS in the background.
+    const int ss = std::max(1, rt_.terrain_bake_supersample);
+    terrain_shadow_active_ss_ = ss;
+    std::vector<uint8_t> base = bake_heightmap_shadow(hm, sun_dir);
+    const int W = hm.width()  * ss;
+    const int H = hm.height() * ss;
+    std::vector<uint8_t> shadow;
+    if (ss == 1) {
+        shadow = std::move(base);
+    } else {
+        shadow.resize(static_cast<size_t>(W) * static_cast<size_t>(H));
+        for (int z = 0; z < H; ++z) {
+            for (int x = 0; x < W; ++x) {
+                int sx = x / ss;
+                int sz = z / ss;
+                shadow[static_cast<size_t>(z) * static_cast<size_t>(W) +
+                       static_cast<size_t>(x)] =
+                    base[static_cast<size_t>(sz) * static_cast<size_t>(hm.width()) +
+                         static_cast<size_t>(sx)];
+            }
+        }
+    }
 
     const bool first_create = (terrain_shadow_image_ == VK_NULL_HANDLE);
     ensure_shadow_resources(device_, allocator_, graphics_queue_,
@@ -752,11 +775,17 @@ void VulkanEngine::terrain_shadow_worker_loop() {
         }
         // Bake outside the lock so other threads keep running.
         ShadowBakeResult r;
-        r.ix = job.ix; r.iz = job.iz; r.w = job.w; r.h = job.h;
+        r.ix = job.ix; r.iz = job.iz; r.w = job.w; r.h = job.h; r.ss = job.ss;
         r.sun_dir = job.sun_dir;
         r.data.resize(static_cast<size_t>(job.w) * static_cast<size_t>(job.h));
-        bake_heightmap_shadow_tile(terrain_shadow_baker_hm_, job.sun_dir,
-                                    job.ix, job.iz, job.w, job.h, r.data.data());
+        if (job.ss <= 1) {
+            bake_heightmap_shadow_tile(terrain_shadow_baker_hm_, job.sun_dir,
+                                        job.ix, job.iz, job.w, job.h, r.data.data());
+        } else {
+            bake_heightmap_shadow_tile_ss(terrain_shadow_baker_hm_, job.sun_dir,
+                                           job.ix, job.iz, job.w, job.h, job.ss,
+                                           r.data.data());
+        }
         {
             std::lock_guard<std::mutex> lk(terrain_shadow_mutex_);
             terrain_shadow_results_.push_back(std::move(r));
@@ -768,8 +797,10 @@ void VulkanEngine::enqueue_terrain_shadow_rebake(glm::vec3 target_sun) {
     if (terrain_data_.heights.empty()) return;
     terrain_shadow_target_sun_dir_ = target_sun;
 
-    const int W = terrain_data_.dim + 1;
-    const int H = terrain_data_.dim + 1;
+    // Tile coordinates are in TEXTURE space (heightmap_dim+1 × ss).
+    const int ss = std::max(1, terrain_shadow_active_ss_);
+    const int W = (terrain_data_.dim + 1) * ss;
+    const int H = (terrain_data_.dim + 1) * ss;
     const int ts = kShadowTileSize;
     const glm::vec3 cam = player_.eye_position();
 
@@ -778,16 +809,17 @@ void VulkanEngine::enqueue_terrain_shadow_rebake(glm::vec3 target_sun) {
     std::vector<ShadowBakeTile> tiles;
     int n_tiles = ((W + ts - 1) / ts) * ((H + ts - 1) / ts);
     tiles.reserve(static_cast<size_t>(n_tiles));
+    const float sub_cell = terrain_data_.cell / static_cast<float>(ss);
     for (int iz = 0; iz < H; iz += ts) {
         int th = std::min(ts, H - iz);
         for (int ix = 0; ix < W; ix += ts) {
             int tw = std::min(ts, W - ix);
             float wx = terrain_data_.origin_x +
                        (static_cast<float>(ix) + 0.5f * static_cast<float>(tw)) *
-                       terrain_data_.cell;
+                       sub_cell;
             float wz = terrain_data_.origin_z +
                        (static_cast<float>(iz) + 0.5f * static_cast<float>(th)) *
-                       terrain_data_.cell;
+                       sub_cell;
             float dx = wx - cam.x, dz = wz - cam.z;
             tiles.push_back({ix, iz, tw, th, dx * dx + dz * dz});
         }
@@ -798,13 +830,13 @@ void VulkanEngine::enqueue_terrain_shadow_rebake(glm::vec3 target_sun) {
               });
 
     // Replace the worker's job queue. Drop any older results too — they
-    // were baked against a stale sun direction.
+    // were baked against a stale sun direction or a different ss.
     {
         std::lock_guard<std::mutex> lk(terrain_shadow_mutex_);
         terrain_shadow_jobs_.clear();
         terrain_shadow_results_.clear();
         for (const auto& t : tiles) {
-            terrain_shadow_jobs_.push_back({t.ix, t.iz, t.w, t.h, target_sun});
+            terrain_shadow_jobs_.push_back({t.ix, t.iz, t.w, t.h, ss, target_sun});
         }
     }
     terrain_shadow_cv_.notify_all();
@@ -825,8 +857,9 @@ void VulkanEngine::tick_terrain_shadow_progressive() {
                !terrain_shadow_results_.empty()) {
             auto& r = terrain_shadow_results_.front();
             // Drop stale results (sun has changed since this tile was
-            // queued) — they'd flash old shadows briefly.
-            if (glm::distance(r.sun_dir, terrain_shadow_target_sun_dir_) < 0.001f) {
+            // queued, or supersample doesn't match the live texture).
+            if (glm::distance(r.sun_dir, terrain_shadow_target_sun_dir_) < 0.001f &&
+                r.ss == terrain_shadow_active_ss_) {
                 ready.push_back(std::move(r));
             }
             terrain_shadow_results_.pop_front();

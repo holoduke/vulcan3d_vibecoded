@@ -578,12 +578,13 @@ private:
     // image. Distant tiles arrive with delay (acceptable per spec)
     // but the main FPS is never blocked by bake work.
     struct ShadowBakeTile { int ix, iz, w, h; float dist_sq; };
-    struct ShadowBakeJob  { int ix, iz, w, h; glm::vec3 sun_dir; };
+    struct ShadowBakeJob  { int ix, iz, w, h; int ss; glm::vec3 sun_dir; };
     struct ShadowBakeResult {
-        int ix, iz, w, h;
+        int ix, iz, w, h, ss;
         glm::vec3 sun_dir;
         std::vector<uint8_t> data;
     };
+    int terrain_shadow_active_ss_ = 1;  // current texture's supersample factor
     glm::vec3 terrain_shadow_target_sun_dir_ = glm::vec3(0.0f);
     static constexpr int kShadowTileSize           = 64;
     static constexpr int kShadowUploadsPerFrame    = 12;
@@ -955,6 +956,12 @@ private:
         // triangles, more detail). 4.0 means LOD 0 reaches 320m, LOD 1
         // 640m, LOD 2 1280m.
         float terrain_lod_scale = 1.0f;
+        // Supersample factor for the heightmap shadow bake. 1 = native
+        // (1 texel per 1m heightmap cell). 2 = 4x more texels (sub-
+        // metre shadow precision). 4 = 16x more texels (sharpest
+        // medium/far shadows). Memory: 1 = ~4MB, 2 = ~17MB, 4 = ~67MB.
+        // Bake time scales linearly; worker thread handles it.
+        int terrain_bake_supersample = 1;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;
