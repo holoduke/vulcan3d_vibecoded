@@ -434,18 +434,22 @@ void main() {
         vec3 tan_u = normalize(cross(ref, L));
         vec3 tan_v = cross(L, tan_u);
 
-        // Terrain shadow-ray bias scales with camera distance. The
-        // chunked raster mesh uses distance-based LOD (stride 1/2/4/8)
-        // while the BLAS holds the full heightmap — so distant fragments
-        // sit BELOW the BLAS's true detail. Without enough bias, every
-        // shadow ray fired upward from the rasterised low-LOD surface
-        // hits a missed-peak in the BLAS and reports "shadowed" → dark
-        // patches on distant ridges where no visible occluder exists.
-        // Roughly 0.5% of camera distance covers worst-case peak
-        // undershoot at LOD 3 without blurring near shadows.
+        // Terrain shadow-ray bias has a non-linear ramp with camera
+        // distance because the chunked raster mesh uses distance-LOD
+        // (stride 1/2/4/8) while the BLAS holds the full heightmap.
+        // At LOD 3 (≥320 m) the rasterised straight-line interpolation
+        // can sit 5–15 m BELOW true heightmap peaks; shadow rays fired
+        // upward then false-hit those missed peaks → dark patches on
+        // distant ridges. We hold near bias tight (no peter-panning on
+        // close shadows) and ramp hard past LOD 0's range:
+        //   ≤ 80 m  : 0.04 m (matches the LOD-0 / BLAS gap)
+        //   320 m   : ~6 m  (covers typical LOD-3 peak undershoot)
+        //   ≥ 600 m : ~12 m (covers worst-case)
         float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
+        float far_t = clamp((dist_to_cam - 80.0) / 320.0, 0.0, 1.0);
+        float terrain_far_bias = far_t * far_t * 8.0;   // 0 → 8 across the ramp
         float bias = is_terrain_pre
-            ? (max(0.04, 0.005 * dist_to_cam) + 0.10 * (1.0 - n_dot_l_raw))
+            ? (max(0.04, terrain_far_bias) + 0.10 * (1.0 - n_dot_l_raw))
             : (0.005 + 0.02 * (1.0 - n_dot_l_raw));
         vec3 origin = vWorldPos + N * bias;
 
