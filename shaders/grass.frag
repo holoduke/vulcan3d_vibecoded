@@ -63,7 +63,11 @@ void main() {
     // keeps them readable as foliage from any angle.
     vec3 N = normalize(vNormal);
     vec3 L = normalize(scene.sun_direction.xyz);
-    float n_dot_l = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
+    // Standard Lambert (no half-Lambert wrap). Blades whose pseudo-
+    // billboard normal faces away from the sun get zero direct
+    // contribution → the shadow side of a slope reads as visibly
+    // darker than the lit side.
+    float n_dot_l = max(dot(N, L), 0.0);
 
     // Light intensity (scalar, preserves blade tint). Sun contribution
     // is the dominant term so blade brightness actually responds to
