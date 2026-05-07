@@ -312,7 +312,12 @@ void main() {
             float ndl = max(dot(N, L), 0.0);
             float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
 
-            // Hybrid shadow (always on for modes 4+).
+            // Hybrid shadow — RT only very close (<20 m where LOD 0 is
+            // certain and BLAS matches the raster precisely), bake
+            // beyond. Tightened from earlier 40-80 m because adjacent
+            // LOD 1 chunk triangles in the blend zone could land on
+            // opposite sides of "ray hits BLAS detail" → per-triangle
+            // shadow flips → dark triangles.
             ivec2 sz = textureSize(u_terrain_shadow, 0);
             float side_b = float(sz.x - 1) * 1.0;
             vec2 uv_b = (vWorldPos.xz / side_b) + vec2(0.5);
@@ -322,10 +327,10 @@ void main() {
                 sh_bake = step(0.5, texture(u_terrain_shadow, uv_b).r);
             }
             float sh = sh_bake;
-            if (dist_to_cam < 80.0) {
+            if (dist_to_cam < 50.0) {
                 vec3 origin = vWorldPos + N * 0.04;
                 float sh_rt = any_hit(origin, L, 200.0) ? 1.0 : 0.0;
-                float near_t = 1.0 - smoothstep(40.0, 80.0, dist_to_cam);
+                float near_t = 1.0 - smoothstep(20.0, 50.0, dist_to_cam);
                 sh = mix(sh, sh_rt, near_t);
             }
 
@@ -677,7 +682,7 @@ void main() {
         // eliminates the false hits while RT keeps crisp near-shadows
         // (incl. boxes / castle on terrain) within ~40 m of the camera.
         if (is_terrain_pre) {
-            float blend_far = smoothstep(30.0, 70.0, cam_dist);
+            float blend_far = smoothstep(20.0, 50.0, cam_dist);
             if (blend_far > 0.0) {
                 ivec2 sz_b = textureSize(u_terrain_shadow, 0);
                 float side_b = float(sz_b.x - 1) * 1.0;
