@@ -219,7 +219,8 @@ void VulkanEngine::update_scene_ubo() {
                                  rt_.grass_distance_density);
     data.grass_extra2 = glm::vec4(rt_.grass_alt_min,
                                   rt_.grass_alt_max,
-                                  0.0f, 0.0f);
+                                  rt_.shadow_map_world_half,
+                                  0.0f);
     data.light_vp = sun_shadow_light_vp_;
 
     VmaAllocationInfo ai{};

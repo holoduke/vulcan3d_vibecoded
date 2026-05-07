@@ -30,7 +30,7 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  terrain_h_low;
     vec4  terrain_h_high;
     vec4  grass_extra;   // x: height_scale, y: alpha_cutoff, z: slope_n_min, w: distance_density
-    vec4  grass_extra2;  // x: alt_min, y: alt_max
+    vec4  grass_extra2;  // x: alt_min, y: alt_max, z: shadow_map_world_half
     mat4  light_vp;      // sun shadow map view-proj (world → light clip)
 } scene;
 
@@ -242,27 +242,44 @@ void main() {
     lp.y *= cull_factor;
     vec3 world = R * lp + base_world;
 
-    // Sample the sun shadow map (single-cascade ortho). Transform the
-    // blade's base world position into light-clip space, do the [-1,1]
-    // → [0,1] remap on XY (Vulkan keeps Z in [0,1]), and use
-    // sampler2DShadow's hardware comparison: result is 0 (lit) when
-    // the rasterised depth is closer than the receiver, 1 (shadowed)
-    // otherwise. Border-clamp white means out-of-frustum samples read
-    // as lit — fine since the receiver is necessarily inside the
-    // ortho box (it was sized to the grass distance + slack).
+    // Hybrid sun shadow: shadow map for blades inside the ortho box (soft
+    // PCF, all casters incl. dynamic), heightmap bake for blades outside
+    // (binary, terrain-only, but unbounded). Cross-faded over a small
+    // band so the boundary isn't visible. The bake updates progressively
+    // when the sun rotates, so distant grass takes a beat to catch up
+    // with sun motion — the shadow map handles near grass instantly.
     {
+        // Shadow map sample (near). Sampled unconditionally — it's a
+        // single texture op, cheaper than branching.
         vec4 lc = scene.light_vp * vec4(base_world, 1.0);
-        // Ortho — w == 1 — but divide anyway in case a future cascade
-        // setup uses a non-affine projection.
         vec3 lndc = lc.xyz / lc.w;
-        vec2 luv = lndc.xy * 0.5 + 0.5;
-        // textureLod on sampler2DShadow: vec3 = (xy_uv, ref_depth).
-        // Bias the receiver depth away from the caster slightly to
-        // damp any leftover acne the slope-bias didn't catch.
+        vec2 luv  = lndc.xy * 0.5 + 0.5;
         const float kReceiverBias = 0.0005;
-        vSunShadow = 1.0 - textureLod(u_sun_shadow_map,
-                                       vec3(luv, lndc.z - kReceiverBias),
-                                       0.0);
+        float shadow_map_val = 1.0 -
+            textureLod(u_sun_shadow_map,
+                       vec3(luv, lndc.z - kReceiverBias), 0.0);
+
+        // Heightmap bake sample (far). Texture is centred on origin
+        // (heightmap origin = -side/2). 2m per cell; out-of-bounds reads
+        // as lit.
+        ivec2 texSize = textureSize(u_terrain_shadow, 0);
+        float side = float(texSize.x) * 2.0;
+        vec2 buv = (base_world.xz / side) + vec2(0.5);
+        float bake_val = 0.0;
+        if (all(greaterThanEqual(buv, vec2(0.0))) &&
+            all(lessThanEqual(buv, vec2(1.0)))) {
+            bake_val = step(0.5, textureLod(u_terrain_shadow, buv, 0.0).r);
+        }
+
+        // Blend: the boundary is the shadow-map ortho half-width.
+        // Inside (boundary - band) → 0% bake (pure shadow map).
+        // Outside (boundary + band) → 100% bake.
+        float boundary  = max(scene.grass_extra2.z, 30.0);
+        const float kBoundaryBand = 8.0;
+        float dist_xz = length(base_world.xz - scene.camera_pos.xz);
+        float t = smoothstep(boundary - kBoundaryBand,
+                             boundary + kBoundaryBand, dist_xz);
+        vSunShadow = mix(shadow_map_val, bake_val, t);
     }
     vDistToCam = view_dist_base;
 

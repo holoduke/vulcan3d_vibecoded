@@ -268,7 +268,7 @@ void VulkanEngine::build_menu_ui() {
     }
 
     ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Ray-Tracing Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("Graphics Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::SeparatorText("Materials");
         ImGui::Checkbox("textures enabled", &rt_.textures_enabled);
 
