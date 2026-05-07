@@ -138,18 +138,14 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
                    static_cast<size_t>(4) * static_cast<size_t>(sample_dim));
     aabb_min = glm::vec3( 1e9f);
     aabb_max = glm::vec3(-1e9f);
-    // 4-cell radius for the gradient. Pre-LOD this was 1-cell, which
-    // gave normals that exactly matched the local 1m face. After LOD
-    // landed, distant chunks render at stride 2/4/8 — triangles span
-    // 4–8 cells but the 1-cell-radius normals at the corners reflect
-    // sub-cell detail the triangle's flat face doesn't represent.
-    // Result: adjacent large LOD-2/3 triangles get noisy per-vertex
-    // normals → patchy "different shaded faces" artifacts. A 4-cell
-    // gradient samples a span comparable to the average rendered
-    // triangle: smooths the LOD-far chunks without erasing the
-    // gentle valleys at LOD 0 (which still get fine-detail shading
-    // from the BLAS-derived face geometry).
-    constexpr int kNormalRadius = 4;
+    // 1-cell normal gradient — gives per-vertex normals that match the
+    // 1m triangle face at LOD 0 for crisp near detail. The earlier
+    // 4-cell smoothed setting was a band-aid for LOD-mismatched far
+    // chunks producing patchy slope-driven rock blend; that's now
+    // handled by fading slope-rock at distance and by the cull-mask
+    // trick keeping RT shadow rays off the terrain BLAS, so we can
+    // get sharp 1m detail back without the artifacts returning.
+    constexpr int kNormalRadius = 1;
     auto sample_normal = [&](int gx, int gz) {
         int xm = std::max(0, gx - kNormalRadius);
         int xp = std::min(hm.width()  - 1, gx + kNormalRadius);

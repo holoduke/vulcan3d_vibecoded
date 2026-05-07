@@ -724,13 +724,19 @@ void main() {
             float sh_bake = 0.0;
             if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
                 all(lessThanEqual(uv_b, vec2(1.0)))) {
+                // 9-tap PCF (3x3 box, 1.5-texel offset) for smooth shadow
+                // edges. The bake is binary 0/255 in each texel — without
+                // wide PCF the edges step at texel boundaries and read as
+                // blocky.
                 vec2 texel = 1.0 / vec2(sz_b);
-                float s = texture(u_terrain_shadow, uv_b).r;
-                s += texture(u_terrain_shadow, uv_b + texel * vec2( 1.0,  0.0)).r;
-                s += texture(u_terrain_shadow, uv_b + texel * vec2(-1.0,  0.0)).r;
-                s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0,  1.0)).r;
-                s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0, -1.0)).r;
-                sh_bake = s * 0.2 * scene.rt_params.w;
+                float s = 0.0;
+                for (int oy = -1; oy <= 1; ++oy) {
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        s += texture(u_terrain_shadow,
+                                     uv_b + texel * vec2(float(ox), float(oy)) * 1.5).r;
+                    }
+                }
+                sh_bake = (s / 9.0) * scene.rt_params.w;
             }
             shadow = max(sh_rt_t, sh_bake);
         }
