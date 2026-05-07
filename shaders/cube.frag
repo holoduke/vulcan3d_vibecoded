@@ -439,9 +439,16 @@ void main() {
             int  albedo_idx = clamp(albedo_idx_raw, 0, 4);
             vec3 detail = triplanar_sample(u_albedo[albedo_idx],
                                            sample_pos, proj_n);
-            // Multiply detail × layer base × user-tunable detail
-            // brightness so the user can dial detail in/out.
-            albedo = base * detail * scene.terrain_params.z;
+            // Triplanar blend uses pow(abs(N), 4) weights, so per-pixel
+            // N from Gouraud interpolation feeds into the texture mix.
+            // Across LOD-mismatched chunk seams, adjacent triangles get
+            // different N → different mixes → texture-driven patchy
+            // brightness. Fade detail out past 80 m so distant terrain
+            // shows just the smooth height-band layer colour.
+            float td = distance(vWorldPos, scene.camera_pos.xyz);
+            float det_w = 1.0 - smoothstep(80.0, 200.0, td);
+            vec3 with_detail = base * detail * scene.terrain_params.z;
+            albedo = mix(base, with_detail, det_w);
         } else {
             albedo = base;
         }
