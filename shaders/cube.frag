@@ -312,16 +312,23 @@ void main() {
             float ndl = max(dot(N, L), 0.0);
             float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
 
-            // PURE BAKE — RT shadow disabled on terrain entirely for
-            // diagnosis. If artifacts persist with this, RT is not the
-            // source; the bake or something else is the issue.
+            // PURE BAKE with PCF — 5-tap kernel and no threshold so
+            // shadow edges blend smoothly across triangles instead of
+            // snapping at the 0.5 step boundary (which looked like
+            // adjacent triangles flipping fully-lit / fully-shadowed).
             ivec2 sz = textureSize(u_terrain_shadow, 0);
             float side_b = float(sz.x - 1) * 1.0;
             vec2 uv_b = (vWorldPos.xz / side_b) + vec2(0.5);
             float sh = 0.0;
             if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
                 all(lessThanEqual(uv_b, vec2(1.0)))) {
-                sh = step(0.5, texture(u_terrain_shadow, uv_b).r);
+                vec2 texel = 1.0 / vec2(sz);
+                float s = texture(u_terrain_shadow, uv_b).r;
+                s += texture(u_terrain_shadow, uv_b + texel * vec2( 1.0,  0.0)).r;
+                s += texture(u_terrain_shadow, uv_b + texel * vec2(-1.0,  0.0)).r;
+                s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0,  1.0)).r;
+                s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0, -1.0)).r;
+                sh = s * 0.2;
             }
 
             // Albedo: grey at base, layer-blend from mode 5.
@@ -680,7 +687,13 @@ void main() {
                 float sh_bake = 0.0;
                 if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
                     all(lessThanEqual(uv_b, vec2(1.0)))) {
-                    sh_bake = step(0.5, texture(u_terrain_shadow, uv_b).r);
+                    vec2 texel = 1.0 / vec2(sz_b);
+                    float s = texture(u_terrain_shadow, uv_b).r;
+                    s += texture(u_terrain_shadow, uv_b + texel * vec2( 1.0,  0.0)).r;
+                    s += texture(u_terrain_shadow, uv_b + texel * vec2(-1.0,  0.0)).r;
+                    s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0,  1.0)).r;
+                    s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0, -1.0)).r;
+                    sh_bake = s * 0.2;
                 }
                 shadow = mix(shadow, sh_bake * scene.rt_params.w, blend_far);
             }
