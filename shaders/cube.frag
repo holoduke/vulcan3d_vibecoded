@@ -254,11 +254,25 @@ void main() {
         return;
     }
 
-    // Terrain — per-vertex normals are now computed from the heightmap
-    // gradient on the C++ side (consistent across chunks, smooth across
-    // triangles). No need to override N here — keeping `is_terrain_pre`
-    // as a flag for downstream wrap-light + atmospheric perspective.
     bool is_terrain_pre = vTexParams.w > 1.5;
+
+    // Terrain LOD normal correction. Per-vertex normals come from the
+    // 1-cell heightmap gradient (fine detail), but at LOD 2/3 each
+    // rendered triangle spans 4–8 cells. Gouraud-interpolating tiny-
+    // detail normals across a big flat triangle gives every triangle
+    // a slightly different brightness depending on which heightmap
+    // detail its corners happened to sample → "patchy faces". Blending
+    // toward the geometric face normal (cross of screen-space world-pos
+    // derivatives) at distance makes each large triangle shade as a
+    // uniform face. Walking closer the LOD shrinks triangles, the per-
+    // vertex normals start matching the face direction, and the blend
+    // returns to the heightmap-derived normal automatically.
+    if (is_terrain_pre) {
+        vec3  face_n = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
+        float dist_n = distance(vWorldPos, scene.camera_pos.xyz);
+        float t      = smoothstep(80.0, 200.0, dist_n);
+        N = normalize(mix(N, face_n, t));
+    }
 
     vec3 L = normalize(scene.sun_direction.xyz);
 
