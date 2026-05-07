@@ -225,6 +225,15 @@ void VulkanEngine::save_settings() const {
     f << "fire_rate_rps = "       << game_.fire_rate_rps      << "\n";
     f << "bullet_speed = "        << game_.bullet_speed       << "\n";
     f << "spark_scale = "         << game_.spark_scale        << "\n";
+    // Persist player position + view orientation so re-launching the game
+    // opens at the same spot the user was inspecting (most useful while
+    // tuning visuals — relaunching shouldn't mean walking back across
+    // the map every time).
+    f << "player_pos_x = "        << player_.position.x       << "\n";
+    f << "player_pos_y = "        << player_.position.y       << "\n";
+    f << "player_pos_z = "        << player_.position.z       << "\n";
+    f << "player_yaw = "          << player_.yaw              << "\n";
+    f << "player_pitch = "        << player_.pitch            << "\n";
     log::infof("settings saved to %s", kSettingsPath);
 }
 
@@ -331,6 +340,12 @@ void VulkanEngine::load_settings() {
             else if (key == "fire_rate_rps")        game_.fire_rate_rps = std::stof(val);
             else if (key == "bullet_speed")         game_.bullet_speed = std::stof(val);
             else if (key == "spark_scale")          game_.spark_scale = std::stof(val);
+            // Player pose — restored after init_world resets defaults.
+            else if (key == "player_pos_x")         player_.position.x = std::stof(val);
+            else if (key == "player_pos_y")         player_.position.y = std::stof(val);
+            else if (key == "player_pos_z")         player_.position.z = std::stof(val);
+            else if (key == "player_yaw")           player_.yaw        = std::stof(val);
+            else if (key == "player_pitch")         player_.pitch      = std::stof(val);
             else {
                 log::warnf("settings: unknown key '%s' (ignored)", key.c_str());
                 continue;

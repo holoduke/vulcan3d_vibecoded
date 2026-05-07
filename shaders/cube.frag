@@ -256,24 +256,6 @@ void main() {
 
     bool is_terrain_pre = vTexParams.w > 1.5;
 
-    // Terrain LOD normal correction. Per-vertex normals come from the
-    // 1-cell heightmap gradient (fine detail), but at LOD 2/3 each
-    // rendered triangle spans 4–8 cells. Gouraud-interpolating tiny-
-    // detail normals across a big flat triangle gives every triangle
-    // a slightly different brightness depending on which heightmap
-    // detail its corners happened to sample → "patchy faces". Blending
-    // toward the geometric face normal (cross of screen-space world-pos
-    // derivatives) at distance makes each large triangle shade as a
-    // uniform face. Walking closer the LOD shrinks triangles, the per-
-    // vertex normals start matching the face direction, and the blend
-    // returns to the heightmap-derived normal automatically.
-    if (is_terrain_pre) {
-        vec3  face_n = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
-        float dist_n = distance(vWorldPos, scene.camera_pos.xyz);
-        float t      = smoothstep(80.0, 200.0, dist_n);
-        N = normalize(mix(N, face_n, t));
-    }
-
     vec3 L = normalize(scene.sun_direction.xyz);
 
     // --- Albedo + bump mapping (triplanar projection) ---
@@ -346,8 +328,18 @@ void main() {
         // Steep faces become rocky regardless of altitude. Slope jitter
         // breaks up the cliff/grass border the same way the height
         // jitter breaks up horizontal layer transitions.
+        // Fade slope-driven rock with camera distance: at LOD 2/3 the
+        // Gouraud-interpolated normals between widely-spaced verts
+        // produce per-triangle slope swings, and adjacent large
+        // triangles end up classified as rock vs grass at random,
+        // reading as patchy "different faces". Past ~120 m we let the
+        // height-band layering carry the look — visually identical at
+        // distance, no per-triangle classification noise.
         float slope_jitter = (ign(vWorldPos.xz * 0.09 + vec2(7.0, 19.0)) - 0.5) * 0.10;
-        float steep = smoothstep(0.45 + slope_jitter, 0.75 + slope_jitter, slope);
+        float steep_raw = smoothstep(0.45 + slope_jitter, 0.75 + slope_jitter, slope);
+        float steep_dist = distance(vWorldPos, scene.camera_pos.xyz);
+        float steep_w = 1.0 - smoothstep(80.0, 200.0, steep_dist);
+        float steep = steep_raw * steep_w;
         base = mix(base, rock, steep);
 
         // ---- Cavity AO from local height curvature ----
