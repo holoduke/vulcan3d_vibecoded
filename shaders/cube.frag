@@ -748,9 +748,14 @@ void main() {
                 if (all(greaterThanEqual(luv, vec2(0.0))) &&
                     all(lessThanEqual(luv, vec2(1.0)))) {
                     // sampler2DShadow with LESS_OR_EQUAL: returns 1 when
-                    // the receiver passes (lit), 0 when blocked. Bias
-                    // the receiver depth slightly to combat acne.
-                    const float kRecvBias = 0.0008;
+                    // the receiver passes (lit), 0 when blocked. The
+                    // shadow pass already applies slope-scale + constant
+                    // depth bias via vkCmdSetDepthBias, so a tiny extra
+                    // receiver shift is enough — earlier 0.0008 mapped
+                    // to ~0.8m over the 1000m ortho depth range and
+                    // peter-panned the shadow base off the ground near
+                    // boxes/castle, leaving a visible gap.
+                    const float kRecvBias = 0.00005;
                     float lit = textureLod(u_sun_shadow_map,
                                             vec3(luv, lndc.z - kRecvBias), 0.0);
                     sh_smap = (1.0 - lit) * scene.rt_params.w;

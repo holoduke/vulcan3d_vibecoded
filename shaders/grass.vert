@@ -254,7 +254,9 @@ void main() {
         vec4 lc = scene.light_vp * vec4(base_world, 1.0);
         vec3 lndc = lc.xyz / lc.w;
         vec2 luv  = lndc.xy * 0.5 + 0.5;
-        const float kReceiverBias = 0.0005;
+        // Tiny receiver shift; the shadow pass applies slope/constant
+        // depth bias via vkCmdSetDepthBias so we don't double-bias here.
+        const float kReceiverBias = 0.00005;
         float shadow_map_val = 1.0 -
             textureLod(u_sun_shadow_map,
                        vec3(luv, lndc.z - kReceiverBias), 0.0);
