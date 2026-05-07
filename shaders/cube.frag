@@ -83,6 +83,13 @@ layout(set = 0, binding = 2, std430) readonly buffer Materials {
 // Bound texture arrays (must match kTextureCount on the C++ side).
 layout(set = 0, binding = 3) uniform sampler2D u_albedo[5];
 layout(set = 0, binding = 4) uniform sampler2D u_normal[5];
+// Pre-baked heightmap sun-shadow texture (R8, 0 = lit, 255 = shadowed).
+// Sampled here as a distance fallback for terrain self-shadow — the
+// BLAS holds the full heightmap detail, so RT shadow rays from a low-
+// LOD rasterised surface false-hit BLAS peaks the raster missed. The
+// bake was traced against the heightmap directly so it matches the
+// rasterised LOD surface at distance with no false hits.
+layout(set = 0, binding = 6) uniform sampler2D u_terrain_shadow;
 
 // Triplanar projection sample. Avoids the "what UV does this cube face
 // use" problem and works correctly on every brush size — the texture stays
@@ -290,15 +297,30 @@ void main() {
             outColor = vec4(normalize(fn) * 0.5 + 0.5, 1.0);
             return;
         } else if (dbg == 4) {
-            // Lambert + RT sun shadow only (one ray, no PCSS). If
-            // artifacts come back here, the shadow ray is the culprit.
+            // Lambert + sun shadow with hybrid RT/bake. RT shadow at
+            // close range (matches BLAS one-to-one), heightmap bake
+            // past 200 m (matches the rasterised LOD surface). The
+            // bake gives terrain self-shadow without false-hits from
+            // BLAS detail above the under-shooting LOD-2/3 raster.
             vec3 L = normalize(scene.sun_direction.xyz);
             float ndl = max(dot(N, L), 0.0);
             float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
-            float far_t = clamp((dist_to_cam - 80.0) / 320.0, 0.0, 1.0);
-            float bias = max(0.04, far_t * far_t * 8.0);
-            vec3 origin = vWorldPos + N * bias;
-            float sh = any_hit(origin, L, 200.0) ? 1.0 : 0.0;
+            // RT contribution.
+            vec3 origin = vWorldPos + N * 0.04;
+            float sh_rt = any_hit(origin, L, 200.0) ? 1.0 : 0.0;
+            // Bake contribution. World extent matches heightmap
+            // origin = -side/2 with 1m cells in the new layout.
+            ivec2 sz = textureSize(u_terrain_shadow, 0);
+            float side = float(sz.x) * 1.0;
+            vec2 uv = (vWorldPos.xz / side) + vec2(0.5);
+            float sh_bake = 0.0;
+            if (all(greaterThanEqual(uv, vec2(0.0))) &&
+                all(lessThanEqual(uv, vec2(1.0)))) {
+                sh_bake = step(0.5, texture(u_terrain_shadow, uv).r);
+            }
+            // Blend: 0% bake near, 100% bake far.
+            float t = smoothstep(80.0, 200.0, dist_to_cam);
+            float sh = mix(sh_rt, sh_bake, t);
             vec3 lit = vec3(0.55) * (0.25 + 0.75 * ndl * (1.0 - sh));
             outColor = vec4(lit, 1.0);
             return;

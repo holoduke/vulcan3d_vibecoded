@@ -85,13 +85,14 @@ void VulkanEngine::init_descriptors() {
     bindings[5].descriptorCount = 1;
     bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    // Binding 6: pre-baked heightmap sun-shadow R8 texture. Sampled
-    // by grass.vert (vertex stage) so cast shadows from the terrain
-    // appear on grass at any distance, with zero per-frame ray cost.
+    // Binding 6: pre-baked heightmap sun-shadow R8 texture. Sampled by
+    // grass.vert AND cube.frag — the latter uses it as a distant-terrain
+    // shadow fallback so the BLAS-vs-LOD-raster mismatch can't produce
+    // false-hit shadow rays on far ridges.
     bindings[6].binding = 6;
     bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[6].descriptorCount = 1;
-    bindings[6].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    bindings[6].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
     // Binding 7: sun shadow map (single-cascade D32). Sampled by grass.vert
     // as a sampler2DShadow for hardware PCF + comparison. Replaces the
