@@ -337,16 +337,20 @@ void main() {
         base = mix(base, rock, steep);
 
         // ---- Cavity AO from local height curvature ----
-        // The heightmap-gradient normal we use was computed from the
-        // global heightmap, so screen-space derivatives of N let us
-        // estimate concavity per fragment — same trick GTAO uses for
-        // its bent normal. Concave (valley) -> darker, convex (peak)
-        // -> brighter. Adds the "natural shadowing in cracks" feel
-        // for free, no extra ray budget.
+        // dFdx(N)·dFdx(vWorldPos) gives concavity per fragment. Adds
+        // "natural shadowing in cracks" for free near the camera, but
+        // on distant LOD-2/3 chunks the screen-space derivatives of
+        // Gouraud-interpolated normals between widely-spaced verts
+        // become erratic (large per-pixel jumps), and the cavity term
+        // oscillates 0.45↔1.0 across adjacent triangles — visible as
+        // patchy dark faces on far ridges. Fade the effect out past
+        // ~120 m so distant terrain reads as smooth.
         float curvature = -dot(dFdx(N), dFdx(vWorldPos)) -
                           dot(dFdy(N), dFdy(vWorldPos));
-        float cavity = clamp(0.5 - curvature * 0.4, 0.45, 1.0);
-        base *= cavity;
+        float cav_dist  = distance(vWorldPos, scene.camera_pos.xyz);
+        float cav_w     = 1.0 - smoothstep(80.0, 200.0, cav_dist);
+        float cavity    = clamp(0.5 - curvature * 0.4, 0.45, 1.0);
+        base *= mix(1.0, cavity, cav_w);
 
         // Optional triplanar detail using the engine's Ground054 albedo
         // (texture index 0). When textures are off (use_albedo=false)
