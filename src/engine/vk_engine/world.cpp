@@ -155,14 +155,35 @@ void VulkanEngine::refresh_terrain_collision() {
     if (!terrain_jolt_dirty_) return;
     if (terrain_data_.heights.empty()) return;
     // Jolt has no incremental update for HeightFieldShape — we rebuild
-    // the whole shape. Cheap relative to a full physics step (a few ms
-    // for 512x512 samples) and only fires once per stroke (mouse-up).
+    // the whole shape. Mirrors the sub-grid trim done at level load:
+    // when sample_count would be odd Jolt's block-size requirement
+    // forces us onto a 2048×2048 sub-grid taken from the 2049² heightmap.
     if (physics_) {
-        physics_->add_static_heightfield(terrain_data_.heights.data(),
-                                         terrain_data_.dim,
-                                         glm::vec2(terrain_data_.origin_x,
-                                                    terrain_data_.origin_z),
-                                         terrain_data_.cell);
+        const int W = terrain_data_.dim + 1;
+        const int physics_samples = (W % 2 == 0) ? W : (W - 1);
+        if (physics_samples == W) {
+            physics_->add_static_heightfield(terrain_data_.heights.data(),
+                                             terrain_data_.dim,
+                                             glm::vec2(terrain_data_.origin_x,
+                                                        terrain_data_.origin_z),
+                                             terrain_data_.cell);
+        } else {
+            std::vector<float> jolt_heights(static_cast<size_t>(physics_samples) *
+                                             static_cast<size_t>(physics_samples));
+            for (int z = 0; z < physics_samples; ++z) {
+                std::memcpy(jolt_heights.data() +
+                                static_cast<size_t>(z) *
+                                static_cast<size_t>(physics_samples),
+                            terrain_data_.heights.data() +
+                                static_cast<size_t>(z) * static_cast<size_t>(W),
+                            static_cast<size_t>(physics_samples) * sizeof(float));
+            }
+            physics_->add_static_heightfield(jolt_heights.data(),
+                                             physics_samples - 1,
+                                             glm::vec2(terrain_data_.origin_x,
+                                                        terrain_data_.origin_z),
+                                             terrain_data_.cell);
+        }
     }
     terrain_jolt_dirty_ = false;
 }
@@ -872,16 +893,23 @@ void VulkanEngine::init_world() {
     // (~1km²). See docs/terrain_plan.md for streaming/LOD/sculpt phases.
     {
         HeightmapParams hp{};
-        // dim+1 must be a power of 2 so Jolt's HeightFieldShape can pick
-        // a valid block_size that divides the sample count, AND dim must
-        // be divisible by the chunked-renderer's chunks_per_side.
-        // 2047 cells → 2048 samples (block_size 8 ✓); 2047 = 23 × 89, so
-        // 23 chunks/side gives chunk_cells = 89 (= 89m at 1 m cells).
-        // World extent 2047m matches the previous 1023×2 m setup, just
-        // 4× more samples (2× per axis) — paired with the four-LOD
-        // skirted chunks the per-frame triangle count actually drops.
-        hp.dim = 2047;
-        hp.cell_size = 1.0f;           // 1 m per cell × 2047 = 2047 m square
+        // Two constraints that fight each other:
+        //   1. chunk_cells must be divisible by every LOD stride (1, 2, 4, 8)
+        //      so the stride-N index loop covers every cell — otherwise the
+        //      lower-LOD index buffers leave a strip of cells uncovered at
+        //      the chunk's right/bottom edge → visible square seams.
+        //   2. Jolt's HeightFieldShape needs sample_count divisible by
+        //      block_size in [2, 8].
+        //
+        // chunk_cells / 8 means dim is divisible by 8 → sample_count = dim+1
+        // is odd → Jolt fails. Resolution: pick dim = 2048 cells (=32×64),
+        // chunk_cells = 64 (divisible by all four strides), and feed Jolt a
+        // 2048×2048 sub-grid by truncating the last row/col of the 2049²
+        // heightmap. The visual mesh uses the full 2049² so the world edge
+        // stays continuous. Jolt loses one cell-width at the world edge —
+        // invisible since the player can't reach the world boundary.
+        hp.dim = 2048;
+        hp.cell_size = 1.0f;
         hp.height_scale = 140.0f;
         hp.plateau_extent = glm::vec2(28.0f, 28.0f);
         hp.plateau_height = 22.0f;
@@ -896,11 +924,11 @@ void VulkanEngine::init_world() {
         terrain_data_.heights = hm.heights;
         terrain_mesh_ = build_terrain_mesh(device_, allocator_,
                                            graphics_queue_, graphics_queue_family_, hm);
-        // Chunked raster terrain: 23×23 chunks of 89 cells each on the
-        // 2047m world (≈89m / chunk at 1m cells). Each chunk now has
-        // four LOD index buffers (stride 1/2/4/8) plus a skirt strip
-        // around its edge that hides cracks at LOD boundaries.
-        const int chunks_per_side = 23;
+        // 32×32 chunks of 64 cells each — 64 is divisible by every LOD
+        // stride (1/2/4/8) so all four LODs cover every cell. ≈64 m per
+        // chunk side at 1 m cells. Skirt strips on each LOD's index
+        // buffer hide LOD-mismatch cracks at chunk seams.
+        const int chunks_per_side = 32;
         terrain_chunks_ = build_terrain_chunks(device_, allocator_,
                                                graphics_queue_, graphics_queue_family_,
                                                hm, chunks_per_side);
@@ -964,12 +992,38 @@ void VulkanEngine::init_world() {
     }
     physics_->add_static_boxes(sboxes.data(), sboxes.size());
     // Heightfield collision for terrain. Player + crates collide cleanly
-    // against the bumpy ground — far cheaper than tessellated brushes.
+    // against the bumpy ground. Jolt requires the sample-count side to be
+    // divisible by some block_size in [2, 8]; with dim=2048 (sample_count
+    // = 2049, odd) we'd violate that, so we copy the first 2048×2048 sub-
+    // grid into a packed buffer and pass that with dim=2047 (sample_count
+    // = 2048, block_size 8 ✓). Player can't reach the world edge so the
+    // single-cell shrinkage is invisible.
     if (!terrain_data_.heights.empty()) {
-        physics_->add_static_heightfield(
-            terrain_data_.heights.data(), terrain_data_.dim,
-            glm::vec2(terrain_data_.origin_x, terrain_data_.origin_z),
-            terrain_data_.cell);
+        const int W = terrain_data_.dim + 1;        // 2049
+        const int physics_samples = (W % 2 == 0) ? W : (W - 1);  // 2048
+        std::vector<float> jolt_heights;
+        if (physics_samples == W) {
+            // Already even — pass through.
+            physics_->add_static_heightfield(
+                terrain_data_.heights.data(), terrain_data_.dim,
+                glm::vec2(terrain_data_.origin_x, terrain_data_.origin_z),
+                terrain_data_.cell);
+        } else {
+            jolt_heights.resize(static_cast<size_t>(physics_samples) *
+                                 static_cast<size_t>(physics_samples));
+            for (int z = 0; z < physics_samples; ++z) {
+                std::memcpy(jolt_heights.data() +
+                                static_cast<size_t>(z) *
+                                static_cast<size_t>(physics_samples),
+                            terrain_data_.heights.data() +
+                                static_cast<size_t>(z) * static_cast<size_t>(W),
+                            static_cast<size_t>(physics_samples) * sizeof(float));
+            }
+            physics_->add_static_heightfield(
+                jolt_heights.data(), physics_samples - 1,
+                glm::vec2(terrain_data_.origin_x, terrain_data_.origin_z),
+                terrain_data_.cell);
+        }
     }
 
     log::infof("Jolt: %d static bodies; dynamic boxes will spawn over time "
