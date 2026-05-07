@@ -296,35 +296,100 @@ void main() {
             if (fn.y < 0.0) fn = -fn;
             outColor = vec4(normalize(fn) * 0.5 + 0.5, 1.0);
             return;
-        } else if (dbg == 4) {
-            // Lambert + sun shadow. Hybrid RT/bake: RT only for the
-            // first 40m where LOD 0 raster matches the BLAS exactly,
-            // then full heightmap bake. The bake was traced from the
-            // same heightmap so the shadow values match the rasterised
-            // surface at any LOD — no false hits.
+        } else if (dbg >= 4) {
+            // Incremental debug modes: each higher number adds one
+            // feature on top of "Lambert + hybrid RT/bake shadow",
+            // so the user can pinpoint which feature reintroduces
+            // distant-terrain artifacts.
+            //   4  = base Lambert + hybrid shadow.
+            //   5  = + height-band layer albedo (sand/grass/dirt/rock/snow).
+            //   6  = + slope-rock blend (faded by distance).
+            //   7  = + cavity AO from screen-space N derivatives (faded).
+            //   8  = + triplanar texture detail (faded at distance).
+            //   9  = + RTAO (faded at distance).
+            //   10 = + GI bounce (faded at distance).
             vec3 L = normalize(scene.sun_direction.xyz);
             float ndl = max(dot(N, L), 0.0);
             float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
 
-            // Bake — sample first so we always have it.
+            // Hybrid shadow (always on for modes 4+).
             ivec2 sz = textureSize(u_terrain_shadow, 0);
-            float side = float(sz.x - 1) * 1.0;     // dim cells × cell_size
-            vec2 uv = (vWorldPos.xz / side) + vec2(0.5);
+            float side_b = float(sz.x - 1) * 1.0;
+            vec2 uv_b = (vWorldPos.xz / side_b) + vec2(0.5);
             float sh_bake = 0.0;
-            if (all(greaterThanEqual(uv, vec2(0.0))) &&
-                all(lessThanEqual(uv, vec2(1.0)))) {
-                sh_bake = step(0.5, texture(u_terrain_shadow, uv).r);
+            if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
+                all(lessThanEqual(uv_b, vec2(1.0)))) {
+                sh_bake = step(0.5, texture(u_terrain_shadow, uv_b).r);
             }
             float sh = sh_bake;
-            // Mix in RT only at very close range to capture small
-            // castle/dyn-prop shadows the bake doesn't cover.
             if (dist_to_cam < 80.0) {
                 vec3 origin = vWorldPos + N * 0.04;
                 float sh_rt = any_hit(origin, L, 200.0) ? 1.0 : 0.0;
                 float near_t = 1.0 - smoothstep(40.0, 80.0, dist_to_cam);
                 sh = mix(sh, sh_rt, near_t);
             }
-            vec3 lit = vec3(0.55) * (0.25 + 0.75 * ndl * (1.0 - sh));
+
+            // Albedo: grey at base, layer-blend from mode 5.
+            vec3 base_col = vec3(0.55);
+            if (dbg >= 5) {
+                const vec3 sand   = vec3(0.78, 0.71, 0.50);
+                const vec3 grass  = vec3(0.31, 0.45, 0.18);
+                const vec3 dirt   = vec3(0.42, 0.30, 0.18);
+                const vec3 rock   = vec3(0.40, 0.38, 0.36);
+                const vec3 snow   = vec3(0.95, 0.95, 0.97);
+                float h = vWorldPos.y;
+                float t_sand = smoothstep(scene.terrain_h_low.x,  scene.terrain_h_low.y,  h);
+                float t_dirt = smoothstep(scene.terrain_h_low.z,  scene.terrain_h_low.w,  h);
+                float t_rock = smoothstep(scene.terrain_h_high.x, scene.terrain_h_high.y, h);
+                float t_snow = smoothstep(scene.terrain_h_high.z, scene.terrain_h_high.w, h);
+                base_col = mix(sand, grass, t_sand);
+                base_col = mix(base_col, dirt, t_dirt);
+                base_col = mix(base_col, rock, t_rock);
+                base_col = mix(base_col, snow, t_snow);
+            }
+            // Slope-rock blend at mode 6+.
+            if (dbg >= 6) {
+                float slope = 1.0 - clamp(N.y, 0.0, 1.0);
+                float steep = smoothstep(0.45, 0.75, slope);
+                float steep_w = 1.0 - smoothstep(80.0, 200.0, dist_to_cam);
+                base_col = mix(base_col, vec3(0.40, 0.38, 0.36), steep * steep_w);
+            }
+            // Cavity AO at mode 7+.
+            if (dbg >= 7) {
+                float curvature = -dot(dFdx(N), dFdx(vWorldPos)) -
+                                  dot(dFdy(N), dFdy(vWorldPos));
+                float cav_w  = 1.0 - smoothstep(80.0, 200.0, dist_to_cam);
+                float cavity = clamp(0.5 - curvature * 0.4, 0.45, 1.0);
+                base_col *= mix(1.0, cavity, cav_w);
+            }
+            // Triplanar texture detail at mode 8+.
+            if (dbg >= 8) {
+                vec3 detail = triplanar_sample(u_albedo[0], vWorldPos * 0.0625, N);
+                float det_w = 1.0 - smoothstep(80.0, 200.0, dist_to_cam);
+                base_col = mix(base_col, base_col * detail, det_w);
+            }
+            // AO at mode 9+ (single short ray, faded at distance).
+            float ao_dbg = 1.0;
+            if (dbg >= 9 && scene.rt_flags2.w > 0) {
+                vec3 origin_ao = vWorldPos + N * 0.01;
+                vec3 ao_dir = normalize(N + vec3(0.3, 0.0, 0.0));
+                if (any_hit(origin_ao, ao_dir, 1.0)) ao_dbg = 0.7;
+                float ao_far_t = smoothstep(80.0, 200.0, dist_to_cam);
+                ao_dbg = mix(ao_dbg, 1.0, ao_far_t);
+            }
+            // GI at mode 10+ (single bounce, faded).
+            vec3 gi_dbg = vec3(0.0);
+            if (dbg >= 10) {
+                vec3 origin_gi = vWorldPos + N * 0.01;
+                vec3 gi_dir = normalize(N + vec3(0.0, 0.0, 0.5));
+                if (!any_hit(origin_gi, gi_dir, 50.0)) {
+                    gi_dbg = scene.sky_color.rgb * 0.2;
+                }
+                float gi_far_t = smoothstep(80.0, 200.0, dist_to_cam);
+                gi_dbg = mix(gi_dbg, vec3(0.0), gi_far_t);
+            }
+
+            vec3 lit = base_col * (0.25 + 0.75 * ndl * (1.0 - sh)) * ao_dbg + gi_dbg;
             outColor = vec4(lit, 1.0);
             return;
         }
@@ -836,15 +901,17 @@ void main() {
         sky_total = taken;
         sky_vis = float(sky_misses) / float(max(1, sky_total));
 
-        // Distant terrain GI fades to zero. Same root cause as the
-        // shadow-bake fallback: GI rays sampled from the rasterised
-        // LOD-2/3 surface false-hit BLAS detail above; per-triangle
-        // hit fractions vary → patchy bright/dark per face. The bake
-        // already gives terrain self-shadow; we don't need GI's
-        // approximation past the LOD-0 zone.
+        // Distant terrain: BLAS-vs-LOD-raster mismatch poisons both
+        // the GI accumulation AND the sky_vis count (GI rays false-hit
+        // BLAS peaks the raster doesn't show → fewer "sky misses" per
+        // triangle, with adjacent triangles diverging → patchy
+        // ambient via sky_factor below). Force gi to 0 and sky_vis
+        // to 1 (open sky) past the LOD-0 zone — distant mountain
+        // tops are essentially always sky-exposed anyway.
         if (is_terrain_pre) {
             float gi_far_t = smoothstep(80.0, 200.0, cam_dist);
             gi_indirect = mix(gi_indirect, vec3(0.0), gi_far_t);
+            sky_vis = mix(sky_vis, 1.0, gi_far_t);
         }
     }
 

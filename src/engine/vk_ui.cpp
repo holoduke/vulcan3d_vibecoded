@@ -315,10 +315,16 @@ void VulkanEngine::build_menu_ui() {
             "simple Lambert (no RT/AO/GI)",
             "show vertex normal",
             "show face normal",
-            "Lambert + RT shadow",
+            "4: Lambert + RT shadow",
+            "5: + height layers",
+            "6: + slope-rock",
+            "7: + cavity AO",
+            "8: + triplanar detail",
+            "9: + RTAO",
+            "10: + GI bounce",
         };
         ImGui::Combo("terrain debug", &rt_.terrain_debug_mode,
-                      terrain_debug_labels, 5);
+                      terrain_debug_labels, 11);
 
         ImGui::SeparatorText("Ambient Occlusion (RT)");
         ImGui::SliderInt("AO samples (0=off)", &rt_.ao_samples, 0, 64);
