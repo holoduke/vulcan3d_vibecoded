@@ -679,24 +679,29 @@ void main() {
         // eliminates the false hits while RT keeps crisp near-shadows
         // (incl. boxes / castle on terrain) within ~40 m of the camera.
         if (is_terrain_pre) {
-            float blend_far = smoothstep(20.0, 50.0, cam_dist);
-            if (blend_far > 0.0) {
-                ivec2 sz_b = textureSize(u_terrain_shadow, 0);
-                float side_b = float(sz_b.x - 1) * 1.0;
-                vec2 uv_b = (vWorldPos.xz / side_b) + vec2(0.5);
-                float sh_bake = 0.0;
-                if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
-                    all(lessThanEqual(uv_b, vec2(1.0)))) {
-                    vec2 texel = 1.0 / vec2(sz_b);
-                    float s = texture(u_terrain_shadow, uv_b).r;
-                    s += texture(u_terrain_shadow, uv_b + texel * vec2( 1.0,  0.0)).r;
-                    s += texture(u_terrain_shadow, uv_b + texel * vec2(-1.0,  0.0)).r;
-                    s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0,  1.0)).r;
-                    s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0, -1.0)).r;
-                    sh_bake = s * 0.2;
-                }
-                shadow = mix(shadow, sh_bake * scene.rt_params.w, blend_far);
+            // Pure bake — RT shadow disabled entirely on terrain (matches
+            // debug mode 4 which is the only artifact-free path). The RT
+            // PCSS shadow's per-fragment jitter combined with N-driven
+            // ray-direction variation produces per-triangle hit/miss
+            // flips at any distance on the BLAS-vs-LOD-raster mismatch.
+            // Bake gives smooth terrain self-shadow; we lose box/castle
+            // shadows on terrain (visually a small loss compared to the
+            // patchwork). Soft via 5-tap PCF.
+            ivec2 sz_b = textureSize(u_terrain_shadow, 0);
+            float side_b = float(sz_b.x - 1) * 1.0;
+            vec2 uv_b = (vWorldPos.xz / side_b) + vec2(0.5);
+            float sh_bake = 0.0;
+            if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
+                all(lessThanEqual(uv_b, vec2(1.0)))) {
+                vec2 texel = 1.0 / vec2(sz_b);
+                float s = texture(u_terrain_shadow, uv_b).r;
+                s += texture(u_terrain_shadow, uv_b + texel * vec2( 1.0,  0.0)).r;
+                s += texture(u_terrain_shadow, uv_b + texel * vec2(-1.0,  0.0)).r;
+                s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0,  1.0)).r;
+                s += texture(u_terrain_shadow, uv_b + texel * vec2( 0.0, -1.0)).r;
+                sh_bake = s * 0.2;
             }
+            shadow = sh_bake * scene.rt_params.w;
         }
     }
 
