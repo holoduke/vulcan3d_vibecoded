@@ -971,6 +971,13 @@ private:
         // <1 softens. Visible difference between e.g. 2.0 and 4.0 on
         // mountain slopes.
         float terrain_shading_contrast = 1.0f;
+        // Heightmap resolution multiplier (per-axis). 1 = baseline
+        // 2048×2048 cells at 1m. 2 = 4096×4096 at 0.5m (16× more
+        // samples total, ~600MB extra mesh memory). 4 = 8192×8192
+        // at 0.25m (256× more samples, NOT recommended — pushes past
+        // ~2GB of GPU memory on the chunk meshes alone). Applied at
+        // level load — change requires a restart.
+        int terrain_heightmap_scale = 1;
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;

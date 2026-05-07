@@ -1115,8 +1115,14 @@ void VulkanEngine::init_world() {
         // heightmap. The visual mesh uses the full 2049ВІ so the world edge
         // stays continuous. Jolt loses one cell-width at the world edge вЂ”
         // invisible since the player can't reach the world boundary.
-        hp.dim = 2048;
-        hp.cell_size = 1.0f;
+        // Heightmap resolution scale — the user can pick higher density
+        // via the Terrain settings menu. Defaults to 1× = the baseline
+        // 2048-cell grid. Higher values keep the world extent the same
+        // (cell shrinks proportionally) so castle/grass/spawn positions
+        // are unaffected.
+        const int hres = std::max(1, std::min(4, rt_.terrain_heightmap_scale));
+        hp.dim = 2048 * hres;
+        hp.cell_size = 1.0f / static_cast<float>(hres);
         hp.height_scale = 140.0f;
         hp.plateau_extent = glm::vec2(28.0f, 28.0f);
         hp.plateau_height = 22.0f;

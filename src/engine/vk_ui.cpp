@@ -388,6 +388,21 @@ void VulkanEngine::build_menu_ui() {
     }
 
     if (ImGui::CollapsingHeader("Terrain", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SeparatorText("Heightmap resolution");
+        const char* hres_labels[] = {
+            "1x (2048 cells, ~17 MB)",
+            "2x (4096 cells, ~270 MB *)",
+            "4x (8192 cells, NOT RECOMMENDED — multi-GB)"
+        };
+        const int hres_values[] = { 1, 2, 4 };
+        int hres_idx = 0;
+        for (int i = 0; i < 3; ++i)
+            if (rt_.terrain_heightmap_scale == hres_values[i]) { hres_idx = i; break; }
+        if (ImGui::Combo("Heightmap scale", &hres_idx, hres_labels, 3)) {
+            rt_.terrain_heightmap_scale = hres_values[hres_idx];
+        }
+        ImGui::TextDisabled("* Restart required — heightmap generated at level load.");
+
         ImGui::SeparatorText("LOD distances");
         ImGui::SliderFloat("Terrain detail (multiplier)",
                             &rt_.terrain_lod_scale, 0.5f, 4.0f, "%.2fx");
