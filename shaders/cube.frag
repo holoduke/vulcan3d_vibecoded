@@ -434,12 +434,18 @@ void main() {
         vec3 tan_u = normalize(cross(ref, L));
         vec3 tan_v = cross(L, tan_u);
 
-        // Modest extra bias for terrain — the chunked raster mesh
-        // matches the BLAS at full LOD now, so a small bump (vs the
-        // brush default) is plenty to clear sub-cell precision drift
-        // without blurring shadow edges.
+        // Terrain shadow-ray bias scales with camera distance. The
+        // chunked raster mesh uses distance-based LOD (stride 1/2/4/8)
+        // while the BLAS holds the full heightmap — so distant fragments
+        // sit BELOW the BLAS's true detail. Without enough bias, every
+        // shadow ray fired upward from the rasterised low-LOD surface
+        // hits a missed-peak in the BLAS and reports "shadowed" → dark
+        // patches on distant ridges where no visible occluder exists.
+        // Roughly 0.5% of camera distance covers worst-case peak
+        // undershoot at LOD 3 without blurring near shadows.
+        float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
         float bias = is_terrain_pre
-            ? (0.04 + 0.10 * (1.0 - n_dot_l_raw))
+            ? (max(0.04, 0.005 * dist_to_cam) + 0.10 * (1.0 - n_dot_l_raw))
             : (0.005 + 0.02 * (1.0 - n_dot_l_raw));
         vec3 origin = vWorldPos + N * bias;
 

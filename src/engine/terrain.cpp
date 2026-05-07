@@ -231,17 +231,17 @@ void gen_chunk_parent_y(const Heightmap& hm, int origin_ix, int origin_iz,
                  static_cast<size_t>(ix)] = py;
         }
     }
-    // Skirt twins keep their own Y; morphing them would lift the skirt
-    // base above the surface and reveal cracks.
+    // Skirt twins must NOT move during morph: their actual Y is the
+    // interior height minus the skirt drop, so parent_y has to match
+    // that exact value or terrain.vert will lerp them upward and
+    // expose the gap the skirt was filling. Match the skirt's actual
+    // dropped Y rather than the interior height.
     size_t skirt_base = static_cast<size_t>(N) * static_cast<size_t>(N);
     auto skirt_self = [&](int ix0, int iz0, int dx, int dz, size_t edge) {
         for (int k = 0; k < N; ++k) {
             int ix = ix0 + dx * k;
             int iz = iz0 + dz * k;
-            float y = h_at(ix, iz);
-            // Skirt stores its dropped Y; parent_y here matches so morph
-            // doesn't lift it (we use the pre-drop self height which the
-            // vertex shader will further drop via the actual Y baked in).
+            float y = h_at(ix, iz) - kTerrainSkirtDepth;
             out[skirt_base + edge * static_cast<size_t>(N) +
                  static_cast<size_t>(k)] = y;
         }
