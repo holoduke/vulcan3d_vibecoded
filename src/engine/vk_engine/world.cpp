@@ -333,7 +333,11 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
                       std::cos(y) * std::cos(p));
     terrain_shadow_sun_dir_        = sun_dir;
     terrain_shadow_target_sun_dir_ = sun_dir;
-    terrain_shadow_pending_tiles_.clear();
+    {
+        std::lock_guard<std::mutex> lk(terrain_shadow_mutex_);
+        terrain_shadow_jobs_.clear();
+        terrain_shadow_results_.clear();
+    }
 
     std::vector<uint8_t> shadow = bake_heightmap_shadow(hm, sun_dir);
     const int W = hm.width();
@@ -703,48 +707,203 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
                                      VK_IMAGE_ASPECT_DEPTH_BIT);
 }
 
+void VulkanEngine::start_terrain_shadow_worker() {
+    if (terrain_data_.heights.empty()) return;
+    if (terrain_shadow_worker_.joinable()) return;     // already running
+    // Snapshot the heightmap into a Heightmap struct the worker can read
+    // without locks. Future sculpt edits won't propagate; if/when we
+    // care, call stop_terrain_shadow_worker / start_terrain_shadow_worker
+    // again to rebuild the snapshot.
+    terrain_shadow_baker_hm_.dim       = terrain_data_.dim;
+    terrain_shadow_baker_hm_.cell      = terrain_data_.cell;
+    terrain_shadow_baker_hm_.origin_x  = terrain_data_.origin_x;
+    terrain_shadow_baker_hm_.origin_z  = terrain_data_.origin_z;
+    terrain_shadow_baker_hm_.heights   = terrain_data_.heights;
+    terrain_shadow_stop_.store(false);
+    terrain_shadow_worker_ = std::thread([this]() { terrain_shadow_worker_loop(); });
+}
+
+void VulkanEngine::stop_terrain_shadow_worker() {
+    if (!terrain_shadow_worker_.joinable()) return;
+    {
+        std::lock_guard<std::mutex> lk(terrain_shadow_mutex_);
+        terrain_shadow_stop_.store(true);
+        terrain_shadow_jobs_.clear();
+    }
+    terrain_shadow_cv_.notify_all();
+    terrain_shadow_worker_.join();
+}
+
+void VulkanEngine::terrain_shadow_worker_loop() {
+    // Background bake loop. Pops one job at a time, runs the tile bake
+    // on the worker thread (zero impact on main FPS), and pushes the
+    // result back. Main thread drains results in tick_terrain_shadow_progressive.
+    while (true) {
+        ShadowBakeJob job;
+        {
+            std::unique_lock<std::mutex> lk(terrain_shadow_mutex_);
+            terrain_shadow_cv_.wait(lk, [&]{
+                return !terrain_shadow_jobs_.empty() ||
+                       terrain_shadow_stop_.load();
+            });
+            if (terrain_shadow_stop_.load()) return;
+            job = terrain_shadow_jobs_.front();
+            terrain_shadow_jobs_.pop_front();
+        }
+        // Bake outside the lock so other threads keep running.
+        ShadowBakeResult r;
+        r.ix = job.ix; r.iz = job.iz; r.w = job.w; r.h = job.h;
+        r.sun_dir = job.sun_dir;
+        r.data.resize(static_cast<size_t>(job.w) * static_cast<size_t>(job.h));
+        bake_heightmap_shadow_tile(terrain_shadow_baker_hm_, job.sun_dir,
+                                    job.ix, job.iz, job.w, job.h, r.data.data());
+        {
+            std::lock_guard<std::mutex> lk(terrain_shadow_mutex_);
+            terrain_shadow_results_.push_back(std::move(r));
+        }
+    }
+}
+
 void VulkanEngine::enqueue_terrain_shadow_rebake(glm::vec3 target_sun) {
     if (terrain_data_.heights.empty()) return;
     terrain_shadow_target_sun_dir_ = target_sun;
-    terrain_shadow_pending_tiles_.clear();
 
     const int W = terrain_data_.dim + 1;
     const int H = terrain_data_.dim + 1;
     const int ts = kShadowTileSize;
     const glm::vec3 cam = player_.eye_position();
-    terrain_shadow_last_sort_pos_ = cam;
 
+    // Build the full tile list, sorted nearest-first so the worker
+    // bakes near-camera tiles before far ones.
+    std::vector<ShadowBakeTile> tiles;
     int n_tiles = ((W + ts - 1) / ts) * ((H + ts - 1) / ts);
-    terrain_shadow_pending_tiles_.reserve(static_cast<size_t>(n_tiles));
+    tiles.reserve(static_cast<size_t>(n_tiles));
     for (int iz = 0; iz < H; iz += ts) {
         int th = std::min(ts, H - iz);
         for (int ix = 0; ix < W; ix += ts) {
             int tw = std::min(ts, W - ix);
-            // Tile centre in world space.
             float wx = terrain_data_.origin_x +
                        (static_cast<float>(ix) + 0.5f * static_cast<float>(tw)) *
                        terrain_data_.cell;
             float wz = terrain_data_.origin_z +
                        (static_cast<float>(iz) + 0.5f * static_cast<float>(th)) *
                        terrain_data_.cell;
-            float dx = wx - cam.x;
-            float dz = wz - cam.z;
-            ShadowBakeTile t{ix, iz, tw, th, dx * dx + dz * dz};
-            terrain_shadow_pending_tiles_.push_back(t);
+            float dx = wx - cam.x, dz = wz - cam.z;
+            tiles.push_back({ix, iz, tw, th, dx * dx + dz * dz});
         }
     }
-    // std::sort on the whole list once. Subsequent re-sorts when the
-    // camera drifts only re-sort the remaining tail (cheaper).
-    std::sort(terrain_shadow_pending_tiles_.begin(),
-              terrain_shadow_pending_tiles_.end(),
+    std::sort(tiles.begin(), tiles.end(),
               [](const ShadowBakeTile& a, const ShadowBakeTile& b) {
                   return a.dist_sq < b.dist_sq;
               });
+
+    // Replace the worker's job queue. Drop any older results too — they
+    // were baked against a stale sun direction.
+    {
+        std::lock_guard<std::mutex> lk(terrain_shadow_mutex_);
+        terrain_shadow_jobs_.clear();
+        terrain_shadow_results_.clear();
+        for (const auto& t : tiles) {
+            terrain_shadow_jobs_.push_back({t.ix, t.iz, t.w, t.h, target_sun});
+        }
+    }
+    terrain_shadow_cv_.notify_all();
 }
 
 void VulkanEngine::tick_terrain_shadow_progressive() {
-    if (terrain_shadow_pending_tiles_.empty()) return;
     if (terrain_shadow_image_ == VK_NULL_HANDLE) return;
+    // Async path: drain a few finished bake results from the worker
+    // thread and upload them to the GPU image. Bake CPU work happens
+    // off-thread so there's no impact on FPS even when many tiles are
+    // baking. We early-return if no results are ready.
+    std::vector<ShadowBakeResult> ready;
+    bool jobs_remaining = false;
+    {
+        std::lock_guard<std::mutex> lk(terrain_shadow_mutex_);
+        const int max_take = kShadowUploadsPerFrame;
+        while (ready.size() < static_cast<size_t>(max_take) &&
+               !terrain_shadow_results_.empty()) {
+            auto& r = terrain_shadow_results_.front();
+            // Drop stale results (sun has changed since this tile was
+            // queued) — they'd flash old shadows briefly.
+            if (glm::distance(r.sun_dir, terrain_shadow_target_sun_dir_) < 0.001f) {
+                ready.push_back(std::move(r));
+            }
+            terrain_shadow_results_.pop_front();
+        }
+        jobs_remaining = !terrain_shadow_jobs_.empty() ||
+                         !terrain_shadow_results_.empty();
+    }
+    if (ready.empty()) {
+        if (!jobs_remaining) {
+            terrain_shadow_sun_dir_ = terrain_shadow_target_sun_dir_;
+        }
+        return;
+    }
+    // Pack tiles into one staging buffer, upload via a single submit.
+    size_t total_bytes = 0;
+    for (const auto& r : ready) {
+        total_bytes += static_cast<size_t>(r.w) * static_cast<size_t>(r.h);
+    }
+    VkBuffer stage = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = nullptr;
+    VkBufferCreateInfo bci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .size = total_bytes,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+    };
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    vmaCreateBuffer(allocator_, &bci, &aci, &stage, &stage_alloc, nullptr);
+    VmaAllocationInfo ai{};
+    vmaGetAllocationInfo(allocator_, stage_alloc, &ai);
+    uint8_t* mapped = static_cast<uint8_t*>(ai.pMappedData);
+
+    std::vector<VkBufferImageCopy> regions;
+    regions.reserve(ready.size());
+    size_t off = 0;
+    for (const auto& r : ready) {
+        size_t bytes = static_cast<size_t>(r.w) * static_cast<size_t>(r.h);
+        std::memcpy(mapped + off, r.data.data(), bytes);
+        VkBufferImageCopy reg{};
+        reg.bufferOffset = off;
+        reg.bufferRowLength = 0;
+        reg.bufferImageHeight = 0;
+        reg.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        reg.imageSubresource.mipLevel = 0;
+        reg.imageSubresource.baseArrayLayer = 0;
+        reg.imageSubresource.layerCount = 1;
+        reg.imageOffset = { r.ix, r.iz, 0 };
+        reg.imageExtent = { static_cast<uint32_t>(r.w),
+                            static_cast<uint32_t>(r.h), 1 };
+        regions.push_back(reg);
+        off += bytes;
+    }
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, terrain_shadow_image_,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdCopyBufferToImage(cb, stage, terrain_shadow_image_,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                static_cast<uint32_t>(regions.size()),
+                                regions.data());
+        vkinit::transition_image(cb, terrain_shadow_image_,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    vmaDestroyBuffer(allocator_, stage, stage_alloc);
+    if (!jobs_remaining) {
+        terrain_shadow_sun_dir_ = terrain_shadow_target_sun_dir_;
+    }
+}
+
+#if 0  // Old inline-bake body — replaced by the worker thread above.
+namespace _terrain_shadow_dead_code_removed {
 
     // Re-sort the remaining tail if the player has drifted enough that
     // priorities changed. 16m threshold в‰€ a quarter of a tile so the
@@ -869,6 +1028,8 @@ void VulkanEngine::tick_terrain_shadow_progressive() {
         terrain_shadow_sun_dir_ = terrain_shadow_target_sun_dir_;
     }
 }
+}  // namespace _terrain_shadow_dead_code_removed
+#endif
 
 float VulkanEngine::sample_terrain_height(float x, float z) const {
     if (terrain_data_.heights.empty() || terrain_data_.dim <= 0) return 0.0f;

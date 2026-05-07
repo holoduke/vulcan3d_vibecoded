@@ -5,9 +5,13 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "engine/frustum.h"
@@ -567,22 +571,40 @@ private:
     VkSampler         terrain_shadow_sampler_ = VK_NULL_HANDLE;
     int               terrain_shadow_dim_     = 0;
     glm::vec3         terrain_shadow_sun_dir_ = glm::vec3(0.0f);
-    // Progressive tile re-bake state. When the sun rotates we don't
-    // re-bake the whole texture in one go (would stutter ~100 ms);
-    // instead we slice the heightmap into tiles, sort by distance to
-    // the camera (nearest first), and drain a small per-frame budget.
-    // Distant grass shadows lag a few frames behind the slider — the
-    // user explicitly asked for that prioritisation.
+    // Async worker-thread bake. The bake CPU work runs entirely off
+    // the main thread; main only does (a) sorting + posting the
+    // job list when the sun direction changes and (b) draining
+    // ready results once per frame and uploading them to the GPU
+    // image. Distant tiles arrive with delay (acceptable per spec)
+    // but the main FPS is never blocked by bake work.
     struct ShadowBakeTile { int ix, iz, w, h; float dist_sq; };
-    glm::vec3                    terrain_shadow_target_sun_dir_ = glm::vec3(0.0f);
-    std::vector<ShadowBakeTile>  terrain_shadow_pending_tiles_;
-    glm::vec3                    terrain_shadow_last_sort_pos_  = glm::vec3(1e9f);
-    static constexpr int kShadowTileSize       = 64;
-    static constexpr int kShadowTilesPerFrame  = 6;
+    struct ShadowBakeJob  { int ix, iz, w, h; glm::vec3 sun_dir; };
+    struct ShadowBakeResult {
+        int ix, iz, w, h;
+        glm::vec3 sun_dir;
+        std::vector<uint8_t> data;
+    };
+    glm::vec3 terrain_shadow_target_sun_dir_ = glm::vec3(0.0f);
+    static constexpr int kShadowTileSize           = 64;
+    static constexpr int kShadowUploadsPerFrame    = 12;
+    // Immutable heightmap snapshot the worker reads — taken once at
+    // engine init (after init_world). Sculpt edits don't propagate
+    // (acceptable; sculpt is rare and we can rebuild the snapshot
+    // explicitly if/when that path matters).
+    Heightmap                       terrain_shadow_baker_hm_;
+    std::thread                     terrain_shadow_worker_;
+    std::mutex                      terrain_shadow_mutex_;
+    std::condition_variable         terrain_shadow_cv_;
+    std::deque<ShadowBakeJob>       terrain_shadow_jobs_;     // main → worker
+    std::deque<ShadowBakeResult>    terrain_shadow_results_;  // worker → main
+    std::atomic<bool>               terrain_shadow_stop_{false};
     void rebuild_terrain_shadow_texture();
     void enqueue_terrain_shadow_rebake(glm::vec3 target_sun);
     void tick_terrain_shadow_progressive();
     void destroy_terrain_shadow_texture();
+    void start_terrain_shadow_worker();
+    void stop_terrain_shadow_worker();
+    void terrain_shadow_worker_loop();
 
     // Sun shadow map (single-cascade, ortho). Replaces the heightmap-bake
     // path for grass and lets dynamic occluders (castle, dyn-props) cast

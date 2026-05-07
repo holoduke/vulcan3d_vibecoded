@@ -123,6 +123,10 @@ void VulkanEngine::init() {
     // init_world fills. Done here so the descriptor write at the end
     // of rebuild_terrain_shadow_texture lands on the live scene set.
     rebuild_terrain_shadow_texture();
+    // Async worker thread bakes the heightmap shadow off the main
+    // thread. Started after the initial full bake so the texture is
+    // valid before grass renders.
+    start_terrain_shadow_worker();
     // Sun shadow map (binding 7). Created after descriptors so the
     // one-shot binding-7 write at the end of init_sun_shadow_resources
     // lands on the live scene set.
@@ -1050,6 +1054,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_sun_shadow_pipeline", [&]{ destroy_sun_shadow_pipeline(); });
     guarded("destroy_pipeline", [&]{ destroy_pipeline(); });
     guarded("destroy_grass", [&]{ destroy_grass(allocator_, grass_); });
+    guarded("stop_terrain_shadow_worker", [&]{ stop_terrain_shadow_worker(); });
     guarded("destroy_terrain_shadow_texture", [&]{ destroy_terrain_shadow_texture(); });
     guarded("destroy_sun_shadow_resources", [&]{ destroy_sun_shadow_resources(); });
     guarded("destroy_pipeline_cache", [&]{ destroy_pipeline_cache(); });
