@@ -1,4 +1,4 @@
-// World-side state: level + meshes + skybox + texture array + viewmodel +
+﻿// World-side state: level + meshes + skybox + texture array + viewmodel +
 // dyn-prop spawning + the per-frame `render_world` raster pass that drives
 // every cube/cylinder draw the engine emits. Lives here because all of these
 // touch `world_`, `dyn_props_`, `physics_`, the TLAS instance cache (via
@@ -24,44 +24,39 @@ namespace qlike {
 
 // Distance-based LOD selector for terrain chunks. Used by all three
 // terrain draw paths (depth pre-pass, color pass, shadow pass) so LOD
-// stays consistent — if the pre-pass picked half-LOD and the color
+// stays consistent вЂ” if the pre-pass picked half-LOD and the color
 // pass picked full, the depth values would mismatch and the color
 // pass's LESS_OR_EQUAL test would discard fragments. Thresholds are
-// in metres of camera-XZ-to-chunk-centre-XZ distance.
-//
-//   < 80 m    full   (stride 1)
-//   < 160 m   half   (stride 2)
-//   < 320 m   quarter(stride 4)
-//   ≥ 320 m   eighth (stride 8)
-static int pick_terrain_lod(const TerrainChunk& c, glm::vec3 cam_xz) {
+// pulled from rt_ so the user can push higher-resolution terrain
+// further out via the sliders in the Graphics Settings menu.
+static int pick_terrain_lod(const TerrainChunk& c, glm::vec3 cam_xz,
+                            float lod1, float lod2, float lod3) {
     float dx = c.center.x - cam_xz.x;
     float dz = c.center.z - cam_xz.z;
     float d = std::sqrt(dx * dx + dz * dz);
-    if (d <  80.0f) return 0;
-    if (d < 160.0f) return 1;
-    if (d < 320.0f) return 2;
+    if (d < lod1) return 0;
+    if (d < lod2) return 1;
+    if (d < lod3) return 2;
     return 3;
 }
 
-// CD-LOD morph factor for a chunk currently rendered at LOD 0. As the
-// chunk approaches the LOD 0 → LOD 1 transition (last 25 % of the LOD-0
-// distance band), morph_factor ramps from 0 (full LOD-0 surface) to 1
-// (LOD-1 stride-2 linear interp). At factor 1 the surface is identical
-// to LOD 1's, so the actual switch to LOD 1 produces no visual pop.
-// Returns 0 for LOD ≥ 1 (the morph is conceptual only between adjacent
-// LODs, and higher LODs snap — far enough from the camera that the
-// pop isn't visible).
-static float pick_terrain_morph(const TerrainChunk& c, glm::vec3 cam_xz, int lod) {
+// CD-LOD morph factor for a chunk currently rendered at LOD 0. Ramps
+// from 0 (full LOD-0 surface) to 1 (LOD-1 stride-2 interp) over the
+// last 25% of the LOD-0 distance band. Threshold scales with the
+// user-selected lod1 distance so morphing stays linked to where the
+// LOD switch actually happens.
+static float pick_terrain_morph(const TerrainChunk& c, glm::vec3 cam_xz,
+                                int lod, float lod1) {
     if (lod != 0) return 0.0f;
     float dx = c.center.x - cam_xz.x;
     float dz = c.center.z - cam_xz.z;
     float d = std::sqrt(dx * dx + dz * dz);
-    constexpr float kFadeStart = 60.0f;
-    constexpr float kFadeEnd   = 80.0f;
-    if (d <= kFadeStart) return 0.0f;
-    if (d >= kFadeEnd)   return 1.0f;
-    float t = (d - kFadeStart) / (kFadeEnd - kFadeStart);
-    return t * t * (3.0f - 2.0f * t);  // smoothstep
+    float fade_start = lod1 * 0.75f;
+    float fade_end   = lod1;
+    if (d <= fade_start) return 0.0f;
+    if (d >= fade_end)   return 1.0f;
+    float t = (d - fade_start) / (fade_end - fade_start);
+    return t * t * (3.0f - 2.0f * t);
 }
 
 void VulkanEngine::apply_terrain_brush(float dt) {
@@ -172,10 +167,10 @@ void VulkanEngine::rebuild_dirty_terrain_chunks() {
 void VulkanEngine::refresh_terrain_collision() {
     if (!terrain_jolt_dirty_) return;
     if (terrain_data_.heights.empty()) return;
-    // Jolt has no incremental update for HeightFieldShape — we rebuild
+    // Jolt has no incremental update for HeightFieldShape вЂ” we rebuild
     // the whole shape. Mirrors the sub-grid trim done at level load:
     // when sample_count would be odd Jolt's block-size requirement
-    // forces us onto a 2048×2048 sub-grid taken from the 2049² heightmap.
+    // forces us onto a 2048Г—2048 sub-grid taken from the 2049ВІ heightmap.
     if (physics_) {
         const int W = terrain_data_.dim + 1;
         const int physics_samples = (W % 2 == 0) ? W : (W - 1);
@@ -213,7 +208,7 @@ void VulkanEngine::refresh_terrain_blas() {
     // buffer is rebuilt from the current heightmap, then the BLAS is
     // re-built in place. RT shadows/GI will be slightly stale until
     // this fires, which reads as "lighting catches up after you stop
-    // sculpting" — acceptable.
+    // sculpting" вЂ” acceptable.
     if (terrain_mesh_.vertex_buffer && !terrain_data_.heights.empty()) {
         Heightmap hm{};
         hm.dim = terrain_data_.dim;
@@ -258,7 +253,7 @@ namespace {
 // path can rely on the resources existing without duplicating setup.
 // Caller writes binding 6 separately; transitions the image into
 // SHADER_READ_ONLY_OPTIMAL on first creation (so partial uploads can
-// flip TRANSFER_DST → SHADER_READ_ONLY symmetrically).
+// flip TRANSFER_DST в†’ SHADER_READ_ONLY symmetrically).
 void ensure_shadow_resources(VkDevice device, VmaAllocator alloc,
                              VkQueue queue, uint32_t qfam,
                              int W, int H,
@@ -309,7 +304,7 @@ void ensure_shadow_resources(VkDevice device, VmaAllocator alloc,
              "terrain shadow sampler");
 
     // Initialise to SHADER_READ_ONLY so the very first tick's
-    // tile transition (SHADER_READ_ONLY → TRANSFER_DST → SHADER_READ_ONLY)
+    // tile transition (SHADER_READ_ONLY в†’ TRANSFER_DST в†’ SHADER_READ_ONLY)
     // is symmetric. Without this the layout starts UNDEFINED and the
     // first frame would have to special-case the source layout.
     vkinit::one_time_submit(device, queue, qfam, [&](VkCommandBuffer cb) {
@@ -421,10 +416,10 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
 
 // ---------------- Sun shadow map (single-cascade ortho) ----------------
 //
-// Standard depth-only shadow pass: one 2048² D32 depth target written
+// Standard depth-only shadow pass: one 2048ВІ D32 depth target written
 // from the sun's POV each frame, sampled by grass.vert as a
 // sampler2DShadow at descriptor binding 7. Cube.frag continues to use
-// RT shadow rays — we don't move the whole engine to CSM yet, this is
+// RT shadow rays вЂ” we don't move the whole engine to CSM yet, this is
 // the cheap path that lets dynamic occluders (castle, dyn-props) cast
 // shadow on grass without firing a ray per blade.
 //
@@ -478,7 +473,7 @@ void VulkanEngine::init_sun_shadow_resources() {
     vk_check(vkCreateImageView(device_, &vci, nullptr, &sun_shadow_view_),
              "sun shadow view");
 
-    // Comparison sampler — sampler2DShadow returns the comparison result
+    // Comparison sampler вЂ” sampler2DShadow returns the comparison result
     // (0..1 with PCF) instead of raw depth. LINEAR + 2x2 hardware PCF gives
     // soft penumbra essentially for free.
     VkSamplerCreateInfo si{};
@@ -496,7 +491,7 @@ void VulkanEngine::init_sun_shadow_resources() {
              "sun shadow sampler");
 
     // Initial transition into SHADER_READ_ONLY so render_sun_shadow_pass's
-    // first transition (READ_ONLY → DEPTH_ATTACHMENT_OPTIMAL) is
+    // first transition (READ_ONLY в†’ DEPTH_ATTACHMENT_OPTIMAL) is
     // symmetric with subsequent frames.
     vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
                             [&](VkCommandBuffer cb) {
@@ -506,7 +501,7 @@ void VulkanEngine::init_sun_shadow_resources() {
                                          VK_IMAGE_ASPECT_DEPTH_BIT);
     });
 
-    // Descriptor binding 7 only needs writing once — the image handle
+    // Descriptor binding 7 only needs writing once вЂ” the image handle
     // doesn't change for the lifetime of the engine.
     VkDescriptorImageInfo dii{};
     dii.sampler = sun_shadow_sampler_;
@@ -653,7 +648,7 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
 
     // Static brushes (castle, towers). Light-frustum cull: only brushes
     // whose AABB intersects the ortho box need rasterising. Cuts ~80%
-    // of brush draws when the player isn't inside the keep — was the
+    // of brush draws when the player isn't inside the keep вЂ” was the
     // dominant cost behind the 14-second TDR repro.
     VkDeviceSize cube_off = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &cube_off);
@@ -668,7 +663,7 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     }
 
-    // Dyn-props — same cube BLAS is the cube mesh; cylinders use their
+    // Dyn-props вЂ” same cube BLAS is the cube mesh; cylinders use their
     // own mesh. Light-frustum cull mirrors the brushes path.
     for (size_t i = 0; i < dyn_props_.size(); ++i) {
         const DynRender& dr = i < dyn_render_cache_.size() ? dyn_render_cache_[i]
@@ -681,15 +676,15 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     }
 
-    // Terrain chunks — frustum-culled, distance-LOD'd. Distance metric is
+    // Terrain chunks вЂ” frustum-culled, distance-LOD'd. Distance metric is
     // camera-to-chunk (not light-to-chunk) so terrain casters share the
-    // same LOD selection as the main render — keeps the cost bounded
+    // same LOD selection as the main render вЂ” keeps the cost bounded
     // and matches the resolution the user actually sees.
     if (!terrain_chunks_.chunks.empty()) {
         glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(light_frustum, c.aabb_min, c.aabb_max)) continue;
-            int lod = pick_terrain_lod(c, cam);
+            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1, rt_.terrain_lod2, rt_.terrain_lod3);
             VkDeviceSize toff = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
             VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
@@ -752,7 +747,7 @@ void VulkanEngine::tick_terrain_shadow_progressive() {
     if (terrain_shadow_image_ == VK_NULL_HANDLE) return;
 
     // Re-sort the remaining tail if the player has drifted enough that
-    // priorities changed. 16m threshold ≈ a quarter of a tile so the
+    // priorities changed. 16m threshold в‰€ a quarter of a tile so the
     // ordering stays meaningful without re-sorting every frame.
     const glm::vec3 cam = player_.eye_position();
     if (glm::distance(cam, terrain_shadow_last_sort_pos_) > 16.0f) {
@@ -818,8 +813,8 @@ void VulkanEngine::tick_terrain_shadow_progressive() {
     uint8_t* mapped = static_cast<uint8_t*>(ai.pMappedData);
 
     // Bake each tile into its slot in the staging buffer. Tiles are
-    // small (64×64 = 4 KiB), CPU-cheap enough that single-threaded
-    // here is fine — the whole tick stays well under a frame.
+    // small (64Г—64 = 4 KiB), CPU-cheap enough that single-threaded
+    // here is fine вЂ” the whole tick stays well under a frame.
     for (int i = 0; i < budget; ++i) {
         const auto& p = pendings[i];
         bake_heightmap_shadow_tile(hm, sun_dir, p.ix, p.iz, p.w, p.h,
@@ -861,7 +856,7 @@ void VulkanEngine::tick_terrain_shadow_progressive() {
 
     // Drop the consumed tiles from the front. erase() of a contiguous
     // range is O(N) but the tail is small and the per-frame budget is
-    // tiny — measured negligible vs. the bake itself.
+    // tiny вЂ” measured negligible vs. the bake itself.
     terrain_shadow_pending_tiles_.erase(
         terrain_shadow_pending_tiles_.begin(),
         terrain_shadow_pending_tiles_.begin() + budget);
@@ -907,24 +902,24 @@ void VulkanEngine::init_world() {
     log::infof("world: %u brushes", static_cast<unsigned>(world_.brushes.size()));
 
     // Procedural terrain: generated first so the castle can be lifted to
-    // sit on the plateau height. Phase 1 is non-streaming — one big mesh
-    // (~1km²). See docs/terrain_plan.md for streaming/LOD/sculpt phases.
+    // sit on the plateau height. Phase 1 is non-streaming вЂ” one big mesh
+    // (~1kmВІ). See docs/terrain_plan.md for streaming/LOD/sculpt phases.
     {
         HeightmapParams hp{};
         // Two constraints that fight each other:
         //   1. chunk_cells must be divisible by every LOD stride (1, 2, 4, 8)
-        //      so the stride-N index loop covers every cell — otherwise the
+        //      so the stride-N index loop covers every cell вЂ” otherwise the
         //      lower-LOD index buffers leave a strip of cells uncovered at
-        //      the chunk's right/bottom edge → visible square seams.
+        //      the chunk's right/bottom edge в†’ visible square seams.
         //   2. Jolt's HeightFieldShape needs sample_count divisible by
         //      block_size in [2, 8].
         //
-        // chunk_cells / 8 means dim is divisible by 8 → sample_count = dim+1
-        // is odd → Jolt fails. Resolution: pick dim = 2048 cells (=32×64),
+        // chunk_cells / 8 means dim is divisible by 8 в†’ sample_count = dim+1
+        // is odd в†’ Jolt fails. Resolution: pick dim = 2048 cells (=32Г—64),
         // chunk_cells = 64 (divisible by all four strides), and feed Jolt a
-        // 2048×2048 sub-grid by truncating the last row/col of the 2049²
-        // heightmap. The visual mesh uses the full 2049² so the world edge
-        // stays continuous. Jolt loses one cell-width at the world edge —
+        // 2048Г—2048 sub-grid by truncating the last row/col of the 2049ВІ
+        // heightmap. The visual mesh uses the full 2049ВІ so the world edge
+        // stays continuous. Jolt loses one cell-width at the world edge вЂ”
         // invisible since the player can't reach the world boundary.
         hp.dim = 2048;
         hp.cell_size = 1.0f;
@@ -942,8 +937,8 @@ void VulkanEngine::init_world() {
         terrain_data_.heights = hm.heights;
         terrain_mesh_ = build_terrain_mesh(device_, allocator_,
                                            graphics_queue_, graphics_queue_family_, hm);
-        // 32×32 chunks of 64 cells each — 64 is divisible by every LOD
-        // stride (1/2/4/8) so all four LODs cover every cell. ≈64 m per
+        // 32Г—32 chunks of 64 cells each вЂ” 64 is divisible by every LOD
+        // stride (1/2/4/8) so all four LODs cover every cell. в‰€64 m per
         // chunk side at 1 m cells. Skirt strips on each LOD's index
         // buffer hide LOD-mismatch cracks at chunk seams.
         const int chunks_per_side = 32;
@@ -952,7 +947,7 @@ void VulkanEngine::init_world() {
                                                hm, chunks_per_side);
         // Lift every level brush by plateau_height so the castle's y=0
         // baseline lands on the plateau surface. Cheaper than rewriting
-        // level.cpp — the brush AABBs / world matrices update through the
+        // level.cpp вЂ” the brush AABBs / world matrices update through the
         // same vector.
         for (auto& b : world_.brushes) b.center.y += hp.plateau_height;
         for (auto& a : world_.aabbs)   { a.min.y += hp.plateau_height;
@@ -965,29 +960,29 @@ void VulkanEngine::init_world() {
         // terrain (low altitude, gentle slope) gets covered. Cap at
         // 200k blades for a healthy density without bloating VRAM.
         GrassParams gp{};
-        // Cover the plateau too — slopes, valleys, and the plateau
+        // Cover the plateau too вЂ” slopes, valleys, and the plateau
         // courtyard around the castle. Castle stones are excluded by
         // the keep-out rectangle below so blades never poke through
         // the brushes themselves.
-        // Placement bounds are GENEROUS — the runtime altitude
+        // Placement bounds are GENEROUS вЂ” the runtime altitude
         // sliders (rt_.grass_alt_min/max) shape the visible band
         // without re-baking. Cover most reasonable terrain heights.
         gp.height_min = -20.0f;
         gp.height_max = 200.0f;
         // Concentrate blades in a 200m square around the castle so the
-        // density is high (~12 blades/m²) where the player actually
+        // density is high (~12 blades/mВІ) where the player actually
         // sees grass. Spreading them across the full 1km map gave
-        // ~0.5/m² (about a metre between blades — looks bald).
+        // ~0.5/mВІ (about a metre between blades вЂ” looks bald).
         gp.half_extent = 200.0f;
         // Inner keep is ~6m square at origin. Keep blades out of the
         // keep interior only; the outer courtyard between keep and
         // perimeter walls gets grass too. Blades whose footprint
-        // overlaps a brush stay invisible — the wall geometry occludes
+        // overlaps a brush stay invisible вЂ” the wall geometry occludes
         // them from outside views.
         gp.keep_out_xz = glm::vec2(4.0f, 4.0f);
         // 800k placed blades: density slider 0..4 maps to render
-        // fraction (density / 4) × placed, so density=1.0 → 200k,
-        // density=4.0 → 800k. Earlier 2M cap meant density=4 fired
+        // fraction (density / 4) Г— placed, so density=1.0 в†’ 200k,
+        // density=4.0 в†’ 800k. Earlier 2M cap meant density=4 fired
         // ~10M sun shadow rays/frame (5 verts each) and pushed the
         // GPU into TDR. 800k keeps the worst case at ~4M rays which
         // the 4080 handles comfortably even with the rest of the
@@ -999,7 +994,7 @@ void VulkanEngine::init_world() {
     }
 
     physics_ = std::make_unique<PhysicsWorld>();
-    // Batch-add the level brushes — Jolt's AddBodiesPrepare/Finalize takes
+    // Batch-add the level brushes вЂ” Jolt's AddBodiesPrepare/Finalize takes
     // the broadphase mutex once for the whole pile instead of per body.
     // For 150+ static brushes (the castle) this is the difference between
     // ~30 ms and ~3 ms at level load.
@@ -1012,16 +1007,16 @@ void VulkanEngine::init_world() {
     // Heightfield collision for terrain. Player + crates collide cleanly
     // against the bumpy ground. Jolt requires the sample-count side to be
     // divisible by some block_size in [2, 8]; with dim=2048 (sample_count
-    // = 2049, odd) we'd violate that, so we copy the first 2048×2048 sub-
+    // = 2049, odd) we'd violate that, so we copy the first 2048Г—2048 sub-
     // grid into a packed buffer and pass that with dim=2047 (sample_count
-    // = 2048, block_size 8 ✓). Player can't reach the world edge so the
+    // = 2048, block_size 8 вњ“). Player can't reach the world edge so the
     // single-cell shrinkage is invisible.
     if (!terrain_data_.heights.empty()) {
         const int W = terrain_data_.dim + 1;        // 2049
         const int physics_samples = (W % 2 == 0) ? W : (W - 1);  // 2048
         std::vector<float> jolt_heights;
         if (physics_samples == W) {
-            // Already even — pass through.
+            // Already even вЂ” pass through.
             physics_->add_static_heightfield(
                 terrain_data_.heights.data(), terrain_data_.dim,
                 glm::vec2(terrain_data_.origin_x, terrain_data_.origin_z),
@@ -1051,7 +1046,7 @@ void VulkanEngine::init_world() {
 }
 
 void VulkanEngine::init_skybox() {
-    // EXR first — keeps real sun radiance so the bloom pass naturally produces
+    // EXR first вЂ” keeps real sun radiance so the bloom pass naturally produces
     // a glaring sun disc. Falls back to the LDR JPG if EXR is missing or
     // tinyexr can't decode it. Engine is invoked from build/ on Windows but
     // from the project root in CI, so probe both.
@@ -1069,7 +1064,7 @@ void VulkanEngine::init_skybox() {
         if (skybox_.image != VK_NULL_HANDLE) break;
     }
     if (skybox_.image == VK_NULL_HANDLE) {
-        log::info("[skybox] no asset loaded — creating 1x1 placeholder so the "
+        log::info("[skybox] no asset loaded вЂ” creating 1x1 placeholder so the "
                   "compose descriptor stays bound");
         // Build a 1x1 black image manually (cheap fallback).
         VkImageCreateInfo ici{};
@@ -1120,7 +1115,7 @@ void VulkanEngine::init_skybox() {
                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         });
     } else {
-        // Real asset loaded — sync the directional-light angles to the
+        // Real asset loaded вЂ” sync the directional-light angles to the
         // brightest pixel in the panorama so cast shadows match the visible
         // sun.
         glm::vec3 d = glm::normalize(skybox_.sun_direction);
@@ -1128,7 +1123,7 @@ void VulkanEngine::init_skybox() {
         float yaw_deg = glm::degrees(std::atan2(d.x, d.z));
         rt_.sun_pitch_deg = pitch_deg;
         rt_.sun_yaw_deg = yaw_deg;
-        log::infof("[skybox] sun synced to UI: pitch=%.1f° yaw=%.1f°",
+        log::infof("[skybox] sun synced to UI: pitch=%.1fВ° yaw=%.1fВ°",
                    pitch_deg, yaw_deg);
     }
 }
@@ -1149,7 +1144,7 @@ void VulkanEngine::init_textures() {
         si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
         si.anisotropyEnable = VK_FALSE;
         // VK_LOD_CLAMP_NONE lets the sampler pick from the entire mip chain
-        // texture.cpp generates — eliminates far-distance moiré and halves
+        // texture.cpp generates вЂ” eliminates far-distance moirГ© and halves
         // average sample bandwidth on receding floors/walls.
         si.maxLod = VK_LOD_CLAMP_NONE;
         vk_check(vkCreateSampler(device_, &si, nullptr, &texture_sampler_),
@@ -1181,7 +1176,7 @@ void VulkanEngine::init_textures() {
         const char* color_jpg;
         const char* normal_jpg;
     };
-    // Index → category. Indices ALSO match what level.cpp / spawn_random_box
+    // Index в†’ category. Indices ALSO match what level.cpp / spawn_random_box
     // pass into Brush::tex_albedo, so reordering here means reordering there.
     const Spec specs[kTextureCount] = {
         { "Ground054",         "Ground054/Ground054_2K-JPG_Color.jpg",
@@ -1320,7 +1315,7 @@ void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,
         PushConstants pc{};
         pc.mvp = vp * model;
         pc.model = model;
-        // Viewmodel is camera-attached — prev_mvp = mvp gives zero motion,
+        // Viewmodel is camera-attached вЂ” prev_mvp = mvp gives zero motion,
         // which is what we want for SVGF (the gun shouldn't smear when the
         // camera turns even though world points "moved").
         pc.prev_mvp = pc.mvp;
@@ -1357,7 +1352,7 @@ void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,
     // Muzzle flash: a bright, short-lived emissive blob just past the muzzle
     // tip. Bloom downstream halos it dramatically. Anchored so the
     // back face of the (scale-animated) cube always sits past the
-    // barrel tip — without this, the small fade-in/out cube floats
+    // barrel tip вЂ” without this, the small fade-in/out cube floats
     // forward of the tip because scale shrinks but center stays fixed.
     if (muzzle_flash_timer_ > 0.0f) {
         const float barrel_tip_z = -0.72f;  // matches barrel_zc - barrel_hl in init
@@ -1404,7 +1399,7 @@ void VulkanEngine::rebuild_dyn_render_cache() {
         // Reuse cached transform if the slot still maps to the same body AND
         // Jolt has put it to sleep.
         if (slot_matches && !physics_->is_body_active_h(handle)) {
-            // Sleeping → no motion this frame. Drag prev_world forward.
+            // Sleeping в†’ no motion this frame. Drag prev_world forward.
             dr.prev_world = dr.world;
             continue;
         }
@@ -1438,7 +1433,7 @@ void VulkanEngine::rebuild_dyn_render_cache() {
 void VulkanEngine::rebuild_tick_aabbs() {
     // Static level + every dynamic box's world-space AABB envelope. With
     // rotated boxes we use the AABB of the rotated cube (over-approximation)
-    // — the player's collision is still solid against tilted falling crates.
+    // вЂ” the player's collision is still solid against tilted falling crates.
     tick_aabbs_.clear();
     tick_aabbs_.reserve(world_.aabbs.size() + dyn_props_.size());
     for (const auto& a : world_.aabbs) tick_aabbs_.push_back(a);
@@ -1458,7 +1453,7 @@ void VulkanEngine::rebuild_tick_aabbs() {
         const bool slot_matches = slot.body_id == dp.body_id;
         const bool active = physics_->is_body_active_h(dp.jolt_handle);
         if (slot_matches && !active) {
-            // Sleeping body in a slot we already populated → AABB hasn't
+            // Sleeping body in a slot we already populated в†’ AABB hasn't
             // moved since last compute, reuse.
             tick_aabbs_.push_back(slot.aabb);
             continue;
@@ -1554,7 +1549,7 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
     player_.position = saved;
     // Far plane: 1500m. Tradeoff between two artefacts:
     //   - too short (e.g. 500m): visible terrain disc is asymmetric
-    //     because the corner ray at 80° FOV reaches further world
+    //     because the corner ray at 80В° FOV reaches further world
     //     distance than the centre, swept across the screen on turn;
     //   - too long  (e.g. 3000m): float32 depth precision at the
     //     silhouette of steep distant peaks runs out of bits and
@@ -1632,7 +1627,7 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
     }
     // Terrain: distance-LOD per chunk. Pre-pass and color pass MUST
     // pick the same LOD AND morph factor per chunk so the rasterised
-    // depth values match — otherwise the LESS_OR_EQUAL test in the
+    // depth values match вЂ” otherwise the LESS_OR_EQUAL test in the
     // color pass would discard fragments. We bind terrain_depth_pipeline_
     // (same terrain.vert as the color pass, just routed to depth-only).
     if (!terrain_chunks_.chunks.empty()) {
@@ -1640,8 +1635,8 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
-            int lod = pick_terrain_lod(c, cam);
-            float morph = pick_terrain_morph(c, cam, lod);
+            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1, rt_.terrain_lod2, rt_.terrain_lod3);
+            float morph = pick_terrain_morph(c, cam, lod, rt_.terrain_lod1);
             VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
             VkDeviceSize voffs[2] = { 0, 0 };
             vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
@@ -1681,7 +1676,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     player_.position = saved;
     // Far plane: 1500m. Tradeoff between two artefacts:
     //   - too short (e.g. 500m): visible terrain disc is asymmetric
-    //     because the corner ray at 80° FOV reaches further world
+    //     because the corner ray at 80В° FOV reaches further world
     //     distance than the centre, swept across the screen on turn;
     //   - too long  (e.g. 3000m): float32 depth precision at the
     //     silhouette of steep distant peaks runs out of bits and
@@ -1692,7 +1687,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     glm::mat4 proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 1500.0f);
     proj[1][1] *= -1.0f;
 
-    // Sub-pixel Halton jitter — TAA integrates these offsets into a super-
+    // Sub-pixel Halton jitter вЂ” TAA integrates these offsets into a super-
     // sampled-looking result across ~16 frames.
     if (rt_.taa_jitter_enabled) {
         auto halton = [](int b, int i) {
@@ -1734,7 +1729,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     const bool tex_on = rt_.textures_enabled;
     // prev_view_proj_ is captured at the END of each frame from the previous
     // frame's last_view_proj_; on frame 0 it's identity (which produces a
-    // single-frame motion-vector glitch — TAA's "history_valid" gate handles
+    // single-frame motion-vector glitch вЂ” TAA's "history_valid" gate handles
     // the invalid-history first frame, so this doesn't surface visually).
     const glm::mat4 prev_vp = prev_view_proj_;
     auto draw_brush = [&](const glm::mat4& model, const glm::mat4& prev_model,
@@ -1762,22 +1757,22 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     };
 
     int culled_static = 0, culled_dyn = 0, drawn_static = 0, drawn_dyn = 0;
-    // Terrain pass — chunked. Each visible chunk is drawn at full LOD
+    // Terrain pass вЂ” chunked. Each visible chunk is drawn at full LOD
     // when within `near_lod` metres of the camera, otherwise half LOD.
     // The merged-static-BLAS-style "single big draw" is reserved for the
     // RT path; for raster we want LOD + frustum cull per chunk so the
     // 2km terrain stays cheap from any viewpoint.
     if (!terrain_chunks_.chunks.empty()) {
         // Switch to the terrain-specific pipeline (terrain.vert + cube.frag,
-        // 2 vertex bindings — pos/norm/uv + parent_y) so we can morph
+        // 2 vertex bindings вЂ” pos/norm/uv + parent_y) so we can morph
         // between LOD 0 and LOD 1 in the vertex shader. Skirts still hide
         // LOD-mismatch cracks at higher LOD seams.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrain_pipeline_);
         glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
-            int lod = pick_terrain_lod(c, cam);
-            float morph = pick_terrain_morph(c, cam, lod);
+            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1, rt_.terrain_lod2, rt_.terrain_lod3);
+            float morph = pick_terrain_morph(c, cam, lod, rt_.terrain_lod1);
             VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
             VkDeviceSize voffs[2] = { 0, 0 };
             vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
@@ -1787,7 +1782,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             pc.mvp = vp;
             pc.model = glm::mat4(1.0f);
             pc.prev_mvp = prev_vp;
-            // .w doubles as the morph factor — terrain.vert lerps Y by it.
+            // .w doubles as the morph factor вЂ” terrain.vert lerps Y by it.
             pc.color = glm::vec4(1.0f, 1.0f, 1.0f, morph);
             pc.emissive = glm::vec4(0.0f);
             pc.tex_params = tex_on
@@ -1804,7 +1799,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }
 
-    // Grass — instanced billboard blades. Single draw call covers
+    // Grass вЂ” instanced billboard blades. Single draw call covers
     // every blade; the grass.vert collapses out-of-range blades to
     // a degenerate triangle (NaN clip space) so no fragment work runs
     // for them. Skipped entirely when disabled in Settings or when
@@ -1820,7 +1815,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdBindVertexBuffers(cmd, 0, 2, bufs, offs);
         vkCmdBindIndexBuffer(cmd, grass_.blade_mesh.index_buffer, 0,
                              VK_INDEX_TYPE_UINT32);
-        // Grass push constants — only grass_params is read by grass.vert,
+        // Grass push constants вЂ” only grass_params is read by grass.vert,
         // the rest are dummies. Time is just the frame number scaled to
         // a sane wind period.
         PushConstants gpc{};
@@ -1861,7 +1856,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         glm::mat4 model = glm::translate(glm::mat4(1.0f), b.center) *
                           glm::scale(glm::mat4(1.0f), b.size);
         glm::vec4 brush_base = tex_on ? b.color : b.fallback_color;
-        // Static brushes don't move — prev_model = current.
+        // Static brushes don't move вЂ” prev_model = current.
         draw_brush(model, model, brush_base, b.emissive, b.full_emissive,
                    b.tex_albedo, b.tex_normal, b.uv_scale, false);
         ++drawn_static;
@@ -1883,7 +1878,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         ++drawn_dyn;
     }
 
-    // Bullet-impact decals — drawn AFTER static + dyn brushes so they sit
+    // Bullet-impact decals вЂ” drawn AFTER static + dyn brushes so they sit
     // on top of the wall textures, BEFORE sparks so the spark glow
     // overlaps the scorch mark visually. Uses the still-bound cube mesh.
     if (!decals_.empty()) {
@@ -1915,7 +1910,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             PushConstants pc{};
             pc.mvp = vp * model;
             pc.model = model;
-            // Projectiles don't track a prev_pose yet — zero-motion approx.
+            // Projectiles don't track a prev_pose yet вЂ” zero-motion approx.
             pc.prev_mvp = pc.mvp;
             pc.color = p.color;
             pc.emissive = glm::vec4(p.emissive, 1.0f);  // full_emissive
@@ -1937,3 +1932,4 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
 }
 
 } // namespace qlike
+

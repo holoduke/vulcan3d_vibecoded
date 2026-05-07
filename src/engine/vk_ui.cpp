@@ -309,6 +309,16 @@ void VulkanEngine::build_menu_ui() {
         ImGui::Checkbox("debug overlay (frustum + bake bounds)",
                          &rt_.shadow_debug_overlay);
 
+        ImGui::SeparatorText("Terrain LOD distances");
+        ImGui::SliderFloat("LOD 0->1 (m)", &rt_.terrain_lod1,  20.0f,  400.0f);
+        ImGui::SliderFloat("LOD 1->2 (m)", &rt_.terrain_lod2,  60.0f,  800.0f);
+        ImGui::SliderFloat("LOD 2->3 (m)", &rt_.terrain_lod3, 120.0f, 1600.0f);
+        // Keep them ordered so the band logic stays valid.
+        if (rt_.terrain_lod2 < rt_.terrain_lod1 + 20.0f)
+            rt_.terrain_lod2 = rt_.terrain_lod1 + 20.0f;
+        if (rt_.terrain_lod3 < rt_.terrain_lod2 + 20.0f)
+            rt_.terrain_lod3 = rt_.terrain_lod2 + 20.0f;
+
         ImGui::SeparatorText("Terrain debug");
         const char* terrain_debug_labels[] = {
             "off (full shading)",

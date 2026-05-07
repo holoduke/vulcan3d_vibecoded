@@ -65,14 +65,13 @@ void main() {
     vec3 L = normalize(scene.sun_direction.xyz);
     float n_dot_l = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
 
-    // Lighting deliberately heavily under-baked. Grass occupies a
-    // large fraction of the lower screen and any per-pixel value above
-    // the bloom threshold (≈1.0 by default) blows up into halos when
-    // auto-exposure compensates for darker portions of the scene
-    // (castle interior). Hard cap below.
-    // Light intensity (scalar, preserves blade tint).
-    float sun_amt = scene.sun_color.a * 0.10 * n_dot_l;
-    float sky_amt = 0.30;
+    // Light intensity (scalar, preserves blade tint). Sun contribution
+    // is the dominant term so blade brightness actually responds to
+    // sun direction; constant sky term is small enough to keep
+    // back-facing slopes visible without flattening the look. The
+    // cap below still bounds total brightness for bloom safety.
+    float sun_amt = scene.sun_color.a * 0.35 * n_dot_l;
+    float sky_amt = 0.15;
 
     // Shadow factor:
     //   - Sun shadow comes from the pre-baked heightmap shadow texture
@@ -99,7 +98,7 @@ void main() {
     // Hard ceiling — guarantees we never feed the bloom mip chain with
     // grass pixels above its threshold even under aggressive
     // auto-exposure boosts.
-    lit = min(lit, vec3(0.32));
+    lit = min(lit, vec3(0.50));
 
     // Soft alpha across the blade UV — adjacent blades blend without
     // back-to-front sorting. Discard threshold from grass_extra.y so

@@ -919,6 +919,16 @@ private:
         //   3 = visualise screen-space face normal as RGB
         int   terrain_debug_mode = 0;
 
+        // Terrain LOD distance thresholds (metres of camera-XZ-to-chunk
+        // centre). A chunk renders at LOD 0 when below `terrain_lod1`,
+        // LOD 1 below `terrain_lod2`, LOD 2 below `terrain_lod3`, else
+        // LOD 3. Bigger thresholds = sharper distant terrain at higher
+        // triangle cost. Defaults preserve the original 80/160/320m
+        // behaviour.
+        float terrain_lod1 = 80.0f;
+        float terrain_lod2 = 160.0f;
+        float terrain_lod3 = 320.0f;
+
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;
         // Specular reflection on flagged surfaces (the pedestal).
