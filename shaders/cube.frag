@@ -256,25 +256,6 @@ void main() {
 
     bool is_terrain_pre = vTexParams.w > 1.5;
 
-    // Terrain LOD shading correction. At LOD 2/3 the rasterised triangle
-    // spans 4–8 m of heightmap, but per-vertex normals describe a much
-    // smaller neighbourhood — adjacent large triangles end up with
-    // mismatched corner normals → noticeably different brightness per
-    // triangle. We compute the actual geometric face normal from
-    // world-space partial derivatives and blend toward it at distance.
-    // The conditional flip handles Vulkan's screen-space y-down: under
-    // some camera orientations cross(dFdx, dFdy) points DOWN, which
-    // (last attempt) killed sunlight on far terrain; forcing y > 0
-    // gives the correct upward-facing terrain normal in all cases.
-    if (is_terrain_pre) {
-        vec3 face_n = cross(dFdx(vWorldPos), dFdy(vWorldPos));
-        if (face_n.y < 0.0) face_n = -face_n;
-        face_n = normalize(face_n);
-        float dist_n = distance(vWorldPos, scene.camera_pos.xyz);
-        float t      = smoothstep(80.0, 200.0, dist_n);
-        N = normalize(mix(N, face_n, t));
-    }
-
     vec3 L = normalize(scene.sun_direction.xyz);
 
     // --- Albedo + bump mapping (triplanar projection) ---
@@ -629,6 +610,17 @@ void main() {
         raw = sqrt(raw);
         float ao_floor_v = scene.rt_lod.w;
         ao = mix(ao_floor_v, 1.0, raw);
+        // Terrain at distance: the rasterised LOD-2/3 surface sits BELOW
+        // the BLAS detail. AO rays from vWorldPos upward hit BLAS peaks
+        // the raster doesn't show → adjacent large triangles get
+        // different occluded-ray fractions → patchy dark "faces". Fade
+        // AO to 1.0 (no occlusion) past 80 m for terrain so the
+        // BLAS-vs-raster mismatch can't drive per-triangle darkening.
+        if (is_terrain_pre) {
+            float ao_far_t = smoothstep(80.0, 200.0,
+                                         distance(vWorldPos, scene.camera_pos.xyz));
+            ao = mix(ao, 1.0, ao_far_t);
+        }
     }
 
     // --- Path-traced GI (1..N bounces) ---
