@@ -948,13 +948,16 @@ private:
         // LOD 3. Bigger thresholds = sharper distant terrain at higher
         // triangle cost. Defaults preserve the original 80/160/320m
         // behaviour.
-        float terrain_lod1 = 80.0f;
-        float terrain_lod2 = 160.0f;
-        float terrain_lod3 = 320.0f;
+        // Default LOD distances bumped much higher so most of the
+        // visible mid-far terrain stays at full / half resolution by
+        // default — the previous 80/160/320 had everything past 80m
+        // looking soft because it was already at stride-2 cells.
+        float terrain_lod1 = 200.0f;
+        float terrain_lod2 = 500.0f;
+        float terrain_lod3 = 1000.0f;
         // Master multiplier on all three LOD distances. 1.0 = defaults
         // above. Crank up to push distant terrain to higher LOD (more
-        // triangles, more detail). 4.0 means LOD 0 reaches 320m, LOD 1
-        // 640m, LOD 2 1280m.
+        // triangles, more detail).
         float terrain_lod_scale = 1.0f;
         // Supersample factor for the heightmap shadow bake. 1 = native
         // (1 texel per 1m heightmap cell). 2 = 4x more texels (sub-

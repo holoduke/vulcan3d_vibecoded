@@ -315,9 +315,9 @@ void VulkanEngine::build_menu_ui() {
         // control if needed.
         ImGui::SliderFloat("Terrain detail (multiplier)",
                             &rt_.terrain_lod_scale, 0.5f, 4.0f, "%.2fx");
-        ImGui::SliderFloat("LOD 0->1 (m)", &rt_.terrain_lod1,  20.0f,  400.0f);
-        ImGui::SliderFloat("LOD 1->2 (m)", &rt_.terrain_lod2,  60.0f,  800.0f);
-        ImGui::SliderFloat("LOD 2->3 (m)", &rt_.terrain_lod3, 120.0f, 1600.0f);
+        ImGui::SliderFloat("LOD 0->1 (m)", &rt_.terrain_lod1,  20.0f, 1000.0f);
+        ImGui::SliderFloat("LOD 1->2 (m)", &rt_.terrain_lod2,  60.0f, 2000.0f);
+        ImGui::SliderFloat("LOD 2->3 (m)", &rt_.terrain_lod3, 120.0f, 4000.0f);
 
         const char* ss_labels[] = { "1x (native)", "2x (sub-cell)", "4x (sharp far)" };
         const int ss_values[] = { 1, 2, 4 };
