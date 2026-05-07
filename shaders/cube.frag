@@ -55,6 +55,8 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     //   terrain_h_high.zw = rock→snow start..end
     vec4  terrain_h_low;
     vec4  terrain_h_high;
+    vec4  grass_extra;       // unused in cube.frag — laid out so grass_extra2.w is reachable
+    vec4  grass_extra2;      // .w = terrain_debug_mode (0=off, 1=Lambert, 2=normal, 3=face)
 } scene;
 
 // Distance-based sample LOD. fragments within lod_near get full samples;
@@ -255,6 +257,40 @@ void main() {
     }
 
     bool is_terrain_pre = vTexParams.w > 1.5;
+
+    // ---- Terrain debug visualisation (set in pause-menu Graphics) ----
+    // Bypasses everything except a basic Lambert / normal preview so we
+    // can isolate which downstream effect (RT shadow, AO, GI, slope
+    // blend, cavity, fog, triplanar) is producing visible artifacts.
+    if (is_terrain_pre) {
+        int dbg = int(scene.grass_extra2.w + 0.5);
+        if (dbg == 1) {
+            // Pure Lambert with constant grey albedo. No RT, no AO,
+            // no slope blend, no fog. If the artifact persists here
+            // it's a geometry/normal problem; if it disappears the
+            // bug is in one of the disabled effects.
+            vec3 L = normalize(scene.sun_direction.xyz);
+            float ndl = max(dot(N, L), 0.0);
+            vec3 lit = vec3(0.55) * (0.25 + 0.75 * ndl);
+            outColor = vec4(lit, 1.0);
+            return;
+        } else if (dbg == 2) {
+            // Per-vertex normal as RGB. Adjacent triangles with
+            // mismatched corner normals will show as visible colour
+            // jumps — direct view into the LOD/Gouraud issue.
+            outColor = vec4(N * 0.5 + 0.5, 1.0);
+            return;
+        } else if (dbg == 3) {
+            // Geometric face normal (cross of world-pos derivatives,
+            // sign-guarded for Vulkan y-down). Each large LOD triangle
+            // is a uniform colour — confirms what flat-shaded geometry
+            // looks like at distance.
+            vec3 fn = cross(dFdx(vWorldPos), dFdy(vWorldPos));
+            if (fn.y < 0.0) fn = -fn;
+            outColor = vec4(normalize(fn) * 0.5 + 0.5, 1.0);
+            return;
+        }
+    }
 
     vec3 L = normalize(scene.sun_direction.xyz);
 

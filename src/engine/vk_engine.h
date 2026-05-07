@@ -911,6 +911,14 @@ private:
         // exactly which casters land inside the shadow map.
         bool  shadow_debug_overlay = false;
 
+        // Terrain debug visualisation modes (cube.frag branch on
+        // scene.grass_extra2.w):
+        //   0 = full shading (normal)
+        //   1 = simple Lambert only (no RT shadow, AO, GI, slope blend, fog)
+        //   2 = visualise per-vertex normal as RGB
+        //   3 = visualise screen-space face normal as RGB
+        int   terrain_debug_mode = 0;
+
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;
         // Specular reflection on flagged surfaces (the pedestal).

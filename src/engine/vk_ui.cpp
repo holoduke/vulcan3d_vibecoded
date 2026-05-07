@@ -309,6 +309,16 @@ void VulkanEngine::build_menu_ui() {
         ImGui::Checkbox("debug overlay (frustum + bake bounds)",
                          &rt_.shadow_debug_overlay);
 
+        ImGui::SeparatorText("Terrain debug");
+        const char* terrain_debug_labels[] = {
+            "off (full shading)",
+            "simple Lambert (no RT/AO/GI)",
+            "show vertex normal",
+            "show face normal",
+        };
+        ImGui::Combo("terrain debug", &rt_.terrain_debug_mode,
+                      terrain_debug_labels, 4);
+
         ImGui::SeparatorText("Ambient Occlusion (RT)");
         ImGui::SliderInt("AO samples (0=off)", &rt_.ao_samples, 0, 64);
         ImGui::SliderFloat("AO radius", &rt_.ao_radius, 0.1f, 8.0f);

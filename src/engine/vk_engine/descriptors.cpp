@@ -220,7 +220,7 @@ void VulkanEngine::update_scene_ubo() {
     data.grass_extra2 = glm::vec4(rt_.grass_alt_min,
                                   rt_.grass_alt_max,
                                   rt_.shadow_map_world_half,
-                                  0.0f);
+                                  static_cast<float>(rt_.terrain_debug_mode));
     data.light_vp = sun_shadow_light_vp_;
 
     VmaAllocationInfo ai{};
