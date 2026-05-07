@@ -828,6 +828,17 @@ void main() {
         gi_indirect = albedo * (sum / float(taken)) * scene.rt_params2.x;
         sky_total = taken;
         sky_vis = float(sky_misses) / float(max(1, sky_total));
+
+        // Distant terrain GI fades to zero. Same root cause as the
+        // shadow-bake fallback: GI rays sampled from the rasterised
+        // LOD-2/3 surface false-hit BLAS detail above; per-triangle
+        // hit fractions vary → patchy bright/dark per face. The bake
+        // already gives terrain self-shadow; we don't need GI's
+        // approximation past the LOD-0 zone.
+        if (is_terrain_pre) {
+            float gi_far_t = smoothstep(80.0, 200.0, cam_dist);
+            gi_indirect = mix(gi_indirect, vec3(0.0), gi_far_t);
+        }
     }
 
     // --- AO --- (also stratified to spread samples cleanly)
