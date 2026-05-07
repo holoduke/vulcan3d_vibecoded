@@ -677,7 +677,7 @@ void main() {
         // eliminates the false hits while RT keeps crisp near-shadows
         // (incl. boxes / castle on terrain) within ~40 m of the camera.
         if (is_terrain_pre) {
-            float blend_far = smoothstep(40.0, 80.0, cam_dist);
+            float blend_far = smoothstep(30.0, 70.0, cam_dist);
             if (blend_far > 0.0) {
                 ivec2 sz_b = textureSize(u_terrain_shadow, 0);
                 float side_b = float(sz_b.x - 1) * 1.0;
@@ -780,14 +780,17 @@ void main() {
         raw = sqrt(raw);
         float ao_floor_v = scene.rt_lod.w;
         ao = mix(ao_floor_v, 1.0, raw);
-        // Terrain at distance: the rasterised LOD-2/3 surface sits BELOW
-        // the BLAS detail. AO rays from vWorldPos upward hit BLAS peaks
-        // the raster doesn't show → adjacent large triangles get
-        // different occluded-ray fractions → patchy dark "faces". Fade
-        // AO to 1.0 (no occlusion) past 80 m for terrain so the
-        // BLAS-vs-raster mismatch can't drive per-triangle darkening.
+        // Terrain at distance: the rasterised LOD 1+ surface sits BELOW
+        // the BLAS detail. AO rays from vWorldPos hit BLAS peaks the
+        // raster doesn't show → adjacent large triangles get different
+        // occluded-ray fractions → patchy dark "faces". LOD 1 starts at
+        // 80 m so we have to begin fading there or even earlier — at
+        // 80 m a chunk has already switched to stride-2 cells and AO
+        // rays start finding BLAS detail the raster missed. Fade
+        // 40 → 100 m so AO is fully off (=1.0) by the time LOD 1 is
+        // anywhere near the camera.
         if (is_terrain_pre) {
-            float ao_far_t = smoothstep(80.0, 200.0,
+            float ao_far_t = smoothstep(40.0, 100.0,
                                          distance(vWorldPos, scene.camera_pos.xyz));
             ao = mix(ao, 1.0, ao_far_t);
         }
@@ -902,14 +905,12 @@ void main() {
         sky_vis = float(sky_misses) / float(max(1, sky_total));
 
         // Distant terrain: BLAS-vs-LOD-raster mismatch poisons both
-        // the GI accumulation AND the sky_vis count (GI rays false-hit
-        // BLAS peaks the raster doesn't show → fewer "sky misses" per
-        // triangle, with adjacent triangles diverging → patchy
-        // ambient via sky_factor below). Force gi to 0 and sky_vis
-        // to 1 (open sky) past the LOD-0 zone — distant mountain
-        // tops are essentially always sky-exposed anyway.
+        // the GI accumulation AND the sky_vis count. Same boundary
+        // as the AO fade — LOD 1 starts at 80 m so we have to be
+        // fully off by then. Fade 40 → 100 m so GI is gone before
+        // LOD 1 chunks become a problem.
         if (is_terrain_pre) {
-            float gi_far_t = smoothstep(80.0, 200.0, cam_dist);
+            float gi_far_t = smoothstep(40.0, 100.0, cam_dist);
             gi_indirect = mix(gi_indirect, vec3(0.0), gi_far_t);
             sky_vis = mix(sky_vis, 1.0, gi_far_t);
         }
