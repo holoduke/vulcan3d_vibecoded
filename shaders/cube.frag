@@ -594,6 +594,30 @@ void main() {
             }
             shadow = (blocked / float(taken)) * scene.rt_params.w;
         }
+
+        // Terrain hybrid: blend the RT PCSS result toward the heightmap
+        // shadow bake at distance. The BLAS holds the full heightmap
+        // detail while the rasterised LOD-2/3 surface under-shoots
+        // peaks → upward shadow rays false-hit the BLAS, producing
+        // patchy dark "faces" on far ridges. The bake was traced
+        // directly against the heightmap so its values match the
+        // rasterised surface at any LOD; using it past 80 m
+        // eliminates the false hits while RT keeps crisp near-shadows
+        // (incl. boxes / castle on terrain) within ~40 m of the camera.
+        if (is_terrain_pre) {
+            float blend_far = smoothstep(40.0, 80.0, cam_dist);
+            if (blend_far > 0.0) {
+                ivec2 sz_b = textureSize(u_terrain_shadow, 0);
+                float side_b = float(sz_b.x - 1) * 1.0;
+                vec2 uv_b = (vWorldPos.xz / side_b) + vec2(0.5);
+                float sh_bake = 0.0;
+                if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
+                    all(lessThanEqual(uv_b, vec2(1.0)))) {
+                    sh_bake = step(0.5, texture(u_terrain_shadow, uv_b).r);
+                }
+                shadow = mix(shadow, sh_bake * scene.rt_params.w, blend_far);
+            }
+        }
     }
 
     vec3 direct = albedo * scene.sun_color.rgb * scene.sun_color.a *
