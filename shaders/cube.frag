@@ -256,6 +256,25 @@ void main() {
 
     bool is_terrain_pre = vTexParams.w > 1.5;
 
+    // Terrain LOD shading correction. At LOD 2/3 the rasterised triangle
+    // spans 4–8 m of heightmap, but per-vertex normals describe a much
+    // smaller neighbourhood — adjacent large triangles end up with
+    // mismatched corner normals → noticeably different brightness per
+    // triangle. We compute the actual geometric face normal from
+    // world-space partial derivatives and blend toward it at distance.
+    // The conditional flip handles Vulkan's screen-space y-down: under
+    // some camera orientations cross(dFdx, dFdy) points DOWN, which
+    // (last attempt) killed sunlight on far terrain; forcing y > 0
+    // gives the correct upward-facing terrain normal in all cases.
+    if (is_terrain_pre) {
+        vec3 face_n = cross(dFdx(vWorldPos), dFdy(vWorldPos));
+        if (face_n.y < 0.0) face_n = -face_n;
+        face_n = normalize(face_n);
+        float dist_n = distance(vWorldPos, scene.camera_pos.xyz);
+        float t      = smoothstep(80.0, 200.0, dist_n);
+        N = normalize(mix(N, face_n, t));
+    }
+
     vec3 L = normalize(scene.sun_direction.xyz);
 
     // --- Albedo + bump mapping (triplanar projection) ---
