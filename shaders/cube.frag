@@ -289,6 +289,19 @@ void main() {
             if (fn.y < 0.0) fn = -fn;
             outColor = vec4(normalize(fn) * 0.5 + 0.5, 1.0);
             return;
+        } else if (dbg == 4) {
+            // Lambert + RT sun shadow only (one ray, no PCSS). If
+            // artifacts come back here, the shadow ray is the culprit.
+            vec3 L = normalize(scene.sun_direction.xyz);
+            float ndl = max(dot(N, L), 0.0);
+            float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
+            float far_t = clamp((dist_to_cam - 80.0) / 320.0, 0.0, 1.0);
+            float bias = max(0.04, far_t * far_t * 8.0);
+            vec3 origin = vWorldPos + N * bias;
+            float sh = any_hit(origin, L, 200.0) ? 1.0 : 0.0;
+            vec3 lit = vec3(0.55) * (0.25 + 0.75 * ndl * (1.0 - sh));
+            outColor = vec4(lit, 1.0);
+            return;
         }
     }
 
