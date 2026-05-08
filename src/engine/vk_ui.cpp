@@ -39,6 +39,12 @@ void VulkanEngine::init_imgui() {
     // landing on the Quit button and exiting the game. Mouse-only
     // for the menu is fine here; no controller use.
     io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+    // Pin imgui.ini next to qlike_settings.cfg so menu collapse /
+    // expand / position state persists across restarts regardless
+    // of the launch cwd. Default behaviour writes "imgui.ini" in
+    // cwd, which means launching from build/ vs the repo root used
+    // two different files and the saved state didn't follow you.
+    io.IniFilename = "qlike_imgui.ini";
     ImGui::StyleColorsDark();
 
     ImGui_ImplGlfw_InitForVulkan(window_->handle(), true);
@@ -70,6 +76,14 @@ void VulkanEngine::init_imgui() {
 
 void VulkanEngine::destroy_imgui() {
     if (!imgui_initialized_) return;
+    // Force-flush settings to disk before tearing down the context.
+    // ImGui's auto-save runs on a timer (default 5 s) and would
+    // otherwise lose state if the user quits within a few seconds of
+    // collapsing/moving a window.
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.IniFilename) {
+        ImGui::SaveIniSettingsToDisk(io.IniFilename);
+    }
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
@@ -154,20 +168,21 @@ void VulkanEngine::build_hud_ui() {
 void VulkanEngine::build_menu_ui() {
     if (state_ != State::Paused) return;
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    // Cap the pause-menu height at 90% of screen so scrolling kicks in
-    // for long settings lists (Terrain shader + Grass + Sculpt + ...
-    // pushed the auto-resized window past the screen edge, hiding the
-    // bottom sections).
+    // Cond_FirstUseEver: centred on first launch, then ImGui restores
+    // whatever position / size the user left in qlike_imgui.ini.
     float max_h = vp->WorkSize.y * 0.90f;
-    ImGui::SetNextWindowSize(ImVec2(560.0f, max_h), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_FirstUseEver,
+                             ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(560.0f, max_h), ImGuiCond_FirstUseEver);
+    // No NoMove / NoSavedSettings — we want the user to drag the
+    // menu and have ImGui persist position + open/closed state of
+    // every CollapsingHeader inside it across restarts. The title
+    // bar is the drag handle; "Pause Menu" is the persistent ID
+    // that ImGui keys saved state against in qlike_imgui.ini.
     ImGuiWindowFlags flags =
-        ImGuiWindowFlags_NoTitleBar |
-        ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoSavedSettings |
         ImGuiWindowFlags_AlwaysVerticalScrollbar;
-    ImGui::Begin("##pause-menu", nullptr, flags);
+    ImGui::Begin("Pause Menu", nullptr, flags);
     ImGui::Text("PAUSED");
     ImGui::Separator();
     ImGui::Spacing();
@@ -434,12 +449,15 @@ void VulkanEngine::build_menu_ui() {
                          &rt_.terrain_raymarch_relaxation);
         ImGui::Checkbox("Fog god-rays (Phase 7)",
                          &rt_.terrain_raymarch_fog_godrays);
-        ImGui::TextDisabled("Lower steps / fewer octaves / higher step factor = faster.\n"
-                             "50% render scale ≈ 4× fewer FBM evaluations.\n"
-                             "Sharpen recovers detail lost to bilinear upscaling.\n"
-                             "Fog 0 = off, 1 = baseline, 2 = thick valley fog.\n"
-                             "Relaxation: faster march at the risk of skipping spikes.\n"
-                             "God-rays: 4 short rays per fog step, ~20% slower fog.");
+        // TextDisabled is printf-style; passing "%s" + a string is the
+        // safe way to display literal `%` characters (e.g. "50%").
+        ImGui::TextDisabled("%s",
+            "Lower steps / fewer octaves / higher step factor = faster.\n"
+            "50% render scale = 4x fewer FBM evaluations.\n"
+            "Sharpen recovers detail lost to bilinear upscaling.\n"
+            "Fog 0 = off, 1 = baseline, 2 = thick valley fog.\n"
+            "Relaxation: faster march at the risk of skipping spikes.\n"
+            "God-rays: 4 short rays per fog step, ~20% slower fog.");
 
         ImGui::SeparatorText("Ocean / water");
         ImGui::Checkbox("Water enabled", &rt_.water_enabled);
@@ -448,10 +466,11 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("Wave strength",
                            &rt_.water_wave_strength, 0.0f, 0.6f, "%.2f");
         ImGui::ColorEdit3("Deep water color", &rt_.water_color.x);
-        ImGui::TextDisabled("Cheap analytical-wave ocean folded into the\n"
-                             "raymarch shader. Rendered when ray hits y=level\n"
-                             "before terrain. Schlick fresnel + sky reflection\n"
-                             "+ specular highlight + depth-fade tint.");
+        ImGui::TextDisabled("%s",
+            "Cheap analytical-wave ocean folded into the\n"
+            "raymarch shader. Rendered when ray hits y=level\n"
+            "before terrain. Schlick fresnel + sky reflection\n"
+            "+ specular highlight + depth-fade tint.");
 
         ImGui::SeparatorText("Heightmap resolution");
         const char* hres_labels[] = {
