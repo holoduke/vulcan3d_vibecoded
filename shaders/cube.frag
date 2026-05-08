@@ -197,6 +197,22 @@ bool any_hit_no_terrain(vec3 origin, vec3 dir, float t_max) {
            gl_RayQueryCommittedIntersectionTriangleEXT;
 }
 
+// Closest-hit variant of the terrain-receivers shadow query — used
+// for the PCSS blocker search distance estimate.
+bool closest_hit_no_terrain(vec3 origin, vec3 dir, float t_max,
+                             out float out_t) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
+                          0x02, origin, 0.001, dir, t_max);
+    while (rayQueryProceedEXT(rq)) {}
+    if (rayQueryGetIntersectionTypeEXT(rq, true) !=
+        gl_RayQueryCommittedIntersectionTriangleEXT) {
+        return false;
+    }
+    out_t = rayQueryGetIntersectionTEXT(rq, true);
+    return true;
+}
+
 // Sky tint without the sun halo вЂ” for atmospheric fog where adding
 // the localized halo brightness on distant terrain pixels makes them
 // glow blindingly when looking near the sun. Same horizonв†’zenith
@@ -623,16 +639,15 @@ void main() {
     //    is razor-sharp, the same shadow stretched across the floor is fuzzy.
     // 3. SHADOW RAYS: stratified sampling inside the size-adapted cone.
     float shadow = 0.0;
-    // Terrain hybrid threshold: RT close, bake far. Past 80 m the
-    // chunked LOD-2/3 raster surface sits 5–15 m below the BLAS
-    // heightmap → upward shadow rays false-hit invisible peaks. The
-    // bake matches the visible surface at any distance, and skipping
-    // the RT firing on far terrain reclaims ~9 rays/px (4 blocker + ~5
-    // stratified) every frame on every distant terrain pixel.
+    // Terrain receivers always fire RT shadows now — but they use
+    // mask 0x02 so the ray queries skip the terrain BLAS entirely
+    // (which is what used to false-hit at distance from LOD/BLAS
+    // mismatch). The bake handles terrain self-shadow; the RT
+    // ray-queries handle castle / dyn-props at every distance, so
+    // box / castle shadows on terrain no longer fade out past 80 m.
     float terrain_dist = distance(vWorldPos, scene.camera_pos.xyz);
-    bool fire_rt_shadow = !is_terrain_pre || terrain_dist <= 80.0;
     if (n_dot_l_raw > 0.0 && scene.rt_flags.x != 0) {
-      if (fire_rt_shadow) {
+      if (true) {   // (kept block for diff hygiene — always-on now)
         // Base sample count from slider, distance-LOD'd. terrain_extra.y
         // is a multiplier on the BASE count that's applied before LOD
         // reduction, so close fragments get N×multiplier rays while far
@@ -667,13 +682,21 @@ void main() {
         float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
         float far_t = clamp((dist_to_cam - 80.0) / 320.0, 0.0, 1.0);
         float terrain_far_bias = far_t * far_t * 8.0;   // 0 в†’ 8 across the ramp
+        // Bias along the receiver normal so the ray clears the
+        // surface. Terrain has near-flat surfaces so a small lift
+        // is enough; the BLAS-vs-LOD mismatch that needed the big
+        // distance-ramped bias is now sidestepped by the no-terrain
+        // mask above (the ray won't hit terrain at all).
         float bias = is_terrain_pre
-            ? (max(0.04, terrain_far_bias) + 0.10 * (1.0 - n_dot_l_raw))
+            ? (0.05 + 0.10 * (1.0 - n_dot_l_raw))
             : (0.005 + 0.02 * (1.0 - n_dot_l_raw));
         vec3 origin = vWorldPos + N * bias;
 
         // 1. Blocker search вЂ” 4 rays in a wider cone (4Г— base softness) so we
         //    actually catch occluders even when the surface is close to lit.
+        // Terrain receivers use the no-terrain variant so we don't get
+        // false-hits from the BLAS terrain detail above the rasterised
+        // LOD surface (the heightmap bake covers terrain self-shadow).
         const int kBlockerSearch = 4;
         float sum_t = 0.0;
         int   hits = 0;
@@ -685,10 +708,10 @@ void main() {
             vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
             vec3 dir = normalize(L + jitter);
             float t;
-            if (closest_hit(origin, dir, 200.0, t)) {
-                sum_t += t;
-                ++hits;
-            }
+            bool got = is_terrain_pre
+                ? closest_hit_no_terrain(origin, dir, 200.0, t)
+                : closest_hit            (origin, dir, 200.0, t);
+            if (got) { sum_t += t; ++hits; }
         }
 
         if (hits == 0) {
@@ -723,7 +746,10 @@ void main() {
                     float phi = 6.28318530718 * u2;
                     vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
                     vec3 dir = normalize(L + jitter);
-                    if (any_hit(origin, dir, 200.0)) blocked += 1.0;
+                    bool blk = is_terrain_pre
+                        ? any_hit_no_terrain(origin, dir, 200.0)
+                        : any_hit            (origin, dir, 200.0);
+                    if (blk) blocked += 1.0;
                     ++taken;
                 }
             }
@@ -731,11 +757,11 @@ void main() {
         }
       }  // end fire_rt_shadow
 
-        // Terrain hybrid: RT close, bake far. `shadow` already holds
-        // the RT PCSS result if `fire_rt_shadow` was true; otherwise
-        // it's still 0.0 (we skipped firing on far terrain). Compute
-        // the bake here and cross-fade the two over 40–80 m so the
-        // transition isn't visible.
+        // Terrain hybrid: RT (castle / dyn-props) + bake (terrain
+        // self-shadow). `shadow` holds the RT no-terrain result, the
+        // bake holds terrain-on-terrain occlusion. Take the MAX so
+        // any blocker (castle or distant ridge) shadows the receiver.
+        // Castle shadows on terrain therefore work at every distance.
         if (is_terrain_pre) {
             ivec2 sz_b = textureSize(u_terrain_shadow, 0);
             const float side_b = 2048.0;
@@ -743,9 +769,6 @@ void main() {
             float sh_bake = 0.0;
             if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
                 all(lessThanEqual(uv_b, vec2(1.0)))) {
-                // 9-tap PCF (3x3 box, 1.5-texel offset). The bake is
-                // binary 0/255 in each texel — without wide PCF the
-                // edges step at texel boundaries and read as blocky.
                 vec2 texel = 1.0 / vec2(sz_b);
                 float s = 0.0;
                 for (int oy = -1; oy <= 1; ++oy) {
@@ -756,9 +779,14 @@ void main() {
                 }
                 sh_bake = (s / 9.0) * scene.rt_params.w;
             }
-            float bake_blend = smoothstep(40.0, 80.0, terrain_dist);
-            shadow = mix(shadow, sh_bake, bake_blend);
+            shadow = max(shadow, sh_bake);
         }
+        // Cubic smoothstep on the combined shadow factor (lit
+        // fraction = 1 − shadow): softens the merged terrain-bake +
+        // RT-castle visibility ramp into one continuous penumbra.
+        float lit_c = clamp(1.0 - shadow, 0.0, 1.0);
+        lit_c = lit_c * lit_c * (3.0 - 2.0 * lit_c);
+        shadow = 1.0 - lit_c;
     }
 
     vec3 direct = albedo * scene.sun_color.rgb * scene.sun_color.a *

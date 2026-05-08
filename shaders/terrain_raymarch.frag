@@ -290,22 +290,38 @@ vec3 calcNormal(vec3 pos, float t) {
     return normalize(vec3(hC - hR, eps, hC - hU));
 }
 
-// PCSS-style soft shadow ray. min(k*h/t) tracks the closest grazing
-// ratio, giving a penumbra that widens with distance from the
-// occluder. k = 16 is moderately soft; 64 would be near-hard.
+// Improved soft-shadow against the FBM heightfield — uses Inigo
+// Quilez's "geometric triangulation" formulation (2018):
+//   y = h² / (2·ph)
+//   d = sqrt(h² − y²)         // perpendicular distance from previous step
+//   res = min(res, d / (w · max(0, t − y)))
+// ph is the previous-step heightfield distance. Compared to the
+// classic `min(k·h/t)`, this avoids spurious darkening at sharp
+// silhouette edges (the common artifact at receiver edges where the
+// classic formula over-counts grazing distance). `w` is the cone
+// half-width in radians (sun is ~0.5° = 0.0044, but we soften it
+// for visual penumbra).
 float calcShadow(vec3 pos, vec3 sunDir) {
+    const float w = 0.030;     // cone half-width — picks visible penumbra
     float res = 1.0;
-    float t = 1.0;
+    float t   = 0.05;
+    float ph  = 1e10;
     int kSteps = int(pc.tex_params.y);
-    for (int i = 0; i < kSteps; i++) {
+    for (int i = 0; i < kSteps; ++i) {
         vec3 p = pos + t * sunDir;
         float h = p.y - terrainM(p.xz);
-        if (h < 0.001) return 0.0;
-        res = min(res, 16.0 * h / t);
-        t += clamp(h, 2.0, 100.0);
-        if (t > 800.0) break;
+        if (h < 0.001) { res = 0.0; break; }
+        float y = h * h / (2.0 * ph);
+        float d = sqrt(max(h * h - y * y, 0.0));
+        res = min(res, d / (w * max(0.0, t - y)));
+        ph  = h;
+        t  += clamp(h, 0.5, 100.0);
+        if (t > 800.0 || res < 0.001) break;
     }
-    return clamp(res, 0.0, 1.0);
+    res = clamp(res, 0.0, 1.0);
+    // Cubic smoothstep softens the penumbra falloff so the soft
+    // edge reads as light scattering instead of a linear ramp.
+    return res * res * (3.0 - 2.0 * res);
 }
 
 // Layered material: rock base, grass on flats, snow up high (with
@@ -619,59 +635,71 @@ void main() {
     float amb = 0.5 + 0.5 * nor.y;
     float fre = pow(clamp(1.0 + dot(rd, nor), 0.0, 1.0), 2.0);
 
-    float sha = (dif > 0.0) ? calcShadow(pos + nor * 0.5, sunDir) : 1.0;
+    // Terrain self-shadow (FBM march). Bias is small (5 cm along
+    // the surface normal) — large biases (the previous 50 cm) made
+    // the shadow visibly detach from the contact line under
+    // distant FBM normals.
+    float sha = (dif > 0.0) ? calcShadow(pos + nor * 0.05, sunDir) : 1.0;
 
-    // Castle / dyn-prop / box shadows via RT (PCSS-style). Mask 0x02
-    // skips the terrain BLAS so we don't double-count terrain self-
-    // shadow (handled by calcShadow above against the FBM).
+    // Castle / dyn-prop / box shadows via TLAS ray queries
+    // (PCSS-style). Mask 0x02 skips the terrain BLAS so we don't
+    // double-count terrain self-shadow (handled by calcShadow above).
     //   1. blocker search — wide cone, find avg occluder distance
-    //   2. penumbra ∝ blocker distance × softness (PCSS)
+    //   2. penumbra ∝ avg blocker distance × sun angular radius
     //   3. stratified shadow rays in the size-adapted cone
+    //   4. results combine multiplicatively with the FBM self-shadow
     if (dif > 0.0 && scene.rt_flags.x != 0) {
-        const float kBaseSoftness = max(0.02, scene.rt_params.x);
+        // Sun angular radius is ~0.5° = 0.0044 rad. We soften it a
+        // bit (×4) for visible penumbras at gameplay distances —
+        // physically correct values would only show as a ~5 cm
+        // penumbra at 10 m blocker distance.
+        const float kSunAngular = 0.0044 * 4.0;
         // Tangent basis perpendicular to L for cone jitter.
         vec3 ref   = abs(sunDir.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
                                             : vec3(1.0, 0.0, 0.0);
         vec3 tan_u = normalize(cross(ref, sunDir));
         vec3 tan_v = cross(sunDir, tan_u);
-        // Ray origin lifted along the surface normal so the FBM-derived
-        // hit point doesn't self-intersect a BLAS triangle that happens
-        // to overlap (e.g. the castle pad).
-        vec3 origin = pos + nor * 0.25;
-        // Per-pixel deterministic seed so the dither pattern is stable
-        // across frames where this pixel is the same surface.
+        // 5 cm bias matches calcShadow above so terrain self-shadow
+        // and TLAS shadow agree on where the surface is.
+        vec3 origin = pos + nor * 0.05;
+        // Per-pixel + per-frame seed: rotating the noise per frame
+        // lets TAA average noisy stratified samples into a smooth
+        // penumbra without raising sample count.
         uvec3 seed = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
 
-        // 1. Blocker search — 4 rays, wide cone.
+        // 1. Blocker search — 6 rays in a wide cone (16× sun angular
+        // radius) so we find occluders even when the surface is
+        // close to lit.
+        const int kBlocker = 6;
         float sum_t = 0.0;
         int   hits  = 0;
-        const int kBlocker = 4;
+        const float kBlockerCone = kSunAngular * 16.0;
         for (int i = 0; i < kBlocker; ++i) {
             float r1 = rmRand(seed + uvec3(i, 91u, 13u));
             float r2 = rmRand(seed + uvec3(i, 19u, 71u));
-            float r  = sqrt(r1) * kBaseSoftness * 4.0;
+            float r  = sqrt(r1) * kBlockerCone;
             float ph = 6.28318530718 * r2;
             vec3 j   = (cos(ph) * tan_u + sin(ph) * tan_v) * r;
             vec3 d   = normalize(sunDir + j);
-            float t;
-            if (closest_hit_no_terrain(origin, d, 200.0, t)) {
-                sum_t += t;
+            float t_b;
+            if (closest_hit_no_terrain(origin, d, 250.0, t_b)) {
+                sum_t += t_b;
                 ++hits;
             }
         }
 
         if (hits > 0) {
-            // 2. Penumbra estimate (PCSS): cone width grows with avg
-            // blocker distance. Clamped both ways so razor-sharp
-            // contacts and far-soft skirts don't blow out.
+            // 2. Penumbra estimate (PCSS): cone half-angle ≈ sun
+            // angular radius; cone radius at receiver = blocker_dist
+            // × angular. Clamped to a sensible range so razor-sharp
+            // contact and very-far soft skirts both stay nice.
             float avg_t = sum_t / float(hits);
-            float scale = clamp(avg_t * 0.1, 0.05, 6.0);
-            float penum = clamp(kBaseSoftness * scale * 0.6,
-                                kBaseSoftness * 0.25,
-                                kBaseSoftness * 6.0);
-
-            // 3. Stratified shadow rays. 8 rays = decent penumbra at
-            // an acceptable per-pixel cost.
+            float penum = clamp(avg_t * kSunAngular,
+                                kSunAngular * 1.0,    // ~5 mm minimum
+                                kSunAngular * 60.0);   // ~50 cm cap
+            // 3. Stratified shadow rays. 8 rays + per-frame seed
+            // rotation reads as smooth penumbra under TAA without
+            // raising the per-pixel cost.
             const int kShadow = 8;
             int strata = int(ceil(sqrt(float(kShadow))));
             float inv  = 1.0 / float(strata);
@@ -687,14 +715,22 @@ void main() {
                     float ph = 6.28318530718 * u2;
                     vec3 j   = (cos(ph) * tan_u + sin(ph) * tan_v) * r;
                     vec3 d   = normalize(sunDir + j);
-                    if (any_hit_no_terrain(origin, d, 200.0)) blocked += 1.0;
+                    if (any_hit_no_terrain(origin, d, 250.0)) blocked += 1.0;
                     ++taken;
                 }
             }
             float dyn_shadow = (blocked / float(taken)) * scene.rt_params.w;
-            sha *= (1.0 - dyn_shadow);   // multiply lit-fraction
+            // Multiply lit-fractions: terrain visibility AND tlas
+            // visibility must both be nonzero for the pixel to be
+            // fully lit.
+            sha *= (1.0 - dyn_shadow);
         }
     }
+    // Final cubic smoothstep on the combined visibility — softens
+    // the edge of the merged FBM-self + TLAS-dyn shadow so the
+    // hand-off between the two contributions reads as one smooth
+    // penumbra.
+    sha = sha * sha * (3.0 - 2.0 * sha);
 
     vec3 mate = getMaterial(pos, nor);
 
