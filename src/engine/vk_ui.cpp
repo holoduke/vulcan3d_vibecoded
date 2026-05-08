@@ -47,6 +47,84 @@ void VulkanEngine::init_imgui() {
     io.IniFilename = "qlike_imgui.ini";
     ImGui::StyleColorsDark();
 
+    // ===== Synthwave style ============================================
+    // Neon magenta + cyan on a deep indigo background — pause menu /
+    // HUD reads as a 1980s CRT title screen. Just a colour + spacing
+    // override; no custom shaders, no extra geometry.
+    {
+        ImGuiStyle& s = ImGui::GetStyle();
+        s.WindowRounding   = 6.0f;
+        s.FrameRounding    = 4.0f;
+        s.GrabRounding     = 4.0f;
+        s.TabRounding      = 4.0f;
+        s.PopupRounding    = 4.0f;
+        s.ScrollbarRounding= 6.0f;
+        s.WindowPadding    = ImVec2(14.0f, 12.0f);
+        s.FramePadding     = ImVec2(8.0f, 5.0f);
+        s.ItemSpacing      = ImVec2(10.0f, 8.0f);
+        s.WindowBorderSize = 1.5f;
+        s.FrameBorderSize  = 0.0f;
+        s.TabBorderSize    = 0.0f;
+        s.IndentSpacing    = 16.0f;
+
+        const ImVec4 magenta      (0.95f, 0.20f, 0.85f, 1.00f);
+        const ImVec4 magentaSoft  (0.65f, 0.15f, 0.60f, 1.00f);
+        const ImVec4 magentaDeep  (0.20f, 0.05f, 0.20f, 1.00f);
+        const ImVec4 cyan         (0.20f, 0.95f, 0.95f, 1.00f);
+        const ImVec4 cyanSoft     (0.15f, 0.55f, 0.65f, 1.00f);
+        const ImVec4 indigoBg     (0.05f, 0.03f, 0.10f, 0.96f);
+        const ImVec4 indigoFrame  (0.10f, 0.07f, 0.18f, 1.00f);
+        const ImVec4 indigoFrameHi(0.18f, 0.12f, 0.32f, 1.00f);
+        const ImVec4 textBright   (0.95f, 0.92f, 1.00f, 1.00f);
+        const ImVec4 textDim      (0.70f, 0.78f, 0.95f, 1.00f);
+
+        ImVec4* c = s.Colors;
+        c[ImGuiCol_Text]                 = textBright;
+        c[ImGuiCol_TextDisabled]         = textDim;
+        c[ImGuiCol_WindowBg]             = indigoBg;
+        c[ImGuiCol_PopupBg]              = indigoBg;
+        c[ImGuiCol_Border]               = magenta;
+        c[ImGuiCol_BorderShadow]         = ImVec4(0,0,0,0);
+        c[ImGuiCol_FrameBg]              = indigoFrame;
+        c[ImGuiCol_FrameBgHovered]       = indigoFrameHi;
+        c[ImGuiCol_FrameBgActive]        = ImVec4(0.30f, 0.18f, 0.50f, 1.0f);
+        c[ImGuiCol_TitleBg]              = magentaDeep;
+        c[ImGuiCol_TitleBgActive]        = magentaSoft;
+        c[ImGuiCol_TitleBgCollapsed]     = magentaDeep;
+        c[ImGuiCol_MenuBarBg]            = magentaDeep;
+        c[ImGuiCol_ScrollbarBg]          = ImVec4(0.05f, 0.03f, 0.12f, 0.6f);
+        c[ImGuiCol_ScrollbarGrab]        = magentaSoft;
+        c[ImGuiCol_ScrollbarGrabHovered] = magenta;
+        c[ImGuiCol_ScrollbarGrabActive]  = cyan;
+        c[ImGuiCol_CheckMark]            = cyan;
+        c[ImGuiCol_SliderGrab]           = cyan;
+        c[ImGuiCol_SliderGrabActive]     = magenta;
+        c[ImGuiCol_Button]               = ImVec4(0.30f, 0.10f, 0.40f, 1.0f);
+        c[ImGuiCol_ButtonHovered]        = magenta;
+        c[ImGuiCol_ButtonActive]         = cyan;
+        c[ImGuiCol_Header]               = magentaSoft;
+        c[ImGuiCol_HeaderHovered]        = magenta;
+        c[ImGuiCol_HeaderActive]         = cyan;
+        c[ImGuiCol_Separator]            = magentaSoft;
+        c[ImGuiCol_SeparatorHovered]     = cyan;
+        c[ImGuiCol_SeparatorActive]      = cyan;
+        c[ImGuiCol_ResizeGrip]           = magentaSoft;
+        c[ImGuiCol_ResizeGripHovered]    = magenta;
+        c[ImGuiCol_ResizeGripActive]     = cyan;
+        c[ImGuiCol_Tab]                  = ImVec4(0.18f, 0.08f, 0.30f, 1.0f);
+        c[ImGuiCol_TabHovered]           = magenta;
+        c[ImGuiCol_TabActive]            = ImVec4(0.55f, 0.12f, 0.55f, 1.0f);
+        c[ImGuiCol_TabUnfocused]         = ImVec4(0.10f, 0.05f, 0.18f, 1.0f);
+        c[ImGuiCol_TabUnfocusedActive]   = magentaSoft;
+        c[ImGuiCol_PlotLines]            = cyan;
+        c[ImGuiCol_PlotLinesHovered]     = magenta;
+        c[ImGuiCol_PlotHistogram]        = magenta;
+        c[ImGuiCol_PlotHistogramHovered] = cyan;
+        c[ImGuiCol_DragDropTarget]       = cyan;
+        c[ImGuiCol_NavHighlight]         = cyan;
+    }
+    // ===================================================================
+
     ImGui_ImplGlfw_InitForVulkan(window_->handle(), true);
 
     VkFormat color_fmt = swapchain_format_;
@@ -183,44 +261,45 @@ void VulkanEngine::build_menu_ui() {
         ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_AlwaysVerticalScrollbar;
     ImGui::Begin("Pause Menu", nullptr, flags);
-    ImGui::Text("PAUSED");
+
+    // Big neon "PAUSED" banner — drawn via ImGui's foreground colour
+    // override so it stands out against the indigo background.
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.20f, 0.85f, 1.0f));
+    ImGui::SetWindowFontScale(1.6f);
+    ImGui::TextUnformatted("// PAUSED //");
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::PopStyleColor();
     ImGui::Separator();
     ImGui::Spacing();
-    const ImVec2 btn(220.0f, 0.0f);
+
+    // Action buttons in a horizontal row across the top so the
+    // user can always see + click them without scrolling.
+    const ImVec2 btn((ImGui::GetContentRegionAvail().x - 20.0f) / 3.0f, 0.0f);
     if (ImGui::Button("Resume", btn)) {
         state_ = State::Playing;
         window_->set_cursor_captured(true);
     }
+    ImGui::SameLine();
     if (ImGui::Button("Restart", btn)) {
         reset_player();
         state_ = State::Playing;
         window_->set_cursor_captured(true);
     }
+    ImGui::SameLine();
     if (ImGui::Button("Quit", btn)) {
         window_->request_close();
     }
-
     ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Grass")) {
-        ImGui::Checkbox("grass enabled", &rt_.grass_enabled);
-        ImGui::SliderFloat("density (0..4)", &rt_.grass_density,    0.0f, 4.0f,
-                           "%.2f");
-        ImGui::SliderFloat("height scale",   &rt_.grass_height_scale, 0.30f, 2.0f);
-        ImGui::SliderFloat("distance (m)",   &rt_.grass_distance,   10.0f, 200.0f);
-        ImGui::SliderFloat("wind (m)",       &rt_.grass_wind,        0.0f, 0.30f);
-        ImGui::SliderFloat("alpha cutoff",   &rt_.grass_alpha_cutoff, 0.0f, 0.6f,
-                           "%.2f (lower = chunkier blade)");
-        ImGui::SliderFloat("slope cutoff",   &rt_.grass_slope_n_min, 0.55f, 1.0f,
-                           "%.2f (1.0 = only flat)");
-        ImGui::SliderFloat("distance density falloff",
-                           &rt_.grass_distance_density, 0.0f, 1.0f,
-                           "%.2f (0=uniform, 1=thin far)");
-        ImGui::SliderFloat("altitude min (m)", &rt_.grass_alt_min, -20.0f, 200.0f);
-        ImGui::SliderFloat("altitude max (m)", &rt_.grass_alt_max, -20.0f, 200.0f);
+
+    // ===== Tabs ============================================================
+    if (!ImGui::BeginTabBar("##settings_tabs",
+                              ImGuiTabBarFlags_FittingPolicyScroll)) {
+        ImGui::End();
+        return;
     }
 
-    ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Game Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // ----- Game tab --------------------------------------------------------
+    if (ImGui::BeginTabItem("Game")) {
         ImGui::SliderFloat("gravity (m/s^2)", &game_.gravity, 0.5f, 1250.0f, "%.1f",
                            ImGuiSliderFlags_Logarithmic);
         ImGui::SliderInt("cubes / minute", &game_.cubes_per_minute, 0, 1000);
@@ -232,10 +311,12 @@ void VulkanEngine::build_menu_ui() {
                            "%.1f");
         ImGui::SliderFloat("spark scale",     &game_.spark_scale,   0.05f, 3.0f,
                            "%.2f");
+        ImGui::EndTabItem();
     }
 
-    ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Resolution & Quality", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // ----- Graphics tab ----------------------------------------------------
+    if (ImGui::BeginTabItem("Graphics")) {
+        if (ImGui::CollapsingHeader("Resolution & Quality", ImGuiTreeNodeFlags_DefaultOpen)) {
         // Quality preset combo. Switching writes a bundle of values onto rt_;
         // tweaking any individual slider afterward marks preset = -1 (custom).
         const char* kPresetLabels[] = {
@@ -285,11 +366,10 @@ void VulkanEngine::build_menu_ui() {
             }
             ImGui::EndCombo();
         }
-    }
+        }   // end CollapsingHeader Resolution & Quality
 
-    ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Graphics Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SeparatorText("Materials");
+        if (ImGui::CollapsingHeader("Graphics Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SeparatorText("Materials");
         ImGui::Checkbox("textures enabled", &rt_.textures_enabled);
 
         ImGui::SeparatorText("Sun");
@@ -407,9 +487,13 @@ void VulkanEngine::build_menu_ui() {
             rt_.gi_samples = 16;     rt_.gi_strength = 1.0f;
             rt_.gi_radius = 200.0f;  rt_.gi_bounces = 4;
         }
+        }   // end CollapsingHeader Graphics Settings
+        ImGui::EndTabItem();
     }
 
-    if (ImGui::CollapsingHeader("Terrain", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // ----- Terrain tab (terrain renderer + grass) -------------------------
+    if (ImGui::BeginTabItem("Terrain")) {
+        if (ImGui::CollapsingHeader("Terrain", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::SeparatorText("Renderer");
         ImGui::Checkbox("Procedural raymarched terrain (FBM)",
                          &rt_.terrain_raymarch_enabled);
@@ -614,7 +698,29 @@ void VulkanEngine::build_menu_ui() {
         };
         ImGui::Combo("terrain debug", &rt_.terrain_debug_mode,
                       terrain_debug_labels, 11);
+        }   // end CollapsingHeader Terrain
+
+        // Grass folded into the Terrain tab — they're conceptually
+        // the same surface family for the player, and the previous
+        // top-level Grass section was rarely opened.
+        if (ImGui::CollapsingHeader("Grass")) {
+            ImGui::Checkbox("grass enabled", &rt_.grass_enabled);
+            ImGui::SliderFloat("density (0..4)", &rt_.grass_density, 0.0f, 4.0f, "%.2f");
+            ImGui::SliderFloat("height scale",   &rt_.grass_height_scale, 0.30f, 2.0f);
+            ImGui::SliderFloat("distance (m)",   &rt_.grass_distance,   10.0f, 200.0f);
+            ImGui::SliderFloat("wind (m)",       &rt_.grass_wind,        0.0f, 0.30f);
+            ImGui::SliderFloat("alpha cutoff",   &rt_.grass_alpha_cutoff, 0.0f, 0.6f, "%.2f");
+            ImGui::SliderFloat("slope cutoff",   &rt_.grass_slope_n_min, 0.55f, 1.0f, "%.2f");
+            ImGui::SliderFloat("distance density falloff",
+                               &rt_.grass_distance_density, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("altitude min (m)", &rt_.grass_alt_min, -20.0f, 200.0f);
+            ImGui::SliderFloat("altitude max (m)", &rt_.grass_alt_max, -20.0f, 200.0f);
+        }
+
+        ImGui::EndTabItem();
     }
+
+    ImGui::EndTabBar();
 
     ImGui::Spacing();
     ImGui::TextDisabled("ESC to resume");
