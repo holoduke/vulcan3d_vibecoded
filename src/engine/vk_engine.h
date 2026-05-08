@@ -1080,6 +1080,11 @@ private:
         // upscale composite (~4× fewer FBM evaluations per frame).
         // Cubes / castle / dyn-props always rasterise at native res.
         float terrain_raymarch_scale         = 1.0f;
+        // Post-upscale sharpen strength applied during the compose
+        // pass. Cheap CAS-style 4-neighbour adaptive sharpen — only
+        // boosts contrast around real edges, ignores flat / noisy
+        // regions. 0 = off, 0.5 = subtle, 1.0 = aggressive.
+        float terrain_raymarch_sharpen       = 0.6f;
         // Multiplier on the RT shadow ray count for fragments within
         // rt_lod.x (close to the camera). 1 = unchanged, higher = more
         // rays close-by for smoother penumbras under boxes / castle.

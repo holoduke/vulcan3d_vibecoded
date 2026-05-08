@@ -421,8 +421,11 @@ void VulkanEngine::build_menu_ui() {
             rt_.terrain_raymarch_scale = tr_scale_values[tr_scale_idx];
             recreate_terrain_raymarch_lowres();
         }
+        ImGui::SliderFloat("Raymarch sharpen", &rt_.terrain_raymarch_sharpen,
+                           0.0f, 1.0f, "%.2f");
         ImGui::TextDisabled("Lower steps / fewer octaves / higher step factor = faster.\n"
-                             "50% render scale ≈ 4× fewer FBM evaluations.");
+                             "50% render scale ≈ 4× fewer FBM evaluations.\n"
+                             "Sharpen recovers detail lost to bilinear upscaling.");
 
         ImGui::SeparatorText("Heightmap resolution");
         const char* hres_labels[] = {

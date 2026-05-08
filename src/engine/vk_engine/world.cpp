@@ -1837,10 +1837,15 @@ void VulkanEngine::render_terrain_raymarch_compose(VkCommandBuffer cmd) {
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                              pipeline_layout_, 0, 1, &scene_desc_set_,
                              0, nullptr);
-    // The shader doesn't use push constants, but the layout requires
-    // some bytes, and skipping vkCmdPushConstants leaves stale values
-    // from the previous draw. Push a zero PushConstants block.
+    // pc.color = (sharpen, LR width, LR height, 0). The shader uses
+    // .x for the CAS-style adaptive sharpen amount and .yz to size
+    // the kernel's neighbour offsets at the LR resolution (so the
+    // 4-tap kernel matches actual data, not the upscaled grid).
     PushConstants pc{};
+    pc.color = glm::vec4(rt_.terrain_raymarch_sharpen,
+                         static_cast<float>(tr_lr_extent_.width),
+                         static_cast<float>(tr_lr_extent_.height),
+                         0.0f);
     vkCmdPushConstants(cmd, pipeline_layout_,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pc);
