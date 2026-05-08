@@ -24,6 +24,8 @@ struct InputFrame {
     bool menu_key = false;  // ESC; engine edge-detects to toggle pause
     bool fire = false;      // left mouse, edge-triggered (one click = one)
     bool fire_held = false; // left mouse, level (true while button is down)
+    bool alt_fire_held = false; // right mouse, level (true while button is down)
+                                // — used by sculpt brush as "lower" alt
     bool screenshot = false;// F12, edge-triggered
     double mouse_dx = 0.0;
     double mouse_dy = 0.0;

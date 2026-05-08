@@ -684,17 +684,23 @@ void VulkanEngine::build_menu_ui() {
         }
 
         ImGui::SeparatorText("Sculpt brush");
-        ImGui::Checkbox("Edit mode (left-click sculpts, not fires)",
+        ImGui::Checkbox("Edit mode (left = brush mode, right = lower)",
                         &terrain_edit_mode_);
         if (terrain_edit_mode_) {
             const char* modes[] = {"Raise", "Lower", "Smooth", "Flatten"};
             int mode_i = static_cast<int>(terrain_brush_mode_);
-            if (ImGui::Combo("brush mode", &mode_i, modes, IM_ARRAYSIZE(modes))) {
+            if (ImGui::Combo("brush mode (left-click)", &mode_i, modes,
+                              IM_ARRAYSIZE(modes))) {
                 terrain_brush_mode_ = static_cast<TerrainBrushMode>(mode_i);
             }
+            ImGui::TextDisabled("right-click always lowers regardless of mode");
             ImGui::SliderFloat("brush radius (m)", &terrain_brush_radius_, 1.0f, 60.0f);
             ImGui::SliderFloat("brush strength (m/s)", &terrain_brush_strength_,
                                0.5f, 60.0f);
+            ImGui::SliderFloat("brush noise (raise/lower)",
+                                &terrain_brush_noise_strength_, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("brush noise freq",
+                                &terrain_brush_noise_freq_, 0.05f, 1.0f, "%.2f");
             if (terrain_brush_mode_ == TerrainBrushMode::Flatten) {
                 ImGui::SliderFloat("flatten target Y",
                                    &terrain_brush_flatten_target_, 0.0f, 200.0f);

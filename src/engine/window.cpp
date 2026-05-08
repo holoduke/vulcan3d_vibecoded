@@ -85,6 +85,10 @@ InputFrame Window::consume_input() {
     f.fire = fire_now && !prev_fire_;  // rising edge
     f.fire_held = fire_now;             // level (held)
     prev_fire_ = fire_now;
+    // Right mouse — used by the sculpt brush as the alternate
+    // "lower" gesture (left = raise / current mode, right = lower).
+    f.alt_fire_held =
+        glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
 
     // F12 — rising-edge screenshot key. Engine catches this and writes
     // a numbered PPM in the working directory.

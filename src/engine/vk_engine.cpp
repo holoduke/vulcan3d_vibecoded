@@ -1020,11 +1020,22 @@ void VulkanEngine::run(const RunOptions& opts) {
                         terrain_brush_has_hit_ = false;
                     }
                 }
-                if (in.fire_held && terrain_brush_has_hit_) {
+                bool sculpt_active = (in.fire_held || in.alt_fire_held) &&
+                                      terrain_brush_has_hit_;
+                if (sculpt_active) {
+                    // Right-click forces Lower regardless of selected
+                    // mode. Restore the selected mode after the call so
+                    // the UI reflects the user's choice on the next
+                    // frame.
+                    TerrainBrushMode prev_mode = terrain_brush_mode_;
+                    if (in.alt_fire_held && !in.fire_held) {
+                        terrain_brush_mode_ = TerrainBrushMode::Lower;
+                    }
                     apply_terrain_brush(frame_dt);
+                    terrain_brush_mode_ = prev_mode;
                     rebuild_dirty_terrain_chunks();
                     if (!terrain_stroke_active_) terrain_stroke_active_ = true;
-                } else if (terrain_stroke_active_ && !in.fire_held) {
+                } else if (terrain_stroke_active_ && !in.fire_held && !in.alt_fire_held) {
                     // Mouse-up: heavy refresh (BLAS + Jolt) deferred until
                     // here so the stroke itself stays cheap.
                     refresh_terrain_blas();

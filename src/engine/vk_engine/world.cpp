@@ -80,6 +80,36 @@ void VulkanEngine::apply_terrain_brush(float dt) {
 
     const float strength = terrain_brush_strength_ * dt;
 
+    // 3-octave value-noise via cheap hash. Centred around 0 so it
+    // multiplies the sculpt delta as `1 + noise·strength` — values
+    // > 1 raise more, < 1 raise less. Result: sculpted patches
+    // pick up natural-looking surface variation instead of flat
+    // squares. Cheap (3 hashes per cell during sculpt only).
+    const float n_str  = std::clamp(terrain_brush_noise_strength_, 0.0f, 1.0f);
+    const float n_freq = std::max(0.02f, terrain_brush_noise_freq_);
+    auto fbm_var = [n_freq](float wx, float wz) {
+        auto hash = [](float x, float y) {
+            float n = std::sin(x * 12.9898f + y * 78.233f) * 43758.5453f;
+            return n - std::floor(n);
+        };
+        auto noise = [&](float x, float y) {
+            float ix = std::floor(x), iy = std::floor(y);
+            float fx = x - ix,        fy = y - iy;
+            float a = hash(ix,        iy);
+            float b = hash(ix + 1.0f, iy);
+            float c = hash(ix,        iy + 1.0f);
+            float d = hash(ix + 1.0f, iy + 1.0f);
+            float ux = fx * fx * (3.0f - 2.0f * fx);
+            float uy = fy * fy * (3.0f - 2.0f * fy);
+            return (a * (1 - ux) + b * ux) * (1 - uy) +
+                   (c * (1 - ux) + d * ux) * uy;
+        };
+        float v = 0.5f * noise(wx * n_freq,        wz * n_freq) +
+                  0.25f * noise(wx * n_freq * 2.07f, wz * n_freq * 2.07f) +
+                  0.125f * noise(wx * n_freq * 4.13f, wz * n_freq * 4.13f);
+        return v - 0.4375f;   // re-centre on 0
+    };
+
     for (int iz = iz0; iz <= iz1; ++iz) {
         for (int ix = ix0; ix <= ix1; ++ix) {
             float dx = (static_cast<float>(ix) - cx) * w;
@@ -92,12 +122,17 @@ void VulkanEngine::apply_terrain_brush(float dt) {
             size_t idx = static_cast<size_t>(iz) * static_cast<size_t>(W) +
                          static_cast<size_t>(ix);
             float& h = terrain_data_.heights[idx];
+            // Per-cell noise multiplier — only kicks in for additive
+            // modes (raise / lower), not smooth / flatten.
+            float wx = terrain_data_.origin_x + ix * terrain_data_.cell;
+            float wz = terrain_data_.origin_z + iz * terrain_data_.cell;
+            float n_mult = 1.0f + 2.0f * fbm_var(wx, wz) * n_str;
             switch (terrain_brush_mode_) {
                 case TerrainBrushMode::Raise:
-                    h += strength * falloff;
+                    h += strength * falloff * n_mult;
                     break;
                 case TerrainBrushMode::Lower:
-                    h -= strength * falloff;
+                    h -= strength * falloff * n_mult;
                     break;
                 case TerrainBrushMode::Smooth: {
                     // 4-tap blur toward neighbour mean.

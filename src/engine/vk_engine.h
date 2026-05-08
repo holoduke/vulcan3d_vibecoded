@@ -754,6 +754,13 @@ private:
     float terrain_brush_radius_  = 6.0f;       // metres
     float terrain_brush_strength_ = 8.0f;      // metres/sec at brush centre
     float terrain_brush_flatten_target_ = 22.0f;
+    // Multiply per-cell sculpt delta by `1 + noise·strength` so
+    // raise/lower areas pick up FBM-like variation instead of
+    // looking like flat squares. 0 = clean / artificial, 1 = strong
+    // hill-like noise. Frequency is metres-per-cycle of the base
+    // octave (≈ 4 m default = visible bumps without aliasing).
+    float terrain_brush_noise_strength_ = 0.6f;
+    float terrain_brush_noise_freq_     = 0.25f;
     glm::vec3 terrain_brush_world_pos_{0.0f}; // last hit point (UI gizmo)
     bool  terrain_brush_has_hit_ = false;
     std::vector<int> terrain_dirty_chunks_;    // indices into terrain_chunks_.chunks
