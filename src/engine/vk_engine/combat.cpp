@@ -156,12 +156,24 @@ void VulkanEngine::update_projectiles(float dt) {
                 drop = true;     // fell out of the world
             } else {
                 // Impact detection. After Jolt's step the bullet's velocity
-                // tells us what happened. We remove on first impact — no bounce.
+                // tells us what happened. The previous heuristic only
+                // checked the speed-along-fire-axis — that meant a shallow
+                // glance off a wall (which keeps most of its speed and
+                // deflects only ~10°) wasn't registered as an impact and
+                // the bullet kept ricocheting. New rule: any noticeable
+                // direction change kills the bullet. Only a near-zero
+                // deflection (≤ 6° = `dot ≥ ~0.994`) lets it continue —
+                // i.e. only super grazing hits ricochet.
                 glm::vec3 v = physics_->get_linear_velocity_h(it->jolt_handle);
-                float along = glm::dot(v, it->initial_dir);
                 float speed = glm::length(v);
                 float min_speed = std::max(20.0f, it->initial_speed * 0.5f);
-                if (along < min_speed || speed < min_speed) {
+                bool dir_change = false;
+                if (speed > 0.5f) {
+                    float align = glm::dot(v / speed, it->initial_dir);
+                    // cos(6°) ≈ 0.9945 — anything more deflected impacts.
+                    if (align < 0.9945f) dir_change = true;
+                }
+                if (dir_change || speed < min_speed) {
                     drop = true;
                     was_impact = true;
                     hit_pos = glm::vec3(m[3]);

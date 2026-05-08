@@ -308,6 +308,7 @@ void VulkanEngine::init() {
     present_loader_frame("Initialising UI",       0.95f);
     init_taa();
     init_viewmodel();
+    init_spacejet();
     init_imgui();
     update_scene_ubo();
     present_loader_frame("Ready",                 1.00f);
@@ -1327,6 +1328,7 @@ void VulkanEngine::shutdown() {
     guarded("save_settings",  [&]{ save_settings(); });
     guarded("destroy_imgui",  [&]{ destroy_imgui(); });
     guarded("destroy_viewmodel", [&]{ destroy_viewmodel(); });
+    guarded("destroy_spacejet",  [&]{ destroy_spacejet(); });
     guarded("destroy_taa",    [&]{ destroy_taa(); });
     // Order: tear down the renderer's GPU dependencies on dynamic-prop world
     // matrices (TLAS instance buffer) BEFORE destroying the physics world that

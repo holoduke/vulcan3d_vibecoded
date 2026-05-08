@@ -469,6 +469,19 @@ private:
     std::vector<ViewmodelMesh> viewmodel_gltf_;
     glm::mat4 viewmodel_root_offset_{ 1.0f };    // local-to-camera placement
 
+    // Spacejet decoration — glTF asset that hovers next to the
+    // castle on the plateau. One Mesh per primitive, drawn raster-
+    // only (no physics, no BLAS). Position + bob set at init time;
+    // animated via sin(frame_time) in render_world.
+    struct SpacejetMesh {
+        Mesh mesh;
+        glm::vec4 base_color = glm::vec4(0.7f, 0.72f, 0.78f, 1.0f);
+    };
+    std::vector<SpacejetMesh> spacejet_meshes_;
+    glm::mat4 spacejet_base_xform_{ 1.0f };       // position+scale, no animation
+    void init_spacejet();
+    void destroy_spacejet();
+
     // 60 dynamic crates: 100 still let the autodemo TDR (~2.4s on a 4080
     // even with the merged-static BLAS), so we drop further. The bottleneck
     // is per-pixel ray budget × in-flight projectiles + active dyn props,

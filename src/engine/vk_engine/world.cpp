@@ -1531,6 +1531,59 @@ void VulkanEngine::destroy_viewmodel() {
     viewmodel_proc_parts_.clear();
 }
 
+void VulkanEngine::init_spacejet() {
+    GltfModel gltf = load_gltf("assets/spacejet/scene.gltf");
+    if (gltf.primitives.empty()) {
+        log::info("spacejet: no asset at assets/spacejet/scene.gltf — skipping");
+        return;
+    }
+    // Place next to the castle on the plateau. Castle origin is
+    // (0, plateau_height) with brushes filling roughly the inner
+    // 56 m square; we drop the jet 18 m east of centre and 8 m
+    // up so it hovers comfortably above the parapet.
+    const float plateau_h = 22.0f;
+    glm::vec3 jet_world(18.0f, plateau_h + 8.0f, 6.0f);
+
+    // Normalise to a sensible visual size — scale so the asset's
+    // longest dimension is ~6 m.
+    glm::vec3 center = (gltf.aabb_min + gltf.aabb_max) * 0.5f;
+    glm::vec3 extent = gltf.aabb_max - gltf.aabb_min;
+    float max_side = std::max({extent.x, extent.y, extent.z, 1e-3f});
+    float scale = 6.0f / max_side;
+
+    // Many sci-fi glTF assets are exported Z-up; the engine is Y-up.
+    // Pre-rotate the model −90° around X so its top points to +Y.
+    glm::mat4 z_to_y = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f),
+                                    glm::vec3(1.0f, 0.0f, 0.0f));
+
+    spacejet_base_xform_ =
+        glm::translate(glm::mat4(1.0f), jet_world) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
+        z_to_y *
+        glm::translate(glm::mat4(1.0f), -center);
+
+    spacejet_meshes_.reserve(gltf.primitives.size());
+    for (const auto& prim : gltf.primitives) {
+        SpacejetMesh sm{};
+        sm.mesh = create_mesh_from_data(device_, allocator_, graphics_queue_,
+                                         graphics_queue_family_,
+                                         prim.vertices.data(),
+                                         static_cast<uint32_t>(prim.vertices.size()),
+                                         prim.indices.data(),
+                                         static_cast<uint32_t>(prim.indices.size()));
+        sm.base_color = prim.base_color;
+        spacejet_meshes_.push_back(std::move(sm));
+    }
+    log::infof("spacejet: loaded %zu primitives, scale=%.3f, pos=(%.1f,%.1f,%.1f)",
+               spacejet_meshes_.size(), scale,
+               jet_world.x, jet_world.y, jet_world.z);
+}
+
+void VulkanEngine::destroy_spacejet() {
+    for (auto& sm : spacejet_meshes_) destroy_mesh(allocator_, sm.mesh);
+    spacejet_meshes_.clear();
+}
+
 void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,
                                   const glm::mat4& view_inv) {
     auto draw_part = [&](const Mesh& m, const glm::mat4& model,
@@ -2184,6 +2237,41 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         }
         // Switch back to the cube pipeline + cube mesh for the brush loop.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    }
+
+    // Spacejet — hovering decoration on the plateau. One draw per
+    // glTF primitive. Animated via sin(time) for the bob and a
+    // slow yaw rotation. Raster-only; no physics, no BLAS.
+    if (!spacejet_meshes_.empty()) {
+        float t = static_cast<float>(frame_number_) * (1.0f / 60.0f);
+        float bob = std::sin(t * 1.2f) * 0.35f;          // ±35 cm sway
+        float yaw = t * 0.08f;                            // slow spin
+        glm::mat4 anim =
+            glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, bob, 0.0f)) *
+            glm::rotate   (glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::mat4 model = anim * spacejet_base_xform_;
+        for (const auto& sm : spacejet_meshes_) {
+            VkDeviceSize off = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &sm.mesh.vertex_buffer, &off);
+            vkCmdBindIndexBuffer(cmd, sm.mesh.index_buffer, 0,
+                                  VK_INDEX_TYPE_UINT32);
+            PushConstants pc{};
+            pc.mvp      = vp * model;
+            pc.model    = model;
+            pc.prev_mvp = prev_vp * model;   // mostly stationary, fine for TAA
+            pc.color    = sm.base_color;
+            pc.emissive = glm::vec4(0.0f);
+            pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
+            vkCmdPushConstants(cmd, pipeline_layout_,
+                               VK_SHADER_STAGE_VERTEX_BIT |
+                                 VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(PushConstants), &pc);
+            vkCmdDrawIndexed(cmd, sm.mesh.index_count, 1, 0, 0, 0);
+        }
+        // Restore cube mesh binding for the grass / dust passes that
+        // assume the cube vertex/index buffer is current.
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }
