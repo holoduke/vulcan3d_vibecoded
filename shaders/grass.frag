@@ -9,6 +9,7 @@ layout(location = 4) in float vCullKill;
 layout(location = 5) in vec3 vWorldPos;
 layout(location = 6) in float vSunShadow;
 layout(location = 7) in float vDistToCam;
+layout(location = 8) in vec4 vPrevClip;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
@@ -113,5 +114,19 @@ void main() {
     if (side_taper < scene.grass_extra.y && vHeightRatio > 0.85) discard;
 
     outColor = vec4(lit, 1.0);
-    outMotion = vec2(0.0);   // wind motion not tracked — TAA tolerates
+    // Screen-space motion vector — current_uv − prev_uv. Same pattern
+    // as cube.frag. Without this, walking grass goes black-flickery
+    // because TAA reprojects against the same screen pixel from the
+    // previous frame (which was a different blade or sky).
+    {
+        vec2 current_uv = (gl_FragCoord.xy + 0.5) * scene.viewport.zw;
+        if (vPrevClip.w > 0.0) {
+            vec2 prev_ndc = vPrevClip.xy / vPrevClip.w;
+            vec2 prev_uv  = prev_ndc * vec2(0.5, 0.5) + vec2(0.5);
+            outMotion = current_uv - prev_uv;
+        } else {
+            outMotion = vec2(0.0);
+        }
+    }
+    // (older comment retained as note for the wind case — wind sway not tracked)
 }

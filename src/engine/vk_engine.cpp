@@ -79,6 +79,157 @@ namespace qlike {
 VulkanEngine::VulkanEngine() = default;
 VulkanEngine::~VulkanEngine() { shutdown(); }
 
+void VulkanEngine::present_loader_frame(const char* label, float progress) {
+    if (!device_ || !swapchain_ || swapchain_images_.empty()) return;
+
+    if (window_) {
+        std::string title = "quake-like — ";
+        title += label ? label : "Loading…";
+        glfwSetWindowTitle(window_->handle(), title.c_str());
+        // Pump GLFW so the OS doesn't mark the window as "not responding"
+        // during the long init steps that sit between loader frames.
+        window_->poll_events();
+    }
+
+    auto& frame = current_frame();
+
+    QLIKE_VK_CHECK(vkWaitForFences(device_, 1, &frame.render_fence,
+                                    VK_TRUE, UINT64_MAX),
+                   "loader: vkWaitForFences");
+
+    uint32_t img_idx = 0;
+    VkResult acq = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,
+                                          frame.swapchain_semaphore,
+                                          VK_NULL_HANDLE, &img_idx);
+    if (acq == VK_ERROR_OUT_OF_DATE_KHR) { resize_requested_ = true; return; }
+    if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
+        QLIKE_VK_CHECK(acq, "loader: vkAcquireNextImageKHR");
+    }
+
+    QLIKE_VK_CHECK(vkResetFences(device_, 1, &frame.render_fence),
+                   "loader: vkResetFences");
+    QLIKE_VK_CHECK(vkResetCommandBuffer(frame.command_buffer, 0),
+                   "loader: vkResetCommandBuffer");
+
+    auto bi = vkinit::command_buffer_begin_info(
+        VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+    QLIKE_VK_CHECK(vkBeginCommandBuffer(frame.command_buffer, &bi),
+                   "loader: vkBeginCommandBuffer");
+
+    vkinit::transition_image(frame.command_buffer,
+                              swapchain_images_[img_idx],
+                              VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    VkClearValue clear_bg{};
+    clear_bg.color = { { 0.045f, 0.055f, 0.075f, 1.0f } };  // dark navy
+    auto sw_color = vkinit::color_attachment_info(
+        swapchain_views_[img_idx], &clear_bg,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingInfo ri{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .pNext = nullptr, .flags = 0,
+        .renderArea = { {0, 0}, swapchain_extent_ },
+        .layerCount = 1, .viewMask = 0,
+        .colorAttachmentCount = 1, .pColorAttachments = &sw_color,
+        .pDepthAttachment = nullptr, .pStencilAttachment = nullptr,
+    };
+    vkCmdBeginRendering(frame.command_buffer, &ri);
+
+    // Progress-bar geometry — drawn purely with vkCmdClearAttachments
+    // rectangles so we don't need a pipeline / shaders / vertex buffer
+    // up at this point in init().
+    auto clear_rect = [&](int x, int y, int w, int h,
+                          float r, float g, float b) {
+        if (w <= 0 || h <= 0) return;
+        VkClearAttachment ca{};
+        ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        ca.colorAttachment = 0;
+        ca.clearValue.color = { { r, g, b, 1.0f } };
+        VkClearRect cr{};
+        cr.rect.offset = { x, y };
+        cr.rect.extent = { static_cast<uint32_t>(w),
+                            static_cast<uint32_t>(h) };
+        cr.baseArrayLayer = 0;
+        cr.layerCount = 1;
+        vkCmdClearAttachments(frame.command_buffer, 1, &ca, 1, &cr);
+    };
+
+    int W = static_cast<int>(swapchain_extent_.width);
+    int H = static_cast<int>(swapchain_extent_.height);
+    int bar_w = std::min(640, W - 80);
+    int bar_h = 14;
+    int bar_x = (W - bar_w) / 2;
+    int bar_y = H * 5 / 8;
+
+    // Title strip — a slim accent band above the progress bar so the
+    // window isn't just a blank rectangle. Position picked so the bar
+    // sits roughly where eye-line would on a 1280×720 / 1920×1080 split.
+    int strip_w = bar_w;
+    int strip_h = 3;
+    int strip_x = bar_x;
+    int strip_y = bar_y - 36;
+    clear_rect(strip_x, strip_y, strip_w, strip_h,
+               0.30f, 0.38f, 0.55f);
+
+    // Track + filled portion. Track is dim, fill is a brand-blue.
+    clear_rect(bar_x, bar_y, bar_w, bar_h,
+               0.13f, 0.15f, 0.19f);
+    float p = progress;
+    if (p < 0.0f) p = 0.0f;
+    if (p > 1.0f) p = 1.0f;
+    int fill_w = static_cast<int>(static_cast<float>(bar_w) * p + 0.5f);
+    clear_rect(bar_x, bar_y, fill_w, bar_h,
+               0.42f, 0.62f, 0.92f);
+
+    vkCmdEndRendering(frame.command_buffer);
+
+    vkinit::transition_image(frame.command_buffer,
+                              swapchain_images_[img_idx],
+                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                              VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+    QLIKE_VK_CHECK(vkEndCommandBuffer(frame.command_buffer),
+                   "loader: vkEndCommandBuffer");
+
+    auto wait = vkinit::semaphore_submit_info(
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        frame.swapchain_semaphore);
+    auto signal = vkinit::semaphore_submit_info(
+        VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+        render_semaphores_[img_idx]);
+    auto cmd_info = vkinit::command_buffer_submit_info(frame.command_buffer);
+    VkSubmitInfo2 submit{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .pNext = nullptr, .flags = 0,
+        .waitSemaphoreInfoCount = 1, .pWaitSemaphoreInfos = &wait,
+        .commandBufferInfoCount = 1, .pCommandBufferInfos = &cmd_info,
+        .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &signal,
+    };
+    QLIKE_VK_CHECK(vkQueueSubmit2(graphics_queue_, 1, &submit,
+                                   frame.render_fence),
+                   "loader: vkQueueSubmit2");
+
+    VkPresentInfoKHR present{
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .pNext = nullptr,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &render_semaphores_[img_idx],
+        .swapchainCount = 1,
+        .pSwapchains = &swapchain_,
+        .pImageIndices = &img_idx,
+        .pResults = nullptr,
+    };
+    VkResult pres = vkQueuePresentKHR(graphics_queue_, &present);
+    if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) {
+        resize_requested_ = true;
+    } else if (pres != VK_SUCCESS) {
+        QLIKE_VK_CHECK(pres, "loader: vkQueuePresentKHR");
+    }
+
+    ++frame_number_;
+}
+
 void VulkanEngine::init() {
     log::info("VulkanEngine::init()");
     window_ = std::make_unique<Window>(WindowConfig{ .width = 1280, .height = 720,
@@ -96,12 +247,25 @@ void VulkanEngine::init() {
     init_depth_image();
     init_commands();
     init_sync();
+    // Loader is presentable from here on. Each subsequent step is the
+    // long-running ones (init_world / init_rt / shadow bake) that the
+    // user used to stare at a blank window for.
+    present_loader_frame("Building world",        0.05f);
     init_readback_buffer();
+    // load_settings() runs AFTER init_world (it restores player pose
+    // that init_world otherwise overwrites). But init_world needs to
+    // know whether to source the heightmap from the shader-matching
+    // FBM (when raymarch is enabled) or the default FastNoiseLite path.
+    // Peek just that one flag here.
+    preload_terrain_raymarch_flag();
     init_world();
+    present_loader_frame("Loading skybox",        0.30f);
     init_skybox();
     init_textures();
+    present_loader_frame("Loading settings",      0.40f);
     load_settings();
     init_descriptors();
+    present_loader_frame("Building ray tracing",  0.50f);
     init_rt();
     {
         VkImageView alb[kTextureCount]{}, nrm[kTextureCount]{};
@@ -114,10 +278,20 @@ void VulkanEngine::init() {
                                      prev_transforms_buffer_,
                                      alb, nrm, kTextureCount, texture_sampler_);
     }
+    present_loader_frame("Compiling pipelines",   0.70f);
     init_pipeline();
     init_terrain_pipelines();
+    init_terrain_raymarch_pipeline();
+    init_terrain_raymarch_compose_pipeline();
+    init_terrain_raymarch_lowres();
     init_sun_shadow_pipeline();
     init_grass_pipeline();
+    present_loader_frame("Baking shadows",        0.85f);
+    // Heightmap raw-heights texture (binding 8) for the procedural
+    // raymarched terrain shader. Uploaded once, after descriptors and
+    // init_world have populated terrain_data_. Cheap (~16 MB at 2048²
+    // R32F).
+    init_terrain_height_texture();
     // Heightmap shadow texture must be baked AFTER descriptors and the
     // texture itself can be created; depends on terrain_data_ which
     // init_world fills. Done here so the descriptor write at the end
@@ -131,10 +305,17 @@ void VulkanEngine::init() {
     // one-shot binding-7 write at the end of init_sun_shadow_resources
     // lands on the live scene set.
     init_sun_shadow_resources();
+    present_loader_frame("Initialising UI",       0.95f);
     init_taa();
     init_viewmodel();
     init_imgui();
     update_scene_ubo();
+    present_loader_frame("Ready",                 1.00f);
+    // Loader frames advanced frame_number_ — reset so --frames N and
+    // screenshot-after counters in run() count from the first real
+    // gameplay frame, not from "real frames + N loader frames".
+    frame_number_ = 0;
+    if (window_) glfwSetWindowTitle(window_->handle(), "quake-like");
     initialized_ = true;
     log::info("VulkanEngine::init() done");
 }
@@ -259,6 +440,85 @@ void VulkanEngine::draw(uint32_t img_index) {
         vkCmdEndRendering(frame.command_buffer);
     }
 
+    // ---------- Pass 0.5: low-res raymarch terrain (when scale < 1) ----------
+    // Renders the FBM raymarch into tr_lr_* attachments at a fraction of
+    // the main resolution. Compose pass at the start of the world color
+    // pass below upscales it into scene_color/depth with depth-aware
+    // composite so cube/castle/dyn-props (drawn afterwards) layer on top.
+    if (tr_use_lowres() && terrain_raymarch_pipeline_) {
+        vkinit::transition_image(frame.command_buffer, tr_lr_color_image_,
+                                 VK_IMAGE_LAYOUT_UNDEFINED,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        vkinit::transition_image(frame.command_buffer, tr_lr_motion_image_,
+                                 VK_IMAGE_LAYOUT_UNDEFINED,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        vkinit::transition_image_aspect(frame.command_buffer, tr_lr_depth_image_,
+                                        VK_IMAGE_LAYOUT_UNDEFINED,
+                                        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                        VK_IMAGE_ASPECT_DEPTH_BIT);
+
+        VkClearValue lr_clear_c{};
+        lr_clear_c.color = { { 0.0f, 0.0f, 0.0f, 0.0f } };
+        VkClearValue lr_clear_m{};
+        lr_clear_m.color = { { 0.0f, 0.0f, 0.0f, 0.0f } };
+        VkClearValue lr_clear_d{};
+        lr_clear_d.depthStencil.depth = 1.0f;
+
+        VkRenderingAttachmentInfo lr_color_att =
+            vkinit::color_attachment_info(tr_lr_color_view_, &lr_clear_c,
+                                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo lr_motion_att =
+            vkinit::color_attachment_info(tr_lr_motion_view_, &lr_clear_m,
+                                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo lr_color_atts[2] = { lr_color_att, lr_motion_att };
+        VkRenderingAttachmentInfo lr_depth_att{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .pNext = nullptr,
+            .imageView = tr_lr_depth_view_,
+            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            .resolveMode = VK_RESOLVE_MODE_NONE,
+            .resolveImageView = VK_NULL_HANDLE,
+            .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .clearValue = lr_clear_d,
+        };
+        VkRenderingInfo lr_ri{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .pNext = nullptr, .flags = 0,
+            .renderArea = { {0, 0}, tr_lr_extent_ },
+            .layerCount = 1, .viewMask = 0,
+            .colorAttachmentCount = 2, .pColorAttachments = lr_color_atts,
+            .pDepthAttachment = &lr_depth_att, .pStencilAttachment = nullptr,
+        };
+        vkCmdBeginRendering(frame.command_buffer, &lr_ri);
+
+        VkViewport lr_vp{};
+        lr_vp.x = 0.0f; lr_vp.y = 0.0f;
+        lr_vp.width  = static_cast<float>(tr_lr_extent_.width);
+        lr_vp.height = static_cast<float>(tr_lr_extent_.height);
+        lr_vp.minDepth = 0.0f; lr_vp.maxDepth = 1.0f;
+        vkCmdSetViewport(frame.command_buffer, 0, 1, &lr_vp);
+        VkRect2D lr_sc{ {0, 0}, tr_lr_extent_ };
+        vkCmdSetScissor(frame.command_buffer, 0, 1, &lr_sc);
+
+        render_terrain_raymarch_lr(frame.command_buffer);
+
+        vkCmdEndRendering(frame.command_buffer);
+
+        // Transition all three to SHADER_READ_ONLY for the compose pass.
+        vkinit::transition_image(frame.command_buffer, tr_lr_color_image_,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        vkinit::transition_image(frame.command_buffer, tr_lr_motion_image_,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        vkinit::transition_image_aspect(frame.command_buffer, tr_lr_depth_image_,
+                                        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                        VK_IMAGE_ASPECT_DEPTH_BIT);
+    }
+
     auto color_att = vkinit::color_attachment_info(scene_color_view_,
                                                    &clear_color,
                                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -302,6 +562,20 @@ void VulkanEngine::draw(uint32_t img_index) {
 
     // ---------- Pass 1: scene → scene_color_image_ + motion_vec_image_ ----------
     vkCmdBeginRendering(frame.command_buffer, &rendering);
+    // When LR upscaling is active, run the compose first so the
+    // upscaled raymarch terrain populates scene_color/motion/depth
+    // before the rasterised geometry draws on top.
+    if (tr_use_lowres() && tr_compose_pipeline_ != VK_NULL_HANDLE) {
+        VkViewport vp{};
+        vp.x = 0.0f; vp.y = 0.0f;
+        vp.width  = static_cast<float>(render_extent_.width);
+        vp.height = static_cast<float>(render_extent_.height);
+        vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+        vkCmdSetViewport(frame.command_buffer, 0, 1, &vp);
+        VkRect2D sc{ {0, 0}, render_extent_ };
+        vkCmdSetScissor(frame.command_buffer, 0, 1, &sc);
+        render_terrain_raymarch_compose(frame.command_buffer);
+    }
     render_world(frame.command_buffer);
     vkCmdEndRendering(frame.command_buffer);
 
@@ -1068,6 +1342,10 @@ void VulkanEngine::shutdown() {
     guarded("destroy_skybox", [&]{ destroy_skybox_resources(); });
     guarded("destroy_textures", [&]{ destroy_textures(); });
     guarded("destroy_grass_pipeline", [&]{ destroy_grass_pipeline(); });
+    guarded("destroy_terrain_height_texture", [&]{ destroy_terrain_height_texture(); });
+    guarded("destroy_terrain_raymarch_lowres", [&]{ destroy_terrain_raymarch_lowres(); });
+    guarded("destroy_terrain_raymarch_compose_pipeline", [&]{ destroy_terrain_raymarch_compose_pipeline(); });
+    guarded("destroy_terrain_raymarch_pipeline", [&]{ destroy_terrain_raymarch_pipeline(); });
     guarded("destroy_terrain_pipelines", [&]{ destroy_terrain_pipelines(); });
     guarded("destroy_sun_shadow_pipeline", [&]{ destroy_sun_shadow_pipeline(); });
     guarded("destroy_pipeline", [&]{ destroy_pipeline(); });

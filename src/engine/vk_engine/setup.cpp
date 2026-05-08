@@ -10,6 +10,8 @@
 #include <VkBootstrap.h>
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -259,6 +261,12 @@ void VulkanEngine::recreate_swapchain() {
     // image bindings (history at 0, depth at 1, bloom at 3) all reference
     // image views that were just destroyed, so rebind them.
     if (bloom_image_) recreate_bloom_targets();
+    // LR raymarch targets are sized at render_extent_ × scale; rebuild
+    // them too so the upscale compose continues to read valid storage.
+    if (tr_lr_color_image_) {
+        destroy_terrain_raymarch_lowres();
+        init_terrain_raymarch_lowres();
+    }
     rewrite_compose_image_bindings();
 
     VkDeviceSize needed = static_cast<VkDeviceSize>(swapchain_extent_.width) *
@@ -476,6 +484,270 @@ void VulkanEngine::destroy_terrain_pipelines() {
     terrain_vert_module_ = VK_NULL_HANDLE;
 }
 
+void VulkanEngine::init_terrain_raymarch_pipeline() {
+    std::string sd = QLIKE_SHADER_DIR;
+    terrain_raymarch_vert_module_ = vkpipe::load_shader_module(
+        device_, sd + "/terrain_raymarch.vert.spv");
+    terrain_raymarch_frag_module_ = vkpipe::load_shader_module(
+        device_, sd + "/terrain_raymarch.frag.spv");
+
+    vkpipe::GraphicsPipelineConfig cfg{};
+    cfg.vert = terrain_raymarch_vert_module_;
+    cfg.frag = terrain_raymarch_frag_module_;
+    cfg.layout = pipeline_layout_;          // shares the cube push-constant layout
+    cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+    cfg.depth_format = depth_format_;
+    // No vertex bindings — the vert builds NDC corners from gl_VertexIndex.
+    cfg.cull = VK_CULL_MODE_NONE;
+    cfg.depth_test = true;
+    cfg.depth_write = true;
+    // LESS_OR_EQUAL so gl_FragDepth = far_plane fragments don't get
+    // rejected by the cleared depth buffer (which is also 1.0).
+    cfg.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    terrain_raymarch_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    log::info("terrain raymarch pipeline built");
+}
+
+void VulkanEngine::destroy_terrain_raymarch_pipeline() {
+    if (terrain_raymarch_pipeline_) {
+        vkDestroyPipeline(device_, terrain_raymarch_pipeline_, nullptr);
+        terrain_raymarch_pipeline_ = VK_NULL_HANDLE;
+    }
+    if (terrain_raymarch_vert_module_) {
+        vkDestroyShaderModule(device_, terrain_raymarch_vert_module_, nullptr);
+        terrain_raymarch_vert_module_ = VK_NULL_HANDLE;
+    }
+    if (terrain_raymarch_frag_module_) {
+        vkDestroyShaderModule(device_, terrain_raymarch_frag_module_, nullptr);
+        terrain_raymarch_frag_module_ = VK_NULL_HANDLE;
+    }
+}
+
+// === Low-res raymarch upscale targets ====================================
+//
+// Three images sized at render_extent_ × terrain_raymarch_scale: HDR
+// color, motion-vec, and a D32 depth. The raymarch pipeline draws into
+// these in a separate render pass; the compose pipeline samples them
+// (bilinear) and writes upscaled color / motion / gl_FragDepth into
+// scene_color / motion_vec_view / depth_view at the start of the main
+// world pass with depth-test LESS_OR_EQUAL so the already-prepass-
+// populated cube/castle depths properly occlude the procedural surface.
+bool VulkanEngine::tr_use_lowres() const {
+    return rt_.terrain_raymarch_enabled &&
+           rt_.terrain_raymarch_scale < 0.999f;
+}
+
+void VulkanEngine::init_terrain_raymarch_lowres() {
+    // Compute the scaled extent. Floor to int, min 1.
+    float s = std::clamp(rt_.terrain_raymarch_scale, 0.25f, 1.0f);
+    uint32_t lw = std::max<uint32_t>(1u, static_cast<uint32_t>(
+        std::round(static_cast<float>(render_extent_.width)  * s)));
+    uint32_t lh = std::max<uint32_t>(1u, static_cast<uint32_t>(
+        std::round(static_cast<float>(render_extent_.height) * s)));
+    tr_lr_extent_ = { lw, lh };
+
+    auto make_color = [&](VkFormat fmt, VkImage& img, VmaAllocation& alloc,
+                           VkImageView& view, const char* tag) {
+        VkImageCreateInfo ici{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = fmt,
+            .extent = { lw, lh, 1 },
+            .mipLevels = 1, .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                     VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        vk_check(vmaCreateImage(allocator_, &ici, &aci, &img, &alloc, nullptr),
+                 tag);
+        VkImageViewCreateInfo vci{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr, .flags = 0, .image = img,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt,
+            .components = {},
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0, .levelCount = 1,
+                .baseArrayLayer = 0, .layerCount = 1,
+            },
+        };
+        vk_check(vkCreateImageView(device_, &vci, nullptr, &view), tag);
+    };
+    make_color(scene_color_format_,
+               tr_lr_color_image_,  tr_lr_color_alloc_,  tr_lr_color_view_,
+               "tr_lr_color");
+    make_color(motion_vec_format_,
+               tr_lr_motion_image_, tr_lr_motion_alloc_, tr_lr_motion_view_,
+               "tr_lr_motion");
+
+    // Depth — the compose shader samples this as a normal sampler2D
+    // (R32 read), so the image's view aspect is DEPTH but the
+    // descriptor type is still combined_image_sampler.
+    {
+        VkImageCreateInfo ici{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = depth_format_,
+            .extent = { lw, lh, 1 },
+            .mipLevels = 1, .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                     VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        vk_check(vmaCreateImage(allocator_, &ici, &aci,
+                                 &tr_lr_depth_image_, &tr_lr_depth_alloc_, nullptr),
+                 "tr_lr_depth image");
+        VkImageViewCreateInfo vci{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .image = tr_lr_depth_image_,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = depth_format_,
+            .components = {},
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0, .levelCount = 1,
+                .baseArrayLayer = 0, .layerCount = 1,
+            },
+        };
+        vk_check(vkCreateImageView(device_, &vci, nullptr, &tr_lr_depth_view_),
+                 "tr_lr_depth view");
+    }
+
+    // Linear sampler — the bilinear upscale is the whole reason we
+    // can ship this at half-res without it looking like Minecraft.
+    if (!tr_lr_sampler_) {
+        VkSamplerCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = VK_FILTER_LINEAR;
+        si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vk_check(vkCreateSampler(device_, &si, nullptr, &tr_lr_sampler_),
+                 "tr_lr_sampler");
+    }
+
+    // Write descriptor bindings 9, 10, 11. These are stable across
+    // resize for the lifetime of the views (we destroy + rewrite on
+    // recreate).
+    VkDescriptorImageInfo dii_c{};
+    dii_c.sampler     = tr_lr_sampler_;
+    dii_c.imageView   = tr_lr_color_view_;
+    dii_c.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo dii_m{};
+    dii_m.sampler     = tr_lr_sampler_;
+    dii_m.imageView   = tr_lr_motion_view_;
+    dii_m.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo dii_d{};
+    dii_d.sampler     = tr_lr_sampler_;
+    dii_d.imageView   = tr_lr_depth_view_;
+    dii_d.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet writes[3] = {};
+    for (int i = 0; i < 3; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = scene_desc_set_;
+        writes[i].dstBinding = static_cast<uint32_t>(9 + i);
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    }
+    writes[0].pImageInfo = &dii_c;
+    writes[1].pImageInfo = &dii_m;
+    writes[2].pImageInfo = &dii_d;
+    vkUpdateDescriptorSets(device_, 3, writes, 0, nullptr);
+    log::infof("terrain raymarch low-res targets: %ux%u (%.0f%%)",
+               lw, lh, s * 100.0f);
+}
+
+void VulkanEngine::destroy_terrain_raymarch_lowres() {
+    if (tr_lr_color_view_) {
+        vkDestroyImageView(device_, tr_lr_color_view_, nullptr);
+        tr_lr_color_view_ = VK_NULL_HANDLE;
+    }
+    if (tr_lr_color_image_) {
+        vmaDestroyImage(allocator_, tr_lr_color_image_, tr_lr_color_alloc_);
+        tr_lr_color_image_ = VK_NULL_HANDLE;
+        tr_lr_color_alloc_ = nullptr;
+    }
+    if (tr_lr_motion_view_) {
+        vkDestroyImageView(device_, tr_lr_motion_view_, nullptr);
+        tr_lr_motion_view_ = VK_NULL_HANDLE;
+    }
+    if (tr_lr_motion_image_) {
+        vmaDestroyImage(allocator_, tr_lr_motion_image_, tr_lr_motion_alloc_);
+        tr_lr_motion_image_ = VK_NULL_HANDLE;
+        tr_lr_motion_alloc_ = nullptr;
+    }
+    if (tr_lr_depth_view_) {
+        vkDestroyImageView(device_, tr_lr_depth_view_, nullptr);
+        tr_lr_depth_view_ = VK_NULL_HANDLE;
+    }
+    if (tr_lr_depth_image_) {
+        vmaDestroyImage(allocator_, tr_lr_depth_image_, tr_lr_depth_alloc_);
+        tr_lr_depth_image_ = VK_NULL_HANDLE;
+        tr_lr_depth_alloc_ = nullptr;
+    }
+    if (tr_lr_sampler_) {
+        vkDestroySampler(device_, tr_lr_sampler_, nullptr);
+        tr_lr_sampler_ = VK_NULL_HANDLE;
+    }
+}
+
+void VulkanEngine::recreate_terrain_raymarch_lowres() {
+    vkDeviceWaitIdle(device_);
+    destroy_terrain_raymarch_lowres();
+    init_terrain_raymarch_lowres();
+}
+
+void VulkanEngine::init_terrain_raymarch_compose_pipeline() {
+    std::string sd = QLIKE_SHADER_DIR;
+    tr_compose_frag_module_ = vkpipe::load_shader_module(
+        device_, sd + "/terrain_raymarch_compose.frag.spv");
+
+    vkpipe::GraphicsPipelineConfig cfg{};
+    cfg.vert = terrain_raymarch_vert_module_;   // reuse the fullscreen-tri vert
+    cfg.frag = tr_compose_frag_module_;
+    cfg.layout = pipeline_layout_;
+    cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+    cfg.depth_format = depth_format_;
+    cfg.cull = VK_CULL_MODE_NONE;
+    cfg.depth_test = true;
+    cfg.depth_write = true;
+    // LESS_OR_EQUAL — we want raymarch fragments that beat (or tie) the
+    // cube prepass depth. Cube fragments drawn later will pass the
+    // same comparison only where they're actually closer than the
+    // raymarch.
+    cfg.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+    tr_compose_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    log::info("terrain raymarch compose pipeline built");
+}
+
+void VulkanEngine::destroy_terrain_raymarch_compose_pipeline() {
+    if (tr_compose_pipeline_) {
+        vkDestroyPipeline(device_, tr_compose_pipeline_, nullptr);
+        tr_compose_pipeline_ = VK_NULL_HANDLE;
+    }
+    if (tr_compose_frag_module_) {
+        vkDestroyShaderModule(device_, tr_compose_frag_module_, nullptr);
+        tr_compose_frag_module_ = VK_NULL_HANDLE;
+    }
+}
+
 void VulkanEngine::init_sun_shadow_pipeline() {
     std::string sd = QLIKE_SHADER_DIR;
     sun_shadow_vert_module_ = vkpipe::load_shader_module(device_, sd + "/shadow.vert.spv");
@@ -486,11 +758,13 @@ void VulkanEngine::init_sun_shadow_pipeline() {
     cfg.layout = pipeline_layout_;       // shares the cube push-constant layout
     cfg.color_attachment_count = 0;
     cfg.depth_format = VK_FORMAT_D32_SFLOAT;
-    // Front-face cull on shadow casters reduces shadow-acne backside
-    // contribution. CULL_FRONT is the trick — render only back-facing
-    // tris into the depth map, so the front face that the user sees
-    // never matches its own depth and self-acne goes away.
-    cfg.cull = VK_CULL_MODE_FRONT_BIT;
+    // CULL_NONE on shadow casters: at a ground-contact line (cube on
+    // terrain) the bottom face is back-facing the light and equals the
+    // ground depth, so CULL_FRONT would let the ground test as lit at
+    // the contact. Recording both faces with positive depth bias gives
+    // a sun-facing caster depth at the contact line and the existing
+    // bias still controls self-acne.
+    cfg.cull = VK_CULL_MODE_NONE;
     cfg.depth_test = true;
     cfg.depth_write = true;
     cfg.depth_compare = VK_COMPARE_OP_LESS;

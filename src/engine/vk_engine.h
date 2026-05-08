@@ -97,6 +97,13 @@ private:
     void destroy_depth_image();
     void init_commands();
     void init_sync();
+
+    // Show a blocking loader frame on the swapchain. Cheap progress bar
+    // drawn via vkCmdClearAttachments rectangles — no pipelines, no
+    // ImGui. Safe to call as soon as init_sync() has run; uses the same
+    // FrameData ring as the main render loop so it consumes one frame
+    // index per call. `progress` is clamped to [0,1].
+    void present_loader_frame(const char* label, float progress);
     void init_readback_buffer();
     void destroy_readback_buffer();
     void init_pipeline();
@@ -132,6 +139,9 @@ private:
     void render_world_depth_pass(VkCommandBuffer cmd);
     void build_hud_ui();
     void load_settings();
+    // One-key peek that runs BEFORE init_world so the heightmap source
+    // (FBM vs FastNoiseLite) can match what the user toggled last session.
+    void preload_terrain_raymarch_flag();
     void save_settings() const;
     // Diff rt_ against last-saved snapshot; debounce-save 500ms after the
     // last detected change so dragging a slider doesn't churn the disk.
@@ -229,6 +239,53 @@ private:
     VkShaderModule  terrain_vert_module_    = VK_NULL_HANDLE;
     void init_terrain_pipelines();
     void destroy_terrain_pipelines();
+
+    // Procedural FBM heightfield ray-marched terrain — selectable
+    // alternate to the chunked rasterised path. Fullscreen triangle
+    // (gl_VertexIndex 0..2) writes hit-point depth via gl_FragDepth so
+    // it composites with rasterised cubes / castle / dyn-props.
+    // Toggled by rt_.terrain_raymarch_enabled.
+    VkPipeline      terrain_raymarch_pipeline_   = VK_NULL_HANDLE;
+    VkShaderModule  terrain_raymarch_vert_module_ = VK_NULL_HANDLE;
+    VkShaderModule  terrain_raymarch_frag_module_ = VK_NULL_HANDLE;
+    void init_terrain_raymarch_pipeline();
+    void destroy_terrain_raymarch_pipeline();
+
+    // Low-res raymarch render target. When `terrain_raymarch_scale` < 1
+    // the FBM ray-march renders into these (cheaper, since each pixel
+    // does ~hundreds of FBM evaluations) and a separate compose pass
+    // bilinear-upscales them into the full-res scene_color/depth with
+    // depth-aware blending so rasterised cubes/castle still occlude
+    // correctly. Each LR* image is sized at render_extent_ × scale.
+    VkImage         tr_lr_color_image_  = VK_NULL_HANDLE;
+    VmaAllocation   tr_lr_color_alloc_  = nullptr;
+    VkImageView     tr_lr_color_view_   = VK_NULL_HANDLE;
+    VkImage         tr_lr_motion_image_ = VK_NULL_HANDLE;
+    VmaAllocation   tr_lr_motion_alloc_ = nullptr;
+    VkImageView     tr_lr_motion_view_  = VK_NULL_HANDLE;
+    VkImage         tr_lr_depth_image_  = VK_NULL_HANDLE;
+    VmaAllocation   tr_lr_depth_alloc_  = nullptr;
+    VkImageView     tr_lr_depth_view_   = VK_NULL_HANDLE;
+    VkSampler       tr_lr_sampler_      = VK_NULL_HANDLE;
+    VkExtent2D      tr_lr_extent_{};
+
+    // Compose pipeline that samples the low-res raymarch and writes
+    // upscaled color/motion + gl_FragDepth into scene_color/depth with
+    // depth-test enabled (so closer rasterised geometry survives).
+    VkPipeline      tr_compose_pipeline_     = VK_NULL_HANDLE;
+    VkShaderModule  tr_compose_frag_module_  = VK_NULL_HANDLE;
+
+    void init_terrain_raymarch_lowres();
+    void destroy_terrain_raymarch_lowres();
+    // Recreate when render_extent_ or terrain_raymarch_scale changes.
+    void recreate_terrain_raymarch_lowres();
+    void init_terrain_raymarch_compose_pipeline();
+    void destroy_terrain_raymarch_compose_pipeline();
+    // Helper: returns true if the LR-upscale path should run this frame.
+    bool tr_use_lowres() const;
+    // Pass entry-points for the LR raymarch + the upscale composite.
+    void render_terrain_raymarch_lr(VkCommandBuffer cmd);
+    void render_terrain_raymarch_compose(VkCommandBuffer cmd);
     VkShaderModule depth_frag_module_ = VK_NULL_HANDLE;
 
     Mesh cube_mesh_{};
@@ -560,6 +617,19 @@ private:
     VkShaderModule   grass_frag_module_    = VK_NULL_HANDLE;
     void init_grass_pipeline();
     void destroy_grass_pipeline();
+
+    // Heightmap raw heights as an R32_SFLOAT texture. Used by the
+    // procedural raymarched terrain shader (binding 8) so the
+    // procedural surface follows the gameplay heightmap shape.
+    // Uploaded once at init from terrain_data_.heights; sculpt edits
+    // don't propagate (re-call init_terrain_height_texture to refresh).
+    VkImage           terrain_height_image_   = VK_NULL_HANDLE;
+    VmaAllocation     terrain_height_alloc_   = nullptr;
+    VkImageView       terrain_height_view_    = VK_NULL_HANDLE;
+    VkSampler         terrain_height_sampler_ = VK_NULL_HANDLE;
+    float             terrain_height_max_     = 0.0f;   // upper-bound for raymarch early-out
+    void init_terrain_height_texture();
+    void destroy_terrain_height_texture();
 
     // CPU-baked heightmap sun-shadow texture (R8). Sampled by
     // grass.vert per blade so distant grass picks up mountain
@@ -978,6 +1048,38 @@ private:
         // ~2GB of GPU memory on the chunk meshes alone). Applied at
         // level load — change requires a restart.
         int terrain_heightmap_scale = 1;
+        // Selectable terrain renderer. false = chunked rasterised mesh
+        // (default, matches the gameplay heightmap). true = fullscreen
+        // procedural FBM ray-marched terrain (terrain_raymarch.frag,
+        // visual-only — physics still uses the rasterised heightmap so
+        // castle / cubes won't sit on the procedural surface). The
+        // shader is toggled at draw time, no rebuild needed.
+        bool terrain_raymarch_enabled = false;
+        // Raymarch FPS knobs. Larger = better quality, slower. Defaults
+        // are the values the reference document recommends; on weaker
+        // GPUs drop both to ~120 / ~32 for a meaningful FPS bump.
+        int  terrain_raymarch_max_steps    = 200;   // 60–300
+        int  terrain_raymarch_shadow_steps = 64;    // 16–96
+        // FBM octaves used by the per-march sampling (terrainM). 9 is
+        // the document default; 5–6 is noticeably faster and visually
+        // close because each higher octave adds half the previous
+        // amplitude (last 3 of 9 contribute ~1.5 % of total).
+        int  terrain_raymarch_octaves        = 9;   // 4–24
+        // FBM octaves for normal sampling (terrainH). Called 3× per
+        // hit pixel for finite-difference normals — biggest single
+        // perf knob. 16 is the doc default; 8 is barely-distinguishable.
+        int  terrain_raymarch_normal_octaves = 16;  // 4–32
+        // Step-factor: ratio of the height-field gap consumed per
+        // march iteration. 0.4 is conservative (no overshoot on sharp
+        // ridges). 0.6–0.8 finishes the same march in ~half the
+        // iterations at the cost of a tiny chance of skipping over a
+        // thin spike.
+        float terrain_raymarch_step_factor   = 0.4f;
+        // Render-scale for the procedural raymarch ONLY. 1.0 = native
+        // (current behaviour). 0.5 = half-res raymarch + bilinear
+        // upscale composite (~4× fewer FBM evaluations per frame).
+        // Cubes / castle / dyn-props always rasterise at native res.
+        float terrain_raymarch_scale         = 1.0f;
         // Multiplier on the RT shadow ray count for fragments within
         // rt_lod.x (close to the camera). 1 = unchanged, higher = more
         // rays close-by for smoother penumbras under boxes / castle.

@@ -623,7 +623,16 @@ void main() {
     //    is razor-sharp, the same shadow stretched across the floor is fuzzy.
     // 3. SHADOW RAYS: stratified sampling inside the size-adapted cone.
     float shadow = 0.0;
+    // Terrain hybrid threshold: RT close, bake far. Past 80 m the
+    // chunked LOD-2/3 raster surface sits 5–15 m below the BLAS
+    // heightmap → upward shadow rays false-hit invisible peaks. The
+    // bake matches the visible surface at any distance, and skipping
+    // the RT firing on far terrain reclaims ~9 rays/px (4 blocker + ~5
+    // stratified) every frame on every distant terrain pixel.
+    float terrain_dist = distance(vWorldPos, scene.camera_pos.xyz);
+    bool fire_rt_shadow = !is_terrain_pre || terrain_dist <= 80.0;
     if (n_dot_l_raw > 0.0 && scene.rt_flags.x != 0) {
+      if (fire_rt_shadow) {
         // Base sample count from slider, distance-LOD'd. terrain_extra.y
         // is a multiplier on the BASE count that's applied before LOD
         // reduction, so close fragments get N×multiplier rays while far
@@ -720,62 +729,23 @@ void main() {
             }
             shadow = (blocked / float(taken)) * scene.rt_params.w;
         }
+      }  // end fire_rt_shadow
 
-        // Terrain hybrid: blend the RT PCSS result toward the heightmap
-        // shadow bake at distance. The BLAS holds the full heightmap
-        // detail while the rasterised LOD-2/3 surface under-shoots
-        // peaks в†’ upward shadow rays false-hit the BLAS, producing
-        // patchy dark "faces" on far ridges. The bake was traced
-        // directly against the heightmap so its values match the
-        // rasterised surface at any LOD; using it past 80 m
-        // eliminates the false hits while RT keeps crisp near-shadows
-        // (incl. boxes / castle on terrain) within ~40 m of the camera.
+        // Terrain hybrid: RT close, bake far. `shadow` already holds
+        // the RT PCSS result if `fire_rt_shadow` was true; otherwise
+        // it's still 0.0 (we skipped firing on far terrain). Compute
+        // the bake here and cross-fade the two over 40–80 m so the
+        // transition isn't visible.
         if (is_terrain_pre) {
-            // Hybrid: shadow map close-by (high-res, includes castle /
-            // dyn-props / terrain self-shadow), bake far (covers the
-            // whole world but coarse). Shadow map is cheaper and
-            // sharper than the RT shadow path inside its frustum.
-            //
-            // Light-clip projection: world → light-NDC → [0,1] uv.
-            // Out-of-frustum = no shadow contribution from the map; the
-            // bake handles those fragments.
-            vec4 lc = scene.light_vp * vec4(vWorldPos, 1.0);
-            vec3 lndc = lc.xyz / lc.w;
-            float sh_smap = 0.0;
-            float smap_w = 0.0;
-            if (lndc.z >= 0.0 && lndc.z <= 1.0) {
-                vec2 luv = lndc.xy * 0.5 + 0.5;
-                if (all(greaterThanEqual(luv, vec2(0.0))) &&
-                    all(lessThanEqual(luv, vec2(1.0)))) {
-                    // sampler2DShadow with LESS_OR_EQUAL: returns 1 when
-                    // the receiver passes (lit), 0 when blocked. The
-                    // shadow pass already applies slope-scale + constant
-                    // depth bias via vkCmdSetDepthBias, so a tiny extra
-                    // receiver shift is enough — earlier 0.0008 mapped
-                    // to ~0.8m over the 1000m ortho depth range and
-                    // peter-panned the shadow base off the ground near
-                    // boxes/castle, leaving a visible gap.
-                    const float kRecvBias = 0.00005;
-                    float lit = textureLod(u_sun_shadow_map,
-                                            vec3(luv, lndc.z - kRecvBias), 0.0);
-                    sh_smap = (1.0 - lit) * scene.rt_params.w;
-                    // Smooth fade-to-bake near the frustum edge so the
-                    // boundary isn't visible.
-                    vec2 edge = min(luv, vec2(1.0) - luv);
-                    float e = min(edge.x, edge.y);
-                    smap_w = smoothstep(0.0, 0.05, e);
-                }
-            }
             ivec2 sz_b = textureSize(u_terrain_shadow, 0);
             const float side_b = 2048.0;
             vec2 uv_b = (vWorldPos.xz / side_b) + vec2(0.5);
             float sh_bake = 0.0;
             if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
                 all(lessThanEqual(uv_b, vec2(1.0)))) {
-                // 9-tap PCF (3x3 box, 1.5-texel offset) for smooth shadow
-                // edges. The bake is binary 0/255 in each texel — without
-                // wide PCF the edges step at texel boundaries and read as
-                // blocky.
+                // 9-tap PCF (3x3 box, 1.5-texel offset). The bake is
+                // binary 0/255 in each texel — without wide PCF the
+                // edges step at texel boundaries and read as blocky.
                 vec2 texel = 1.0 / vec2(sz_b);
                 float s = 0.0;
                 for (int oy = -1; oy <= 1; ++oy) {
@@ -786,9 +756,8 @@ void main() {
                 }
                 sh_bake = (s / 9.0) * scene.rt_params.w;
             }
-            // Inside shadow-map frustum: use the high-res shadow map
-            // result. Outside: bake. Smooth crossfade at the edge.
-            shadow = mix(sh_bake, sh_smap, smap_w);
+            float bake_blend = smoothstep(40.0, 80.0, terrain_dist);
+            shadow = mix(shadow, sh_bake, bake_blend);
         }
     }
 
@@ -921,7 +890,12 @@ void main() {
     int sky_total  = 0;
     int N_gi = scene.rt_flags2.x > 0 ? lod_samples(scene.rt_flags2.x, cam_dist) : 0;
     int N_bounces = max(1, scene.rt_flags2.z);
-    if (N_gi > 0) {
+    // Terrain skips GI entirely — adjacent triangles' N differs slightly
+    // and cos_hemi() is N-relative, so per-triangle hit/miss flips on
+    // BLAS detail produce patchy bright/dark faces. The earlier code
+    // fired the rays then forced gi_indirect=0 / sky_vis=1; gating here
+    // saves all those rays.
+    if (N_gi > 0 && !is_terrain_pre) {
         float gi_radius = scene.rt_params2.y;
 
         // Sky-only ambient term вЂ” used when a GI bounce hits a surface
@@ -944,16 +918,7 @@ void main() {
                 float u2 = (float(sy) + r2) * inv_strata;
 
                 vec3 ray_dir = cos_hemi(u1, u2, N);
-                // Same origin lift as AO above: pushes the ray above
-                // BLAS detail that the rasterised LOD-1+ raster sits
-                // below, so GI rays from distant terrain don't false-
-                // hit BLAS peaks the user can't see.
-                float gi_lift = 0.01;
-                if (is_terrain_pre) {
-                    float t_o = clamp((cam_dist - 40.0) / 200.0, 0.0, 1.0);
-                    gi_lift = mix(0.01, 6.0, t_o);
-                }
-                vec3 ray_origin = vWorldPos + N * gi_lift;
+                vec3 ray_origin = vWorldPos + N * 0.01;
                 vec3 throughput = vec3(1.0);
                 vec3 path = vec3(0.0);
 
@@ -1018,19 +983,6 @@ void main() {
         sky_total = taken;
         sky_vis = float(sky_misses) / float(max(1, sky_total));
 
-        // GI on terrain is disabled. cos_hemi() uses N as the basis,
-        // so adjacent triangles' GI ray directions diverge per-N в†’ ray
-        // paths through BLAS detail differ в†’ per-triangle hit/miss
-        // flips в†’ patchy bright/dark faces. Origin-lift fixes this at
-        // distance but not at close range where N still varies fast.
-        // Bake provides the directional shadow; ambient fills the rest.
-        // sky_vis still computed (for ambient sky vs ground term) but
-        // forced to 1 (open sky) so it can't introduce the same
-        // patchiness through sky_factor.
-        if (is_terrain_pre) {
-            gi_indirect = vec3(0.0);
-            sky_vis = 1.0;
-        }
     }
 
     // --- AO --- (also stratified to spread samples cleanly)

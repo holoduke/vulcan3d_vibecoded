@@ -13,6 +13,34 @@
 
 namespace qlike {
 
+// Quick scan of qlike_settings.cfg for the raymarch flag — load_settings()
+// runs AFTER init_world() (it restores the saved player pose, which init_world
+// would otherwise overwrite), but init_world needs to know whether to use
+// the FBM-matching heightmap source up-front. So we peek just this one key
+// without applying anything else.
+void VulkanEngine::preload_terrain_raymarch_flag() {
+    std::ifstream f(kSettingsPath);
+    if (!f.is_open()) return;
+    std::string line;
+    while (std::getline(f, line)) {
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = line.substr(0, eq);
+        std::string val = line.substr(eq + 1);
+        auto trim = [](std::string& s) {
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))  s.pop_back();
+        };
+        trim(key); trim(val);
+        if (key == "terrain_raymarch_enabled") {
+            rt_.terrain_raymarch_enabled = (std::atoi(val.c_str()) != 0);
+            log::infof("preload: terrain_raymarch_enabled = %d",
+                       rt_.terrain_raymarch_enabled ? 1 : 0);
+            return;
+        }
+    }
+}
+
 // reset_player lives here too — it's the menu's "Reset" action, conceptually
 // adjacent to the settings save/load flow.
 void VulkanEngine::reset_player() {
@@ -201,6 +229,13 @@ void VulkanEngine::save_settings() const {
     f << "terrain_bake_supersample = " << rt_.terrain_bake_supersample << "\n";
     f << "terrain_shading_contrast = " << rt_.terrain_shading_contrast << "\n";
     f << "terrain_heightmap_scale = " << rt_.terrain_heightmap_scale << "\n";
+    f << "terrain_raymarch_enabled = " << (rt_.terrain_raymarch_enabled ? 1 : 0) << "\n";
+    f << "terrain_raymarch_max_steps = " << rt_.terrain_raymarch_max_steps << "\n";
+    f << "terrain_raymarch_shadow_steps = " << rt_.terrain_raymarch_shadow_steps << "\n";
+    f << "terrain_raymarch_octaves = " << rt_.terrain_raymarch_octaves << "\n";
+    f << "terrain_raymarch_normal_octaves = " << rt_.terrain_raymarch_normal_octaves << "\n";
+    f << "terrain_raymarch_step_factor = " << rt_.terrain_raymarch_step_factor << "\n";
+    f << "terrain_raymarch_scale = " << rt_.terrain_raymarch_scale << "\n";
     f << "shadow_near_mult = " << rt_.shadow_near_mult << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
@@ -324,6 +359,13 @@ void VulkanEngine::load_settings() {
             else if (key == "terrain_bake_supersample") rt_.terrain_bake_supersample = std::stoi(val);
             else if (key == "terrain_shading_contrast") rt_.terrain_shading_contrast = std::stof(val);
             else if (key == "terrain_heightmap_scale") rt_.terrain_heightmap_scale = std::stoi(val);
+            else if (key == "terrain_raymarch_enabled") rt_.terrain_raymarch_enabled = std::stoi(val) != 0;
+            else if (key == "terrain_raymarch_max_steps") rt_.terrain_raymarch_max_steps = std::stoi(val);
+            else if (key == "terrain_raymarch_shadow_steps") rt_.terrain_raymarch_shadow_steps = std::stoi(val);
+            else if (key == "terrain_raymarch_octaves") rt_.terrain_raymarch_octaves = std::stoi(val);
+            else if (key == "terrain_raymarch_normal_octaves") rt_.terrain_raymarch_normal_octaves = std::stoi(val);
+            else if (key == "terrain_raymarch_step_factor") rt_.terrain_raymarch_step_factor = std::stof(val);
+            else if (key == "terrain_raymarch_scale") rt_.terrain_raymarch_scale = std::stof(val);
             else if (key == "shadow_near_mult") rt_.shadow_near_mult = std::stof(val);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);

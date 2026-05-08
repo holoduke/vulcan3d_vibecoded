@@ -390,6 +390,40 @@ void VulkanEngine::build_menu_ui() {
     }
 
     if (ImGui::CollapsingHeader("Terrain", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SeparatorText("Renderer");
+        ImGui::Checkbox("Procedural raymarched terrain (FBM)",
+                         &rt_.terrain_raymarch_enabled);
+        ImGui::TextDisabled("Restart required — physics, grass and mesh are\n"
+                             "rebuilt from the FBM at level load when this is on.");
+        ImGui::SliderInt("Raymarch steps",
+                         &rt_.terrain_raymarch_max_steps, 60, 300);
+        ImGui::SliderInt("Raymarch shadow steps",
+                         &rt_.terrain_raymarch_shadow_steps, 16, 96);
+        ImGui::SliderInt("FBM octaves (march)",
+                         &rt_.terrain_raymarch_octaves, 4, 24);
+        ImGui::SliderInt("FBM octaves (normals)",
+                         &rt_.terrain_raymarch_normal_octaves, 4, 32);
+        ImGui::SliderFloat("Step factor",
+                           &rt_.terrain_raymarch_step_factor, 0.4f, 0.8f, "%.2f");
+        // Render-scale for the raymarch only — biggest single perf
+        // knob. 0.5 = quarter the FBM evaluations per frame; bilinear
+        // upscale + depth-aware composite hides most of the softness
+        // because terrain noise is low-frequency anyway.
+        const char* tr_scale_labels[] = { "100% (native)", "75%", "50%", "33%", "25%" };
+        const float tr_scale_values[] = { 1.0f, 0.75f, 0.5f, 0.333f, 0.25f };
+        int tr_scale_idx = 0;
+        for (int i = 0; i < 5; ++i)
+            if (std::abs(rt_.terrain_raymarch_scale - tr_scale_values[i]) < 0.02f) {
+                tr_scale_idx = i; break;
+            }
+        if (ImGui::Combo("Raymarch render scale", &tr_scale_idx,
+                          tr_scale_labels, 5)) {
+            rt_.terrain_raymarch_scale = tr_scale_values[tr_scale_idx];
+            recreate_terrain_raymarch_lowres();
+        }
+        ImGui::TextDisabled("Lower steps / fewer octaves / higher step factor = faster.\n"
+                             "50% render scale ≈ 4× fewer FBM evaluations.");
+
         ImGui::SeparatorText("Heightmap resolution");
         const char* hres_labels[] = {
             "1x (2048 cells, ~17 MB)",

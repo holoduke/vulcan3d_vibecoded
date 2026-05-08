@@ -41,6 +41,121 @@ float Heightmap::sample_world(float x, float z) const {
     return h0 * (1.0f - tz) + h1 * tz;
 }
 
+// === FBM heightmap matching terrain_raymarch.frag ============================
+//
+// The fragment shader's terrainM uses 2D value noise with analytical
+// derivatives + derivative-erosion suppression. We mirror it here so the
+// CPU heightmap (driving physics / grass / mesh / BLAS) matches what the
+// shader draws. Constants are bit-identical to the shader; small float
+// drift is OK because the visible raymarch is what the user sees, and a
+// few cm of grass / physics offset is invisible.
+namespace {
+
+inline glm::vec3 rm_fract(glm::vec3 v) { return v - glm::floor(v); }
+inline float     rm_fract1(float v)    { return v - std::floor(v); }
+
+// hash21 — exactly mirrors the shader's hash function.
+inline float rm_hash21(glm::vec2 p) {
+    glm::vec3 p3 = rm_fract(glm::vec3(p.x, p.y, p.x) * 0.1031f);
+    p3 += glm::dot(p3, glm::vec3(p3.y, p3.z, p3.x) + 19.19f);
+    return rm_fract1((p3.x + p3.y) * p3.z);
+}
+
+inline float rm_noised(glm::vec2 p, glm::vec2& deriv) {
+    glm::vec2 i = glm::floor(p);
+    glm::vec2 f = p - i;
+    glm::vec2 u  = f * f * (3.0f - 2.0f * f);
+    glm::vec2 du = 6.0f * f * (1.0f - f);
+    float a = rm_hash21(i + glm::vec2(0, 0));
+    float b = rm_hash21(i + glm::vec2(1, 0));
+    float c = rm_hash21(i + glm::vec2(0, 1));
+    float d = rm_hash21(i + glm::vec2(1, 1));
+    float val = a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y;
+    deriv = du * (glm::vec2(b - a, c - a) +
+                  (a - b - c + d) * glm::vec2(u.y, u.x));
+    return val;
+}
+
+constexpr float kRmTerrainScale  = 0.003f;
+constexpr float kRmTerrainHeight = 120.0f;
+constexpr float kRmPlateauBlend  = 24.0f;
+
+// Mirror of shader m2 = mat2(0.8, -0.6, 0.6, 0.8). GLSL is column-major;
+// applying m * p = (col0*p.x + col1*p.y) gives:
+//   x' =  0.8*p.x + 0.6*p.y
+//   y' = -0.6*p.x + 0.8*p.y
+inline glm::vec2 rm_rotate(glm::vec2 p) {
+    return glm::vec2(0.8f * p.x + 0.6f * p.y,
+                     -0.6f * p.x + 0.8f * p.y);
+}
+
+float rm_terrain(glm::vec2 worldXZ, const HeightmapParams& p) {
+    glm::vec2 wp = worldXZ;
+    glm::vec2 q  = worldXZ * kRmTerrainScale;
+    float a = 0.0f, b = 1.0f;
+    glm::vec2 d(0.0f);
+    for (int i = 0; i < 9; i++) {
+        glm::vec2 deriv;
+        float n = rm_noised(q, deriv);
+        d += deriv;
+        a += b * n / (1.0f + glm::dot(d, d));
+        b *= 0.5f;
+        q = rm_rotate(q) * 2.0f;
+    }
+    float h = a * kRmTerrainHeight;
+
+    // Soft plateau blend (mirrors shader's plateauWeight + mix).
+    glm::vec2 ext = p.plateau_extent;
+    glm::vec2 ab  = glm::abs(wp - p.plateau_center) - ext;
+    float dout = std::max(std::max(ab.x, 0.0f), std::max(ab.y, 0.0f));
+    float t = dout / kRmPlateauBlend;
+    t = std::clamp(t, 0.0f, 1.0f);
+    float w = 1.0f - (t * t * (3.0f - 2.0f * t));   // smoothstep
+    return h * (1.0f - w) + p.plateau_height * w;
+}
+
+} // namespace
+
+Heightmap generate_heightmap_raymarch(const HeightmapParams& p) {
+    Heightmap hm;
+    hm.dim       = p.dim;
+    hm.cell      = p.cell_size;
+    hm.origin_x  = -0.5f * static_cast<float>(p.dim) * p.cell_size;
+    hm.origin_z  = -0.5f * static_cast<float>(p.dim) * p.cell_size;
+    const int W = hm.width();
+    const int H = hm.height();
+    hm.heights.resize(static_cast<size_t>(W) * static_cast<size_t>(H));
+
+    // Multi-thread row-strip generation. 9 octaves × 2048² ≈ 38 M FBM
+    // evals — single-threaded would be ~10 s, parallel ~2-3 s on 8+
+    // cores.
+    const int hw = std::max<int>(1, static_cast<int>(std::thread::hardware_concurrency()));
+    std::vector<std::thread> workers;
+    workers.reserve(hw);
+    int rows = (H + hw - 1) / hw;
+    for (int t = 0; t < hw; ++t) {
+        int z0 = t * rows;
+        int z1 = std::min(H, z0 + rows);
+        if (z0 >= z1) break;
+        workers.emplace_back([&, z0, z1] {
+            for (int iz = z0; iz < z1; ++iz) {
+                float wz = hm.origin_z + static_cast<float>(iz) * hm.cell;
+                for (int ix = 0; ix < W; ++ix) {
+                    float wx = hm.origin_x + static_cast<float>(ix) * hm.cell;
+                    hm.heights[static_cast<size_t>(iz) *
+                               static_cast<size_t>(W) +
+                               static_cast<size_t>(ix)] =
+                        rm_terrain(glm::vec2(wx, wz), p);
+                }
+            }
+        });
+    }
+    for (auto& w : workers) w.join();
+    log::infof("[terrain] heightmap_raymarch %dx%d cells, %.0fm side, plateau h=%.1f",
+               p.dim, p.dim, hm.side(), p.plateau_height);
+    return hm;
+}
+
 Heightmap generate_heightmap(const HeightmapParams& p) {
     FastNoiseLite n;
     n.SetSeed(p.seed);

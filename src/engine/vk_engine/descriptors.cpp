@@ -40,7 +40,13 @@ void VulkanEngine::init_descriptors() {
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 },
         // +1 for the heightmap shadow texture at binding 6.
         // +1 for the sun shadow map at binding 7 (sampler2DShadow).
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTextureCount * 2 + 2 },
+        // +1 for the raw heightmap texture at binding 8 (R32_SFLOAT) —
+        // sampled by terrain_raymarch.frag so the procedural raymarched
+        // terrain follows the gameplay heightmap shape.
+        // +3 for the low-res raymarch upscale targets (bindings 9..11):
+        // color, motion vector, depth — sampled by the compose pass
+        // when terrain_raymarch_scale < 1.0.
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTextureCount * 2 + 6 },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -53,8 +59,12 @@ void VulkanEngine::init_descriptors() {
              "scene desc pool");
 
     // Bindings: 0=UBO, 1=TLAS, 2=materials, 3=albedo[N], 4=normal[N],
-    //           5=prev_transforms, 6=heightmap shadow, 7=sun shadow map.
-    VkDescriptorSetLayoutBinding bindings[8]{};
+    //           5=prev_transforms, 6=heightmap shadow, 7=sun shadow map,
+    //           8=raw heightmap (R32_SFLOAT) for terrain_raymarch.frag,
+    //           9=LR raymarch color, 10=LR raymarch motion-vec, 11=LR
+    //              raymarch depth — read by the compose pass when
+    //              terrain_raymarch_scale < 1.
+    VkDescriptorSetLayoutBinding bindings[12]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -103,10 +113,30 @@ void VulkanEngine::init_descriptors() {
     bindings[7].stageFlags = VK_SHADER_STAGE_VERTEX_BIT |
                               VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Binding 8: raw heightmap as R32_SFLOAT, sampled by
+    // terrain_raymarch.frag so the procedural ray-marched terrain
+    // follows the gameplay heightmap shape exactly (castle / cubes
+    // sit correctly on the visible surface).
+    bindings[8].binding = 8;
+    bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[8].descriptorCount = 1;
+    bindings[8].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    // Bindings 9..11: low-res raymarch upscale targets, sampled by the
+    // compose pass when terrain_raymarch_scale < 1. Color and motion
+    // are HDR / SFLOAT; depth is R32 sampled as a regular texture so
+    // the compose can write gl_FragDepth = upscaled depth.
+    for (int b = 9; b <= 11; ++b) {
+        bindings[b].binding = static_cast<uint32_t>(b);
+        bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[b].descriptorCount = 1;
+        bindings[b].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 8, .pBindings = bindings,
+        .bindingCount = 12, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),

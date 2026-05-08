@@ -56,6 +56,14 @@ struct Heightmap {
 
 Heightmap generate_heightmap(const HeightmapParams& p);
 
+// FBM heightmap that mirrors the shader's terrain_raymarch.frag exactly:
+// 9-octave value-noise FBM with derivative-erosion, ~37° per-octave
+// rotation, plateau blend toward p.plateau_height inside the gameplay
+// plateau footprint. Used so physics / grass / chunked mesh / BLAS share
+// the visible surface when rt_.terrain_raymarch_enabled. Multi-threaded
+// — ~38 M FBM evaluations at 2048² takes ~2-3 s on a desktop CPU.
+Heightmap generate_heightmap_raymarch(const HeightmapParams& p);
+
 // Builds a single triangulated terrain mesh covering the whole heightmap.
 // Used by the merged BLAS for ray traversal — RT shadows / GI / AO see
 // the full-resolution surface regardless of raster LOD.

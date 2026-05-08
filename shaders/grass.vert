@@ -57,6 +57,13 @@ layout(location = 4) out float vCullKill;
 layout(location = 5) out vec3 vWorldPos;
 layout(location = 6) out float vSunShadow;   // 0 = lit, 1 = sun-blocked
 layout(location = 7) out float vDistToCam;
+// Previous-frame clip-space position. grass.frag perspective-divides
+// this to a UV and emits (current_uv - prev_uv) as the motion vector
+// so TAA reprojects correctly when the camera moves. Without this,
+// motion = 0 made TAA mix the previous frame's pixel from the same
+// screen location (a different blade / sky) into walking grass —
+// reading as black flickers.
+layout(location = 8) out vec4 vPrevClip;
 
 // Legacy heightmap sun-shadow texture (binding 6) — kept for fallback;
 // the active path samples binding 7 (sun shadow map) instead.
@@ -227,6 +234,7 @@ void main() {
                  cull_factor < 0.04) ? 1.0 : 0.0;
     if (vCullKill > 0.5) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        vPrevClip   = vec4(2.0, 2.0, 2.0, 1.0);
         vNormal = vec3(0.0, 1.0, 0.0);
         vColor  = vec3(0.0);
         vUv     = vec2(0.0);
@@ -249,17 +257,27 @@ void main() {
     // when the sun rotates, so distant grass takes a beat to catch up
     // with sun motion — the shadow map handles near grass instantly.
     {
-        // Shadow map sample (near). Sampled unconditionally — it's a
-        // single texture op, cheaper than branching.
+        // Shadow map sample (near). Bound-check explicitly: when the
+        // player jumps or walks the light frustum moves with them, and
+        // a blade can briefly land outside [0,1] luv or outside [0,1]
+        // depth. Without this guard sampler2DShadow returned 0 (= "not
+        // lit") for those frames, flashing the blade dark — that's the
+        // walk/jump black-flicker the user reported.
         vec4 lc = scene.light_vp * vec4(base_world, 1.0);
         vec3 lndc = lc.xyz / lc.w;
         vec2 luv  = lndc.xy * 0.5 + 0.5;
-        // Tiny receiver shift; the shadow pass applies slope/constant
-        // depth bias via vkCmdSetDepthBias so we don't double-bias here.
         const float kReceiverBias = 0.00005;
-        float shadow_map_val = 1.0 -
-            textureLod(u_sun_shadow_map,
-                       vec3(luv, lndc.z - kReceiverBias), 0.0);
+        bool inFrustum = lndc.z >= 0.0 && lndc.z <= 1.0 &&
+                         all(greaterThanEqual(luv, vec2(0.0))) &&
+                         all(lessThanEqual(luv, vec2(1.0)));
+        // Out-of-frustum: assume lit (0). The bake (sampled below)
+        // takes over for those blades via the distance crossfade.
+        float shadow_map_val = 0.0;
+        if (inFrustum) {
+            shadow_map_val = 1.0 -
+                textureLod(u_sun_shadow_map,
+                           vec3(luv, lndc.z - kReceiverBias), 0.0);
+        }
 
         // Heightmap bake sample (far). Texture covers the same world
         // extent regardless of supersample factor, so we hardcode the
@@ -286,6 +304,11 @@ void main() {
     vDistToCam = view_dist_base;
 
     gl_Position = pc.mvp * vec4(world, 1.0);
+    // Same world position fed through previous-frame VP so the
+    // motion vector captures camera motion. Wind sway between frames
+    // is sub-cm so we ignore it here; TAA's spatial filter absorbs
+    // that residual.
+    vPrevClip   = pc.prev_mvp * vec4(world, 1.0);
 
     // Normal in world space — the blade billboards roughly toward
     // camera by virtue of its random rotation; for shading we use a

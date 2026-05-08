@@ -441,6 +441,150 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
     }
 }
 
+// ---------------- Heightmap texture (binding 8) ----------------
+//
+// Uploads `terrain_data_.heights` as an R32_SFLOAT 2D image so
+// terrain_raymarch.frag can sample the gameplay heightmap and produce
+// a procedural-look surface that matches its shape exactly. One-shot
+// upload at init; sculpt edits don't propagate (call this again to
+// refresh if/when needed).
+void VulkanEngine::init_terrain_height_texture() {
+    if (terrain_data_.heights.empty()) {
+        log::warn("init_terrain_height_texture: heightmap empty, skipping");
+        return;
+    }
+    const int W = terrain_data_.dim;
+    const int H = terrain_data_.dim;
+
+    // Cache the max for the raymarch's upper-bound clip. Compute once
+    // here — sculpt edits don't update the texture anyway.
+    float max_h = 0.0f;
+    for (float h : terrain_data_.heights) if (h > max_h) max_h = h;
+    terrain_height_max_ = max_h;
+
+    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R32_SFLOAT;
+    ici.extent = { static_cast<uint32_t>(W),
+                   static_cast<uint32_t>(H), 1 };
+    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vk_check(vmaCreateImage(allocator_, &ici, &aci,
+                             &terrain_height_image_,
+                             &terrain_height_alloc_, nullptr),
+             "terrain height image");
+
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = terrain_height_image_;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_R32_SFLOAT;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vci.subresourceRange.baseMipLevel = 0;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.baseArrayLayer = 0;
+    vci.subresourceRange.layerCount = 1;
+    vk_check(vkCreateImageView(device_, &vci, nullptr, &terrain_height_view_),
+             "terrain height view");
+
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = VK_FILTER_LINEAR;     // bilinear height interpolation
+    si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vk_check(vkCreateSampler(device_, &si, nullptr, &terrain_height_sampler_),
+             "terrain height sampler");
+
+    const VkDeviceSize bytes =
+        static_cast<VkDeviceSize>(W) *
+        static_cast<VkDeviceSize>(H) * sizeof(float);
+    VkBuffer stage = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = nullptr;
+    {
+        VkBufferCreateInfo bci{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr, .flags = 0, .size = bytes,
+            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+        };
+        VmaAllocationCreateInfo bac{};
+        bac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        bac.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        vmaCreateBuffer(allocator_, &bci, &bac, &stage, &stage_alloc, nullptr);
+        VmaAllocationInfo ai{};
+        vmaGetAllocationInfo(allocator_, stage_alloc, &ai);
+        std::memcpy(ai.pMappedData, terrain_data_.heights.data(),
+                    static_cast<size_t>(bytes));
+    }
+
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, terrain_height_image_,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = { static_cast<uint32_t>(W),
+                                static_cast<uint32_t>(H), 1 };
+        vkCmdCopyBufferToImage(cb, stage, terrain_height_image_,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                1, &region);
+        vkinit::transition_image(cb, terrain_height_image_,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+
+    vmaDestroyBuffer(allocator_, stage, stage_alloc);
+
+    // Write binding 8.
+    VkDescriptorImageInfo dii{};
+    dii.sampler = terrain_height_sampler_;
+    dii.imageView = terrain_height_view_;
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = scene_desc_set_;
+    w.dstBinding = 8;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &dii;
+    vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+
+    log::infof("heightmap texture uploaded (%dx%d, %.1f MB)",
+               W, H, static_cast<double>(bytes) / (1024.0 * 1024.0));
+}
+
+void VulkanEngine::destroy_terrain_height_texture() {
+    if (terrain_height_view_) {
+        vkDestroyImageView(device_, terrain_height_view_, nullptr);
+        terrain_height_view_ = VK_NULL_HANDLE;
+    }
+    if (terrain_height_image_) {
+        vmaDestroyImage(allocator_, terrain_height_image_,
+                         terrain_height_alloc_);
+        terrain_height_image_ = VK_NULL_HANDLE;
+        terrain_height_alloc_ = nullptr;
+    }
+    if (terrain_height_sampler_) {
+        vkDestroySampler(device_, terrain_height_sampler_, nullptr);
+        terrain_height_sampler_ = VK_NULL_HANDLE;
+    }
+}
+
 // ---------------- Sun shadow map (single-cascade ortho) ----------------
 //
 // Standard depth-only shadow pass: one 2048ВІ D32 depth target written
@@ -656,17 +800,15 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
                             0, 1, &scene_desc_set_, 0, nullptr);
 
-    // Slope-scale + constant bias to combat acne. Tuned conservatively;
-    // peter-panning at thin geometry edges is the lesser evil here vs
-    // shadow acne scrolling across grass as the sun rotates.
-    // Bias values: slope was 4 — too aggressive on slanted caster faces
-    // (oblique mountain slopes, rotated boxes), which pushed their depth
-    // far "behind" the actual surface and detached the shadow from the
-    // contact line. The user reported a band/gap of unshadowed terrain
-    // right next to box/castle bases. 1.0/1.5 is conservative for D32
-    // depth and keeps flat-surface acne in check while letting the
-    // shadow start at the actual contact point.
-    vkCmdSetDepthBias(cmd, /*const*/ 1.0f, /*clamp*/ 0.0f, /*slope*/ 1.5f);
+    // CULL_NONE makes the front (sun-facing) face write the correct
+    // caster depth, so there's no need for positive caster bias to
+    // separate caster from receiver. Slope-scaled bias was the
+    // direct cause of the contact-line gap: on near-vertical caster
+    // faces (cube sides, steep terrain) max(|dz/dx|, |dz/dy|) blows
+    // up and the slope factor multiplies that into a multi-metre
+    // push, detaching the shadow from the base. Keep only a tiny
+    // constant offset to absorb depth-encoding noise.
+    vkCmdSetDepthBias(cmd, /*const*/ 0.5f, /*clamp*/ 0.0f, /*slope*/ 0.0f);
 
     glm::mat4 vp = sun_shadow_light_vp_;
     Frustum light_frustum = extract_frustum(vp);
@@ -1007,7 +1149,13 @@ void VulkanEngine::init_world() {
         hp.plateau_height = 22.0f;
         hp.plateau_blend  = 24.0f;
         hp.frequency      = 0.0014f;
-        Heightmap hm = generate_heightmap(hp);
+        // When the procedural raymarched terrain is selected, generate
+        // the heightmap from the SAME FBM the shader uses so physics,
+        // grass, mesh and BLAS share the visible surface. Otherwise the
+        // FastNoiseLite-driven gameplay heightmap (default).
+        Heightmap hm = rt_.terrain_raymarch_enabled
+            ? generate_heightmap_raymarch(hp)
+            : generate_heightmap(hp);
         // Cache for collision + Phase 4 sculpt access.
         terrain_data_.dim = hm.dim;
         terrain_data_.cell = hm.cell;
@@ -1608,6 +1756,97 @@ void VulkanEngine::spawn_random_box() {
     }
 }
 
+void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
+    // Re-derive the same per-frame VP that render_world will compute
+    // immediately after this. We want bit-identical matrices so the
+    // compose pass's gl_FragDepth survives the LESS_OR_EQUAL test that
+    // the cube/castle prepass depth wrote.
+    float aspect = static_cast<float>(render_extent_.width) /
+                   static_cast<float>(render_extent_.height);
+    constexpr float kFixedDt = 1.0f / 120.0f;
+    float alpha = physics_accumulator_ / kFixedDt;
+    if (alpha < 0.0f) alpha = 0.0f;
+    if (alpha > 1.0f) alpha = 1.0f;
+    glm::vec3 render_pos = glm::mix(prev_player_position_, player_.position, alpha);
+
+    glm::vec3 saved = player_.position;
+    player_.position = render_pos;
+    glm::mat4 view = player_.view_matrix();
+    player_.position = saved;
+    glm::mat4 proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 1500.0f);
+    proj[1][1] *= -1.0f;
+    if (rt_.taa_jitter_enabled) {
+        auto halton = [](int b, int i) {
+            float f = 1.0f, r = 0.0f;
+            while (i > 0) { f /= float(b); r += f * float(i % b); i /= b; }
+            return r;
+        };
+        int idx = static_cast<int>(frame_number_ % 16) + 1;
+        float jx = (halton(2, idx) - 0.5f) * 2.0f * rt_.taa_jitter_strength /
+                   static_cast<float>(render_extent_.width);
+        float jy = (halton(3, idx) - 0.5f) * 2.0f * rt_.taa_jitter_strength /
+                   static_cast<float>(render_extent_.height);
+        proj[2][0] += jx;
+        proj[2][1] += jy;
+    }
+    glm::mat4 vp = proj * view;
+
+    VkViewport vp_state{};
+    vp_state.x = 0.0f; vp_state.y = 0.0f;
+    vp_state.width  = static_cast<float>(tr_lr_extent_.width);
+    vp_state.height = static_cast<float>(tr_lr_extent_.height);
+    vp_state.minDepth = 0.0f; vp_state.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &vp_state);
+    VkRect2D scissor{ {0, 0}, tr_lr_extent_ };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                       terrain_raymarch_pipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             pipeline_layout_, 0, 1, &scene_desc_set_,
+                             0, nullptr);
+
+    PushConstants pc{};
+    pc.mvp      = vp;
+    pc.model    = glm::inverse(vp);
+    pc.prev_mvp = prev_view_proj_valid_ ? prev_view_proj_ : vp;
+    pc.color    = glm::vec4(0.0f, 0.0f, 28.0f, 22.0f);
+    pc.emissive = glm::vec4(
+        std::clamp(rt_.terrain_raymarch_step_factor, 0.4f, 0.8f),
+        0.0f, 0.0f, 0.0f);
+    pc.tex_params = glm::vec4(
+        static_cast<float>(std::clamp(rt_.terrain_raymarch_max_steps, 60, 300)),
+        static_cast<float>(std::clamp(rt_.terrain_raymarch_shadow_steps, 16, 96)),
+        static_cast<float>(std::clamp(rt_.terrain_raymarch_octaves, 4, 24)),
+        static_cast<float>(std::clamp(rt_.terrain_raymarch_normal_octaves, 4, 32)));
+    vkCmdPushConstants(cmd, pipeline_layout_,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(PushConstants), &pc);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+}
+
+void VulkanEngine::render_terrain_raymarch_compose(VkCommandBuffer cmd) {
+    // Fullscreen-tri compose pass — sits at the START of the main
+    // world color pass. Samples LR raymarch outputs and writes
+    // upscaled color/motion + gl_FragDepth. The pipeline's depth_test
+    // = LESS_OR_EQUAL means cube/castle/dyn-prop fragments drawn
+    // afterwards by the rest of render_world() correctly occlude the
+    // terrain where they're closer.
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                       tr_compose_pipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             pipeline_layout_, 0, 1, &scene_desc_set_,
+                             0, nullptr);
+    // The shader doesn't use push constants, but the layout requires
+    // some bytes, and skipping vkCmdPushConstants leaves stale values
+    // from the previous draw. Push a zero PushConstants block.
+    PushConstants pc{};
+    vkCmdPushConstants(cmd, pipeline_layout_,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(PushConstants), &pc);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+}
+
 void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
     // Mirror render_world()'s view setup. We don't try to share state across
     // the two passes because that would require threading FrameView through
@@ -1709,7 +1948,11 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
     // depth values match вЂ” otherwise the LESS_OR_EQUAL test in the
     // color pass would discard fragments. We bind terrain_depth_pipeline_
     // (same terrain.vert as the color pass, just routed to depth-only).
-    if (!terrain_chunks_.chunks.empty()) {
+    if (!terrain_chunks_.chunks.empty() && !rt_.terrain_raymarch_enabled) {
+        // Skip the chunked depth prime when the procedural raymarch is
+        // active — its frag writes its own depth via gl_FragDepth in
+        // the color pass, and rasterised chunk depths from the prime
+        // would wrongly occlude that with stale heightfield depths.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrain_depth_pipeline_);
         glm::vec3 cam = player_.eye_position();
         for (const auto& c : terrain_chunks_.chunks) {
@@ -1841,7 +2084,53 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // The merged-static-BLAS-style "single big draw" is reserved for the
     // RT path; for raster we want LOD + frustum cull per chunk so the
     // 2km terrain stays cheap from any viewpoint.
-    if (!terrain_chunks_.chunks.empty()) {
+    if (rt_.terrain_raymarch_enabled && terrain_raymarch_pipeline_ != VK_NULL_HANDLE
+        && !tr_use_lowres()) {
+        // Procedural FBM ray-marched terrain — fullscreen draw, frag
+        // writes hit-point depth so rasterised cubes / castle / dyn-
+        // props (which already wrote depth earlier in this pass) still
+        // occlude correctly. Misses (sky) discard, leaving compose's
+        // sky pass to fill those pixels.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrain_raymarch_pipeline_);
+        PushConstants pc{};
+        pc.mvp = vp;
+        pc.model = glm::inverse(vp);   // frag reconstructs world ray from NDC
+        pc.prev_mvp = prev_vp;
+        // .xy = plateau centre, .z = plateau half-extent, .w = plateau
+        // height. Shader's terrainM blends FBM toward the plateau
+        // height inside the castle footprint so brushes / dyn-props
+        // visibly sit on the procedural surface. Values mirror the
+        // gameplay heightmap's plateau in init_world (28 m half-ext,
+        // 22 m height, centred at origin).
+        pc.color = glm::vec4(0.0f, 0.0f, 28.0f, 22.0f);
+        pc.emissive = glm::vec4(0.0f);
+        // tex_params for the raymarch shader carries quality knobs:
+        //   .x = max ray-march steps      (60..300)
+        //   .y = shadow ray steps         (16..96)
+        //   .z = FBM octaves for march    (4..9)
+        //   .w = FBM octaves for normals  (4..16)
+        // Lower = faster, higher = smoother / longer reach.
+        pc.tex_params = glm::vec4(
+            static_cast<float>(std::clamp(rt_.terrain_raymarch_max_steps, 60, 300)),
+            static_cast<float>(std::clamp(rt_.terrain_raymarch_shadow_steps, 16, 96)),
+            static_cast<float>(std::clamp(rt_.terrain_raymarch_octaves, 4, 24)),
+            static_cast<float>(std::clamp(rt_.terrain_raymarch_normal_octaves, 4, 32)));
+        // emissive.x = step factor (0.4..0.8). 0.4 = safest, 0.8 =
+        // ~half the iterations to converge but may skip thin spikes.
+        pc.emissive = glm::vec4(
+            std::clamp(rt_.terrain_raymarch_step_factor, 0.4f, 0.8f),
+            0.0f, 0.0f, 0.0f);
+        vkCmdPushConstants(cmd, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PushConstants), &pc);
+        // 3 verts, 1 instance — gl_VertexIndex 0..2 covers the screen.
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        // Restore cube pipeline + cube mesh for the grass / dust /
+        // viewmodel passes that follow.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    } else if (!terrain_chunks_.chunks.empty()) {
         // Switch to the terrain-specific pipeline (terrain.vert + cube.frag,
         // 2 vertex bindings вЂ” pos/norm/uv + parent_y) so we can morph
         // between LOD 0 and LOD 1 in the vertex shader. Skirts still hide
