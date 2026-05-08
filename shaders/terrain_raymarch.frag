@@ -290,37 +290,27 @@ vec3 calcNormal(vec3 pos, float t) {
     return normalize(vec3(hC - hR, eps, hC - hU));
 }
 
-// Improved soft-shadow against the FBM heightfield — uses Inigo
-// Quilez's "geometric triangulation" formulation (2018):
-//   y = h² / (2·ph)
-//   d = sqrt(h² − y²)         // perpendicular distance from previous step
-//   res = min(res, d / (w · max(0, t − y)))
-// ph is the previous-step heightfield distance. Compared to the
-// classic `min(k·h/t)`, this avoids spurious darkening at sharp
-// silhouette edges (the common artifact at receiver edges where the
-// classic formula over-counts grazing distance). `w` is the cone
-// half-width in radians (sun is ~0.5° = 0.0044, but we soften it
-// for visual penumbra).
+// Classic heightfield soft-shadow march — `min(k·h/t)` where h is
+// the vertical gap between the ray and the FBM surface. Works on
+// heightfields where steps don't equal the geodesic distance (we
+// clamp the step to a useful range, decoupling step from h, which
+// breaks Inigo Quilez's geometric-triangulation variant — that
+// formula assumes sphere-trace properties). Cubic smoothstep at
+// the end softens the linear penumbra ramp into a more natural
+// curve. k = 16 gives a moderate softness; lower = softer.
 float calcShadow(vec3 pos, vec3 sunDir) {
-    const float w = 0.030;     // cone half-width — picks visible penumbra
     float res = 1.0;
     float t   = 0.05;
-    float ph  = 1e10;
     int kSteps = int(pc.tex_params.y);
     for (int i = 0; i < kSteps; ++i) {
         vec3 p = pos + t * sunDir;
         float h = p.y - terrainM(p.xz);
         if (h < 0.001) { res = 0.0; break; }
-        float y = h * h / (2.0 * ph);
-        float d = sqrt(max(h * h - y * y, 0.0));
-        res = min(res, d / (w * max(0.0, t - y)));
-        ph  = h;
-        t  += clamp(h, 0.5, 100.0);
+        res = min(res, 16.0 * h / t);
+        t += clamp(h, 0.5, 100.0);
         if (t > 800.0 || res < 0.001) break;
     }
     res = clamp(res, 0.0, 1.0);
-    // Cubic smoothstep softens the penumbra falloff so the soft
-    // edge reads as light scattering instead of a linear ramp.
     return res * res * (3.0 - 2.0 * res);
 }
 
