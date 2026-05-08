@@ -1302,6 +1302,14 @@ void VulkanEngine::init_world() {
         Heightmap hm = rt_.terrain_raymarch_enabled
             ? generate_heightmap_raymarch(hp)
             : generate_heightmap(hp);
+        // Capture procedural baseline NOW (before any disk-overlay
+        // load). The raymarch shader's heightmap-delta texture is
+        // computed as `current - baseline` so sculpt edits + disk
+        // overlays show up in raymarch as well as in the rasterised
+        // mesh. If we captured baseline after the load, delta would
+        // always be 0 for the loaded slice and raymarch would still
+        // show the procedural surface.
+        terrain_baseline_heights_ = hm.heights;
         // If the user has saved a sculpt-edited heightmap (via the
         // Terrain → Save heightmap button), load it now and overwrite
         // the procedurally-generated one. Validates dim+cell match
@@ -1339,11 +1347,6 @@ void VulkanEngine::init_world() {
         terrain_data_.origin_x = hm.origin_x;
         terrain_data_.origin_z = hm.origin_z;
         terrain_data_.heights = hm.heights;
-        // Capture procedural baseline so the raymarch shader can be
-        // shown only the delta (sculpt edits + plateau noise +
-        // disk-loaded overlay) on top of its own GLSL FBM. Without
-        // this, sculpting wouldn't affect the raymarched terrain.
-        terrain_baseline_heights_ = hm.heights;
         terrain_mesh_ = build_terrain_mesh(device_, allocator_,
                                            graphics_queue_, graphics_queue_family_, hm);
         // 32Г—32 chunks of 64 cells each вЂ” 64 is divisible by every LOD

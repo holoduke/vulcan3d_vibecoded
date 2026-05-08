@@ -48,3 +48,5 @@ assets/tex/**/*.png
 shot*.png
 shot*.ppm
 shot*.jpg
+
+assets/level1_heights.bin
