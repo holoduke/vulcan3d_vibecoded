@@ -257,6 +257,15 @@ void VulkanEngine::update_scene_ubo() {
     data.terrain_extra = glm::vec4(rt_.terrain_shading_contrast,
                                     rt_.shadow_near_mult,
                                     0.0f, 0.0f);
+    // Ocean / water plane params. Time is derived from frame number
+    // at a nominal 60 Hz — exact wall-clock isn't needed for waves
+    // and avoids threading a real timer here.
+    float water_t = static_cast<float>(frame_number_) * (1.0f / 60.0f);
+    data.water_params = glm::vec4(rt_.water_enabled ? 1.0f : 0.0f,
+                                   rt_.water_level,
+                                   rt_.water_wave_strength,
+                                   water_t);
+    data.water_color  = glm::vec4(rt_.water_color, 0.0f);
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

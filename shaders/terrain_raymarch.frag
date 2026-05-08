@@ -117,6 +117,14 @@ layout(set = 0, binding = 0) uniform Scene {
     vec4 grass_extra2;
     mat4 light_vp;
     vec4 terrain_extra;
+    // Ocean / water plane:
+    //   water_params.x = enabled (0/1)
+    //   water_params.y = world Y of calm sea level
+    //   water_params.z = wave strength (m)
+    //   water_params.w = animation time (seconds)
+    //   water_color.rgb = deep-water tint
+    vec4 water_params;
+    vec4 water_color;
 } scene;
 
 // === Hash + Value-Noise with analytical derivatives ===
@@ -313,6 +321,27 @@ vec3 getMaterial(vec3 pos, vec3 nor) {
     return col;
 }
 
+// Cheap animated ocean normal — two scrolling sin/cos directions
+// summed at slightly off-axis frequencies. Looks like the doc's
+// "Sea of Greek" demo but without the FBM cost. Returns a
+// world-space normal perturbed off (0,1,0).
+vec3 waterNormal(vec2 worldXZ, float t, float strength) {
+    // Two wave directions, slow-scrolling. Frequencies pick prime-
+    // ish ratios so the pattern doesn't repeat on a small grid.
+    float f1 = sin(worldXZ.x * 0.13 + t * 0.7) +
+               sin(worldXZ.y * 0.17 - t * 0.6);
+    float f2 = sin((worldXZ.x + worldXZ.y) * 0.21 + t * 1.1) +
+               sin((worldXZ.x - worldXZ.y) * 0.27 - t * 0.9);
+    // Analytical partials (chain rule on the sums above).
+    float dx = 0.13 * cos(worldXZ.x * 0.13 + t * 0.7) +
+               0.21 * cos((worldXZ.x + worldXZ.y) * 0.21 + t * 1.1) +
+               0.27 * cos((worldXZ.x - worldXZ.y) * 0.27 - t * 0.9);
+    float dz = 0.17 * cos(worldXZ.y * 0.17 - t * 0.6) +
+               0.21 * cos((worldXZ.x + worldXZ.y) * 0.21 + t * 1.1) -
+               0.27 * cos((worldXZ.x - worldXZ.y) * 0.27 - t * 0.9);
+    return normalize(vec3(-dx * strength, 1.0, -dz * strength));
+}
+
 void main() {
     // Reconstruct the world-space ray from this fragment's NDC.xy.
     // ndcNear (z=0) and ndcFar (z=1) → world points; their delta is
@@ -323,11 +352,84 @@ void main() {
     vec3 rd = normalize(wFar.xyz / wFar.w - wNear.xyz / wNear.w);
 
     float t = raymarch(ro, rd);
-    if (t < 0.0) {
+
+    // Water plane intersection. The ray hits the water surface if
+    //   - water is enabled AND
+    //   - the ray is travelling downward and starts above water
+    //     (or upward and starts below — we render that case as
+    //     "underwater" looking up but for now keep it simple)
+    bool water_on = scene.water_params.x > 0.5;
+    float water_y = scene.water_params.y;
+    float t_water = -1.0;
+    if (water_on && abs(rd.y) > 1e-4) {
+        float tw = (water_y - ro.y) / rd.y;
+        if (tw > 0.0 && (t < 0.0 || tw < t)) {
+            t_water = tw;
+        }
+    }
+
+    if (t < 0.0 && t_water < 0.0) {
         // Sky — let the existing compose-pass sky handle this pixel.
-        // Discarding leaves scene_color and depth untouched here so
-        // the compose stage's atmospheric sky remains visible.
         discard;
+    }
+
+    // === Water surface shading ===========================================
+    if (t_water > 0.0) {
+        vec3 wpos = ro + rd * t_water;
+        float wave_str = scene.water_params.z;
+        float wave_t   = scene.water_params.w;
+        vec3 wnor = waterNormal(wpos.xz, wave_t, wave_str);
+        vec3 sunDirW = scene.sun_direction.xyz;
+
+        // Schlick fresnel — F0 = 0.02 for water. Looking grazing-on
+        // means full reflection; looking straight down ≈ 2 % reflection.
+        float cosV = clamp(-dot(rd, wnor), 0.0, 1.0);
+        const float F0 = 0.02;
+        float fres = F0 + (1.0 - F0) * pow(1.0 - cosV, 5.0);
+
+        // Cheap sky reflection — same horizon→zenith gradient the
+        // compose sky uses (no separate sky pass needed). Sun halo
+        // adds a gentle warm dot near the sun direction.
+        vec3 refl = reflect(rd, wnor);
+        float skyT = clamp(refl.y * 0.5 + 0.5, 0.0, 1.0);
+        vec3 reflCol = mix(vec3(0.55, 0.65, 0.78),
+                           vec3(0.30, 0.45, 0.75), skyT);
+        float sunHalo = pow(max(dot(refl, sunDirW), 0.0), 60.0);
+        reflCol += scene.sun_color.rgb * scene.sun_color.a * sunHalo * 0.6;
+
+        // Deep / shallow blend by view depth into the water surface.
+        // Pure visual cue — no real refraction. Closer = lighter
+        // (silt, sub-surface scatter), far = deep tint.
+        float depthFade = 1.0 - exp(-t_water * 0.012);
+        vec3 deep = scene.water_color.rgb;
+        vec3 shallow = mix(deep * 1.5 + vec3(0.05, 0.10, 0.10),
+                            deep, depthFade);
+
+        // Specular highlight on the wave crests when the sun is close
+        // to the half-vector. Sharp lobe (~64) so it reads as glints.
+        vec3 H = normalize(sunDirW - rd);
+        float spec = pow(max(dot(wnor, H), 0.0), 64.0);
+
+        vec3 col_w = mix(shallow, reflCol, fres);
+        col_w += scene.sun_color.rgb * scene.sun_color.a * spec * 0.8;
+
+        // Apply the same volumetric fog as terrain (reuse the
+        // existing block by jumping to a tail). To keep the diff
+        // tight we re-do the fog inline here using the same code path.
+        float sundotW = clamp(dot(rd, sunDirW), 0.0, 1.0);
+        vec3 ext_w = exp(-t_water * 0.00025 * vec3(1.0, 1.5, 4.0));
+        vec3 fogColW = mix(vec3(0.55, 0.55, 0.58),
+                           vec3(1.0, 0.7, 0.3),
+                           0.3 * pow(sundotW, 8.0));
+        col_w = col_w * ext_w + fogColW * (1.0 - ext_w);
+
+        // Write hit depth; rasterised geometry that's actually in
+        // front (e.g. a cube on a pier) still occludes us.
+        vec4 clipW = pc.mvp * vec4(wpos, 1.0);
+        gl_FragDepth = clipW.z / clipW.w;
+        outColor  = vec4(col_w, 1.0);
+        outMotion = vec2(0.0);
+        return;
     }
 
     vec3 pos = ro + t * rd;

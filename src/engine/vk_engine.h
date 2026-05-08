@@ -1102,6 +1102,14 @@ private:
         // god-ray look. Cheap (4 short rays per fog step), but multi
         // ALU + branches so off by default.
         bool  terrain_raymarch_fog_godrays   = false;
+
+        // Ocean / water plane. Rendered inside the terrain raymarch
+        // (fullscreen tri) so it composites with rasterised geometry
+        // via gl_FragDepth — same as the terrain itself.
+        bool      water_enabled        = false;
+        float     water_level          = 2.0f;     // world Y of the calm sea level
+        float     water_wave_strength  = 0.18f;    // height of bump pattern (m)
+        glm::vec3 water_color          = glm::vec3(0.04f, 0.18f, 0.22f);
         // Multiplier on the RT shadow ray count for fragments within
         // rt_lod.x (close to the camera). 1 = unchanged, higher = more
         // rays close-by for smoother penumbras under boxes / castle.

@@ -240,6 +240,12 @@ void VulkanEngine::save_settings() const {
     f << "terrain_raymarch_fog_strength = " << rt_.terrain_raymarch_fog_strength << "\n";
     f << "terrain_raymarch_relaxation = " << (rt_.terrain_raymarch_relaxation ? 1 : 0) << "\n";
     f << "terrain_raymarch_fog_godrays = " << (rt_.terrain_raymarch_fog_godrays ? 1 : 0) << "\n";
+    f << "water_enabled = " << (rt_.water_enabled ? 1 : 0) << "\n";
+    f << "water_level = " << rt_.water_level << "\n";
+    f << "water_wave_strength = " << rt_.water_wave_strength << "\n";
+    f << "water_color = " << rt_.water_color.r << " "
+                            << rt_.water_color.g << " "
+                            << rt_.water_color.b << "\n";
     f << "shadow_near_mult = " << rt_.shadow_near_mult << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
@@ -374,6 +380,15 @@ void VulkanEngine::load_settings() {
             else if (key == "terrain_raymarch_fog_strength") rt_.terrain_raymarch_fog_strength = std::stof(val);
             else if (key == "terrain_raymarch_relaxation") rt_.terrain_raymarch_relaxation = std::stoi(val) != 0;
             else if (key == "terrain_raymarch_fog_godrays") rt_.terrain_raymarch_fog_godrays = std::stoi(val) != 0;
+            else if (key == "water_enabled")        rt_.water_enabled = std::stoi(val) != 0;
+            else if (key == "water_level")          rt_.water_level = std::stof(val);
+            else if (key == "water_wave_strength")  rt_.water_wave_strength = std::stof(val);
+            else if (key == "water_color") {
+                glm::vec3 v;
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.water_color = v;
+                }
+            }
             else if (key == "shadow_near_mult") rt_.shadow_near_mult = std::stof(val);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);

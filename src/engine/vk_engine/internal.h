@@ -119,6 +119,14 @@ struct SceneUBO {
     //      transition by darkening grazing-angle areas.
     //   y, z, w: unused.
     glm::vec4  terrain_extra;
+    // Ocean / water plane.
+    //   water_params.x = enabled (0/1)
+    //   water_params.y = water level (world Y)
+    //   water_params.z = wave strength (height of bump pattern, m)
+    //   water_params.w = animation time (seconds, drives wave scroll)
+    //   water_color.rgb = deep-water tint
+    glm::vec4  water_params;
+    glm::vec4  water_color;
 };
 
 // ---- KHR ray tracing entry points ----

@@ -33,7 +33,12 @@ void VulkanEngine::init_imgui() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // Keyboard nav DISABLED. With nav on, ImGui can auto-focus a
+    // pause-menu button when the menu opens, then propagate further
+    // key events to it — pressing ESC over the pause menu was
+    // landing on the Quit button and exiting the game. Mouse-only
+    // for the menu is fine here; no controller use.
+    io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
 
     ImGui_ImplGlfw_InitForVulkan(window_->handle(), true);
@@ -435,6 +440,18 @@ void VulkanEngine::build_menu_ui() {
                              "Fog 0 = off, 1 = baseline, 2 = thick valley fog.\n"
                              "Relaxation: faster march at the risk of skipping spikes.\n"
                              "God-rays: 4 short rays per fog step, ~20% slower fog.");
+
+        ImGui::SeparatorText("Ocean / water");
+        ImGui::Checkbox("Water enabled", &rt_.water_enabled);
+        ImGui::SliderFloat("Water level (Y)",
+                           &rt_.water_level, -10.0f, 50.0f, "%.1f m");
+        ImGui::SliderFloat("Wave strength",
+                           &rt_.water_wave_strength, 0.0f, 0.6f, "%.2f");
+        ImGui::ColorEdit3("Deep water color", &rt_.water_color.x);
+        ImGui::TextDisabled("Cheap analytical-wave ocean folded into the\n"
+                             "raymarch shader. Rendered when ray hits y=level\n"
+                             "before terrain. Schlick fresnel + sky reflection\n"
+                             "+ specular highlight + depth-fade tint.");
 
         ImGui::SeparatorText("Heightmap resolution");
         const char* hres_labels[] = {
