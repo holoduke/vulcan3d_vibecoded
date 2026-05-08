@@ -135,8 +135,14 @@ struct SceneUBO {
     //   x: shore blend distance (m of water depth where shallow→deep)
     //   y: shore noise strength (0..1, perturbs the depth in shore band)
     //   z: TLAS reflection flag (0/1) — RT cubes / castle into water
-    //   w: unused
+    //   w: water transparency (0..1)
     glm::vec4  water_shore;
+    // Volumetric ground-fog band:
+    //   x: y_start (world Y where fog density starts)
+    //   y: y_top   (world Y where fog density falls to zero)
+    //   z: noise strength (0..1, FBM modulation on density)
+    //   w: unused
+    glm::vec4  fog_band;
 };
 
 // ---- KHR ray tracing entry points ----

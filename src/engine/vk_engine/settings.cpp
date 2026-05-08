@@ -240,6 +240,9 @@ void VulkanEngine::save_settings() const {
     f << "terrain_raymarch_fog_strength = " << rt_.terrain_raymarch_fog_strength << "\n";
     f << "terrain_raymarch_relaxation = " << (rt_.terrain_raymarch_relaxation ? 1 : 0) << "\n";
     f << "terrain_raymarch_fog_godrays = " << (rt_.terrain_raymarch_fog_godrays ? 1 : 0) << "\n";
+    f << "terrain_raymarch_fog_y_start = " << rt_.terrain_raymarch_fog_y_start << "\n";
+    f << "terrain_raymarch_fog_y_top = "   << rt_.terrain_raymarch_fog_y_top   << "\n";
+    f << "terrain_raymarch_fog_noise = "   << rt_.terrain_raymarch_fog_noise   << "\n";
     f << "water_enabled = " << (rt_.water_enabled ? 1 : 0) << "\n";
     f << "water_level = " << rt_.water_level << "\n";
     f << "water_wave_strength = " << rt_.water_wave_strength << "\n";
@@ -390,6 +393,9 @@ void VulkanEngine::load_settings() {
             else if (key == "terrain_raymarch_fog_strength") rt_.terrain_raymarch_fog_strength = std::stof(val);
             else if (key == "terrain_raymarch_relaxation") rt_.terrain_raymarch_relaxation = std::stoi(val) != 0;
             else if (key == "terrain_raymarch_fog_godrays") rt_.terrain_raymarch_fog_godrays = std::stoi(val) != 0;
+            else if (key == "terrain_raymarch_fog_y_start") rt_.terrain_raymarch_fog_y_start = std::stof(val);
+            else if (key == "terrain_raymarch_fog_y_top")   rt_.terrain_raymarch_fog_y_top   = std::stof(val);
+            else if (key == "terrain_raymarch_fog_noise")   rt_.terrain_raymarch_fog_noise   = std::stof(val);
             else if (key == "water_enabled")        rt_.water_enabled = std::stoi(val) != 0;
             else if (key == "water_level")          rt_.water_level = std::stof(val);
             else if (key == "water_wave_strength")  rt_.water_wave_strength = std::stof(val);

@@ -529,6 +529,12 @@ void VulkanEngine::build_menu_ui() {
                            0.0f, 1.0f, "%.2f");
         ImGui::SliderFloat("Volumetric fog strength",
                            &rt_.terrain_raymarch_fog_strength, 0.0f, 2.0f, "%.2f");
+        ImGui::SliderFloat("Fog Y start (m)",
+                           &rt_.terrain_raymarch_fog_y_start, -20.0f, 60.0f, "%.1f");
+        ImGui::SliderFloat("Fog Y top (m)",
+                           &rt_.terrain_raymarch_fog_y_top, -20.0f, 80.0f, "%.1f");
+        ImGui::SliderFloat("Fog noise (wisps)",
+                           &rt_.terrain_raymarch_fog_noise, 0.0f, 1.0f, "%.2f");
         ImGui::Checkbox("Relaxation cone-stepping (Phase 6)",
                          &rt_.terrain_raymarch_relaxation);
         ImGui::Checkbox("Fog god-rays (Phase 7)",
@@ -654,6 +660,27 @@ void VulkanEngine::build_menu_ui() {
             ImGui::SliderFloat("rock->snow start",  &rt_.terrain_h_rock_snow_start,    50.0f, 200.0f);
             ImGui::SliderFloat("rock->snow end",    &rt_.terrain_h_rock_snow_end,      50.0f, 200.0f);
             ImGui::TreePop();
+        }
+
+        ImGui::SeparatorText("Heightmap save / load");
+        if (ImGui::Button("Save heightmap")) {
+            save_terrain_heights();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("→ assets/level1_heights.bin (auto-loaded next launch)");
+        // Plateau noise — adds gentle relief on the castle pad so it
+        // isn't a perfect flat. Two sliders (amplitude + frequency)
+        // and an Apply button so accidental drag doesn't constantly
+        // edit the heightmap.
+        static float plateau_amp_m = 0.6f;
+        static float plateau_freq  = 0.20f;
+        ImGui::SliderFloat("Plateau noise amp (m)", &plateau_amp_m,
+                           0.0f, 4.0f, "%.2f");
+        ImGui::SliderFloat("Plateau noise freq",    &plateau_freq,
+                           0.05f, 1.0f, "%.2f");
+        if (ImGui::Button("Apply plateau noise")) {
+            add_plateau_noise(plateau_amp_m, plateau_freq);
+            log::info("[ui] plateau noise applied — Save heightmap to persist");
         }
 
         ImGui::SeparatorText("Sculpt brush");

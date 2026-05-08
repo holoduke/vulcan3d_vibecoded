@@ -132,8 +132,10 @@ layout(set = 0, binding = 0) uniform Scene {
     vec4 water_color;
     vec4 water_color_shallow;
     // x: shore blend distance (m), y: shore noise strength,
-    // z: TLAS-reflection flag, w: unused.
+    // z: TLAS-reflection flag, w: water transparency.
     vec4 water_shore;
+    // Fog band: x = y_start, y = y_top, z = noise strength.
+    vec4 fog_band;
 } scene;
 
 // === Hash + Value-Noise with analytical derivatives ===
@@ -279,15 +281,36 @@ float raymarch(vec3 ro, vec3 rd) {
     return t;
 }
 
-// Finite-difference normal with distance-scaled epsilon — coarser
-// epsilon at distance integrates over noise frequencies the camera
-// can't resolve, so distant terrain doesn't alias.
+// Finite-difference normal with distance-scaled epsilon. Eps grows
+// linearly with distance (was quadratic — that smeared distant
+// detail far more than required for anti-aliasing) so distant
+// terrain keeps edge crispness while close-up still uses sub-cm
+// epsilon. Then a high-frequency micro-noise is added to the lit
+// normal at distance to give surface detail the FBM (capped at
+// 32 octaves) can't represent.
 vec3 calcNormal(vec3 pos, float t) {
-    float eps = 0.02 + 0.00005 * t * t;
+    float eps = 0.02 + 0.0008 * t;
     float hC = terrainH(pos.xz);
     float hR = terrainH(pos.xz + vec2(eps, 0.0));
     float hU = terrainH(pos.xz + vec2(0.0, eps));
-    return normalize(vec3(hC - hR, eps, hC - hU));
+    vec3 n = normalize(vec3(hC - hR, eps, hC - hU));
+
+    // Distance-mixed micro-detail: a couple of high-frequency noise
+    // taps perturb the normal so the lit surface keeps texture out
+    // to the far plane. Strength fades in past ~80 m (close terrain
+    // already has enough relief from the FBM). Free-ish — 4 noise2
+    // calls per shaded pixel.
+    float det_w = clamp((t - 80.0) / 200.0, 0.0, 1.0) * 0.6;
+    if (det_w > 0.001) {
+        float dn1 = noise2(pos.xz * 0.85);
+        float dn2 = noise2(pos.xz * 1.93 + 17.3);
+        float dn1x = noise2(pos.xz * 0.85 + vec2(0.5, 0.0));
+        float dn1z = noise2(pos.xz * 0.85 + vec2(0.0, 0.5));
+        vec3 dn = vec3((dn1 - dn1x), 0.0, (dn1 - dn1z)) +
+                   0.4 * vec3(dn2 - 0.5, 0.0, dn2 - 0.5);
+        n = normalize(n + dn * det_w * 0.5);
+    }
+    return n;
 }
 
 // Classic heightfield soft-shadow march — `min(k·h/t)` where h is
@@ -762,10 +785,12 @@ void main() {
         bool  fogGodRays  = pc.grass_params.z > 0.5;
         if (fogStrength > 0.001) {
         const int   kVolSteps         = 16;     // dense enough to hide stepping w/ jitter
-        const float kVolScaleHeight   = 22.0;   // density halves every 22 m up
-        const float kVolDensityBase   = 0.018;  // σe at y = 0
+        const float kVolDensityBase   = 0.030;  // σe at full density inside the band
         const float kVolPhaseG        = 0.65;   // forward-scattering bias
-        const float kVolNoiseStrength = 0.6;    // 0 = uniform, 1 = strong wisps
+        // Band parameters from settings (fog_band slot in scene UBO).
+        float fog_y_start = scene.fog_band.x;
+        float fog_y_top   = scene.fog_band.y;
+        float fog_noise   = clamp(scene.fog_band.z, 0.0, 1.0);
 
         vec3 fogTint   = vec3(0.78, 0.83, 0.90);
         vec3 sunGlow   = scene.sun_color.rgb * scene.sun_color.a;
@@ -791,17 +816,25 @@ void main() {
         float trans   = 1.0;
         for (int i = 0; i < kVolSteps; ++i) {
             vec3 p = ro + rd * t_v;
-            float h_norm = exp(-max(0.0, p.y) / kVolScaleHeight);
-            // Slow-scrolling FBM gives the wisps. Cheap 2-octave —
-            // anything richer would dominate the per-pixel cost.
-            float wisp = 1.0;
-            {
-                vec2 q = p.xz * 0.012;
-                float w = noise2(q) * 0.6 + noise2(q * 2.7) * 0.3;
-                wisp = mix(1.0, w * 1.6, kVolNoiseStrength);
-                wisp = max(wisp, 0.2);
-            }
-            float sigma_e = kVolDensityBase * h_norm * wisp * fogStrength;
+            // Density profile: 0 below y_start, ramps up over 1 m,
+            // 1 inside the band, falls off over 4 m above y_top.
+            // Compact band that hugs the valleys instead of a global
+            // exp falloff.
+            float profile = smoothstep(fog_y_start, fog_y_start + 1.0, p.y) *
+                            (1.0 - smoothstep(fog_y_top, fog_y_top + 4.0, p.y));
+            // 3-octave FBM-style wisp pattern. Modulates the density
+            // so the layer reads as wispy ground fog instead of a
+            // perfect sheet. Slow-scrolling for animated drift.
+            vec2 q = p.xz * 0.020 + vec2(scene.water_params.w * 0.05);
+            float w = 0.55 * noise2(q)
+                    + 0.30 * noise2(q * 2.13)
+                    + 0.15 * noise2(q * 4.27);
+            // Centred around 0.5 so noise = 1.0 → "no modulation" and
+            // noise = 0 → density ×0.2 (thin patch). Strength slider
+            // controls how much the noise can carve gaps.
+            float wisp = mix(1.0, 2.0 * w, fog_noise);
+            wisp = clamp(wisp, 0.2, 2.0);
+            float sigma_e = kVolDensityBase * profile * wisp * fogStrength;
 
             // Phase 7 — fog self-shadow / god-rays. Step a few small
             // distances toward the sun and accumulate optical depth
@@ -817,10 +850,13 @@ void main() {
                 float ld = ds * 0.5;
                 for (int j = 0; j < kFogShadowSteps; ++j) {
                     vec3 sp = p + sunDir * ld;
-                    float h_s   = exp(-max(0.0, sp.y) / kVolScaleHeight);
-                    float w_s   = mix(1.0, noise2(sp.xz * 0.012) * 1.6,
-                                       kVolNoiseStrength);
-                    float sig_s = kVolDensityBase * h_s * max(w_s, 0.2) * fogStrength;
+                    float prof_s = smoothstep(fog_y_start, fog_y_start + 1.0, sp.y) *
+                                    (1.0 - smoothstep(fog_y_top, fog_y_top + 4.0, sp.y));
+                    vec2 qs = sp.xz * 0.020 + vec2(scene.water_params.w * 0.05);
+                    float w_s = 0.55 * noise2(qs) + 0.30 * noise2(qs * 2.13)
+                              + 0.15 * noise2(qs * 4.27);
+                    float wisp_s = clamp(mix(1.0, 2.0 * w_s, fog_noise), 0.2, 2.0);
+                    float sig_s = kVolDensityBase * prof_s * wisp_s * fogStrength;
                     lightTrans *= exp(-sig_s * ds);
                     ds *= 1.5;          // exponential growth — covers far w/o more steps
                     ld += ds;

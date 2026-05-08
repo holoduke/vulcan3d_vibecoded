@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <vector>
 
@@ -566,6 +567,77 @@ void VulkanEngine::init_terrain_height_texture() {
 
     log::infof("heightmap texture uploaded (%dx%d, %.1f MB)",
                W, H, static_cast<double>(bytes) / (1024.0 * 1024.0));
+}
+
+bool VulkanEngine::save_terrain_heights() {
+    if (terrain_data_.heights.empty()) return false;
+    std::ofstream f("assets/level1_heights.bin", std::ios::binary);
+    if (!f.is_open()) {
+        log::error("save_terrain_heights: failed to open assets/level1_heights.bin");
+        return false;
+    }
+    int32_t dim = terrain_data_.dim;
+    f.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
+    f.write(reinterpret_cast<const char*>(&terrain_data_.cell), sizeof(float));
+    f.write(reinterpret_cast<const char*>(&terrain_data_.origin_x), sizeof(float));
+    f.write(reinterpret_cast<const char*>(&terrain_data_.origin_z), sizeof(float));
+    f.write(reinterpret_cast<const char*>(terrain_data_.heights.data()),
+            terrain_data_.heights.size() * sizeof(float));
+    log::infof("[terrain] saved %zu heights to assets/level1_heights.bin",
+               terrain_data_.heights.size());
+    return true;
+}
+
+void VulkanEngine::add_plateau_noise(float amplitude_m, float frequency) {
+    if (terrain_data_.heights.empty()) return;
+    // Gameplay plateau is centred at origin with a 28 m half-extent
+    // (matches HeightmapParams in init_world). Apply noise inside,
+    // taper it off across the 24 m blend ring so the rim stays smooth.
+    const glm::vec2 plat_centre(0.0f, 0.0f);
+    const glm::vec2 plat_ext   (28.0f, 28.0f);
+    const float     plat_blend = 24.0f;
+
+    auto fbm2 = [](glm::vec2 p) {
+        // 3-octave value-noise FBM via a cheap hash.
+        auto hash = [](glm::vec2 q) {
+            float n = std::sin(q.x * 12.9898f + q.y * 78.233f) * 43758.5453f;
+            return n - std::floor(n);
+        };
+        auto noise = [&](glm::vec2 q) {
+            glm::vec2 i = glm::floor(q);
+            glm::vec2 f = q - i;
+            float a = hash(i);
+            float b = hash(i + glm::vec2(1.0f, 0.0f));
+            float c = hash(i + glm::vec2(0.0f, 1.0f));
+            float d = hash(i + glm::vec2(1.0f, 1.0f));
+            glm::vec2 u = f * f * (3.0f - 2.0f * f);
+            return glm::mix(glm::mix(a, b, u.x), glm::mix(c, d, u.x), u.y);
+        };
+        float v = 0.5f * noise(p) + 0.25f * noise(p * 2.07f) +
+                   0.125f * noise(p * 4.13f);
+        return v - 0.4375f;   // re-centre around zero
+    };
+
+    const int W = terrain_data_.dim + 1;
+    const int H = terrain_data_.dim + 1;
+    for (int iz = 0; iz < H; ++iz) {
+        float wz = terrain_data_.origin_z + iz * terrain_data_.cell;
+        for (int ix = 0; ix < W; ++ix) {
+            float wx = terrain_data_.origin_x + ix * terrain_data_.cell;
+            glm::vec2 d = glm::abs(glm::vec2(wx, wz) - plat_centre) - plat_ext;
+            float dout = std::max(std::max(d.x, 0.0f), std::max(d.y, 0.0f));
+            float t = std::clamp(dout / plat_blend, 0.0f, 1.0f);
+            float w = 1.0f - t * t * (3.0f - 2.0f * t);    // 1 inside, 0 outside
+            if (w <= 0.001f) continue;
+            float n = fbm2(glm::vec2(wx, wz) * frequency);
+            terrain_data_.heights[static_cast<size_t>(iz) *
+                                   static_cast<size_t>(W) +
+                                   static_cast<size_t>(ix)] +=
+                n * amplitude_m * w;
+        }
+    }
+    log::infof("[terrain] plateau noise applied (amp=%.2f m, freq=%.3f)",
+               amplitude_m, frequency);
 }
 
 void VulkanEngine::destroy_terrain_height_texture() {
@@ -1156,6 +1228,37 @@ void VulkanEngine::init_world() {
         Heightmap hm = rt_.terrain_raymarch_enabled
             ? generate_heightmap_raymarch(hp)
             : generate_heightmap(hp);
+        // If the user has saved a sculpt-edited heightmap (via the
+        // Terrain → Save heightmap button), load it now and overwrite
+        // the procedurally-generated one. Validates dim+cell match
+        // so a heightmap saved at 2048×1m doesn't mis-load on a
+        // 4096×0.5m level.
+        {
+            std::ifstream hf("assets/level1_heights.bin", std::ios::binary);
+            if (hf.is_open()) {
+                int32_t fdim = 0;
+                float fcell = 0.0f, fox = 0.0f, foz = 0.0f;
+                hf.read(reinterpret_cast<char*>(&fdim), sizeof(fdim));
+                hf.read(reinterpret_cast<char*>(&fcell), sizeof(fcell));
+                hf.read(reinterpret_cast<char*>(&fox), sizeof(fox));
+                hf.read(reinterpret_cast<char*>(&foz), sizeof(foz));
+                if (fdim == hm.dim &&
+                    std::abs(fcell - hm.cell) < 1e-4f &&
+                    std::abs(fox - hm.origin_x) < 1e-2f &&
+                    std::abs(foz - hm.origin_z) < 1e-2f) {
+                    size_t n = static_cast<size_t>(hm.width()) *
+                               static_cast<size_t>(hm.height());
+                    hf.read(reinterpret_cast<char*>(hm.heights.data()),
+                            n * sizeof(float));
+                    log::infof("[terrain] loaded sculpted heightmap "
+                               "(%zu cells)", n);
+                } else {
+                    log::warnf("[terrain] saved heightmap dim/cell mismatch "
+                               "— ignoring (saved %dx %.3fm, want %dx %.3fm)",
+                               fdim, fcell, hm.dim, hm.cell);
+                }
+            }
+        }
         // Cache for collision + Phase 4 sculpt access.
         terrain_data_.dim = hm.dim;
         terrain_data_.cell = hm.cell;
@@ -1551,15 +1654,13 @@ void VulkanEngine::init_spacejet() {
     float max_side = std::max({extent.x, extent.y, extent.z, 1e-3f});
     float scale = 6.0f / max_side;
 
-    // Many sci-fi glTF assets are exported Z-up; the engine is Y-up.
-    // Pre-rotate the model −90° around X so its top points to +Y.
-    glm::mat4 z_to_y = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f),
-                                    glm::vec3(1.0f, 0.0f, 0.0f));
-
+    // Asset is standard glTF (Y-up, -Z forward) — no axis-swap
+    // rotation needed. -90° X put nose at -Y (down), +90° X put nose
+    // at +Y (up); identity puts nose at -Z (engine-forward) with top
+    // at +Y (engine-up), which is what we want.
     spacejet_base_xform_ =
         glm::translate(glm::mat4(1.0f), jet_world) *
         glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
-        z_to_y *
         glm::translate(glm::mat4(1.0f), -center);
 
     spacejet_meshes_.reserve(gltf.primitives.size());

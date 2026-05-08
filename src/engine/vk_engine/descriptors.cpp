@@ -278,6 +278,10 @@ void VulkanEngine::update_scene_ubo() {
                                   rt_.water_shore_noise,
                                   rt_.water_tlas_reflections ? 1.0f : 0.0f,
                                   rt_.water_transparency);
+    data.fog_band = glm::vec4(rt_.terrain_raymarch_fog_y_start,
+                               rt_.terrain_raymarch_fog_y_top,
+                               rt_.terrain_raymarch_fog_noise,
+                               0.0f);
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

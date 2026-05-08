@@ -643,6 +643,16 @@ private:
     float             terrain_height_max_     = 0.0f;   // upper-bound for raymarch early-out
     void init_terrain_height_texture();
     void destroy_terrain_height_texture();
+    // Persist / load the live (possibly sculpt-edited) heightmap to
+    // assets/level1_heights.bin. Save writes dim/cell/origin header +
+    // raw float data; load is automatic in init_world if the file
+    // exists and metadata matches.
+    bool save_terrain_heights();
+    // Add stratified noise to the heightmap inside the rectangular
+    // plateau region — gives the castle pad some natural relief
+    // instead of being a perfect flat. Modifies terrain_data_ in
+    // place; caller can save it. Amplitude is in metres.
+    void add_plateau_noise(float amplitude_m, float frequency);
 
     // CPU-baked heightmap sun-shadow texture (R8). Sampled by
     // grass.vert per blade so distant grass picks up mountain
@@ -1115,6 +1125,13 @@ private:
         // god-ray look. Cheap (4 short rays per fog step), but multi
         // ALU + branches so off by default.
         bool  terrain_raymarch_fog_godrays   = false;
+        // Fog band — density is non-zero between [fog_y_start, fog_y_top]
+        // and falls off above/below with a soft transition. Combined
+        // with a low-frequency noise so the layer isn't a perfect
+        // sheet (real ground fog is wispy).
+        float terrain_raymarch_fog_y_start   = 0.0f;
+        float terrain_raymarch_fog_y_top     = 18.0f;
+        float terrain_raymarch_fog_noise     = 0.7f;   // 0 = uniform sheet, 1 = strong wisps
 
         // Ocean / water plane. Rendered inside the terrain raymarch
         // (fullscreen tri) so it composites with rasterised geometry
