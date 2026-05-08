@@ -145,6 +145,7 @@ void VulkanEngine::apply_terrain_brush(float dt) {
     }
     terrain_blas_dirty_ = true;
     terrain_jolt_dirty_ = true;
+    terrain_height_dirty_ = true;   // re-upload delta texture for raymarch
 }
 
 void VulkanEngine::rebuild_dirty_terrain_chunks() {
@@ -527,8 +528,22 @@ void VulkanEngine::init_terrain_height_texture() {
         vmaCreateBuffer(allocator_, &bci, &bac, &stage, &stage_alloc, nullptr);
         VmaAllocationInfo ai{};
         vmaGetAllocationInfo(allocator_, stage_alloc, &ai);
-        std::memcpy(ai.pMappedData, terrain_data_.heights.data(),
-                    static_cast<size_t>(bytes));
+        // Upload DELTA from baseline so the raymarch shader can layer
+        // sculpt edits on top of its own GLSL FBM. On first launch
+        // this is all zeros (current == baseline).
+        size_t n = static_cast<size_t>(W) * static_cast<size_t>(H);
+        if (terrain_baseline_heights_.size() == n) {
+            std::vector<float> delta(n);
+            for (size_t i = 0; i < n; ++i) {
+                delta[i] = terrain_data_.heights[i] -
+                            terrain_baseline_heights_[i];
+            }
+            std::memcpy(ai.pMappedData, delta.data(),
+                        static_cast<size_t>(bytes));
+        } else {
+            std::memcpy(ai.pMappedData, terrain_data_.heights.data(),
+                        static_cast<size_t>(bytes));
+        }
     }
 
     vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
@@ -567,6 +582,64 @@ void VulkanEngine::init_terrain_height_texture() {
 
     log::infof("heightmap texture uploaded (%dx%d, %.1f MB)",
                W, H, static_cast<double>(bytes) / (1024.0 * 1024.0));
+}
+
+void VulkanEngine::refresh_terrain_height_texture() {
+    if (!terrain_height_image_ || terrain_data_.heights.empty()) return;
+    const int W = terrain_data_.dim;
+    const int H = terrain_data_.dim;
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(W) *
+                                static_cast<VkDeviceSize>(H) * sizeof(float);
+
+    VkBuffer stage = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = nullptr;
+    VkBufferCreateInfo bci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .size = bytes,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+    };
+    VmaAllocationCreateInfo bac{};
+    bac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    bac.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    vmaCreateBuffer(allocator_, &bci, &bac, &stage, &stage_alloc, nullptr);
+    VmaAllocationInfo ai{};
+    vmaGetAllocationInfo(allocator_, stage_alloc, &ai);
+    size_t n = static_cast<size_t>(W) * static_cast<size_t>(H);
+    if (terrain_baseline_heights_.size() == n) {
+        std::vector<float> delta(n);
+        for (size_t i = 0; i < n; ++i) {
+            delta[i] = terrain_data_.heights[i] -
+                        terrain_baseline_heights_[i];
+        }
+        std::memcpy(ai.pMappedData, delta.data(),
+                    static_cast<size_t>(bytes));
+    } else {
+        std::memcpy(ai.pMappedData, terrain_data_.heights.data(),
+                    static_cast<size_t>(bytes));
+    }
+
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, terrain_height_image_,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = { static_cast<uint32_t>(W),
+                                static_cast<uint32_t>(H), 1 };
+        vkCmdCopyBufferToImage(cb, stage, terrain_height_image_,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                1, &region);
+        vkinit::transition_image(cb, terrain_height_image_,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    vmaDestroyBuffer(allocator_, stage, stage_alloc);
+    terrain_height_dirty_ = false;
 }
 
 bool VulkanEngine::save_terrain_heights() {
@@ -638,6 +711,7 @@ void VulkanEngine::add_plateau_noise(float amplitude_m, float frequency) {
     }
     log::infof("[terrain] plateau noise applied (amp=%.2f m, freq=%.3f)",
                amplitude_m, frequency);
+    terrain_height_dirty_ = true;
 }
 
 void VulkanEngine::destroy_terrain_height_texture() {
@@ -1265,6 +1339,11 @@ void VulkanEngine::init_world() {
         terrain_data_.origin_x = hm.origin_x;
         terrain_data_.origin_z = hm.origin_z;
         terrain_data_.heights = hm.heights;
+        // Capture procedural baseline so the raymarch shader can be
+        // shown only the delta (sculpt edits + plateau noise +
+        // disk-loaded overlay) on top of its own GLSL FBM. Without
+        // this, sculpting wouldn't affect the raymarched terrain.
+        terrain_baseline_heights_ = hm.heights;
         terrain_mesh_ = build_terrain_mesh(device_, allocator_,
                                            graphics_queue_, graphics_queue_family_, hm);
         // 32Г—32 chunks of 64 cells each вЂ” 64 is divisible by every LOD

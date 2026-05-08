@@ -1225,6 +1225,13 @@ void VulkanEngine::run(const RunOptions& opts) {
             }
             tick_terrain_shadow_progressive();
         }
+        // Re-upload the heightmap delta texture if the user sculpted /
+        // added plateau noise this frame. Cheap one-shot upload of
+        // dim*dim*4 bytes; happens only on the frame the dirty bit
+        // is set, not every frame the brush is held.
+        if (terrain_height_dirty_) {
+            refresh_terrain_height_texture();
+        }
         // Audio listener follows the camera. Reaping drained one-shots
         // also runs here so the active-voice list stays small.
         if (audio_) {

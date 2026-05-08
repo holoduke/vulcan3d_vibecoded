@@ -648,6 +648,19 @@ private:
     // raw float data; load is automatic in init_world if the file
     // exists and metadata matches.
     bool save_terrain_heights();
+    // Re-upload the heightmap delta (current - baseline) into binding
+    // 8 so the raymarch shader's terrainM picks up sculpt edits +
+    // plateau-noise + saved-overlay changes. Baseline is captured at
+    // level load (the procedural FBM result); only deltas are sent.
+    // Cheap (one staging copy of dim×dim×4 bytes); use sparingly.
+    void refresh_terrain_height_texture();
+    // Set after sculpt / plateau-noise / load so the next frame can
+    // call refresh_terrain_height_texture once instead of every brush
+    // step.
+    bool terrain_height_dirty_ = false;
+    // Procedural baseline captured at init_world. delta_to_upload =
+    // terrain_data_.heights[i] - terrain_baseline_heights_[i].
+    std::vector<float> terrain_baseline_heights_;
     // Add stratified noise to the heightmap inside the rectangular
     // plateau region — gives the castle pad some natural relief
     // instead of being a perfect flat. Modifies terrain_data_ in

@@ -43,9 +43,21 @@ layout(push_constant) uniform PC {
     vec4 grass_params;
 } pc;
 
-// Heightmap binding kept for compatibility with the descriptor layout
-// — not sampled by this shader after the revert to pure-FBM terrain.
+// Heightmap delta texture (R32F). Stores `current_height -
+// procedural_baseline_height` per cell, so sculpt edits + plateau
+// noise + disk-loaded overlays appear on top of the shader's GLSL
+// FBM. Uploaded once at level load and re-uploaded after sculpt /
+// noise edits. World XZ → UV maps via the gameplay-plateau push
+// constants (pc.color.xy = origin, pc.color.z is plateau-extent
+// — we don't have the heightmap origin/side here, so use the well-
+// known engine layout: terrain centred at origin, side = 2048 m).
 layout(set = 0, binding = 8) uniform sampler2D u_terrain_height;
+const float kHeightmapSide = 2048.0;
+float sampleHeightDelta(vec2 worldXZ) {
+    vec2 uv = (worldXZ / kHeightmapSide) + vec2(0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+    return texture(u_terrain_height, uv).r;
+}
 
 // Sun shadow map (single-cascade ortho D32). Rendered each frame
 // from the light's POV with castle, dyn-props and terrain chunks
@@ -209,7 +221,11 @@ float terrainM(vec2 p) {
     // Blend the FBM toward the gameplay plateau height inside the
     // castle's footprint so brushes / dyn-props look seated.
     float t = plateauWeight(wp);
-    return mix(h, pc.color.w, t);
+    h = mix(h, pc.color.w, t);
+    // Add sculpt / plateau-noise / disk-overlay deltas. Texture is
+    // 0 in unsculpted areas so this is a no-op for stock terrain.
+    h += sampleHeightDelta(wp);
+    return h;
 }
 
 // Normal-detail FBM — finite-difference normals call this 3× per hit
@@ -231,7 +247,9 @@ float terrainH(vec2 p) {
     }
     float h = a * TERRAIN_HEIGHT;
     float t = plateauWeight(wp);
-    return mix(h, pc.color.w, t);
+    h = mix(h, pc.color.w, t);
+    h += sampleHeightDelta(wp);
+    return h;
 }
 
 float terrainMaxHeight() { return max(TERRAIN_HEIGHT, pc.color.w); }
