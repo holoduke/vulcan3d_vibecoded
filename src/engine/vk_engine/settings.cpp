@@ -243,6 +243,7 @@ void VulkanEngine::save_settings() const {
     f << "water_enabled = " << (rt_.water_enabled ? 1 : 0) << "\n";
     f << "water_level = " << rt_.water_level << "\n";
     f << "water_wave_strength = " << rt_.water_wave_strength << "\n";
+    f << "water_rt_reflections = " << (rt_.water_rt_reflections ? 1 : 0) << "\n";
     f << "water_color = " << rt_.water_color.r << " "
                             << rt_.water_color.g << " "
                             << rt_.water_color.b << "\n";
@@ -383,6 +384,7 @@ void VulkanEngine::load_settings() {
             else if (key == "water_enabled")        rt_.water_enabled = std::stoi(val) != 0;
             else if (key == "water_level")          rt_.water_level = std::stof(val);
             else if (key == "water_wave_strength")  rt_.water_wave_strength = std::stof(val);
+            else if (key == "water_rt_reflections") rt_.water_rt_reflections = std::stoi(val) != 0;
             else if (key == "water_color") {
                 glm::vec3 v;
                 if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {

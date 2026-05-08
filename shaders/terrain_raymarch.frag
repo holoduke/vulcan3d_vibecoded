@@ -321,6 +321,30 @@ vec3 getMaterial(vec3 pos, vec3 nor) {
     return col;
 }
 
+// Cheap raymarch for water-reflection rays. Same conservative-step
+// heightfield trace as `raymarch()` but with a fixed reduced step
+// count (the reflected rays usually hit within 30-50 steps because
+// the surface is close to the camera). Skips jitter to avoid
+// per-pixel reflection noise that wouldn't denoise temporally.
+float raymarchReflect(vec3 ro, vec3 rd) {
+    float maxH = terrainMaxHeight();
+    float t = 0.0;
+    if (ro.y > maxH && rd.y >= 0.0) return -1.0;
+    if (ro.y > maxH) {
+        t = (ro.y - maxH) / max(-rd.y, 1e-4);
+    }
+    const int kReflSteps = 64;
+    const float kReflStep = 0.5;     // slightly aggressive
+    for (int i = 0; i < kReflSteps; ++i) {
+        vec3 pos = ro + t * rd;
+        float h = pos.y - terrainM(pos.xz);
+        if (abs(h) < 0.005 * t) break;     // looser threshold than primary
+        if (t > 800.0) return -1.0;        // shorter range than primary
+        t += kReflStep * h;
+    }
+    return t;
+}
+
 // Cheap animated ocean normal — two scrolling sin/cos directions
 // summed at slightly off-axis frequencies. Looks like the doc's
 // "Sea of Greek" demo but without the FBM cost. Returns a
@@ -387,15 +411,56 @@ void main() {
         const float F0 = 0.02;
         float fres = F0 + (1.0 - F0) * pow(1.0 - cosV, 5.0);
 
-        // Cheap sky reflection — same horizon→zenith gradient the
-        // compose sky uses (no separate sky pass needed). Sun halo
-        // adds a gentle warm dot near the sun direction.
         vec3 refl = reflect(rd, wnor);
+        // Sky reflection — horizon→zenith gradient + sun halo. Used
+        // directly when the reflection ray escapes the terrain or
+        // when RT reflections are off.
         float skyT = clamp(refl.y * 0.5 + 0.5, 0.0, 1.0);
-        vec3 reflCol = mix(vec3(0.55, 0.65, 0.78),
-                           vec3(0.30, 0.45, 0.75), skyT);
+        vec3 sky_refl = mix(vec3(0.55, 0.65, 0.78),
+                             vec3(0.30, 0.45, 0.75), skyT);
         float sunHalo = pow(max(dot(refl, sunDirW), 0.0), 60.0);
-        reflCol += scene.sun_color.rgb * scene.sun_color.a * sunHalo * 0.6;
+        sky_refl += scene.sun_color.rgb * scene.sun_color.a * sunHalo * 0.6;
+
+        vec3 reflCol = sky_refl;
+        // RT-style FBM-march reflection — picks up the actual mountain
+        // / valley silhouettes in the water surface. Cheap because
+        // we use a reduced-quality march; if it misses (refl ray
+        // exits past the terrain or goes into the sky) fall back to
+        // the analytical sky.
+        bool do_rt_refl = scene.water_params.x > 0.5 &&
+                          pc.grass_params.w > 0.5 && refl.y > 0.02;
+        if (do_rt_refl) {
+            // Lift the origin slightly along refl so we don't
+            // immediately self-intersect the wave bumps below the
+            // water plane.
+            vec3 r_ro = wpos + refl * 0.5 + vec3(0.0, 0.05, 0.0);
+            float t_r = raymarchReflect(r_ro, refl);
+            if (t_r > 0.0) {
+                vec3 r_pos = r_ro + refl * t_r;
+                vec3 r_nor = calcNormal(r_pos, t_r);
+                // Lambert + sky ambient. No shadow march in the
+                // reflection — too expensive for a free-running
+                // surface effect, and the missing self-shadow is
+                // visually fine on a wavy reflection.
+                float r_dif = max(dot(r_nor, sunDirW), 0.0);
+                float r_amb = 0.5 + 0.5 * r_nor.y;
+                vec3  r_mat = getMaterial(r_pos, r_nor);
+                vec3  r_lin = r_dif * scene.sun_color.rgb *
+                                scene.sun_color.a +
+                              r_amb * scene.sky_color.rgb * 0.35;
+                vec3  r_col = r_mat * r_lin;
+                // Same atmospheric extinction as the primary
+                // shading, applied to the reflection-ray distance.
+                vec3  r_ext = exp(-t_r * 0.00025 *
+                                  vec3(1.0, 1.5, 4.0));
+                vec3  r_fog = mix(vec3(0.55, 0.55, 0.58),
+                                  vec3(1.0, 0.7, 0.3),
+                                  0.3 * pow(max(dot(refl, sunDirW), 0.0), 8.0));
+                r_col = r_col * r_ext + r_fog * (1.0 - r_ext);
+                reflCol = r_col;
+            }
+            // miss → keep sky_refl
+        }
 
         // Deep / shallow blend by view depth into the water surface.
         // Pure visual cue — no real refraction. Closer = lighter

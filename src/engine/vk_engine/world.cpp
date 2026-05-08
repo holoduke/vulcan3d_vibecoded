@@ -1823,11 +1823,12 @@ void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
     //   x = volumetric fog strength (0 = off)
     //   y = relaxation cone-stepping flag (>0.5 = on)
     //   z = fog god-ray self-shadow flag (>0.5 = on)
+    //   w = water RT-reflection flag (>0.5 = march FBM in refl dir)
     pc.grass_params = glm::vec4(
         std::max(0.0f, rt_.terrain_raymarch_fog_strength),
         rt_.terrain_raymarch_relaxation ? 1.0f : 0.0f,
         rt_.terrain_raymarch_fog_godrays ? 1.0f : 0.0f,
-        0.0f);
+        rt_.water_rt_reflections ? 1.0f : 0.0f);
     vkCmdPushConstants(cmd, pipeline_layout_,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pc);
@@ -2139,7 +2140,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             std::max(0.0f, rt_.terrain_raymarch_fog_strength),
             rt_.terrain_raymarch_relaxation ? 1.0f : 0.0f,
             rt_.terrain_raymarch_fog_godrays ? 1.0f : 0.0f,
-            0.0f);
+            rt_.water_rt_reflections ? 1.0f : 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &pc);

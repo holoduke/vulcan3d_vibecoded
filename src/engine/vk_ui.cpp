@@ -466,6 +466,7 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("Wave strength",
                            &rt_.water_wave_strength, 0.0f, 0.6f, "%.2f");
         ImGui::ColorEdit3("Deep water color", &rt_.water_color.x);
+        ImGui::Checkbox("RT terrain reflections", &rt_.water_rt_reflections);
         ImGui::TextDisabled("%s",
             "Cheap analytical-wave ocean folded into the\n"
             "raymarch shader. Rendered when ray hits y=level\n"

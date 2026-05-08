@@ -1110,6 +1110,12 @@ private:
         float     water_level          = 2.0f;     // world Y of the calm sea level
         float     water_wave_strength  = 0.18f;    // height of bump pattern (m)
         glm::vec3 water_color          = glm::vec3(0.04f, 0.18f, 0.22f);
+        // RT reflections on water: when true, the water surface
+        // ray-marches the FBM terrain along the reflection vector
+        // and uses the shaded hit point (lambert + sky tint) as the
+        // reflected colour. When false, a cheap horizon→zenith sky
+        // gradient is used instead.
+        bool      water_rt_reflections = true;
         // Multiplier on the RT shadow ray count for fragments within
         // rt_lod.x (close to the camera). 1 = unchanged, higher = more
         // rays close-by for smoother penumbras under boxes / castle.
