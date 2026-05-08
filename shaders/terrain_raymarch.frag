@@ -125,6 +125,10 @@ layout(set = 0, binding = 0) uniform Scene {
     //   water_color.rgb = deep-water tint
     vec4 water_params;
     vec4 water_color;
+    vec4 water_color_shallow;
+    // x: shore blend distance (m), y: shore noise strength,
+    // z: TLAS-reflection flag, w: unused.
+    vec4 water_shore;
 } scene;
 
 // === Hash + Value-Noise with analytical derivatives ===
@@ -462,13 +466,63 @@ void main() {
             // miss → keep sky_refl
         }
 
-        // Deep / shallow blend by view depth into the water surface.
-        // Pure visual cue — no real refraction. Closer = lighter
-        // (silt, sub-surface scatter), far = deep tint.
-        float depthFade = 1.0 - exp(-t_water * 0.012);
-        vec3 deep = scene.water_color.rgb;
-        vec3 shallow = mix(deep * 1.5 + vec3(0.05, 0.10, 0.10),
-                            deep, depthFade);
+        // TLAS reflection — ray-query against castle / cubes / dyn
+        // props (mask 0x02 skips the terrain BLAS). If the TLAS hit
+        // is closer than whatever's in `reflCol` (FBM-march or sky),
+        // override with a basic shaded stand-in. We don't do per-
+        // instance material lookup here to keep the path cheap; a
+        // mid-grey lit by sun + sky reads correctly for most stone /
+        // wood / box surfaces and reflections in water are too low-
+        // detail for the user to notice the missing texture.
+        if (scene.water_shore.z > 0.5 && refl.y > 0.02) {
+            vec3 r_ro = wpos + wnor * 0.05;
+            float t_tlas;
+            if (closest_hit_no_terrain(r_ro, refl, 200.0, t_tlas)) {
+                // Fake a vaguely-up normal weighted toward the
+                // reflection ray (no real RT normal without a hit-
+                // attribute pass). Good enough for water mirrors.
+                vec3 r_nor = normalize(mix(vec3(0.0, 1.0, 0.0),
+                                            -refl, 0.4));
+                float r_dif = max(dot(r_nor, sunDirW), 0.0);
+                float r_amb = 0.5 + 0.5 * r_nor.y;
+                vec3 stone = vec3(0.55, 0.52, 0.48);
+                vec3 r_col = stone * (r_dif * scene.sun_color.rgb *
+                                       scene.sun_color.a +
+                                       r_amb * scene.sky_color.rgb * 0.35);
+                // Atmospheric extinction over reflection distance.
+                vec3 r_ext = exp(-t_tlas * 0.00025 *
+                                  vec3(1.0, 1.5, 4.0));
+                vec3 r_fog = mix(vec3(0.55, 0.55, 0.58),
+                                  vec3(1.0, 0.7, 0.3),
+                                  0.3 * pow(max(dot(refl, sunDirW),
+                                                0.0), 8.0));
+                r_col = r_col * r_ext + r_fog * (1.0 - r_ext);
+                reflCol = r_col;
+            }
+        }
+
+        // Shore-aware base colour. We compute the actual water depth
+        // at this surface point — water_level minus the FBM terrain
+        // height directly below. Shallow water = `water_color_shallow`,
+        // deep water = `water_color`, transition over `shore_blend`
+        // metres. Mild noise on the depth breaks up the perfectly
+        // geometric shoreline so it reads as natural beach.
+        vec3 deep    = scene.water_color.rgb;
+        vec3 shallow_tint = scene.water_color_shallow.rgb;
+        float shore_blend = max(0.1, scene.water_shore.x);
+        float shore_noise = scene.water_shore.y;
+        float terrain_y = terrainM(wpos.xz);
+        float depth_m   = max(0.0, water_y - terrain_y);
+        float dn = noise2(wpos.xz * 0.18) +
+                    0.5 * noise2(wpos.xz * 0.42);
+        depth_m += (dn - 0.6) * shore_blend * shore_noise;
+        depth_m  = max(0.0, depth_m);
+        float water_blend = smoothstep(0.0, shore_blend, depth_m);
+        vec3  shallow = mix(shallow_tint, deep, water_blend);
+        // Distance fade to the deep tint so far water doesn't read
+        // shallower than near water just because of the noise.
+        float distFade = 1.0 - exp(-t_water * 0.012);
+        shallow = mix(shallow, deep, distFade * 0.4);
 
         // Specular highlight on the wave crests when the sun is close
         // to the half-vector. Sharp lobe (~64) so it reads as glints.

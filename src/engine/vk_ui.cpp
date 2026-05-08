@@ -466,7 +466,42 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("Wave strength",
                            &rt_.water_wave_strength, 0.0f, 0.6f, "%.2f");
         ImGui::ColorEdit3("Deep water color", &rt_.water_color.x);
+        ImGui::ColorEdit3("Shallow water color", &rt_.water_color_shallow.x);
+        ImGui::SliderFloat("Shore band (m)",
+                           &rt_.water_shore_blend, 0.5f, 20.0f, "%.1f");
+        ImGui::SliderFloat("Shore noise",
+                           &rt_.water_shore_noise, 0.0f, 1.0f, "%.2f");
         ImGui::Checkbox("RT terrain reflections", &rt_.water_rt_reflections);
+        ImGui::Checkbox("RT cube/castle reflections (TLAS)",
+                         &rt_.water_tlas_reflections);
+        // Quick presets so the user has a starting point per mood.
+        if (ImGui::Button("Tropical")) {
+            rt_.water_color         = glm::vec3(0.04f, 0.30f, 0.40f);
+            rt_.water_color_shallow = glm::vec3(0.55f, 0.85f, 0.90f);
+            rt_.water_shore_blend   = 6.0f;
+            rt_.water_shore_noise   = 0.45f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Lake")) {
+            rt_.water_color         = glm::vec3(0.05f, 0.16f, 0.20f);
+            rt_.water_color_shallow = glm::vec3(0.30f, 0.55f, 0.55f);
+            rt_.water_shore_blend   = 3.0f;
+            rt_.water_shore_noise   = 0.40f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Deep ocean")) {
+            rt_.water_color         = glm::vec3(0.02f, 0.10f, 0.18f);
+            rt_.water_color_shallow = glm::vec3(0.10f, 0.35f, 0.50f);
+            rt_.water_shore_blend   = 8.0f;
+            rt_.water_shore_noise   = 0.30f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Murky")) {
+            rt_.water_color         = glm::vec3(0.10f, 0.13f, 0.07f);
+            rt_.water_color_shallow = glm::vec3(0.30f, 0.32f, 0.20f);
+            rt_.water_shore_blend   = 2.0f;
+            rt_.water_shore_noise   = 0.55f;
+        }
         ImGui::TextDisabled("%s",
             "Cheap analytical-wave ocean folded into the\n"
             "raymarch shader. Rendered when ray hits y=level\n"

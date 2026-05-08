@@ -1116,6 +1116,20 @@ private:
         // reflected colour. When false, a cheap horizon→zenith sky
         // gradient is used instead.
         bool      water_rt_reflections = true;
+        // RT TLAS reflection: when true, additionally fire a ray
+        // query into the TLAS along the reflect direction so cubes /
+        // castle / dyn-props show up in the water surface (not just
+        // the FBM terrain). Cheap (1 closest_hit ray per pixel).
+        bool      water_tlas_reflections = true;
+        // Shore tinting — colour the water lighter where it's shallow.
+        // Depth = water_level − terrain_height_at(xz) (in metres).
+        glm::vec3 water_color_shallow  = glm::vec3(0.45f, 0.62f, 0.65f);
+        // How many metres of water depth the shallow→deep blend
+        // covers. 4 m = noticeable beach band; 0.5 m = razor-sharp.
+        float     water_shore_blend    = 4.0f;
+        // Noise on the shore band so the line isn't a perfect contour.
+        // 0 = clean, 1 = strongly broken.
+        float     water_shore_noise    = 0.4f;
         // Multiplier on the RT shadow ray count for fragments within
         // rt_lod.x (close to the camera). 1 = unchanged, higher = more
         // rays close-by for smoother penumbras under boxes / castle.

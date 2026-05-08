@@ -266,6 +266,11 @@ void VulkanEngine::update_scene_ubo() {
                                    rt_.water_wave_strength,
                                    water_t);
     data.water_color  = glm::vec4(rt_.water_color, 0.0f);
+    data.water_color_shallow = glm::vec4(rt_.water_color_shallow, 0.0f);
+    data.water_shore = glm::vec4(rt_.water_shore_blend,
+                                  rt_.water_shore_noise,
+                                  rt_.water_tlas_reflections ? 1.0f : 0.0f,
+                                  0.0f);
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

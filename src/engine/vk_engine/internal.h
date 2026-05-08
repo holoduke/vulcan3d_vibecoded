@@ -127,6 +127,16 @@ struct SceneUBO {
     //   water_color.rgb = deep-water tint
     glm::vec4  water_params;
     glm::vec4  water_color;
+    // Shallow-water colour (used near shores). Linear gradient from
+    // this toward water_color over `water_shore.x` metres of depth,
+    // with `water_shore.y` strength of FBM noise so the shore line
+    // isn't perfectly geometric. .w slot reserved.
+    glm::vec4  water_color_shallow;
+    //   x: shore blend distance (m of water depth where shallow→deep)
+    //   y: shore noise strength (0..1, perturbs the depth in shore band)
+    //   z: TLAS reflection flag (0/1) — RT cubes / castle into water
+    //   w: unused
+    glm::vec4  water_shore;
 };
 
 // ---- KHR ray tracing entry points ----
