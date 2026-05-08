@@ -423,9 +423,18 @@ void VulkanEngine::build_menu_ui() {
         }
         ImGui::SliderFloat("Raymarch sharpen", &rt_.terrain_raymarch_sharpen,
                            0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Volumetric fog strength",
+                           &rt_.terrain_raymarch_fog_strength, 0.0f, 2.0f, "%.2f");
+        ImGui::Checkbox("Relaxation cone-stepping (Phase 6)",
+                         &rt_.terrain_raymarch_relaxation);
+        ImGui::Checkbox("Fog god-rays (Phase 7)",
+                         &rt_.terrain_raymarch_fog_godrays);
         ImGui::TextDisabled("Lower steps / fewer octaves / higher step factor = faster.\n"
                              "50% render scale ≈ 4× fewer FBM evaluations.\n"
-                             "Sharpen recovers detail lost to bilinear upscaling.");
+                             "Sharpen recovers detail lost to bilinear upscaling.\n"
+                             "Fog 0 = off, 1 = baseline, 2 = thick valley fog.\n"
+                             "Relaxation: faster march at the risk of skipping spikes.\n"
+                             "God-rays: 4 short rays per fog step, ~20% slower fog.");
 
         ImGui::SeparatorText("Heightmap resolution");
         const char* hres_labels[] = {

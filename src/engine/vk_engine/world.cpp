@@ -1819,6 +1819,15 @@ void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
         static_cast<float>(std::clamp(rt_.terrain_raymarch_shadow_steps, 16, 96)),
         static_cast<float>(std::clamp(rt_.terrain_raymarch_octaves, 4, 24)),
         static_cast<float>(std::clamp(rt_.terrain_raymarch_normal_octaves, 4, 32)));
+    // grass_params slot repurposed for raymarch knobs:
+    //   x = volumetric fog strength (0 = off)
+    //   y = relaxation cone-stepping flag (>0.5 = on)
+    //   z = fog god-ray self-shadow flag (>0.5 = on)
+    pc.grass_params = glm::vec4(
+        std::max(0.0f, rt_.terrain_raymarch_fog_strength),
+        rt_.terrain_raymarch_relaxation ? 1.0f : 0.0f,
+        rt_.terrain_raymarch_fog_godrays ? 1.0f : 0.0f,
+        0.0f);
     vkCmdPushConstants(cmd, pipeline_layout_,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pc);
@@ -2125,6 +2134,12 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         pc.emissive = glm::vec4(
             std::clamp(rt_.terrain_raymarch_step_factor, 0.4f, 0.8f),
             0.0f, 0.0f, 0.0f);
+        // grass_params slot — fog strength + flags (mirrors LR pass).
+        pc.grass_params = glm::vec4(
+            std::max(0.0f, rt_.terrain_raymarch_fog_strength),
+            rt_.terrain_raymarch_relaxation ? 1.0f : 0.0f,
+            rt_.terrain_raymarch_fog_godrays ? 1.0f : 0.0f,
+            0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &pc);

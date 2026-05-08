@@ -1085,6 +1085,23 @@ private:
         // boosts contrast around real edges, ignores flat / noisy
         // regions. 0 = off, 0.5 = subtle, 1.0 = aggressive.
         float terrain_raymarch_sharpen       = 0.6f;
+        // Volumetric ground fog scale (0 = off, 1 = doc baseline,
+        // 2 = thick valley fog). Multiplies both density and the
+        // sun-scatter contribution so the slider behaves linearly:
+        // half = half as visible at every distance.
+        float terrain_raymarch_fog_strength  = 0.6f;
+        // Phase 6 — relaxation cone-stepping. When true, march step
+        // grows with distance (`step *= max(t*0.02, 1.0)`) so we
+        // cover the same range in ~half the iterations at the cost
+        // of a tiny chance of skipping thin spikes. Doc-recommended
+        // for distance-heavy scenes.
+        bool  terrain_raymarch_relaxation    = false;
+        // Phase 7 — volumetric fog self-shadow. When true, each fog
+        // step fires N tiny rays toward the sun + accumulates optical
+        // depth so terrain / castle shadow the fog itself, giving a
+        // god-ray look. Cheap (4 short rays per fog step), but multi
+        // ALU + branches so off by default.
+        bool  terrain_raymarch_fog_godrays   = false;
         // Multiplier on the RT shadow ray count for fragments within
         // rt_lod.x (close to the camera). 1 = unchanged, higher = more
         // rays close-by for smoother penumbras under boxes / castle.

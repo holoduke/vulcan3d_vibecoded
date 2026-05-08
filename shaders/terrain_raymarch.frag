@@ -19,13 +19,19 @@ layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
 
 // Same push-constant layout as cube.frag's PushConstants. We use
-//   mvp        — view_proj for gl_FragDepth at the hit point
-//   model      — inverse(view_proj) for world-ray reconstruction
-//   color.xy   — gameplay plateau centre (world XZ)
-//   color.z    — plateau half-extent (metres) — half-width of the
-//                rectangular flat region the castle sits on
-//   color.w    — plateau height (target Y the FBM blends toward in
-//                the plateau region)
+//   mvp           — view_proj for gl_FragDepth at the hit point
+//   model         — inverse(view_proj) for world-ray reconstruction
+//   color.xy      — plateau centre (world XZ)
+//   color.z       — plateau half-extent (m)
+//   color.w       — plateau height
+//   emissive.x    — march step factor (0.4..0.8)
+//   tex_params.x  — march step count
+//   tex_params.y  — shadow ray steps
+//   tex_params.z  — march FBM octaves
+//   tex_params.w  — normal FBM octaves
+//   grass_params.x — fog strength multiplier (0 = off)
+//   grass_params.y — relaxation flag (>0.5 = use relaxation step)
+//   grass_params.z — fog god-ray flag (>0.5 = self-shadowed fog)
 // The remaining fields are unused by this shader.
 layout(push_constant) uniform PC {
     mat4 mvp;
@@ -231,6 +237,7 @@ float raymarch(vec3 ro, vec3 rd) {
     float jitter = rmRand(uvec3(gl_FragCoord.xy, scene.rt_flags.w));
     int kSteps = int(pc.tex_params.x);
     float kStep = pc.emissive.x;
+    bool relax = pc.grass_params.y > 0.5;
     // Tiny initial offset; max half-cell so the surface hit shifts
     // sub-pixel only.
     t += jitter * 0.5;
@@ -239,7 +246,18 @@ float raymarch(vec3 ro, vec3 rd) {
         float h = pos.y - terrainM(pos.xz);
         if (abs(h) < 0.0015 * t) break;
         if (t > 1500.0) return -1.0;
-        t += kStep * h;
+        // Phase 6 — relaxation cone-stepping. Step grows with
+        // distance so the same ray covers more ground in fewer
+        // iterations. 0.7 attenuation on h prevents penetration
+        // when the relaxation factor over-shoots.
+        float advance;
+        if (relax) {
+            float rl = max(t * 0.02, 1.0);
+            advance = kStep * h * rl * 0.7;
+        } else {
+            advance = kStep * h;
+        }
+        t += advance;
     }
     return t;
 }
@@ -430,6 +448,10 @@ void main() {
     // instead of a uniform sheet. No per-step volumetric shadow ray
     // — the HG phase already gives the directional sun glow.
     {
+        // Slider-driven strength; skip the entire march when 0.
+        float fogStrength = pc.grass_params.x;
+        bool  fogGodRays  = pc.grass_params.z > 0.5;
+        if (fogStrength > 0.001) {
         const int   kVolSteps         = 16;     // dense enough to hide stepping w/ jitter
         const float kVolScaleHeight   = 22.0;   // density halves every 22 m up
         const float kVolDensityBase   = 0.018;  // σe at y = 0
@@ -470,12 +492,38 @@ void main() {
                 wisp = mix(1.0, w * 1.6, kVolNoiseStrength);
                 wisp = max(wisp, 0.2);
             }
-            float sigma_e = kVolDensityBase * h_norm * wisp;
+            float sigma_e = kVolDensityBase * h_norm * wisp * fogStrength;
+
+            // Phase 7 — fog self-shadow / god-rays. Step a few small
+            // distances toward the sun and accumulate optical depth
+            // through the same density field. Surface (terrain /
+            // castle) shadows the fog because the surface RT shadow
+            // `sha` already gates the unshadowed mass; the per-step
+            // sample additionally darkens fog that's behind a fog-
+            // density gradient, giving the godray look.
+            float lightTrans = sha;
+            if (fogGodRays) {
+                const int kFogShadowSteps = 4;
+                float ds = 6.0;          // base step in metres
+                float ld = ds * 0.5;
+                for (int j = 0; j < kFogShadowSteps; ++j) {
+                    vec3 sp = p + sunDir * ld;
+                    float h_s   = exp(-max(0.0, sp.y) / kVolScaleHeight);
+                    float w_s   = mix(1.0, noise2(sp.xz * 0.012) * 1.6,
+                                       kVolNoiseStrength);
+                    float sig_s = kVolDensityBase * h_s * max(w_s, 0.2) * fogStrength;
+                    lightTrans *= exp(-sig_s * ds);
+                    ds *= 1.5;          // exponential growth — covers far w/o more steps
+                    ld += ds;
+                    if (lightTrans < 0.02) break;
+                }
+            }
+
             // Single-scattering: σs ≈ σe (assume cloudy isotropic
-            // scattering, no absorption). Multiply by phase for the
-            // sun-aligned directional component plus a small ambient
-            // term so back-lit fog isn't pitch-black.
-            vec3  Lin   = sunGlow * phase * sha + fogTint * 0.25;
+            // scattering, no absorption). Phase function gives the
+            // sun-aligned directional component; ambient fogTint
+            // keeps back-lit fog from going pitch-black.
+            vec3  Lin   = sunGlow * phase * lightTrans + fogTint * 0.25;
             float seg  = exp(-sigma_e * dt);
             vec3  Sint = (Lin - Lin * seg) / max(sigma_e, 1e-4);
             scatter += trans * Sint * sigma_e;   // re-multiply σs because we factored σe out
@@ -485,6 +533,7 @@ void main() {
         }
         // Apply: surface attenuated by trans, scatter added in front.
         col = col * trans + scatter;
+        }   // fogStrength > 0
     }
 
     // Write the hit-point depth so rasterised geometry that wrote
