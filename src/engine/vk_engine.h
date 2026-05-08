@@ -1068,7 +1068,7 @@ private:
         // FBM octaves for normal sampling (terrainH). Called 3× per
         // hit pixel for finite-difference normals — biggest single
         // perf knob. 16 is the doc default; 8 is barely-distinguishable.
-        int  terrain_raymarch_normal_octaves = 16;  // 4–32
+        int  terrain_raymarch_normal_octaves = 18;  // 4–32
         // Step-factor: ratio of the height-field gap consumed per
         // march iteration. 0.4 is conservative (no overshoot on sharp
         // ridges). 0.6–0.8 finishes the same march in ~half the

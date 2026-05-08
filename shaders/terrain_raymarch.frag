@@ -224,8 +224,16 @@ float raymarch(vec3 ro, vec3 rd) {
         // Skip the open-air segment by jumping to the upper bound plane.
         t = (ro.y - maxH) / (-rd.y);
     }
+    // Phase 5 — blue-noise jittered start offset. Per-pixel hash-based
+    // sub-step shift breaks up the per-fragment march alignment, so
+    // contour banding from a too-aggressive step factor disperses into
+    // noise (then washes out under TAA). Free; no extra texture taps.
+    float jitter = rmRand(uvec3(gl_FragCoord.xy, scene.rt_flags.w));
     int kSteps = int(pc.tex_params.x);
     float kStep = pc.emissive.x;
+    // Tiny initial offset; max half-cell so the surface hit shifts
+    // sub-pixel only.
+    t += jitter * 0.5;
     for (int i = 0; i < kSteps; i++) {
         vec3 pos = ro + t * rd;
         float h = pos.y - terrainM(pos.xz);
@@ -408,26 +416,75 @@ void main() {
                       0.3 * pow(sundot, 8.0));
     col = col * extinction + fogCol * (1.0 - extinction);
 
-    // === Low-altitude volumetric fog ============================
-    // Real fog hugs valley floors. Density drops off exponentially
-    // with altitude. The "trapezoid rule" between camera and hit
-    // altitude is a cheap single-sample approximation of the integral
-    // along the ray. Tuned so:
-    //   ground ↔ ground at ~300 m → noticeable haze
-    //   high altitude or short range → almost no effect
-    //   distant valley floors → never fully whites out (silhouette
-    //                            remains readable)
+    // === Volumetric ground fog (real ray-march) =================
+    // Multi-step march along the camera ray with Beer-Lambert
+    // transmittance accumulation + Henyey-Greenstein phase-weighted
+    // sun in-scattering. The Frostbite-style energy-conserving
+    // integration:
+    //   Sint = (S - S * exp(-σe * dt)) / σe    [exact for constant σ
+    //                                            over the segment]
+    //   trans *= exp(-σe * dt)
+    //   col_out += trans_prev * Sint
+    // Fog density = exp(-y / scaleHeight) × (1 + slow FBM scroll) so
+    // the fog has subtle volumetric variation (wisps in the valleys)
+    // instead of a uniform sheet. No per-step volumetric shadow ray
+    // — the HG phase already gives the directional sun glow.
     {
-        const float kFogScaleHeight = 18.0;   // density halves every 18 m up
-        const float kFogBaseDensity = 0.003;  // density at y = 0
-        vec3 lowFogCol = mix(vec3(0.72, 0.76, 0.82),
-                             vec3(1.0, 0.85, 0.65),
-                             0.20 * pow(sundot, 8.0));
-        float dCam = exp(-max(0.0, ro.y)  / kFogScaleHeight);
-        float dHit = exp(-max(0.0, pos.y) / kFogScaleHeight);
-        float fog_amt = kFogBaseDensity * 0.5 * (dCam + dHit) * t;
-        float trans = exp(-fog_amt);
-        col = mix(lowFogCol, col, trans);
+        const int   kVolSteps         = 16;     // dense enough to hide stepping w/ jitter
+        const float kVolScaleHeight   = 22.0;   // density halves every 22 m up
+        const float kVolDensityBase   = 0.018;  // σe at y = 0
+        const float kVolPhaseG        = 0.65;   // forward-scattering bias
+        const float kVolNoiseStrength = 0.6;    // 0 = uniform, 1 = strong wisps
+
+        vec3 fogTint   = vec3(0.78, 0.83, 0.90);
+        vec3 sunGlow   = scene.sun_color.rgb * scene.sun_color.a;
+
+        // Henyey-Greenstein phase: forward-peaked when looking near the sun.
+        float cosTh = dot(rd, sunDir);
+        float gg    = kVolPhaseG * kVolPhaseG;
+        float phase = (1.0 - gg) /
+                      (4.0 * 3.14159265 *
+                       pow(1.0 + gg - 2.0 * kVolPhaseG * cosTh, 1.5));
+
+        // Cap march length at the surface hit. Sky pixels never reach
+        // here (we returned -1 above), so t is always finite.
+        float t_end = t;
+        float t_max = min(t_end, 600.0);   // cap so we don't waste taps in fog-noise pixels far away
+        float dt    = t_max / float(kVolSteps);
+        // Per-pixel jitter on the start position breaks step banding
+        // — combined with Phase 5's surface jitter this stays dither-stable.
+        float jStart = rmRand(uvec3(gl_FragCoord.xy, scene.rt_flags.w + 7u));
+        float t_v   = dt * jStart;
+
+        vec3  scatter = vec3(0.0);
+        float trans   = 1.0;
+        for (int i = 0; i < kVolSteps; ++i) {
+            vec3 p = ro + rd * t_v;
+            float h_norm = exp(-max(0.0, p.y) / kVolScaleHeight);
+            // Slow-scrolling FBM gives the wisps. Cheap 2-octave —
+            // anything richer would dominate the per-pixel cost.
+            float wisp = 1.0;
+            {
+                vec2 q = p.xz * 0.012;
+                float w = noise2(q) * 0.6 + noise2(q * 2.7) * 0.3;
+                wisp = mix(1.0, w * 1.6, kVolNoiseStrength);
+                wisp = max(wisp, 0.2);
+            }
+            float sigma_e = kVolDensityBase * h_norm * wisp;
+            // Single-scattering: σs ≈ σe (assume cloudy isotropic
+            // scattering, no absorption). Multiply by phase for the
+            // sun-aligned directional component plus a small ambient
+            // term so back-lit fog isn't pitch-black.
+            vec3  Lin   = sunGlow * phase * sha + fogTint * 0.25;
+            float seg  = exp(-sigma_e * dt);
+            vec3  Sint = (Lin - Lin * seg) / max(sigma_e, 1e-4);
+            scatter += trans * Sint * sigma_e;   // re-multiply σs because we factored σe out
+            trans   *= seg;
+            t_v     += dt;
+            if (trans < 0.02) break;             // early-out — fully foggy
+        }
+        // Apply: surface attenuated by trans, scatter added in front.
+        col = col * trans + scatter;
     }
 
     // Write the hit-point depth so rasterised geometry that wrote

@@ -89,17 +89,41 @@ void main() {
     // existing sky clear in scene_color and the cube prepass depth.
     if (lr_depth >= 0.9999) discard;
 
-    vec3 c = texture(u_lr_color, uv).rgb;
+    // Phase 4 — depth-aware bilateral 4-tap upsample. Standard
+    // bilinear leaks across depth discontinuities (e.g. cube/castle
+    // silhouettes against distant terrain) producing visible halos
+    // at low render scales. Weighting the neighbour samples by depth
+    // similarity preserves silhouettes while staying free in flat
+    // regions where all weights ≈ 1.
+    vec2 lr_texel = vec2(1.0) / max(pc.color.yz, vec2(1.0));
+    vec2 uv_n = uv + vec2(0.0, -lr_texel.y);
+    vec2 uv_s = uv + vec2(0.0,  lr_texel.y);
+    vec2 uv_w = uv + vec2(-lr_texel.x, 0.0);
+    vec2 uv_e = uv + vec2( lr_texel.x, 0.0);
+    vec3 c0 = texture(u_lr_color, uv).rgb;
+    vec3 cn = texture(u_lr_color, uv_n).rgb;
+    vec3 cs = texture(u_lr_color, uv_s).rgb;
+    vec3 cw = texture(u_lr_color, uv_w).rgb;
+    vec3 ce = texture(u_lr_color, uv_e).rgb;
+    float dn = texture(u_lr_depth, uv_n).r;
+    float ds = texture(u_lr_depth, uv_s).r;
+    float dw = texture(u_lr_depth, uv_w).r;
+    float de = texture(u_lr_depth, uv_e).r;
+    // Sharpness 8: kernel falls off when |Δdepth| > ~1/8. Tuned so
+    // sub-pixel depth jitter doesn't kill the bilinear blend.
+    const float kSharp = 8.0;
+    float wn = exp(-kSharp * abs(dn - lr_depth));
+    float ws = exp(-kSharp * abs(ds - lr_depth));
+    float ww = exp(-kSharp * abs(dw - lr_depth));
+    float we = exp(-kSharp * abs(de - lr_depth));
+    float wsum = 1.0 + wn + ws + ww + we;
+    vec3 c_blur = (c0 + wn*cn + ws*cs + ww*cw + we*ce) / wsum;
+    vec3 c = c_blur;
+
     float strength = pc.color.x;
     if (strength > 0.0 && pc.color.y > 0.5 && pc.color.z > 0.5) {
-        // Sharpen at the LR resolution (one-LR-texel offsets) so the
-        // kernel matches the actual data, not the upscaled grid.
-        vec2 lr_texel = vec2(1.0) / pc.color.yz;
-        vec3 n = texture(u_lr_color, uv + vec2(0.0, -lr_texel.y)).rgb;
-        vec3 s = texture(u_lr_color, uv + vec2(0.0,  lr_texel.y)).rgb;
-        vec3 w = texture(u_lr_color, uv + vec2(-lr_texel.x, 0.0)).rgb;
-        vec3 e = texture(u_lr_color, uv + vec2( lr_texel.x, 0.0)).rgb;
-        c = casSharpen(c, n, e, s, w, strength);
+        // Sharpen uses the same 4 weighted neighbours we already have.
+        c = casSharpen(c0, cn, ce, cs, cw, strength);
     }
     outColor     = vec4(c, 1.0);
     outMotion    = texture(u_lr_motion, uv).rg;
