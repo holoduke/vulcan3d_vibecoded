@@ -1108,7 +1108,12 @@ private:
         // via gl_FragDepth — same as the terrain itself.
         bool      water_enabled        = false;
         float     water_level          = 2.0f;     // world Y of the calm sea level
-        float     water_wave_strength  = 0.18f;    // height of bump pattern (m)
+        float     water_wave_strength  = 0.06f;    // amplitude of normal perturbation
+        // Wave frequency multiplier — multiplies the base scrolling
+        // sin/cos frequencies. 1.0 = baseline (~30 m wavelengths).
+        // 2.0 = half the wavelength (more, smaller ripples). 0.5 =
+        // double the wavelength (bigger sweeping waves).
+        float     water_wave_scale     = 1.0f;
         glm::vec3 water_color          = glm::vec3(0.04f, 0.18f, 0.22f);
         // RT reflections on water: when true, the water surface
         // ray-marches the FBM terrain along the reflection vector

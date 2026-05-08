@@ -464,7 +464,9 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("Water level (Y)",
                            &rt_.water_level, -10.0f, 50.0f, "%.1f m");
         ImGui::SliderFloat("Wave strength",
-                           &rt_.water_wave_strength, 0.0f, 0.6f, "%.2f");
+                           &rt_.water_wave_strength, 0.0f, 0.6f, "%.3f");
+        ImGui::SliderFloat("Wave scale (freq mult)",
+                           &rt_.water_wave_scale, 0.1f, 5.0f, "%.2f");
         ImGui::ColorEdit3("Deep water color", &rt_.water_color.x);
         ImGui::ColorEdit3("Shallow water color", &rt_.water_color_shallow.x);
         ImGui::SliderFloat("Shore band (m)",

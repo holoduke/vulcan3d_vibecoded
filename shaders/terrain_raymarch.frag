@@ -371,23 +371,21 @@ float raymarchReflect(vec3 ro, vec3 rd) {
 }
 
 // Cheap animated ocean normal — two scrolling sin/cos directions
-// summed at slightly off-axis frequencies. Looks like the doc's
-// "Sea of Greek" demo but without the FBM cost. Returns a
-// world-space normal perturbed off (0,1,0).
-vec3 waterNormal(vec2 worldXZ, float t, float strength) {
-    // Two wave directions, slow-scrolling. Frequencies pick prime-
-    // ish ratios so the pattern doesn't repeat on a small grid.
-    float f1 = sin(worldXZ.x * 0.13 + t * 0.7) +
-               sin(worldXZ.y * 0.17 - t * 0.6);
-    float f2 = sin((worldXZ.x + worldXZ.y) * 0.21 + t * 1.1) +
-               sin((worldXZ.x - worldXZ.y) * 0.27 - t * 0.9);
-    // Analytical partials (chain rule on the sums above).
-    float dx = 0.13 * cos(worldXZ.x * 0.13 + t * 0.7) +
-               0.21 * cos((worldXZ.x + worldXZ.y) * 0.21 + t * 1.1) +
-               0.27 * cos((worldXZ.x - worldXZ.y) * 0.27 - t * 0.9);
-    float dz = 0.17 * cos(worldXZ.y * 0.17 - t * 0.6) +
-               0.21 * cos((worldXZ.x + worldXZ.y) * 0.21 + t * 1.1) -
-               0.27 * cos((worldXZ.x - worldXZ.y) * 0.27 - t * 0.9);
+// summed at slightly off-axis frequencies. `scale` multiplies the
+// base frequencies (1.0 = ~30 m wavelengths; 2.0 = half-wavelength
+// finer ripples; 0.5 = bigger sweeping waves).
+vec3 waterNormal(vec2 worldXZ, float t, float strength, float scale) {
+    float k1 = 0.13 * scale;
+    float k2 = 0.17 * scale;
+    float k3 = 0.21 * scale;
+    float k4 = 0.27 * scale;
+    // Analytical partials (chain rule on the wave sums).
+    float dx = k1 * cos(worldXZ.x * k1 + t * 0.7) +
+               k3 * cos((worldXZ.x + worldXZ.y) * k3 + t * 1.1) +
+               k4 * cos((worldXZ.x - worldXZ.y) * k4 - t * 0.9);
+    float dz = k2 * cos(worldXZ.y * k2 - t * 0.6) +
+               k3 * cos((worldXZ.x + worldXZ.y) * k3 + t * 1.1) -
+               k4 * cos((worldXZ.x - worldXZ.y) * k4 - t * 0.9);
     return normalize(vec3(-dx * strength, 1.0, -dz * strength));
 }
 
@@ -427,7 +425,11 @@ void main() {
         vec3 wpos = ro + rd * t_water;
         float wave_str = scene.water_params.z;
         float wave_t   = scene.water_params.w;
-        vec3 wnor = waterNormal(wpos.xz, wave_t, wave_str);
+        // wave-frequency multiplier — packed in water_color_shallow.w
+        // by update_scene_ubo. Defaults to 1.0; the slider lets the
+        // user dial finer ripples or bigger sweeping waves.
+        float wave_scale = max(0.05, scene.water_color_shallow.w);
+        vec3 wnor = waterNormal(wpos.xz, wave_t, wave_str, wave_scale);
         vec3 sunDirW = scene.sun_direction.xyz;
 
         // Schlick fresnel — F0 = 0.02 for water. Looking grazing-on

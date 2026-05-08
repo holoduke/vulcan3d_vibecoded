@@ -243,6 +243,7 @@ void VulkanEngine::save_settings() const {
     f << "water_enabled = " << (rt_.water_enabled ? 1 : 0) << "\n";
     f << "water_level = " << rt_.water_level << "\n";
     f << "water_wave_strength = " << rt_.water_wave_strength << "\n";
+    f << "water_wave_scale = " << rt_.water_wave_scale << "\n";
     f << "water_rt_reflections = " << (rt_.water_rt_reflections ? 1 : 0) << "\n";
     f << "water_tlas_reflections = " << (rt_.water_tlas_reflections ? 1 : 0) << "\n";
     f << "water_shore_blend = " << rt_.water_shore_blend << "\n";
@@ -392,6 +393,7 @@ void VulkanEngine::load_settings() {
             else if (key == "water_enabled")        rt_.water_enabled = std::stoi(val) != 0;
             else if (key == "water_level")          rt_.water_level = std::stof(val);
             else if (key == "water_wave_strength")  rt_.water_wave_strength = std::stof(val);
+            else if (key == "water_wave_scale")     rt_.water_wave_scale = std::stof(val);
             else if (key == "water_rt_reflections") rt_.water_rt_reflections = std::stoi(val) != 0;
             else if (key == "water_tlas_reflections") rt_.water_tlas_reflections = std::stoi(val) != 0;
             else if (key == "water_shore_blend") rt_.water_shore_blend = std::stof(val);
