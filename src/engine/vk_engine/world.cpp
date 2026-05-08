@@ -455,8 +455,12 @@ void VulkanEngine::init_terrain_height_texture() {
         log::warn("init_terrain_height_texture: heightmap empty, skipping");
         return;
     }
-    const int W = terrain_data_.dim;
-    const int H = terrain_data_.dim;
+    // Heightmap is stored as (dim+1) × (dim+1) — vertices, not cells —
+    // so the texture must match that or the row-stride doesn't line up
+    // and the upload scrambles the data (cells get shifted by 1 column
+    // per row). Texture is dim+1 in each axis to match.
+    const int W = terrain_data_.dim + 1;
+    const int H = terrain_data_.dim + 1;
 
     // Cache the max for the raymarch's upper-bound clip. Compute once
     // here — sculpt edits don't update the texture anyway.
@@ -586,8 +590,11 @@ void VulkanEngine::init_terrain_height_texture() {
 
 void VulkanEngine::refresh_terrain_height_texture() {
     if (!terrain_height_image_ || terrain_data_.heights.empty()) return;
-    const int W = terrain_data_.dim;
-    const int H = terrain_data_.dim;
+    // Match init_terrain_height_texture's texture dimensions
+    // (dim+1 × dim+1) so the row stride aligns with the heights
+    // vector's vertex layout.
+    const int W = terrain_data_.dim + 1;
+    const int H = terrain_data_.dim + 1;
     const VkDeviceSize bytes = static_cast<VkDeviceSize>(W) *
                                 static_cast<VkDeviceSize>(H) * sizeof(float);
 
