@@ -1130,6 +1130,14 @@ private:
         // Noise on the shore band so the line isn't a perfect contour.
         // 0 = clean, 1 = strongly broken.
         float     water_shore_noise    = 0.4f;
+        // Shadow casting on water: when true, the water surface
+        // dims its specular and base tint where the sun shadow map
+        // says it's occluded by terrain / castle / dyn-props.
+        bool      water_shadows_enabled = true;
+        // 0 = fully opaque (water_color is the colour you see), 1 =
+        // shallow water shows the underwater terrain through it
+        // (linearly attenuated by depth so deep water still hides).
+        float     water_transparency    = 0.6f;
         // Multiplier on the RT shadow ray count for fragments within
         // rt_lod.x (close to the camera). 1 = unchanged, higher = more
         // rays close-by for smoother penumbras under boxes / castle.

@@ -47,6 +47,11 @@ layout(push_constant) uniform PC {
 // — not sampled by this shader after the revert to pure-FBM terrain.
 layout(set = 0, binding = 8) uniform sampler2D u_terrain_height;
 
+// Sun shadow map (single-cascade ortho D32). Rendered each frame
+// from the light's POV with castle, dyn-props and terrain chunks
+// as casters. Sampled here for water-surface shadow occlusion.
+layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
+
 // TLAS — castle, dyn-props, terrain BLAS, etc. We fire shadow rays
 // against it with cull-mask 0x02 so the terrain BLAS (instance
 // mask 0x01) is excluded — terrain self-shadow is handled by
@@ -529,8 +534,63 @@ void main() {
         vec3 H = normalize(sunDirW - rd);
         float spec = pow(max(dot(wnor, H), 0.0), 64.0);
 
-        vec3 col_w = mix(shallow, reflCol, fres);
-        col_w += scene.sun_color.rgb * scene.sun_color.a * spec * 0.8;
+        // Sun shadow on the water surface — bound-checked sample of
+        // the sun shadow map (binding 7), already populated from
+        // terrain chunks + castle + dyn-props. Dims the specular
+        // (no glints in shadow) and slightly darkens the base tint.
+        float water_lit = 1.0;
+        if (scene.water_color.w > 0.5) {
+            vec4 lc = scene.light_vp * vec4(wpos, 1.0);
+            vec3 lndc = lc.xyz / lc.w;
+            if (lndc.z >= 0.0 && lndc.z <= 1.0) {
+                vec2 luv = lndc.xy * 0.5 + 0.5;
+                if (all(greaterThanEqual(luv, vec2(0.0))) &&
+                    all(lessThanEqual(luv, vec2(1.0)))) {
+                    const float kRecvBias = 0.00005;
+                    water_lit = textureLod(u_sun_shadow_map,
+                                            vec3(luv, lndc.z - kRecvBias), 0.0);
+                }
+            }
+        }
+
+        // Underwater showthrough — for shallow water we evaluate the
+        // terrain at wpos.xz and pass its surface tint through the
+        // water tinted by depth. Beer's-law-style attenuation:
+        // T = exp(-depth * absorption) so deep water still hides
+        // the bottom while shallow water reads transparent.
+        vec3 baseTint = shallow;     // current shore-blended water colour
+        float trans_amt = scene.water_shore.w;
+        if (trans_amt > 0.001) {
+            // Reuse the depth_m we already computed for the shore
+            // blend. Absorption coefficient picks ~50 % attenuation
+            // at a 2 m depth, ~95 % by 6 m.
+            float absorp = 0.5;
+            float Tw = exp(-depth_m * absorp);
+            // Underwater surface — terrain material at the under-
+            // water point, lambert-shaded by sun (with shadow), no
+            // shore noise so the look is calm.
+            vec3 u_pos = vec3(wpos.x, terrain_y, wpos.z);
+            vec3 u_nor = calcNormal(u_pos, t_water);
+            vec3 u_mat = getMaterial(u_pos, u_nor);
+            float u_dif = max(dot(u_nor, sunDirW), 0.0) * water_lit;
+            float u_amb = 0.5 + 0.5 * u_nor.y;
+            vec3  u_col = u_mat * (u_dif * scene.sun_color.rgb *
+                                    scene.sun_color.a * 0.8 +
+                                    u_amb * scene.sky_color.rgb * 0.35);
+            // Tint the underwater colour by the water tint so it
+            // reads as "looking through water", not "no water".
+            u_col *= mix(vec3(1.0), shallow * 1.5 + vec3(0.05),
+                          0.5);
+            // Blend: shallow → underwater visible, deep → opaque
+            // water_color. trans_amt scales the maximum showthrough.
+            baseTint = mix(baseTint, u_col, Tw * trans_amt);
+        }
+
+        vec3 col_w = mix(baseTint, reflCol, fres);
+        col_w += scene.sun_color.rgb * scene.sun_color.a * spec *
+                  0.8 * water_lit;
+        // Subtle darkening of the surface tint when in shadow.
+        col_w *= mix(0.7, 1.0, water_lit);
 
         // Apply the same volumetric fog as terrain (reuse the
         // existing block by jumping to a tail). To keep the diff

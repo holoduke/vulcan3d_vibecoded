@@ -265,12 +265,16 @@ void VulkanEngine::update_scene_ubo() {
                                    rt_.water_level,
                                    rt_.water_wave_strength,
                                    water_t);
-    data.water_color  = glm::vec4(rt_.water_color, 0.0f);
+    // water_color.w doubles as the "shadows enabled" flag (0 / 1).
+    data.water_color  = glm::vec4(rt_.water_color,
+                                   rt_.water_shadows_enabled ? 1.0f : 0.0f);
     data.water_color_shallow = glm::vec4(rt_.water_color_shallow, 0.0f);
+    // water_shore.w doubles as the transparency / underwater
+    // showthrough strength (0 = opaque, 1 = shallow shows terrain).
     data.water_shore = glm::vec4(rt_.water_shore_blend,
                                   rt_.water_shore_noise,
                                   rt_.water_tlas_reflections ? 1.0f : 0.0f,
-                                  0.0f);
+                                  rt_.water_transparency);
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

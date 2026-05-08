@@ -247,6 +247,8 @@ void VulkanEngine::save_settings() const {
     f << "water_tlas_reflections = " << (rt_.water_tlas_reflections ? 1 : 0) << "\n";
     f << "water_shore_blend = " << rt_.water_shore_blend << "\n";
     f << "water_shore_noise = " << rt_.water_shore_noise << "\n";
+    f << "water_shadows_enabled = " << (rt_.water_shadows_enabled ? 1 : 0) << "\n";
+    f << "water_transparency = " << rt_.water_transparency << "\n";
     f << "water_color_shallow = " << rt_.water_color_shallow.r << " "
                                    << rt_.water_color_shallow.g << " "
                                    << rt_.water_color_shallow.b << "\n";
@@ -394,6 +396,8 @@ void VulkanEngine::load_settings() {
             else if (key == "water_tlas_reflections") rt_.water_tlas_reflections = std::stoi(val) != 0;
             else if (key == "water_shore_blend") rt_.water_shore_blend = std::stof(val);
             else if (key == "water_shore_noise") rt_.water_shore_noise = std::stof(val);
+            else if (key == "water_shadows_enabled") rt_.water_shadows_enabled = std::stoi(val) != 0;
+            else if (key == "water_transparency") rt_.water_transparency = std::stof(val);
             else if (key == "water_color_shallow") {
                 glm::vec3 v;
                 if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {

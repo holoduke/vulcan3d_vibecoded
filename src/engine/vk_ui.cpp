@@ -474,6 +474,13 @@ void VulkanEngine::build_menu_ui() {
         ImGui::Checkbox("RT terrain reflections", &rt_.water_rt_reflections);
         ImGui::Checkbox("RT cube/castle reflections (TLAS)",
                          &rt_.water_tlas_reflections);
+        ImGui::Checkbox("Sun shadows on water", &rt_.water_shadows_enabled);
+        ImGui::SliderFloat("Transparency",
+                           &rt_.water_transparency, 0.0f, 1.0f, "%.2f");
+        ImGui::TextDisabled("%s",
+            "Transparency only affects shallow water (Beer's law\n"
+            "attenuation). Set to 0 for fully opaque, 1 for tropical\n"
+            "showthrough where you can see the seabed.");
         // Quick presets so the user has a starting point per mood.
         if (ImGui::Button("Tropical")) {
             rt_.water_color         = glm::vec3(0.04f, 0.30f, 0.40f);
