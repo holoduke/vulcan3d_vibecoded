@@ -72,6 +72,24 @@ layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 // real dynamic-occluder hits (castle, boxes).
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 
+// Materials buffer — same layout cube.frag reads. Path-traced GI on
+// the raymarched terrain looks up the BRDF colour at each bounce hit
+// from this buffer using the closest-hit's instance custom index
+// (with the kStaticBlasSentinel branch for the merged static BLAS).
+struct Material {
+    vec4 color;
+    vec4 emissive;
+    vec4 tex;       // x: albedo idx, y: normal idx, z: uv scale, w: spare
+};
+layout(set = 0, binding = 2, std430) readonly buffer Materials {
+    Material materials[];
+};
+// Sentinel matching kStaticBlasInstSentinel in src/engine/vk_engine/rt.cpp
+// — the merged-static castle BLAS uses this in instanceCustomIndex; the
+// shader recovers the per-brush material via primitive_id / 12.
+const int kStaticBlasSentinel = 0xFFFFFF;
+const int kCubeTrisPerBox     = 12;
+
 // Mask 0x02 = "anything except the terrain BLAS instance".
 bool any_hit_no_terrain(vec3 origin, vec3 dir, float t_max) {
     rayQueryEXT rq;
@@ -98,6 +116,58 @@ bool closest_hit_no_terrain(vec3 origin, vec3 dir, float t_max,
     }
     out_t = rayQueryGetIntersectionTEXT(rq, true);
     return true;
+}
+
+// Closest-hit + material lookup (mask 0x02 — terrain BLAS skipped).
+// Used by the path-traced GI loop to find castle / dyn-prop bounce
+// hits and look up their albedo for the throughput tint.
+bool closest_hit_material_no_terrain(vec3 origin, vec3 dir, float t_max,
+                                     out float out_t,
+                                     out int out_inst,
+                                     out int out_prim) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
+                          0x02, origin, 0.001, dir, t_max);
+    while (rayQueryProceedEXT(rq)) {}
+    if (rayQueryGetIntersectionTypeEXT(rq, true) !=
+        gl_RayQueryCommittedIntersectionTriangleEXT) {
+        return false;
+    }
+    out_t   = rayQueryGetIntersectionTEXT(rq, true);
+    out_inst = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+    out_prim = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+    return true;
+}
+
+// Shadow-caster mask 0x01 — used FROM the GI bounce hit point on a
+// castle / dyn-prop surface to test sun visibility. Includes the
+// terrain BLAS (which IS marked 0x01) so a bounce hit deep in a
+// valley is correctly shadowed by the surrounding terrain. NOT used
+// for the primary terrain receiver shadow — that's the no-terrain
+// mask above to avoid procedural-vs-BLAS LOD self-hits.
+bool any_hit_shadow_caster(vec3 origin, vec3 dir, float t_max) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, topLevelAS,
+                          gl_RayFlagsTerminateOnFirstHitEXT |
+                          gl_RayFlagsOpaqueEXT,
+                          0x01, origin, 0.001, dir, t_max);
+    while (rayQueryProceedEXT(rq)) {}
+    return rayQueryGetIntersectionTypeEXT(rq, true) ==
+           gl_RayQueryCommittedIntersectionTriangleEXT;
+}
+
+// Build a cosine-weighted sample direction in the hemisphere around
+// `n`. With this distribution the Lambertian estimator simplifies to
+// `albedo * Li` per sample (the cos(θ) and BRDF/π factors cancel
+// against the pdf), which matches cube.frag's GI formulation.
+vec3 cos_hemi(float u1, float u2, vec3 n) {
+    float r   = sqrt(u1);
+    float phi = 6.28318530718 * u2;
+    vec3  d   = vec3(r * cos(phi), sqrt(max(0.0, 1.0 - u1)), r * sin(phi));
+    vec3 up_a = abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 t    = normalize(cross(up_a, n));
+    vec3 b    = cross(n, t);
+    return d.x * t + d.y * n + d.z * b;
 }
 
 // Tiny xorshift32 hash — deterministic per-pixel jitter for the
@@ -168,6 +238,23 @@ vec3 sample_sky_atmosphere(vec3 dir) {
     vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
     vec3 zenith  = scene.sky_color.rgb;
     return mix(horizon, zenith, pow(up, 0.45));
+}
+
+// Sky sample WITH the sun halo — used for path-traced GI rays that
+// miss into the open. A bounce ray that points near the sun should
+// pick up the disk's intensity (that's a sun-direct contribution
+// without firing a separate sun ray). The halo is bounded by the
+// pow(8) cosine and the 0.08 multiplier so it doesn't spike on
+// near-grazing samples; matches cube.frag's path-trace estimator.
+vec3 sample_sky(vec3 dir) {
+    vec3  L = normalize(scene.sun_direction.xyz);
+    float up = clamp(dir.y, 0.0, 1.0);
+    vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
+    vec3 zenith  = scene.sky_color.rgb;
+    vec3 sky = mix(horizon, zenith, pow(up, 0.45));
+    float halo = pow(max(dot(dir, L), 0.0), 8.0);
+    sky += scene.sun_color.rgb * scene.sun_color.a * 0.08 * halo;
+    return sky;
 }
 
 // === Hash + Value-Noise with analytical derivatives ===
@@ -815,14 +902,10 @@ void main() {
     // ambient term — corners between walls + boxes get visibly
     // shaded, just like the rasterised path.
     float ao = 1.0;
-    vec3  gi_sky = vec3(0.0);
     int ao_mode = scene.rt_flags2.w;
     if (ao_mode > 0 && scene.rt_flags.z > 0 && do_rt) {
         int requested = (ao_mode == 1) ? min(scene.rt_flags.z, 2)
                                        : scene.rt_flags.z;
-        // No lod_samples helper here — clamp manually so distant
-        // terrain doesn't waste per-pixel rays on AO that doesn't
-        // visibly contribute.
         int N_ao = clamp(requested, 1, 32);
         float ao_radius = scene.rt_params.y * (ao_mode == 1 ? 0.5 : 1.0);
 
@@ -833,51 +916,14 @@ void main() {
         uvec3 ao_seed = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
         int taken = 0;
         float occluded = 0.0;
-        vec3 sky_gi = vec3(0.0);
-        int  gi_misses = 0;
         for (int i = 0; i < N_ao; ++i) {
             float u1 = rmRand(ao_seed + uvec3(i, 7u, 53u));
             float u2 = rmRand(ao_seed + uvec3(i, 41u, 5u));
-            // cosine-hemisphere distribution around the surface normal.
-            float r = sqrt(u1);
-            float ph = 6.28318530718 * u2;
-            vec3 d_local = vec3(r * cos(ph), sqrt(max(0.0, 1.0 - u1)),
-                                  r * sin(ph));
-            vec3 ref_n = abs(nor.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
-                                              : vec3(1.0, 0.0, 0.0);
-            vec3 t1 = normalize(cross(ref_n, nor));
-            vec3 t2 = cross(nor, t1);
-            vec3 d = d_local.x * t1 + d_local.y * nor + d_local.z * t2;
-            if (any_hit_no_terrain(origin_ao, d, ao_radius)) {
-                occluded += 1.0;
-            } else {
-                sky_gi += sample_sky_atmosphere(d);
-                ++gi_misses;
-            }
+            vec3 d = cos_hemi(u1, u2, nor);
+            if (any_hit_no_terrain(origin_ao, d, ao_radius)) occluded += 1.0;
             ++taken;
         }
-        // Sky-bounce GI: average of the sky colour along the rays
-        // that *missed* any occluder. Diving by misses (not by total)
-        // keeps the GI brightness independent of how much of the
-        // hemisphere is occluded — AO alone handles the darkening
-        // there. Then soften toward the noise-free sky-at-normal
-        // reference so users can trade per-pixel variance for a
-        // smoother estimate.
-        vec3 sky_at_n = sample_sky_atmosphere(nor);
-        vec3 gi_raw   = (gi_misses > 0)
-                          ? (sky_gi / float(gi_misses))
-                          : sky_at_n;
-        float soft = clamp(scene.terrain_extra.z, 0.0, 1.0);
-        gi_sky = mix(gi_raw, sky_at_n, soft);
-        // Linear curve (no sqrt) — sqrt compresses the dark side
-        // of the [0,1] range, so a 25 % hit ratio reads as
-        // sqrt(0.75) ≈ 0.87 and corners barely darken. With more
-        // samples the AO converges to its true low ratio and the
-        // sqrt output reads brighter than the noisy 1-sample case
-        // — exactly the "more samples = less shadow" surprise
-        // reported. Linear curve makes AO scale monotonically with
-        // hit ratio so increasing samples reduces noise without
-        // washing out the darkening.
+        // Linear curve (no sqrt) — see commit 12f9ebc rationale.
         float raw = 1.0 - (occluded / float(taken));
         float ao_floor_v = scene.rt_lod.w;
         ao = mix(ao_floor_v, 1.0, raw);
@@ -885,22 +931,124 @@ void main() {
 
     vec3 mate = getMaterial(pos, nor);
 
+    // === Path-traced GI on the raymarched terrain =================
+    // Mirrors cube.frag's GI loop: stratified cosine-hemisphere
+    // samples, N_bounces of throughput tracking, sun-shadow rays at
+    // bounce hits up to gi_shadow_max_bounce, sky fallback on miss.
+    // The terrain BLAS is skipped (mask 0x02) for the bounce closest
+    // hits — we only want castle/dyn-prop bounce contributions; a
+    // procedural-terrain self-bounce would need running getMaterial
+    // at the hit point which is much more expensive than the BLAS
+    // material lookup. The sun-shadow ray FROM a bounce hit uses
+    // mask 0x01 (the standard shadow-caster mask) so the terrain
+    // CAN occlude the sun for a castle wall hit deep in a valley.
+    //
+    // Energy: cosine-weighted sampling makes each hit's contribution
+    // = albedo * Li (the BRDF/π and cos/π factors cancel). We tag
+    // the raw GI with the surface albedo (`mate`) at the end — same
+    // structure as cube.frag — and lerp toward a smooth sky-at-N
+    // estimate by `gi_softener` for low-sample noise control.
+    vec3 gi_indirect = vec3(0.0);
+    int N_gi = (scene.rt_flags2.x > 0 && do_rt) ? scene.rt_flags2.x : 0;
+    if (N_gi > 0) {
+        int N_bounces     = max(1, scene.rt_flags2.z);
+        int gi_shadow_max = int(scene.rt_lod.z);
+        float gi_radius   = max(scene.rt_params2.y, 1.0);
+        // Soft sky fill for bounce hits that can't see the sun. Same
+        // 5%-of-sky constant as cube.frag — keeps interior bounces
+        // believably dark instead of glowing from a too-bright fill.
+        vec3 sky_fill = scene.sky_color.rgb * 0.05;
+
+        int strata = int(ceil(sqrt(float(N_gi))));
+        float inv_strata = 1.0 / float(strata);
+        int  taken = 0;
+        vec3 sum   = vec3(0.0);
+        uvec3 gi_seed = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
+
+        for (int sy = 0; sy < strata && taken < N_gi; ++sy) {
+            for (int sx = 0; sx < strata && taken < N_gi; ++sx) {
+                float r1 = rmRand(gi_seed + uvec3(taken, 73u, 11u));
+                float r2 = rmRand(gi_seed + uvec3(taken, 91u, 47u));
+                float u1 = (float(sx) + r1) * inv_strata;
+                float u2 = (float(sy) + r2) * inv_strata;
+
+                vec3 ray_dir    = cos_hemi(u1, u2, nor);
+                vec3 ray_origin = pos + nor * 0.05;
+                vec3 throughput = vec3(1.0);
+                vec3 path       = vec3(0.0);
+
+                for (int b = 0; b < N_bounces; ++b) {
+                    float t_hit;
+                    int   inst_id;
+                    int   prim_id;
+                    if (!closest_hit_material_no_terrain(ray_origin, ray_dir,
+                                                          gi_radius,
+                                                          t_hit, inst_id, prim_id)) {
+                        // Miss → sky in this direction. Bound by the
+                        // halo's pow(8) so it doesn't firefly badly.
+                        path += throughput * sample_sky(ray_dir);
+                        break;
+                    }
+                    int mat_idx = (inst_id == kStaticBlasSentinel)
+                                    ? (prim_id / kCubeTrisPerBox)
+                                    : inst_id;
+                    Material m  = materials[mat_idx];
+                    vec3 hit_pos = ray_origin + ray_dir * t_hit;
+                    // No vertex normal in ray queries; -ray_dir is a
+                    // good local approximation for cosine sampling
+                    // and the sun-shadow's n·L test (matches cube.frag).
+                    vec3 hit_n   = -ray_dir;
+
+                    vec3 hit_light = sky_fill;
+                    if (b < gi_shadow_max) {
+                        float n_dot_sun = dot(hit_n, scene.sun_direction.xyz);
+                        if (n_dot_sun > 0.0) {
+                            if (!any_hit_shadow_caster(
+                                    hit_pos + hit_n * 0.01,
+                                    scene.sun_direction.xyz, 200.0)) {
+                                hit_light += scene.sun_color.rgb *
+                                             scene.sun_color.a * n_dot_sun;
+                            }
+                        }
+                    }
+                    path += throughput * (m.emissive.rgb +
+                                          m.color.rgb * hit_light);
+                    if (b + 1 >= N_bounces) break;
+
+                    // Tint throughput by the surface albedo, kick
+                    // off the next bounce in a cosine hemisphere
+                    // around the approximate hit normal.
+                    throughput *= m.color.rgb;
+                    ray_origin  = hit_pos + hit_n * 0.01;
+                    float br1 = rmRand(gi_seed + uvec3(taken * 7 + b, 31u, 17u));
+                    float br2 = rmRand(gi_seed + uvec3(taken * 7 + b, 7u, 91u));
+                    ray_dir = cos_hemi(br1, br2, hit_n);
+                }
+                sum += path;
+                ++taken;
+            }
+        }
+        vec3 gi_raw = (taken > 0) ? (sum / float(taken)) : vec3(0.0);
+        // Softener: lerp toward a noise-free sky-at-normal estimate.
+        // 0 = raw path-traced GI (most accurate, noisiest at low N),
+        // 1 = smooth fallback (no per-pixel variance).
+        vec3 gi_smooth = sample_sky_atmosphere(nor);
+        float soft = clamp(scene.terrain_extra.z, 0.0, 1.0);
+        gi_indirect = mate * mix(gi_raw, gi_smooth, soft) *
+                      scene.rt_params2.x;
+        // Hard ceiling to keep a single bright bounce (e.g. a sun-
+        // facing white box wall) from spiking the HDR + bloom.
+        gi_indirect = min(gi_indirect, vec3(4.0));
+    }
+
     vec3 lin = vec3(0.0);
     lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a;
     // Ambient + Fresnel rim term darkened by RTAO so corners between
     // walls / boxes / castle visibly shade the terrain.
     lin += amb * scene.sky_color.rgb * 0.35 * ao;
     lin += fre * scene.sky_color.rgb * 0.25 * ao;
-    // Sky-bounce GI — additive on top of the analytical ambient so
-    // disabling GI never goes darker than the no-RT path. Modulated
-    // by the global GI strength slider; the gi_sky term has already
-    // been blended toward the noise-free sky-at-normal sample by the
-    // GI-softener slider so cranking softener → smooth, low-noise GI.
-    if (scene.rt_flags2.x > 0) {
-        lin += gi_sky * 0.40 * scene.rt_params2.x * ao;
-    }
 
-    vec3 col = mate * lin;
+    vec3 col = mate * lin + gi_indirect;
 
     // Wavelength-dependent atmospheric extinction (blue attenuates
     // ~4× faster than red), with a sun-tinted fog colour near the sun
