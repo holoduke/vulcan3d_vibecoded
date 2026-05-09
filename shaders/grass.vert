@@ -222,33 +222,33 @@ void main() {
 
     float view_dist_base = distance(base_world, scene.camera_pos.xyz);
 
-    // ---- Side-on realignment (Unity-Grass trick) -------------------
+    // ---- Side-on realignment (Unity-Grass trick, dampened) --------
     // When the camera is looking nearly edge-on at the blade plane,
     // the rasteriser would render a sub-pixel sliver. Widen the blade
-    // lateral in that case so it stays visible. Cheap because we can
-    // compute the alignment from the blade's rotation alone.
+    // lateral so it stays visible. Boost capped at 1.20 (was 1.60) +
+    // narrower trigger band — bigger boosts produced visible per-
+    // frame stretching as the camera moved, which TAA reprojected
+    // against the prior frame's narrower vertex and read as flicker.
     {
         vec3  view_dir = scene.camera_pos.xyz - base_world;
         vec2  view_xz  = normalize(view_dir.xz + vec2(1e-4));
-        // Local +Z (blade plane normal) → world via R: rotY column 2
-        // = (sin(rot), 0, cos(rot)).
         vec2 plane_n_xz = vec2(sin(rotation), cos(rotation));
         float align = abs(dot(view_xz, plane_n_xz));
-        float side_on = 1.0 - align;
-        // Widen lateral up to 1.6x when fully edge-on. Smoothstep so
-        // the boost only kicks in below align ≈ 0.4 (≥66°-off-axis).
-        float boost = 1.0 + smoothstep(0.4, 0.0, align) * 0.6;
+        float boost = 1.0 + smoothstep(0.25, 0.0, align) * 0.20;
         lp.x *= boost;
     }
 
     // ---- Distance-LOD width + height morph -------------------------
     // Far blades narrow + shorten smoothly so alpha-coverage at the
     // scale of one screen pixel stays reasonable, eliminating shimmer.
-    // No hard LOD swap — same mesh, just scaled.
+    // Smooth fade band (was 40→max*0.85, now 80→max*0.95) so each
+    // metre of camera motion shifts the morph by less, keeping the
+    // per-vertex velocity small enough that TAA reprojection stays
+    // stable instead of flickering.
     {
-        float dlod = smoothstep(40.0, pc.grass_params.x * 0.85, view_dist_base);
-        lp.x *= mix(1.0, 0.55, dlod);
-        lp.y *= mix(1.0, 0.85, dlod);
+        float dlod = smoothstep(80.0, pc.grass_params.x * 0.95, view_dist_base);
+        lp.x *= mix(1.0, 0.65, dlod);
+        lp.y *= mix(1.0, 0.90, dlod);
     }
 
     // Smooth distance fade — blades shrink over the last 25% of the

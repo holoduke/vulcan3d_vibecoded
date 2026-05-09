@@ -64,11 +64,16 @@ void main() {
     // keeps them readable as foliage from any angle.
     vec3 N = normalize(vNormal);
     vec3 L = normalize(scene.sun_direction.xyz);
-    // Standard Lambert (no half-Lambert wrap). Blades whose pseudo-
-    // billboard normal faces away from the sun get zero direct
-    // contribution → the shadow side of a slope reads as visibly
-    // darker than the lit side.
-    float n_dot_l = max(dot(N, L), 0.0);
+    // Half-Lambert wrap. With the new Bezier blade + per-blade tilt
+    // the random rotation R can put a blade's pseudo-normal facing
+    // squarely away from the sun, and pure Lambert (max(N·L, 0)) then
+    // floors to zero → some blades render as solid black even though
+    // they're physically not in shadow. Half-Lambert remaps N·L from
+    // [-1, 1] to [0, 1] then squares so back-facing blades still pick
+    // up ~25% of direct, killing the "random pure-black blade" look.
+    float n_dot_l_raw = dot(N, L);
+    float wrap = n_dot_l_raw * 0.5 + 0.5;
+    float n_dot_l = wrap * wrap;
 
     // Light intensity (scalar, preserves blade tint). Sun contribution
     // is the dominant term so blade brightness actually responds to
@@ -76,7 +81,7 @@ void main() {
     // back-facing slopes visible without flattening the look. The
     // cap below still bounds total brightness for bloom safety.
     float sun_amt = scene.sun_color.a * 0.35 * n_dot_l;
-    float sky_amt = 0.15;
+    float sky_amt = 0.20;
 
     // Shadow factor:
     //   - Sun shadow comes from the pre-baked heightmap shadow texture
