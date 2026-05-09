@@ -671,13 +671,18 @@ void main() {
     // distant FBM normals.
     float sha = (dif > 0.0) ? calcShadow(pos + nor * 0.05, sunDir) : 1.0;
 
-    // Object shadows from castle / boxes / dyn-props on the
-    // raymarched terrain — REMOVED. The previous PCSS implementation
-    // produced visible per-pixel dither in faint shadow regions
-    // because the raymarched terrain has no clean fallback (unlike
-    // cube.frag's max-combine with the heightmap bake). Will be
-    // replaced with a different technique. For now the surface only
-    // sees terrain self-shadow from `calcShadow` above.
+    // Most basic object shadow: single any-hit ray toward the sun
+    // against the TLAS, mask 0x02 (skips terrain BLAS so we don't
+    // self-shadow). Binary 0/1 — hard-edged, zero noise. No
+    // penumbra. Bias along the sun direction so the origin is
+    // safely above the terrain regardless of the FBM normal's
+    // per-pixel jitter.
+    if (dif > 0.0 && scene.rt_flags.x != 0) {
+        vec3 origin = pos + sunDir * 0.1;
+        if (any_hit_no_terrain(origin, sunDir, 250.0)) {
+            sha *= (1.0 - scene.rt_params.w);   // shadow strength slider
+        }
+    }
 
     vec3 mate = getMaterial(pos, nor);
 
