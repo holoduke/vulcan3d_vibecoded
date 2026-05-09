@@ -324,6 +324,17 @@ void main() {
         // upsamples cleanly with the correct UV.
         vec2 bloom_uv = gl_FragCoord.xy * pc.viewport.zw;
         vec3 bloom = texture(u_bloom, bloom_uv).rgb;
+        // Bloom uses additive blending across 7 mip-up passes — each
+        // pass adds another mip's contribution to the destination, so
+        // the largest mip reads can sum to ~6 × (mip_count) per channel
+        // (with the bloom-down cap at 6). Compose's `hdr += bloom *
+        // strength` would then add ~8 per channel screen-wide on top
+        // of the (TAA-bounded ≤16) hdr — ACES rolls that off to a
+        // sky-tinted near-white wash that alternates with the normal
+        // frame as RT GI samples land bright vs dim. Cap the bloom
+        // contribution per pixel so the additive chain has a hard
+        // ceiling regardless of how the chain accumulated.
+        bloom = min(bloom, vec3(4.0));
         hdr += bloom * pc.bloom_params.x;
     }
     vec2 flare_uv = gl_FragCoord.xy * pc.viewport.zw;
