@@ -78,9 +78,19 @@ vec3 variance_clip(ivec2 ip, out vec3 mn_out, out vec3 mx_out) {
     vec3 mean_sq = vec3(0.0);
     vec3 center = vec3(0.0);
     const int N = 25;
+    // Per-tap NaN/inf guard. A single rogue inf in current_color (e.g.
+    // a path-traced GI bounce that landed on a sun-disk halo and
+    // compounded) would otherwise sail through mean/mean_sq, blow the
+    // stddev to NaN, leave mn/mx undefined, and the variance clamp
+    // would do nothing — so the inf/NaN locks into history. When the
+    // camera stops moving, the corrupt history reprojects to itself
+    // and the screen reads as a flat silhouette. Clamping each tap
+    // before accumulating bounds the entire TAA pipeline.
+    const vec3 kHdrCap = vec3(16.0);
     for (int j = -2; j <= 2; ++j) {
         for (int i = -2; i <= 2; ++i) {
             vec3 c = texelFetch(current_color, ip + ivec2(i, j), 0).rgb;
+            c = clamp(c, vec3(0.0), kHdrCap);
             mean += c;
             mean_sq += c * c;
             if (i == 0 && j == 0) center = c;
@@ -133,6 +143,10 @@ void main() {
     }
 
     vec3 hist = texture(history_color, prev_uv).rgb;
+    // Match the variance_clip input cap so a corrupt history value can
+    // never re-poison the next frame (variance_clip already caps the
+    // current frame; if hist is also bounded the loop is safe).
+    hist = clamp(hist, vec3(0.0), vec3(16.0));
     vec3 hist_clamped = clamp(hist, mn, mx);
 
     // Velocity-adaptive history blend. Constant high-feedback (0.95)
