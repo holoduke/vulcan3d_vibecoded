@@ -174,6 +174,11 @@ struct PhysicsWorld::Impl {
     ObjectPairFilterImpl obj_pairs;
 
     std::unordered_map<uint32_t, JPH::BodyID> ids;
+    // Reverse lookup so raycast hits → user id is O(1) instead of a
+    // linear walk over `ids`. Keyed on BodyID's internal index value
+    // (BodyID has no GetIndexAndSequenceNumber on older Jolt versions
+    // — store the full GetIndex() which is the broadphase-stable key).
+    std::unordered_map<uint32_t, uint32_t> id_by_body_index;
     uint32_t next_id = 1;
 };
 
@@ -348,6 +353,7 @@ uint32_t PhysicsWorld::add_dynamic_box(glm::vec3 c, glm::vec3 he,
         bcs, JPH::EActivation::Activate);
     uint32_t id = impl_->next_id++;
     impl_->ids.emplace(id, bid);
+    impl_->id_by_body_index[bid.GetIndex()] = id;
     return id;
 }
 
@@ -389,6 +395,7 @@ uint32_t PhysicsWorld::add_dynamic_cylinder_ccd(glm::vec3 c, float radius,
         bcs, JPH::EActivation::Activate);
     uint32_t id = impl_->next_id++;
     impl_->ids.emplace(id, bid);
+    impl_->id_by_body_index[bid.GetIndex()] = id;
     return id;
 }
 
@@ -420,6 +427,7 @@ uint32_t PhysicsWorld::add_dynamic_sphere(glm::vec3 c, float radius,
         bcs, JPH::EActivation::Activate);
     uint32_t id = impl_->next_id++;
     impl_->ids.emplace(id, bid);
+    impl_->id_by_body_index[bid.GetIndex()] = id;
     return id;
 }
 
@@ -429,6 +437,7 @@ void PhysicsWorld::remove_body(uint32_t id) {
     JPH::BodyInterface& bi = impl_->system.GetBodyInterface();
     bi.RemoveBody(it->second);
     bi.DestroyBody(it->second);
+    impl_->id_by_body_index.erase(it->second.GetIndex());
     impl_->ids.erase(it);
 }
 
@@ -456,9 +465,9 @@ PhysicsWorld::RayHit PhysicsWorld::raycast(glm::vec3 origin, glm::vec3 direction
         out.normal = glm::vec3(n.GetX(), n.GetY(), n.GetZ());
         if (body.GetMotionType() == JPH::EMotionType::Dynamic) {
             out.dynamic = true;
-            for (const auto& [id, bid] : impl_->ids) {
-                if (bid == res.mBodyID) { out.body_id = id; break; }
-            }
+            // O(1) lookup via reverse map (was a linear walk over `ids`).
+            auto rit = impl_->id_by_body_index.find(res.mBodyID.GetIndex());
+            if (rit != impl_->id_by_body_index.end()) out.body_id = rit->second;
         }
     }
     (void)bi;

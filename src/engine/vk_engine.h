@@ -830,6 +830,11 @@ private:
     std::vector<glm::mat4> static_brush_worlds_;
     bool static_brush_tex_on_ = false;
     bool static_brush_dirty_ = true;
+    // Set whenever bake_static_brushes() reseeds static_brush_materials_
+    // / _worlds_ / _instances_; cleared after the per-frame memcpy
+    // copies them into the GPU-visible buffers. Avoids re-uploading
+    // ~200 KB of unchanged static data every frame.
+    bool static_brush_uploaded_ = false;
 
     // --- TAA: scene color + history ping-pong ---
     VkImage      scene_color_image_ = VK_NULL_HANDLE;

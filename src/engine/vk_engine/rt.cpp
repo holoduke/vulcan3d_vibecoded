@@ -186,14 +186,19 @@ void VulkanEngine::init_rt() {
         instances_buffer_address_ = buffer_device_address(device_, instances_buffer_);
     }
 
-    // Per-instance material buffer (host-visible, mapped). Three vec4 per
-    // entry: color (rgb) + full_emissive flag (a); emissive (rgb) + reserved;
-    // tex_params (albedo idx, normal idx, uv scale, reserved).
+    // Per-instance material buffer. Read by every cube.frag fragment as
+    // an SSBO — placing it in DEVICE_LOCAL memory keeps that read off
+    // PCIe. AUTO_PREFER_DEVICE + HOST_ACCESS_SEQUENTIAL_WRITE asks VMA
+    // to use BAR-mapped device memory if the GPU supports it, falling
+    // back to internal staging otherwise. Three vec4 per entry: color
+    // (rgb)+full_emissive(a); emissive(rgb)+reserved; tex_params
+    // (albedo idx, normal idx, uv scale, reserved).
     //
-    // After the static-brush BLAS merge, customIndex ranges from 0 (per-brush
-    // material via gl_PrimitiveID/12 — the merged-BLAS instance itself uses
-    // the sentinel custom_index) up to M + tlas_max_instances_ for dynamic
-    // entries. Size accordingly so dynamic slot writes never overflow.
+    // After the static-brush BLAS merge, customIndex ranges from 0
+    // (per-brush material via gl_PrimitiveID/12 — the merged-BLAS
+    // instance itself uses the sentinel custom_index) up to
+    // M + tlas_max_instances_ for dynamic entries. Size accordingly so
+    // dynamic slot writes never overflow.
     const uint32_t kStaticMatSlots = static_cast<uint32_t>(world_.brushes.size());
     // +1 reserves a slot for the terrain instance (Phase 1 single
     // heightmap mesh) right after the per-brush materials.
@@ -209,7 +214,7 @@ void VulkanEngine::init_rt() {
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                     VMA_ALLOCATION_CREATE_MAPPED_BIT;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
@@ -238,8 +243,10 @@ void VulkanEngine::init_rt() {
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
+        // Device-local with BAR-mapped host write — same rationale as
+        // materials_buffer_ above (read by every cube.frag fragment).
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                     VMA_ALLOCATION_CREATE_MAPPED_BIT;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
@@ -797,6 +804,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         // Force a full TLAS rebuild (not UPDATE) on the next frame because
         // the instance count just changed.
         prev_tlas_n_ = UINT32_MAX;
+        static_brush_uploaded_ = false;
     }
 
     auto* dst = static_cast<VkAccelerationStructureInstanceKHR*>(instances_mapped_);
@@ -810,13 +818,20 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     const uint32_t M = static_cast<uint32_t>(world_.brushes.size());
     const uint32_t T = (terrain_blas_device_address_ != 0) ? 1u : 0u;
     const uint32_t static_mats = M + T;
-    if (mats && static_mats > 0) {
-        std::memcpy(mats, static_brush_materials_.data(),
-                    sizeof(glm::vec4) * 3 * static_mats);
-    }
-    if (prevs && static_mats > 0) {
-        std::memcpy(prevs, static_brush_worlds_.data(),
-                    sizeof(glm::mat4) * static_mats);
+    // Static brush materials + worlds change rarely (texture toggle,
+    // merged-vs-per-brush swap, brush count change). Gate the per-frame
+    // memcpy of ~200 KB on the dirty flag — saves PCIe traffic when the
+    // static set is stable.
+    if (!static_brush_uploaded_) {
+        if (mats && static_mats > 0) {
+            std::memcpy(mats, static_brush_materials_.data(),
+                        sizeof(glm::vec4) * 3 * static_mats);
+        }
+        if (prevs && static_mats > 0) {
+            std::memcpy(prevs, static_brush_worlds_.data(),
+                        sizeof(glm::mat4) * static_mats);
+        }
+        static_brush_uploaded_ = true;
     }
     // TLAS instance block: 1 entry (merged) or M entries (legacy) +
     // optionally 1 terrain entry. memcpy the prebuilt instances directly.
