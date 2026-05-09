@@ -21,9 +21,16 @@ if(MSVC)
     #   /GL        whole-program optimisation (paired with /LTCG link)
     #   /Gy        function-level linking (lets /OPT:REF strip unused)
     #   /Gw        same for global data
-    #   /fp:fast   reorder + denormal-as-zero + don't preserve NaN sign
     #   /arch:AVX2 enable AVX2 instructions (every x64 CPU since ~2013)
     #   /Qpar      auto-parallelise simple loops
+    #
+    # /fp:fast removed — bisected to be the cause of a sky-coloured
+    # cyan-wash flicker on the user's GPU. /fp:fast lets MSVC reorder
+    # FP ops + treat denormals as zero + assume operands are not NaN;
+    # somewhere in the per-frame uniform / scene UBO compute, that
+    # assumption produces a wrong value that scales the lit term
+    # screen-wide. Keep IEEE-conformant FP for now; the perf delta vs
+    # /fp:precise is marginal in this codebase.
     add_compile_options(
         $<$<CONFIG:Release>:/Ob3>
         $<$<CONFIG:Release>:/Oi>
@@ -31,7 +38,6 @@ if(MSVC)
         $<$<CONFIG:Release>:/GL>
         $<$<CONFIG:Release>:/Gy>
         $<$<CONFIG:Release>:/Gw>
-        $<$<CONFIG:Release>:/fp:fast>
         $<$<CONFIG:Release>:/arch:AVX2>
         $<$<CONFIG:Release>:/Qpar>
     )
@@ -44,9 +50,9 @@ if(MSVC)
     )
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
+    # -ffast-math symmetrically dropped (matches MSVC /fp:fast removal).
     add_compile_options(
         $<$<CONFIG:Release>:-O3>
-        $<$<CONFIG:Release>:-ffast-math>
         $<$<CONFIG:Release>:-march=x86-64-v3>   # AVX2 baseline
         $<$<CONFIG:Release>:-flto>
     )

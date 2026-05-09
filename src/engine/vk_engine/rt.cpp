@@ -22,7 +22,7 @@ namespace qlike {
 // never collides with a legitimate materials-buffer slot.
 inline constexpr uint32_t kStaticBlasInstSentinel = 0xFFFFFFu;
 
-// Tris per cube — shader does `prim_id / kCubeTrisPerBox` to recover the
+// Tris per cube вЂ” shader does `prim_id / kCubeTrisPerBox` to recover the
 // brush index inside the merged BLAS. Mirrored as `12` in cube.frag.
 inline constexpr uint32_t kCubeTrisPerBox = 12;
 
@@ -89,7 +89,7 @@ void VulkanEngine::init_rt() {
                 .pQueueFamilyIndices = rt_share_indices,
             };
             VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
             vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                      &out_buffer, &out_alloc, nullptr),
                      "blas buffer");
@@ -116,7 +116,7 @@ void VulkanEngine::init_rt() {
                 .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
             };
             VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
             vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                      &scratch, &scratch_alloc, nullptr),
                      "blas scratch");
@@ -141,7 +141,7 @@ void VulkanEngine::init_rt() {
     build_mesh_blas(cylinder_mesh_, "cylinder",
                     cylinder_blas_buffer_, cylinder_blas_alloc_,
                     cylinder_blas_, cylinder_blas_device_address_);
-    // Terrain BLAS — same lambda, since the terrain mesh is just a
+    // Terrain BLAS вЂ” same lambda, since the terrain mesh is just a
     // standard Vertex/uint32 indexed mesh (built in init_world via
     // build_terrain_mesh).
     if (terrain_mesh_.index_count > 0) {
@@ -150,7 +150,7 @@ void VulkanEngine::init_rt() {
                         terrain_blas_, terrain_blas_device_address_);
     }
     // Single big BLAS over the entire static castle. Replaces ~190 small
-    // per-brush TLAS instances with one — drops top-level traversal cost
+    // per-brush TLAS instances with one вЂ” drops top-level traversal cost
     // and (more importantly) keeps RT load below the GPU TDR threshold
     // when many dyn props + projectiles + particles share the TLAS.
     bake_merged_static_blas();
@@ -187,7 +187,7 @@ void VulkanEngine::init_rt() {
     }
 
     // Per-instance material buffer. Read by every cube.frag fragment as
-    // an SSBO — placing it in DEVICE_LOCAL memory keeps that read off
+    // an SSBO вЂ” placing it in DEVICE_LOCAL memory keeps that read off
     // PCIe. AUTO_PREFER_DEVICE + HOST_ACCESS_SEQUENTIAL_WRITE asks VMA
     // to use BAR-mapped device memory if the GPU supports it, falling
     // back to internal staging otherwise. Three vec4 per entry: color
@@ -195,7 +195,7 @@ void VulkanEngine::init_rt() {
     // (albedo idx, normal idx, uv scale, reserved).
     //
     // After the static-brush BLAS merge, customIndex ranges from 0
-    // (per-brush material via gl_PrimitiveID/12 — the merged-BLAS
+    // (per-brush material via gl_PrimitiveID/12 вЂ” the merged-BLAS
     // instance itself uses the sentinel custom_index) up to
     // M + tlas_max_instances_ for dynamic entries. Size accordingly so
     // dynamic slot writes never overflow.
@@ -214,7 +214,7 @@ void VulkanEngine::init_rt() {
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                     VMA_ALLOCATION_CREATE_MAPPED_BIT;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
@@ -243,10 +243,10 @@ void VulkanEngine::init_rt() {
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
-        // Device-local with BAR-mapped host write — same rationale as
+        // Device-local with BAR-mapped host write вЂ” same rationale as
         // materials_buffer_ above (read by every cube.frag fragment).
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                     VMA_ALLOCATION_CREATE_MAPPED_BIT;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
@@ -301,7 +301,7 @@ void VulkanEngine::init_rt() {
             .pQueueFamilyIndices = rt_share_indices,
         };
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                  &tlas_buffer_, &tlas_alloc_, nullptr),
                  "tlas buffer");
@@ -315,7 +315,7 @@ void VulkanEngine::init_rt() {
              "vkCreateAccelerationStructureKHR tlas");
 
     {
-        // Scratch must hold whichever of {build, update} is bigger — the same
+        // Scratch must hold whichever of {build, update} is bigger вЂ” the same
         // buffer is reused for both modes in rebuild_tlas().
         VkDeviceSize scratch_size = tlas_sizes.buildScratchSize;
         if (tlas_sizes.updateScratchSize > scratch_size) {
@@ -328,7 +328,7 @@ void VulkanEngine::init_rt() {
             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                      VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
             // Scratch is only touched by the compute queue's AS build, but
-            // we include CONCURRENT here for symmetry — the BLAS build at
+            // we include CONCURRENT here for symmetry вЂ” the BLAS build at
             // init time uses one_time_submit on the graphics queue, which
             // means the FIRST scratch use is on graphics. CONCURRENT avoids
             // the implicit ownership claim getting "stuck" on graphics
@@ -338,7 +338,7 @@ void VulkanEngine::init_rt() {
             .pQueueFamilyIndices = rt_share_indices,
         };
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                  &tlas_scratch_buffer_, &tlas_scratch_alloc_, nullptr),
                  "tlas scratch");
@@ -390,20 +390,20 @@ void VulkanEngine::destroy_rt() {
 void VulkanEngine::bake_merged_static_blas() {
     // Concatenate every world_.brush's cube into one world-space triangle
     // soup. The unit-cube vertex template lives in cube_mesh_ but we need
-    // *positions only* in world space — normals and UVs are unused for RT
+    // *positions only* in world space вЂ” normals and UVs are unused for RT
     // (cube.frag's primary shading reads from raster, RT only sees triangle
     // intersections). We still pack the full Vertex struct because that's
     // the only path our `create_mesh_from_data` upload helper takes.
     //
-    // 24 verts × N brushes; 36 indices × N brushes (12 tris × N brushes).
-    // For a 200-brush castle that's 4800 verts / 7200 indices — trivial.
+    // 24 verts Г— N brushes; 36 indices Г— N brushes (12 tris Г— N brushes).
+    // For a 200-brush castle that's 4800 verts / 7200 indices вЂ” trivial.
     const uint32_t M = static_cast<uint32_t>(world_.brushes.size());
     if (M == 0) {
         merged_static_brush_count_ = 0;
         return;
     }
 
-    // Cube template (positions only — normals/UVs zeroed since RT ignores).
+    // Cube template (positions only вЂ” normals/UVs zeroed since RT ignores).
     constexpr float h = 0.5f;
     static const glm::vec3 kCubePos[24] = {
         // +X
@@ -454,7 +454,7 @@ void VulkanEngine::bake_merged_static_blas() {
     merged_static_brush_count_ = M;
 
     // Build a BLAS over the merged triangle soup. PREFER_FAST_TRACE +
-    // single-build (no UPDATE flag) — this geometry never changes after
+    // single-build (no UPDATE flag) вЂ” this geometry never changes after
     // level load.
     const uint32_t tri_count = merged_static_mesh_.index_count / 3;
     VkDeviceAddress vbo_addr = buffer_device_address(device_, merged_static_mesh_.vertex_buffer);
@@ -483,7 +483,7 @@ void VulkanEngine::bake_merged_static_blas() {
     // by 30-50% for worst-case fits; compacting reclaims that VRAM AND tends
     // to give a slightly faster traversal because the post-compact tree fits
     // tighter in cache. Required because the merged BLAS for ~1800 tris is
-    // permanent — we'd carry the over-allocation forever otherwise.
+    // permanent вЂ” we'd carry the over-allocation forever otherwise.
     bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
                 VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
     bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
@@ -520,7 +520,7 @@ void VulkanEngine::bake_merged_static_blas() {
             .pQueueFamilyIndices = rt_share_indices,
         };
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                  &merged_static_blas_buffer_,
                                  &merged_static_blas_alloc_, nullptr),
@@ -548,7 +548,7 @@ void VulkanEngine::bake_merged_static_blas() {
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                  &scratch, &scratch_alloc, nullptr),
                  "merged static blas scratch");
@@ -617,7 +617,7 @@ void VulkanEngine::bake_merged_static_blas() {
                 .pQueueFamilyIndices = rt_share_indices,
             };
             VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
             vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                      &compact_buf, &compact_alloc, nullptr),
                      "merged static blas compact buffer");
@@ -713,7 +713,7 @@ void VulkanEngine::bake_static_brushes() {
         }
     }
 
-    // Per-brush material table — populated identically for both paths so
+    // Per-brush material table вЂ” populated identically for both paths so
     // the materials[brush_idx] layout is consistent.
     for (const auto& b : world_.brushes) {
         glm::mat4 m = glm::translate(glm::mat4(1.0f), b.center) *
@@ -730,7 +730,7 @@ void VulkanEngine::bake_static_brushes() {
         static_brush_materials_.push_back(glm::vec4(b.emissive, 0.0f));
         static_brush_materials_.push_back(tex);
     }
-    // Terrain instance + material — appended at slot M (one entry per
+    // Terrain instance + material вЂ” appended at slot M (one entry per
     // call to bake_static_brushes). cube.frag's GI hit recovers the
     // terrain material via materials[customIndex] just like dynamic
     // instances. customIndex == M (= world_.brushes.size()).
@@ -742,7 +742,7 @@ void VulkanEngine::bake_static_brushes() {
         tinst.instanceCustomIndex = static_cast<uint32_t>(world_.brushes.size());
         // Mask convention extended for the terrain receiver case:
         //   bit 0 = "shadow caster, ray-mask 0x01 sees it" (legacy)
-        //   bit 1 = "non-terrain shadow caster" — terrain receivers
+        //   bit 1 = "non-terrain shadow caster" вЂ” terrain receivers
         //           use ray mask 0x02 to fire RT shadow rays that
         //           skip the terrain BLAS (so the BLAS-vs-LOD-raster
         //           mismatch can't false-hit per triangle), but still
@@ -820,7 +820,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     const uint32_t static_mats = M + T;
     // Static brush materials + worlds change rarely (texture toggle,
     // merged-vs-per-brush swap, brush count change). Gate the per-frame
-    // memcpy of ~200 KB on the dirty flag — saves PCIe traffic when the
+    // memcpy of ~200 KB on the dirty flag вЂ” saves PCIe traffic when the
     // static set is stable.
     if (!static_brush_uploaded_) {
         if (mats && static_mats > 0) {
@@ -866,7 +866,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         //   bit 0 = "shadow caster / AO occluder"
         //   bit 1 = "visible to GI / reflection"
         // Shadow + AO rays use cull-mask 0x01 (excludes anything without
-        // bit 0 set — sparks + bullets are mask 0xFE so they're skipped);
+        // bit 0 set вЂ” sparks + bullets are mask 0xFE so they're skipped);
         // GI + reflection rays use 0xFF and see everything.
         inst.mask = mask;
         inst.instanceShaderBindingTableRecordOffset = 0;
@@ -892,7 +892,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     // uses the same heuristic). A dyn-prop whose AABB subtends less than this
     // angle from the camera is small enough that its shadow / GI contribution
     // is sub-pixel; skipping it from the TLAS saves traversal cost and BLAS-
-    // instance overhead. Threshold ≈ 0.5° = ~tan(0.5°) ≈ 0.0087 rad.
+    // instance overhead. Threshold в‰€ 0.5В° = ~tan(0.5В°) в‰€ 0.0087 rad.
     constexpr float kMinAngularSize = 0.0087f;
     const glm::vec3 cam_pos = player_.eye_position();
     for (size_t i = 0; i < dyn_props_.size(); ++i) {
@@ -925,7 +925,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     // + AS-build work per frame, plus they get traversed by every GI and
     // reflection ray for negligible visual contribution (sub-mm cylinders
     // moving fast). Their visual is fully handled by the trail rasterization
-    // in draw_spark_trails — far cheaper, and indistinguishable on screen.
+    // in draw_spark_trails вЂ” far cheaper, and indistinguishable on screen.
 
     for (const auto& p : projectiles_) {
         glm::mat4 world;
@@ -939,7 +939,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         glm::mat4 m = align * scale_m;
         // Mask 0xFC: clears bit 0 (no shadow-caster for non-terrain
         // receivers) AND bit 1 (no shadow-caster for terrain receivers).
-        // Bullets are sub-mm cylinders moving at 600 m/s — their contact
+        // Bullets are sub-mm cylinders moving at 600 m/s вЂ” their contact
         // shadow streaks alias visibly in the soft-shadow penumbra. GI/
         // reflection rays still see them via mask 0xFF so the tracer
         // line shows up in shiny surfaces.
@@ -993,7 +993,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
 
     last_tlas_n_ = n;
 
-    // No in-CB memory barrier here — this command buffer is submitted on the
+    // No in-CB memory barrier here вЂ” this command buffer is submitted on the
     // compute queue, and the cross-queue dependency to the graphics queue's
     // FRAGMENT_SHADER stage (where cube.frag reads the TLAS) is carried by
     // the binary semaphore signaled by this submission. Binary semaphores
