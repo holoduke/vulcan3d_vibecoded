@@ -887,7 +887,12 @@ void main() {
         float fogStrength = pc.grass_params.x;
         bool  fogGodRays  = pc.grass_params.z > 0.5;
         if (fogStrength > 0.001) {
-        const int   kVolSteps         = 16;     // dense enough to hide stepping w/ jitter
+        // Distance-LOD on the fog march: full 12 steps near the
+        // camera, drop to 4 past 150 m. Distant terrain pixels with
+        // 16-step fog were the dominant per-pixel cost and the
+        // direct cause of the GPU TDR — far fog can't visibly
+        // resolve sub-step density anyway.
+        int kVolSteps = (cam_dist_pos < 150.0) ? 12 : 4;
         const float kVolDensityBase   = 0.030;  // σe at full density inside the band
         const float kVolPhaseG        = 0.65;   // forward-scattering bias
         // Band parameters from settings (fog_band slot in scene UBO).
