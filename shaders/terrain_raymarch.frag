@@ -102,22 +102,13 @@ bool closest_hit_no_terrain(vec3 origin, vec3 dir, float t_max,
 
 // Tiny xorshift32 hash — deterministic per-pixel jitter for the
 // stratified shadow rays.
-// Interleaved Gradient Noise — same dither pattern cube.frag uses
-// for PCSS / RTAO. xorshift hashes (the previous rmRand) produce
-// row-banding correlations that read as moving "lines in shadows"
-// even with TAA. IGN is designed for stochastic rendering: low
-// perceptual structure across pixels, well-distributed across the
-// sample-index axis when you offset the input position.
-float ignBase(vec2 p) {
-    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
-}
-float rmRand(uvec3 seed) {
-    // Same recipe as cube.frag::rand — shift the input position by
-    // the sample index along a magic vector so each sample's jitter
-    // is uncorrelated within a pixel but smooth across neighbours.
-    float s = float(seed.x) + 5.588238 * float(seed.z);
-    float t = float(seed.y) + 1.388765 * float(seed.z);
-    return ignBase(vec2(s, t));
+float rmRand(uvec3 s) {
+    s.x ^= s.x << 13u;
+    s.x ^= s.x >> 17u;
+    s.x ^= s.x << 5u;
+    s.x += s.y * 19349663u;
+    s.x += s.z * 83492791u;
+    return float(s.x & 0x00FFFFFFu) / 16777216.0;
 }
 
 // Scene UBO — same layout as cube.frag's binding 0. Only a handful of
@@ -158,16 +149,6 @@ layout(set = 0, binding = 0) uniform Scene {
     // Fog band: x = y_start, y = y_top, z = noise strength.
     vec4 fog_band;
 } scene;
-
-// Procedural sky color in `dir` direction. Used by the GI hemisphere
-// rays when they escape to the sky. Same horizon→zenith gradient as
-// the compose pass; no sun halo to avoid pumping HDR into bloom.
-vec3 sample_sky_atmosphere(vec3 dir) {
-    float up = clamp(dir.y, 0.0, 1.0);
-    vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
-    vec3 zenith  = scene.sky_color.rgb;
-    return mix(horizon, zenith, pow(up, 0.45));
-}
 
 // === Hash + Value-Noise with analytical derivatives ===
 // dot/fract pattern (avoids sin() precision artifacts on some GPUs).
@@ -335,22 +316,15 @@ vec3 calcNormal(vec3 pos, float t) {
     return normalize(vec3(hC - hR, eps, hC - hU));
 }
 
-// Classic heightfield soft-shadow march — `min(k·h/t)`. k ties to
-// the global Shadow softness slider (rt_params.x) so a single
-// control softens both terrain self-shadow AND PCSS castle/box
-// shadows. Slider 0 → k=64 (razor sharp), slider 0.15 → k=4
-// (very soft). Cubic smoothstep at the end softens the linear
-// penumbra ramp.
+// Classic heightfield soft-shadow march — `min(k·h/t)` where h is
+// the vertical gap between the ray and the FBM surface. Works on
+// heightfields where steps don't equal the geodesic distance (we
+// clamp the step to a useful range, decoupling step from h, which
+// breaks Inigo Quilez's geometric-triangulation variant — that
+// formula assumes sphere-trace properties). Cubic smoothstep at
+// the end softens the linear penumbra ramp into a more natural
+// curve. k = 16 gives a moderate softness; lower = softer.
 float calcShadow(vec3 pos, vec3 sunDir) {
-    // Driven by global Shadow softness slider × per-terrain
-    // softness scale. Same combination the PCSS below uses so both
-    // shadow types respond to the same UI controls in lock-step.
-    float soft_g = scene.rt_params.x;
-    if (scene.terrain_params.w > 0.0) {
-        soft_g *= max(0.05, scene.terrain_params.w);
-    }
-    float soft = clamp(soft_g / 0.15, 0.0, 1.0);
-    float k    = mix(64.0, 4.0, soft);
     float res = 1.0;
     float t   = 0.05;
     int kSteps = int(pc.tex_params.y);
@@ -358,7 +332,7 @@ float calcShadow(vec3 pos, vec3 sunDir) {
         vec3 p = pos + t * sunDir;
         float h = p.y - terrainM(p.xz);
         if (h < 0.001) { res = 0.0; break; }
-        res = min(res, k * h / t);
+        res = min(res, 16.0 * h / t);
         t += clamp(h, 0.5, 100.0);
         if (t > 800.0 || res < 0.001) break;
     }
@@ -665,10 +639,7 @@ void main() {
         // Write hit depth; rasterised geometry that's actually in
         // front (e.g. a cube on a pier) still occludes us.
         vec4 clipW = pc.mvp * vec4(wpos, 1.0);
-        // See main terrain branch — cap below the compose sky-cutoff
-        // threshold so far water doesn't get repainted as sky-below-
-        // horizon (black).
-        gl_FragDepth = min(clipW.z / clipW.w, 0.9998);
+        gl_FragDepth = clipW.z / clipW.w;
         outColor = vec4(col_w, 1.0);
         // Motion vector for TAA reprojection (same pattern as
         // terrain branch below). Treats the surface as world-static
@@ -717,14 +688,8 @@ void main() {
     //   4. max-combine with `self_shadow` so where the FBM says we
     //      are in self-shadow we use that clean value (analogue of
     //      cube.frag's `max(shadow, sh_bake)`).
-    // Distance-LOD: skip the RT work past 200 m. Far terrain pays
-    // the bake/calcShadow penalty only — keeps the per-frame ray
-    // budget bounded and prevents Windows TDR on a heavy view.
     float dyn_shadow = 0.0;
-    float cam_dist_pos = distance(pos, scene.camera_pos.xyz);
-    bool do_rt = cam_dist_pos < 200.0;
-
-    if (dif > 0.0 && scene.rt_flags.x != 0 && do_rt) {
+    if (dif > 0.0 && scene.rt_flags.x != 0) {
         // base_softness from the global Shadow softness slider,
         // scaled by the terrain-specific scale (terrain_params.w).
         float base_softness = scene.rt_params.x;
@@ -807,95 +772,12 @@ void main() {
     float shadow = max(dyn_shadow, self_shadow);
     float sha = 1.0 - shadow;
 
-    // RT ambient occlusion against castle / boxes / dyn-props
-    // (mask 0x02 — terrain BLAS skipped). Mirrors cube.frag's RTAO
-    // path: cosine-hemisphere samples around the surface normal,
-    // sqrt-shaped raw occlusion, ao_floor remap. AO darkens the
-    // ambient term — corners between walls + boxes get visibly
-    // shaded, just like the rasterised path.
-    float ao = 1.0;
-    // Sky-bounce GI accumulator. Defaults to zero — only populated
-    // when the AO loop runs (it piggybacks on the same hemisphere
-    // rays). Modulates the sky/ambient lighting term.
-    vec3 gi_sky = vec3(0.0);
-    int ao_mode = scene.rt_flags2.w;
-    if (ao_mode > 0 && scene.rt_flags.z > 0 && do_rt) {
-        // Don't apply cube.frag's mode-1 (GTAO) sample cap of 2 here.
-        // 2 cosine-hemisphere rays per pixel gives only 3 discrete
-        // visibility buckets (0/1/2 hits) and renders as heavily
-        // binary IGN-distributed black squares on the terrain. The
-        // raymarch shader always uses the full slider value; minimum
-        // 4 so even a 1-sample slider doesn't blow up.
-        int N_ao = clamp(scene.rt_flags.z, 4, 32);
-        float ao_radius = scene.rt_params.y;
-
-        // Origin lifted along the surface normal a few cm so the
-        // FBM-derived hit point doesn't self-intersect a BLAS
-        // triangle (e.g. a castle pad).
-        vec3 origin_ao = pos + nor * 0.05;
-        uvec3 ao_seed = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
-        int taken = 0;
-        float occluded = 0.0;
-        // Sky-bounce GI accumulator: rays that miss escape to the
-        // sky and contribute the sky colour in their direction.
-        // Free piggyback on the AO loop — same hemisphere rays,
-        // single any-hit query, no second shadow ray. Result is a
-        // proper directional ambient term that picks up bright sky
-        // coming through openings between walls.
-        vec3 sky_gi = vec3(0.0);
-        for (int i = 0; i < N_ao; ++i) {
-            float u1 = rmRand(ao_seed + uvec3(i, 7u, 53u));
-            float u2 = rmRand(ao_seed + uvec3(i, 41u, 5u));
-            // cosine-hemisphere distribution around the surface normal.
-            float r = sqrt(u1);
-            float ph = 6.28318530718 * u2;
-            vec3 d_local = vec3(r * cos(ph), sqrt(max(0.0, 1.0 - u1)),
-                                  r * sin(ph));
-            vec3 ref_n = abs(nor.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
-                                              : vec3(1.0, 0.0, 0.0);
-            vec3 t1 = normalize(cross(ref_n, nor));
-            vec3 t2 = cross(nor, t1);
-            vec3 d = d_local.x * t1 + d_local.y * nor + d_local.z * t2;
-            if (any_hit_no_terrain(origin_ao, d, ao_radius)) {
-                occluded += 1.0;
-                // Hit = blocked, no GI contribution from this dir.
-                // (A second-bounce trace from the hit point toward
-                // the sun would catch indirect off the castle, but
-                // doubles the per-pixel ray cost — skip for now.)
-            } else {
-                // Miss = ray escaped to sky. Sample the procedural
-                // sky in that direction, weighted by cosine (already
-                // baked into the cosine-hemisphere PDF).
-                sky_gi += sample_sky_atmosphere(d);
-            }
-        }
-        // Linear curve (no sqrt) — sqrt compresses the dark side
-        // of the [0,1] range, so a 25 % hit ratio reads as
-        // sqrt(0.75) ≈ 0.87 and corners barely darken. With more
-        // samples the AO converges to its true low ratio and the
-        // sqrt output reads brighter than the noisy 1-sample case
-        // — exactly the "more samples = less shadow" surprise
-        // reported. Linear curve makes AO scale monotonically with
-        // hit ratio so increasing samples reduces noise without
-        // washing out the darkening.
-        float raw = 1.0 - (occluded / float(taken));
-        float ao_floor_v = scene.rt_lod.w;
-        ao = mix(ao_floor_v, 1.0, raw);
-        // Average the sky GI samples and store on the sky_color
-        // term for the lighting accumulation below.
-        gi_sky = sky_gi / float(taken);
-    }
-
     vec3 mate = getMaterial(pos, nor);
 
     vec3 lin = vec3(0.0);
     lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a;
-    // Analytical ambient + Fresnel rim — always applies, modulated
-    // by AO so corners darken.
-    lin += amb * scene.sky_color.rgb * 0.35 * ao;
-    lin += fre * scene.sky_color.rgb * 0.25 * ao;
-    // GI add temporarily disabled while diagnosing black-tile artifact
-    // the user reports. Was: `lin += gi_sky * 0.4 * scene.rt_params2.x`.
+    lin += amb * scene.sky_color.rgb * 0.35;
+    lin += fre * scene.sky_color.rgb * 0.25;
 
     vec3 col = mate * lin;
 
@@ -927,12 +809,7 @@ void main() {
         float fogStrength = pc.grass_params.x;
         bool  fogGodRays  = pc.grass_params.z > 0.5;
         if (fogStrength > 0.001) {
-        // Distance-LOD on the fog march: full 12 steps near the
-        // camera, drop to 4 past 150 m. Distant terrain pixels with
-        // 16-step fog were the dominant per-pixel cost and the
-        // direct cause of the GPU TDR — far fog can't visibly
-        // resolve sub-step density anyway.
-        int kVolSteps = (cam_dist_pos < 150.0) ? 12 : 4;
+        const int   kVolSteps         = 16;     // dense enough to hide stepping w/ jitter
         const float kVolDensityBase   = 0.030;  // σe at full density inside the band
         const float kVolPhaseG        = 0.65;   // forward-scattering bias
         // Band parameters from settings (fog_band slot in scene UBO).
@@ -943,18 +820,12 @@ void main() {
         vec3 fogTint   = vec3(0.78, 0.83, 0.90);
         vec3 sunGlow   = scene.sun_color.rgb * scene.sun_color.a;
 
-        // Henyey-Greenstein phase: forward-peaked when looking near
-        // the sun. The denominator goes near-zero as cosTh→1, so
-        // phase can spike past 100 and blow up the bloom + auto-
-        // exposure (visible flash + sometimes drives a TDR).
-        // Clamp the denominator's growth so phase stays bounded.
-        float cosTh = clamp(dot(rd, sunDir), -1.0, 0.985);
+        // Henyey-Greenstein phase: forward-peaked when looking near the sun.
+        float cosTh = dot(rd, sunDir);
         float gg    = kVolPhaseG * kVolPhaseG;
         float phase = (1.0 - gg) /
                       (4.0 * 3.14159265 *
                        pow(1.0 + gg - 2.0 * kVolPhaseG * cosTh, 1.5));
-        // Hard ceiling matches a typical "sun glow" magnitude.
-        phase = min(phase, 4.0);
 
         // Cap march length at the surface hit. Sky pixels never reach
         // here (we returned -1 above), so t is always finite.
@@ -1041,15 +912,8 @@ void main() {
 
     // Write the hit-point depth so rasterised geometry that wrote
     // depth earlier in the same pass occludes the terrain correctly.
-    // Cap below 0.9999 — the compose pass treats depth >= 0.99999 as
-    // a sky pixel and paints `sample_sky(dir)`. For terrain hits past
-    // ~800 m the projected depth crosses the threshold and compose
-    // overwrites our colour with the skybox sampled below the horizon
-    // (which is black for typical HDRIs). Result: distant raymarch
-    // terrain renders as pure black. Capping keeps compose's sky-
-    // detection from misfiring on far terrain hits.
     vec4 clip = pc.mvp * vec4(pos, 1.0);
-    gl_FragDepth = min(clip.z / clip.w, 0.9998);
+    gl_FragDepth = clip.z / clip.w;
 
     outColor = vec4(col, 1.0);
     // Screen-space motion vector for TAA. World position is stationary
