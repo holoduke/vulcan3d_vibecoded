@@ -817,13 +817,14 @@ void main() {
     vec3 gi_sky = vec3(0.0);
     int ao_mode = scene.rt_flags2.w;
     if (ao_mode > 0 && scene.rt_flags.z > 0 && do_rt) {
-        int requested = (ao_mode == 1) ? min(scene.rt_flags.z, 2)
-                                       : scene.rt_flags.z;
-        // No lod_samples helper here — clamp manually so distant
-        // terrain doesn't waste per-pixel rays on AO that doesn't
-        // visibly contribute.
-        int N_ao = clamp(requested, 1, 32);
-        float ao_radius = scene.rt_params.y * (ao_mode == 1 ? 0.5 : 1.0);
+        // Don't apply cube.frag's mode-1 (GTAO) sample cap of 2 here.
+        // 2 cosine-hemisphere rays per pixel gives only 3 discrete
+        // visibility buckets (0/1/2 hits) and renders as heavily
+        // binary IGN-distributed black squares on the terrain. The
+        // raymarch shader always uses the full slider value; minimum
+        // 4 so even a 1-sample slider doesn't blow up.
+        int N_ao = clamp(scene.rt_flags.z, 4, 32);
+        float ao_radius = scene.rt_params.y;
 
         // Origin lifted along the surface normal a few cm so the
         // FBM-derived hit point doesn't self-intersect a BLAS
