@@ -689,9 +689,17 @@ void main() {
                                             : vec3(1.0, 0.0, 0.0);
         vec3 tan_u = normalize(cross(ref, sunDir));
         vec3 tan_v = cross(sunDir, tan_u);
-        // 5 cm bias matches calcShadow above so terrain self-shadow
-        // and TLAS shadow agree on where the surface is.
-        vec3 origin = pos + nor * 0.05;
+        // Bias along the SUN direction, NOT the surface normal. The
+        // raymarch normal is per-pixel finite-differenced from the
+        // FBM, so it has high-frequency variation between adjacent
+        // pixels. Using it for the shadow-ray origin shifted the
+        // ray-cone slightly per pixel; near a castle silhouette
+        // those tiny shifts caused per-pixel hit/miss disagreement,
+        // i.e. the white-noise dither the user reported in faint
+        // shadows. Sun direction is constant across pixels, so the
+        // ray origin moves coherently and the cone samples a
+        // consistent wedge of the BLAS.
+        vec3 origin = pos + sunDir * 0.05;
         // STABLE per-pixel seed (no frame_number). Reseeding every
         // frame produces white-noise dither in the penumbra that TAA
         // can't fully average — the visible "moving square holes"
