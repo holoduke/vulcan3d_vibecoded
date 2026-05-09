@@ -23,6 +23,29 @@
 
 namespace qlike {
 
+// Classic GLSL-style hash + value-noise + 3-octave FBM, used by every
+// CPU sculpt / plateau-noise / erosion path. Was previously inlined as
+// nested lambdas in three sites with three different signatures
+// (cleanness review #8). Centralising it removes the duplicate
+// `12.9898/78.233/43758.5453` magic triple and lets the compiler pick
+// one inlining strategy.
+static float fbm_hash(float x, float y) {
+    float n = std::sin(x * 12.9898f + y * 78.233f) * 43758.5453f;
+    return n - std::floor(n);
+}
+static float fbm_noise2(float x, float y) {
+    float ix = std::floor(x), iy = std::floor(y);
+    float fx = x - ix,        fy = y - iy;
+    float a = fbm_hash(ix,        iy);
+    float b = fbm_hash(ix + 1.0f, iy);
+    float c = fbm_hash(ix,        iy + 1.0f);
+    float d = fbm_hash(ix + 1.0f, iy + 1.0f);
+    float ux = fx * fx * (3.0f - 2.0f * fx);
+    float uy = fy * fy * (3.0f - 2.0f * fy);
+    return (a * (1 - ux) + b * ux) * (1 - uy) +
+           (c * (1 - ux) + d * ux) * uy;
+}
+
 // Distance-based LOD selector for terrain chunks. Used by all three
 // terrain draw paths (depth pre-pass, color pass, shadow pass) so LOD
 // stays consistent вЂ” if the pre-pass picked half-LOD and the color
@@ -88,25 +111,9 @@ void VulkanEngine::apply_terrain_brush(float dt) {
     const float n_str  = std::clamp(terrain_brush_noise_strength_, 0.0f, 1.0f);
     const float n_freq = std::max(0.02f, terrain_brush_noise_freq_);
     auto fbm_var = [n_freq](float wx, float wz) {
-        auto hash = [](float x, float y) {
-            float n = std::sin(x * 12.9898f + y * 78.233f) * 43758.5453f;
-            return n - std::floor(n);
-        };
-        auto noise = [&](float x, float y) {
-            float ix = std::floor(x), iy = std::floor(y);
-            float fx = x - ix,        fy = y - iy;
-            float a = hash(ix,        iy);
-            float b = hash(ix + 1.0f, iy);
-            float c = hash(ix,        iy + 1.0f);
-            float d = hash(ix + 1.0f, iy + 1.0f);
-            float ux = fx * fx * (3.0f - 2.0f * fx);
-            float uy = fy * fy * (3.0f - 2.0f * fy);
-            return (a * (1 - ux) + b * ux) * (1 - uy) +
-                   (c * (1 - ux) + d * ux) * uy;
-        };
-        float v = 0.5f * noise(wx * n_freq,        wz * n_freq) +
-                  0.25f * noise(wx * n_freq * 2.07f, wz * n_freq * 2.07f) +
-                  0.125f * noise(wx * n_freq * 4.13f, wz * n_freq * 4.13f);
+        float v = 0.5f  * fbm_noise2(wx * n_freq,         wz * n_freq) +
+                  0.25f * fbm_noise2(wx * n_freq * 2.07f, wz * n_freq * 2.07f) +
+                  0.125f* fbm_noise2(wx * n_freq * 4.13f, wz * n_freq * 4.13f);
         return v - 0.4375f;   // re-centre on 0
     };
 
@@ -717,23 +724,9 @@ void VulkanEngine::add_plateau_noise(float amplitude_m, float frequency) {
     const float     plat_blend = 24.0f;
 
     auto fbm2 = [](glm::vec2 p) {
-        // 3-octave value-noise FBM via a cheap hash.
-        auto hash = [](glm::vec2 q) {
-            float n = std::sin(q.x * 12.9898f + q.y * 78.233f) * 43758.5453f;
-            return n - std::floor(n);
-        };
-        auto noise = [&](glm::vec2 q) {
-            glm::vec2 i = glm::floor(q);
-            glm::vec2 f = q - i;
-            float a = hash(i);
-            float b = hash(i + glm::vec2(1.0f, 0.0f));
-            float c = hash(i + glm::vec2(0.0f, 1.0f));
-            float d = hash(i + glm::vec2(1.0f, 1.0f));
-            glm::vec2 u = f * f * (3.0f - 2.0f * f);
-            return glm::mix(glm::mix(a, b, u.x), glm::mix(c, d, u.x), u.y);
-        };
-        float v = 0.5f * noise(p) + 0.25f * noise(p * 2.07f) +
-                   0.125f * noise(p * 4.13f);
+        float v = 0.5f  * fbm_noise2(p.x,         p.y) +
+                  0.25f * fbm_noise2(p.x * 2.07f, p.y * 2.07f) +
+                  0.125f* fbm_noise2(p.x * 4.13f, p.y * 4.13f);
         return v - 0.4375f;   // re-centre around zero
     };
 
@@ -766,28 +759,14 @@ void VulkanEngine::add_fbm_erosion_to_sculpted(float amplitude_factor,
     if (terrain_baseline_heights_.size() != terrain_data_.heights.size()) return;
 
     auto fbm5 = [](glm::vec2 p) {
-        // 5-octave value-noise FBM via the same cheap hash used by the
-        // sculpt brush noise. Decreasing amplitude per octave produces
-        // the classic ridged-mountain look.
-        auto hash = [](glm::vec2 q) {
-            float n = std::sin(q.x * 12.9898f + q.y * 78.233f) * 43758.5453f;
-            return n - std::floor(n);
-        };
-        auto noise = [&](glm::vec2 q) {
-            glm::vec2 i = glm::floor(q);
-            glm::vec2 f = q - i;
-            float a = hash(i);
-            float b = hash(i + glm::vec2(1.0f, 0.0f));
-            float c = hash(i + glm::vec2(0.0f, 1.0f));
-            float d = hash(i + glm::vec2(1.0f, 1.0f));
-            glm::vec2 u = f * f * (3.0f - 2.0f * f);
-            return glm::mix(glm::mix(a, b, u.x), glm::mix(c, d, u.x), u.y);
-        };
-        float v = 0.50f * noise(p) +
-                  0.25f * noise(p * 2.07f) +
-                  0.125f * noise(p * 4.13f) +
-                  0.0625f * noise(p * 8.21f) +
-                  0.03125f * noise(p * 16.47f);
+        // 5-octave value-noise FBM via the shared fbm_noise2 helper.
+        // Decreasing amplitude per octave produces the classic
+        // ridged-mountain look.
+        float v = 0.50000f * fbm_noise2(p.x,          p.y) +
+                  0.25000f * fbm_noise2(p.x * 2.07f,  p.y * 2.07f) +
+                  0.12500f * fbm_noise2(p.x * 4.13f,  p.y * 4.13f) +
+                  0.06250f * fbm_noise2(p.x * 8.21f,  p.y * 8.21f) +
+                  0.03125f * fbm_noise2(p.x * 16.47f, p.y * 16.47f);
         return v - 0.484375f;   // re-centre around zero
     };
 
