@@ -2382,6 +2382,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     }
 
     last_view_proj_ = proj * view;
+    last_inv_view_proj_ = glm::inverse(last_view_proj_);
     glm::mat4 vp = last_view_proj_;
     Frustum frustum = extract_frustum(vp);
 

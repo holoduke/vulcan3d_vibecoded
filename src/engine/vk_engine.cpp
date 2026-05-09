@@ -611,7 +611,7 @@ void VulkanEngine::draw(uint32_t img_index) {
             glm::vec4 viewport;
             glm::vec4 params;
         } u{};
-        u.inv_vp = glm::inverse(last_view_proj_);
+        u.inv_vp = last_inv_view_proj_;     // cached in render_world()
         u.prev_vp = prev_view_proj_;
         // TAA reads + writes at render_extent_, so the viewport vec it uses
         // for `gl_FragCoord → uv` conversion must reflect that.
@@ -763,7 +763,7 @@ void VulkanEngine::draw(uint32_t img_index) {
                                             rt_.auto_exposure_strength,
                                             rt_.image_contrast,
                                             rt_.image_brightness);
-        pc_data.inv_view_proj = glm::inverse(last_view_proj_);
+        pc_data.inv_view_proj = last_inv_view_proj_;   // cached
         vkCmdPushConstants(frame.command_buffer, compose_pipeline_layout_,
                            VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(pc_data), &pc_data);

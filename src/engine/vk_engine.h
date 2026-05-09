@@ -902,6 +902,11 @@ private:
 
     glm::mat4 prev_view_proj_{ 1.0f };
     glm::mat4 last_view_proj_{ 1.0f };
+    // Cached glm::inverse(last_view_proj_) — recomputed once per frame
+    // when last_view_proj_ is updated and reused by TAA + compose +
+    // viewmodel paths. Was being inverted 3-4× per frame on the CPU
+    // (~150 cycles each).
+    glm::mat4 last_inv_view_proj_{ 1.0f };
     bool      prev_view_proj_valid_ = false;
     int       history_write_slot_ = 0;  // toggles each frame
 
