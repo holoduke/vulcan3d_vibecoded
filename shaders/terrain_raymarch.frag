@@ -828,9 +828,16 @@ void main() {
             if (any_hit_no_terrain(origin_ao, d, ao_radius)) occluded += 1.0;
             ++taken;
         }
-        // sqrt curve + ao_floor — same shaping as cube.frag.
+        // Linear curve (no sqrt) — sqrt compresses the dark side
+        // of the [0,1] range, so a 25 % hit ratio reads as
+        // sqrt(0.75) ≈ 0.87 and corners barely darken. With more
+        // samples the AO converges to its true low ratio and the
+        // sqrt output reads brighter than the noisy 1-sample case
+        // — exactly the "more samples = less shadow" surprise
+        // reported. Linear curve makes AO scale monotonically with
+        // hit ratio so increasing samples reduces noise without
+        // washing out the darkening.
         float raw = 1.0 - (occluded / float(taken));
-        raw = sqrt(raw);
         float ao_floor_v = scene.rt_lod.w;
         ao = mix(ao_floor_v, 1.0, raw);
     }
