@@ -704,8 +704,14 @@ void main() {
     //   4. max-combine with `self_shadow` so where the FBM says we
     //      are in self-shadow we use that clean value (analogue of
     //      cube.frag's `max(shadow, sh_bake)`).
+    // Distance-LOD: skip the RT work past 200 m. Far terrain pays
+    // the bake/calcShadow penalty only — keeps the per-frame ray
+    // budget bounded and prevents Windows TDR on a heavy view.
     float dyn_shadow = 0.0;
-    if (dif > 0.0 && scene.rt_flags.x != 0) {
+    float cam_dist_pos = distance(pos, scene.camera_pos.xyz);
+    bool do_rt = cam_dist_pos < 200.0;
+
+    if (dif > 0.0 && scene.rt_flags.x != 0 && do_rt) {
         // base_softness from the global Shadow softness slider,
         // scaled by the terrain-specific scale (terrain_params.w).
         float base_softness = scene.rt_params.x;
@@ -796,7 +802,7 @@ void main() {
     // shaded, just like the rasterised path.
     float ao = 1.0;
     int ao_mode = scene.rt_flags2.w;
-    if (ao_mode > 0 && scene.rt_flags.z > 0) {
+    if (ao_mode > 0 && scene.rt_flags.z > 0 && do_rt) {
         int requested = (ao_mode == 1) ? min(scene.rt_flags.z, 2)
                                        : scene.rt_flags.z;
         // No lod_samples helper here — clamp manually so distant
