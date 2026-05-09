@@ -159,6 +159,16 @@ layout(set = 0, binding = 0) uniform Scene {
     vec4 fog_band;
 } scene;
 
+// Procedural sky color in `dir` direction. Used by the GI hemisphere
+// rays when they escape to the sky. Same horizon→zenith gradient as
+// the compose pass; no sun halo to avoid pumping HDR into bloom.
+vec3 sample_sky_atmosphere(vec3 dir) {
+    float up = clamp(dir.y, 0.0, 1.0);
+    vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
+    vec3 zenith  = scene.sky_color.rgb;
+    return mix(horizon, zenith, pow(up, 0.45));
+}
+
 // === Hash + Value-Noise with analytical derivatives ===
 // dot/fract pattern (avoids sin() precision artifacts on some GPUs).
 float hash21(vec2 p) {
@@ -801,6 +811,10 @@ void main() {
     // ambient term — corners between walls + boxes get visibly
     // shaded, just like the rasterised path.
     float ao = 1.0;
+    // Sky-bounce GI accumulator. Defaults to zero — only populated
+    // when the AO loop runs (it piggybacks on the same hemisphere
+    // rays). Modulates the sky/ambient lighting term.
+    vec3 gi_sky = vec3(0.0);
     int ao_mode = scene.rt_flags2.w;
     if (ao_mode > 0 && scene.rt_flags.z > 0 && do_rt) {
         int requested = (ao_mode == 1) ? min(scene.rt_flags.z, 2)
@@ -818,6 +832,13 @@ void main() {
         uvec3 ao_seed = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
         int taken = 0;
         float occluded = 0.0;
+        // Sky-bounce GI accumulator: rays that miss escape to the
+        // sky and contribute the sky colour in their direction.
+        // Free piggyback on the AO loop — same hemisphere rays,
+        // single any-hit query, no second shadow ray. Result is a
+        // proper directional ambient term that picks up bright sky
+        // coming through openings between walls.
+        vec3 sky_gi = vec3(0.0);
         for (int i = 0; i < N_ao; ++i) {
             float u1 = rmRand(ao_seed + uvec3(i, 7u, 53u));
             float u2 = rmRand(ao_seed + uvec3(i, 41u, 5u));
@@ -831,8 +852,18 @@ void main() {
             vec3 t1 = normalize(cross(ref_n, nor));
             vec3 t2 = cross(nor, t1);
             vec3 d = d_local.x * t1 + d_local.y * nor + d_local.z * t2;
-            if (any_hit_no_terrain(origin_ao, d, ao_radius)) occluded += 1.0;
-            ++taken;
+            if (any_hit_no_terrain(origin_ao, d, ao_radius)) {
+                occluded += 1.0;
+                // Hit = blocked, no GI contribution from this dir.
+                // (A second-bounce trace from the hit point toward
+                // the sun would catch indirect off the castle, but
+                // doubles the per-pixel ray cost — skip for now.)
+            } else {
+                // Miss = ray escaped to sky. Sample the procedural
+                // sky in that direction, weighted by cosine (already
+                // baked into the cosine-hemisphere PDF).
+                sky_gi += sample_sky_atmosphere(d);
+            }
         }
         // Linear curve (no sqrt) — sqrt compresses the dark side
         // of the [0,1] range, so a 25 % hit ratio reads as
@@ -846,16 +877,27 @@ void main() {
         float raw = 1.0 - (occluded / float(taken));
         float ao_floor_v = scene.rt_lod.w;
         ao = mix(ao_floor_v, 1.0, raw);
+        // Average the sky GI samples and store on the sky_color
+        // term for the lighting accumulation below.
+        gi_sky = sky_gi / float(taken);
     }
 
     vec3 mate = getMaterial(pos, nor);
 
     vec3 lin = vec3(0.0);
     lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a;
-    // Ambient + Fresnel rim term darkened by RTAO so corners between
-    // walls / boxes / castle visibly shade the terrain.
-    lin += amb * scene.sky_color.rgb * 0.35 * ao;
-    lin += fre * scene.sky_color.rgb * 0.25 * ao;
+    // Path-traced sky GI — averaged sky colour seen by the
+    // hemisphere rays in the AO loop. Replaces the analytical
+    // ambient when the GI ray budget is non-zero (rt_flags2.x); the
+    // analytical fallback stays when GI is off so the surface
+    // doesn't go pitch-black.
+    if (scene.rt_flags2.x > 0 && do_rt) {
+        lin += gi_sky * 0.6;     // GI strength; could expose to a slider
+        lin += fre * scene.sky_color.rgb * 0.25 * ao;
+    } else {
+        lin += amb * scene.sky_color.rgb * 0.35 * ao;
+        lin += fre * scene.sky_color.rgb * 0.25 * ao;
+    }
 
     vec3 col = mate * lin;
 
