@@ -756,6 +756,68 @@ void VulkanEngine::add_plateau_noise(float amplitude_m, float frequency) {
     terrain_height_dirty_ = true;
 }
 
+void VulkanEngine::add_fbm_erosion_to_sculpted(float amplitude_factor,
+                                                 float frequency) {
+    if (terrain_data_.heights.empty()) return;
+    if (terrain_baseline_heights_.size() != terrain_data_.heights.size()) return;
+
+    auto fbm5 = [](glm::vec2 p) {
+        // 5-octave value-noise FBM via the same cheap hash used by the
+        // sculpt brush noise. Decreasing amplitude per octave produces
+        // the classic ridged-mountain look.
+        auto hash = [](glm::vec2 q) {
+            float n = std::sin(q.x * 12.9898f + q.y * 78.233f) * 43758.5453f;
+            return n - std::floor(n);
+        };
+        auto noise = [&](glm::vec2 q) {
+            glm::vec2 i = glm::floor(q);
+            glm::vec2 f = q - i;
+            float a = hash(i);
+            float b = hash(i + glm::vec2(1.0f, 0.0f));
+            float c = hash(i + glm::vec2(0.0f, 1.0f));
+            float d = hash(i + glm::vec2(1.0f, 1.0f));
+            glm::vec2 u = f * f * (3.0f - 2.0f * f);
+            return glm::mix(glm::mix(a, b, u.x), glm::mix(c, d, u.x), u.y);
+        };
+        float v = 0.50f * noise(p) +
+                  0.25f * noise(p * 2.07f) +
+                  0.125f * noise(p * 4.13f) +
+                  0.0625f * noise(p * 8.21f) +
+                  0.03125f * noise(p * 16.47f);
+        return v - 0.484375f;   // re-centre around zero
+    };
+
+    const int W = terrain_data_.dim + 1;
+    const int H = terrain_data_.dim + 1;
+    int touched = 0;
+    for (int iz = 0; iz < H; ++iz) {
+        float wz = terrain_data_.origin_z + iz * terrain_data_.cell;
+        for (int ix = 0; ix < W; ++ix) {
+            const size_t idx = static_cast<size_t>(iz) *
+                               static_cast<size_t>(W) +
+                               static_cast<size_t>(ix);
+            float delta = terrain_data_.heights[idx] -
+                          terrain_baseline_heights_[idx];
+            // Only erode cells the user actually raised — preserve
+            // procedural terrain + lowered areas as-is.
+            if (delta <= 0.25f) continue;
+            float wx = terrain_data_.origin_x + ix * terrain_data_.cell;
+            float n = fbm5(glm::vec2(wx, wz) * frequency);
+            terrain_data_.heights[idx] += n * delta * amplitude_factor;
+            ++touched;
+        }
+    }
+    log::infof("[terrain] FBM erosion baked into %d sculpted cells "
+               "(amp=%.2f, freq=%.3f)", touched, amplitude_factor, frequency);
+    terrain_height_dirty_ = true;
+    // Mark every chunk dirty so the rasterised mesh rebuilds.
+    terrain_dirty_chunks_.clear();
+    terrain_dirty_chunks_.reserve(terrain_chunks_.chunks.size());
+    for (size_t ci = 0; ci < terrain_chunks_.chunks.size(); ++ci) {
+        terrain_dirty_chunks_.push_back(static_cast<int>(ci));
+    }
+}
+
 void VulkanEngine::destroy_terrain_height_texture() {
     if (terrain_height_view_) {
         vkDestroyImageView(device_, terrain_height_view_, nullptr);

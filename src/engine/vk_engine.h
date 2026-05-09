@@ -666,6 +666,14 @@ private:
     // instead of being a perfect flat. Modifies terrain_data_ in
     // place; caller can save it. Amplitude is in metres.
     void add_plateau_noise(float amplitude_m, float frequency);
+    // Re-bake an FBM erosion-style perturbation into every cell that
+    // has been raised above the procedural baseline. The result is
+    // that smooth dome-shaped sculpt strokes pick up natural-looking
+    // ridges + valleys + grain. amplitude_factor controls how strong
+    // the perturbation is relative to the local sculpt amount;
+    // frequency is the base FBM scale (cycles per metre). Marks all
+    // chunks dirty + triggers a delta-texture refresh.
+    void add_fbm_erosion_to_sculpted(float amplitude_factor, float frequency);
 
     // CPU-baked heightmap sun-shadow texture (R8). Sampled by
     // grass.vert per blade so distant grass picks up mountain

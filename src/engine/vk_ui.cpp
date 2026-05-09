@@ -729,6 +729,16 @@ void VulkanEngine::build_menu_ui() {
             } else {
                 ImGui::TextDisabled("aim at terrain to engage brush");
             }
+
+            ImGui::Separator();
+            ImGui::TextDisabled("Re-bake FBM erosion onto sculpted cells:");
+            static float fbm_amp_factor = 0.30f;
+            static float fbm_freq       = 0.04f;
+            ImGui::SliderFloat("FBM erosion amplitude", &fbm_amp_factor, 0.05f, 1.0f);
+            ImGui::SliderFloat("FBM erosion freq",       &fbm_freq,        0.005f, 0.5f);
+            if (ImGui::Button("Apply FBM erosion to sculpted area")) {
+                add_fbm_erosion_to_sculpted(fbm_amp_factor, fbm_freq);
+            }
         }
 
         ImGui::SeparatorText("Debug");

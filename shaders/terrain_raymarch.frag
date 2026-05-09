@@ -359,7 +359,12 @@ float terrainH(vec2 p) {
     return h;
 }
 
-float terrainMaxHeight() { return max(TERRAIN_HEIGHT, pc.color.w); }
+// Generous headroom: sampleHeightDelta() (sculpt strokes + disk
+// overlays) can push the FBM-derived terrain well above TERRAIN_HEIGHT.
+// Underestimating max height triggers the open-air early-out in
+// raymarch() while the camera is still inside the terrain volume,
+// producing the "everything broken at high altitude" symptom.
+float terrainMaxHeight() { return max(TERRAIN_HEIGHT, pc.color.w) + 80.0; }
 
 // Coarse 3-octave heightfield — strictly for AO + GI occlusion
 // raymarches where sub-meter detail doesn't matter. Cuts the per-step
@@ -474,7 +479,22 @@ vec3 calcNormal(vec3 pos, float t) {
     float hC = terrainH(pos.xz);
     float hR = terrainH(pos.xz + vec2(eps, 0.0));
     float hU = terrainH(pos.xz + vec2(0.0, eps));
-    return normalize(vec3(hC - hR, eps, hC - hU));
+    vec3 N = normalize(vec3(hC - hR, eps, hC - hU));
+
+    // Closeup micro-bump — two-octave high-frequency noise gradient
+    // tilts the surface normal so near-camera ground reads as rocky
+    // / pebbly instead of glass-smooth. Falls off past 60 m so it
+    // only costs the always-near pixels and never aliases at depth.
+    // Uses noised() which returns (value, dN/dx, dN/dy) in one call.
+    float detail_w = 1.0 - smoothstep(15.0, 60.0, t);
+    if (detail_w > 0.001) {
+        vec3 d1 = noised(pos.xz * 4.0);
+        vec3 d2 = noised(pos.xz * 13.0);
+        vec2 grad = (d1.yz * 0.30 + d2.yz * 0.18) * detail_w;
+        // Project the noise gradient as a tangent-plane perturbation.
+        N = normalize(N + vec3(-grad.x, 0.0, -grad.y) * 0.45);
+    }
+    return N;
 }
 
 // Classic heightfield soft-shadow march — `min(k·h/t)`. k ties to
@@ -1024,7 +1044,14 @@ void main() {
     if (N_gi > 0) {
         int N_bounces     = max(1, scene.rt_flags2.z);
         int gi_shadow_max = int(scene.rt_lod.z);
-        float gi_radius   = max(scene.rt_params2.y, 1.0);
+        // Force a generous floor on the GI search radius for the
+        // terrain shader. Bounces from a low-rough ground point need
+        // tens of metres to reach the castle / boxes, so the user's
+        // gi_radius (e.g. 22 m) was leaving most rays terminating as
+        // miss before reaching anything reflective. 80 m floor lets
+        // first-bounce rays consistently sample wall colour even
+        // when the surface slider is dialled low for cube.frag GI.
+        float gi_radius   = max(scene.rt_params2.y, 80.0);
         // Soft sky fill for bounce hits that can't see the sun. Same
         // 5%-of-sky constant as cube.frag — keeps interior bounces
         // believably dark instead of glowing from a too-bright fill.
