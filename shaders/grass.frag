@@ -94,12 +94,31 @@ void main() {
             shadow_factor *= 0.45;
         }
     }
+    // Translucent back-lit term — when the sun is behind the blade
+    // (camera looks roughly toward sun, blade between), foliage
+    // glows from forward subsurface scattering. n_dot_l is small in
+    // that case but `view_dot_l = dot(view_dir, L)` is large. A 0.45
+    // power tightens the lobe to grazing-only. Yellow-green tint
+    // matches plant chlorophyll's transmittance peak.
+    vec3 V = normalize(scene.camera_pos.xyz - vWorldPos);
+    float view_dot_l = max(dot(-V, L), 0.0);
+    float backlit = pow(view_dot_l, 4.0) * (1.0 - n_dot_l) * vHeightRatio;
+    vec3  trans   = vec3(0.95, 1.05, 0.55) *
+                    backlit * 0.30 * scene.sun_color.a;
+
+    // Base AO — darken the bottom 20% of the blade so blades read as
+    // anchored to the ground instead of floating. Falls off past 60 m
+    // so distant blades don't waste shading on a sub-pixel detail.
+    float base_ao = mix(0.55, 1.0, smoothstep(0.0, 0.20, vHeightRatio));
+    float ao_fade = 1.0 - smoothstep(40.0, 100.0, vDistToCam);
+    base_ao = mix(1.0, base_ao, ao_fade);
+
     float lum = (sun_amt + sky_amt) * shadow_factor;
 
     vec3 tip_lift = mix(vec3(0.95), vec3(1.05, 1.0, 0.9), vHeightRatio);
-    vec3 base = vColor * tip_lift;
+    vec3 base = vColor * tip_lift * base_ao;
 
-    vec3 lit = base * lum;
+    vec3 lit = base * lum + trans * vColor;
     // Hard ceiling — guarantees we never feed the bloom mip chain with
     // grass pixels above its threshold even under aggressive
     // auto-exposure boosts.
