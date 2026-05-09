@@ -746,11 +746,15 @@ void main() {
             float penum = clamp(avg_t * kSunAngular,
                                 kSunAngular * 0.5,
                                 kSunAngular * 4.0);
-            // 3. Stratified shadow rays. 16 rays in a 4×4 grid keeps
-            // the per-pixel penumbra value within ±1/16 of the true
-            // visibility (vs ±1/8 with 8 rays) — visibly smoother
-            // gradient before TAA's spatial blur even runs.
-            const int kShadow = 16;
+            // 3. Stratified shadow rays. The cube.frag terrain path
+            // hides PCSS noise by max-combining with the heightmap
+            // bake (which is 0 or 1, no dither). The raymarch path
+            // has nothing to fall back on, so we need enough rays
+            // for the per-pixel penumbra value to read smooth on
+            // its own. Drive the count from the global slider so
+            // the user can crank it for thicker shadows. 32 default
+            // halves the dither vs 16; 64 makes it imperceptible.
+            int kShadow = clamp(scene.rt_flags.y, 8, 64);
             int strata = int(ceil(sqrt(float(kShadow))));
             float inv  = 1.0 / float(strata);
             int taken  = 0;
