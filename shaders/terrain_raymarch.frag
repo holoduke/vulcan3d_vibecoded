@@ -1056,28 +1056,17 @@ void main() {
                     if (!closest_hit_material_no_terrain(ray_origin, ray_dir,
                                                           gi_radius,
                                                           t_hit, inst_id, prim_id)) {
-                        // BLAS missed. Check terrain self-occlusion
-                        // before treating this as a sky escape — a
-                        // ray pointed into a hill / heightmap valley
-                        // wall should pick up a dim ground-coloured
-                        // bounce instead of full sky brightness.
-                        // Only the FIRST bounce checks terrain (keeps
-                        // cost bounded and matches the "primary GI
-                        // hits hill" intuition; deeper bounces from
-                        // actual BLAS hits skip it).
-                        if (b == 0 &&
-                            terrain_blocks_ray(ray_origin, ray_dir, gi_radius)) {
-                            // Dim ground tint — the receiver's own
-                            // material modulated by sky_fill stands
-                            // in for the bounce surface's albedo
-                            // (it's terrain too, similar palette).
-                            path += throughput * mate * sky_fill * 1.5;
-                        } else {
-                            // Miss → sky in this direction. Bound by
-                            // the halo's pow(8) so no fireflies.
-                            path += throughput * sample_sky(ray_dir);
-                            if (b == 0) ++first_bounce_misses;
-                        }
+                        // BLAS miss → sky in this direction. Bound by
+                        // the halo's pow(8) so no fireflies. Terrain
+                        // self-occlusion is intentionally NOT checked
+                        // here — for short gi_radius (~20 m) on flat
+                        // terrain the heightfield march false-blocks
+                        // sky-bound rays, killing the GI signal. AO
+                        // already carries terrain occlusion via the
+                        // ambient term; GI keeps its sky-escape
+                        // contribution undamped.
+                        path += throughput * sample_sky(ray_dir);
+                        if (b == 0) ++first_bounce_misses;
                         break;
                     }
                     int mat_idx = (inst_id == kStaticBlasSentinel)
