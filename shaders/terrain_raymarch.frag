@@ -669,72 +669,115 @@ void main() {
     // the surface normal) — large biases (the previous 50 cm) made
     // the shadow visibly detach from the contact line under
     // distant FBM normals.
-    float sha = (dif > 0.0) ? calcShadow(pos + nor * 0.05, sunDir) : 1.0;
+    // calcShadow returns lit fraction; convert to "shadow amount"
+    // (0 = lit, 1 = full shadow) so we can combine it with the RT
+    // result the same way cube.frag does for the rasterised path.
+    float self_shadow = (dif > 0.0)
+        ? (1.0 - calcShadow(pos + nor * 0.05, sunDir))
+        : 1.0;
 
-    // Hard sun shadow + RT ambient occlusion. Both use a deterministic
-    // tap pattern (no per-pixel hash) so adjacent pixels see continuous
-    // values and there's no dither.
-    //
-    // 1. Sun shadow — single ray toward the sun, mask 0x02 (skip
-    //    terrain BLAS). Binary, hard-edged.
-    float ao = 1.0;
-    if (scene.rt_flags.x != 0) {
-        vec3 origin = pos + sunDir * 0.2 + vec3(0.0, 0.05, 0.0);
-        if (any_hit_no_terrain(origin, sunDir, 500.0)) {
-            sha = 0.0;
+    // RT PCSS for castle / boxes / dyn-props. Mirrors cube.frag's
+    // terrain-receiver shadow path 1:1 — the cube.frag terrain
+    // shadows look clean, so the same algorithm with the same knobs
+    // should work here. Origin biased along the sun direction so
+    // the per-pixel FBM normal jitter doesn't enter (was the source
+    // of the previous dither).
+    //   1. 4 blocker rays in a wide cone
+    //   2. PCSS penumbra estimate from avg blocker distance
+    //   3. N_s stratified shadow rays in the size-adapted cone
+    //   4. max-combine with `self_shadow` so where the FBM says we
+    //      are in self-shadow we use that clean value (analogue of
+    //      cube.frag's `max(shadow, sh_bake)`).
+    float dyn_shadow = 0.0;
+    if (dif > 0.0 && scene.rt_flags.x != 0) {
+        // base_softness from the global Shadow softness slider,
+        // scaled by the terrain-specific scale (terrain_params.w).
+        float base_softness = scene.rt_params.x;
+        if (scene.terrain_params.w > 0.0) {
+            base_softness *= max(0.05, scene.terrain_params.w);
         }
+        // Sample count from global Shadow samples slider × near
+        // multiplier. Same source cube.frag uses for terrain.
+        float near_mult = max(1.0, scene.terrain_extra.y);
+        int N_s = clamp(int(ceil(float(scene.rt_flags.y) * near_mult)),
+                        4, 64);
 
-        // 2. RT ambient occlusion against castle / boxes / dyn-props.
-        //    6 closest-hit rays in a fixed hemisphere pattern. Each
-        //    ray's hit distance is weighted: very close hits darken
-        //    nearly fully, far hits don't darken at all. That way
-        //    even 1 horizontal ray hitting a wall 0.5 m away drops
-        //    the AO factor enough to read as "in a corner".
-        vec3 N = nor;
-        vec3 ref_n = abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
-                                       : vec3(1.0, 0.0, 0.0);
-        vec3 t1 = normalize(cross(ref_n, N));
-        vec3 t2 = cross(N, t1);
-        const float kAoDist = 6.0;
-        const float c30 = 0.5;
-        const float s30 = 0.866;
-        // 5 ring taps at 30° elevation, evenly around the surface,
-        // plus 1 straight up. Cheap (6 rays).
-        vec3 ao_dirs[6];
-        ao_dirs[0] = N;
-        // 5 azimuth angles 0/72/144/216/288°
-        ao_dirs[1] = normalize(N * c30 + (t1 *  1.0000 + t2 *  0.0000) * s30);
-        ao_dirs[2] = normalize(N * c30 + (t1 *  0.3090 + t2 *  0.9511) * s30);
-        ao_dirs[3] = normalize(N * c30 + (t1 * -0.8090 + t2 *  0.5878) * s30);
-        ao_dirs[4] = normalize(N * c30 + (t1 * -0.8090 + t2 * -0.5878) * s30);
-        ao_dirs[5] = normalize(N * c30 + (t1 *  0.3090 + t2 * -0.9511) * s30);
-        vec3 ao_origin = pos + N * 0.05;
-        float ao_acc = 0.0;
-        for (int i = 0; i < 6; ++i) {
-            float t_hit;
-            if (closest_hit_no_terrain(ao_origin, ao_dirs[i], kAoDist, t_hit)) {
-                // Distance falloff: 1 = touching, 0 = at max range.
-                float w = 1.0 - clamp(t_hit / kAoDist, 0.0, 1.0);
-                ao_acc += w * w;   // squared so far hits matter little
+        vec3 ref_l = abs(sunDir.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
+                                            : vec3(1.0, 0.0, 0.0);
+        vec3 tan_u = normalize(cross(ref_l, sunDir));
+        vec3 tan_v = cross(sunDir, tan_u);
+        // Bias along sun direction (NOT surface normal) — the FBM
+        // normal varies high-frequency per pixel; using it offsets
+        // each pixel's shadow cone slightly and produces dither.
+        vec3 origin = pos + sunDir * 0.1;
+        // Per-pixel + per-frame seed — TAA averages noisy samples.
+        uvec3 seed_base = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
+
+        // 1. Blocker search (4 rays, 4× softness cone).
+        const int kBlocker = 4;
+        float sum_t = 0.0;
+        int   hits  = 0;
+        for (int i = 0; i < kBlocker; ++i) {
+            float br1 = rmRand(seed_base + uvec3(i, 91u, 13u));
+            float br2 = rmRand(seed_base + uvec3(i, 19u, 71u));
+            float r   = sqrt(br1) * base_softness * 4.0;
+            float ph  = 6.28318530718 * br2;
+            vec3 j    = (cos(ph) * tan_u + sin(ph) * tan_v) * r;
+            vec3 d    = normalize(sunDir + j);
+            float t_b;
+            if (closest_hit_no_terrain(origin, d, 200.0, t_b)) {
+                sum_t += t_b;
+                ++hits;
             }
         }
-        // Softer overall: divide by ray count (6) so a single
-        // touching hit darkens by ~17 %, two corner walls ~30 %,
-        // worst case (3+ taps fully occluded) capped at 50 %.
-        ao = 1.0 - clamp(ao_acc / 6.0, 0.0, 0.50);
+        if (hits > 0) {
+            // 2. Penumbra estimate (cube.frag formulation).
+            float avg_t = sum_t / float(hits);
+            float t_norm = avg_t * 0.1;
+            float curve_exp = mix(1.0, 3.0,
+                                   clamp(scene.rt_params2.w, 0.0, 1.0));
+            float scale = pow(max(t_norm, 0.0), curve_exp);
+            float penumbra = clamp(base_softness * scale * 0.6,
+                                    base_softness * 0.25,
+                                    base_softness * 6.0);
+
+            // 3. Stratified shadow rays.
+            int strata = int(ceil(sqrt(float(N_s))));
+            float inv = 1.0 / float(strata);
+            int taken = 0;
+            float blocked = 0.0;
+            for (int sy = 0; sy < strata && taken < N_s; ++sy) {
+                for (int sx = 0; sx < strata && taken < N_s; ++sx) {
+                    float r1 = rmRand(seed_base + uvec3(taken, 11u, 47u));
+                    float r2 = rmRand(seed_base + uvec3(taken, 53u, 23u));
+                    float u1 = (float(sx) + r1) * inv;
+                    float u2 = (float(sy) + r2) * inv;
+                    float r  = sqrt(u1) * penumbra;
+                    float ph = 6.28318530718 * u2;
+                    vec3 j   = (cos(ph) * tan_u + sin(ph) * tan_v) * r;
+                    vec3 d   = normalize(sunDir + j);
+                    if (any_hit_no_terrain(origin, d, 200.0)) blocked += 1.0;
+                    ++taken;
+                }
+            }
+            dyn_shadow = (blocked / float(taken)) * scene.rt_params.w;
+        }
     }
+    // 4. Max-combine: the FBM self-shadow is the analogue of
+    //    cube.frag's heightmap bake — clean, no noise. Where the
+    //    surface is in self-shadow, we take that value verbatim.
+    //    Where it's lit, the RT cone fills in castle / cube
+    //    contributions. Result reads identical to the rasterised
+    //    terrain shadow path.
+    float shadow = max(dyn_shadow, self_shadow);
+    float sha = 1.0 - shadow;
 
     vec3 mate = getMaterial(pos, nor);
 
     vec3 lin = vec3(0.0);
-    // Sun term partially modulated by AO so cavities still darken
-    // even in direct sun (real corners get less bounce light too).
-    // Gentle coupling — direct-lit areas shouldn't crash to dark.
-    float sun_ao = mix(1.0, ao, 0.15);
-    lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a * sun_ao;
-    // Sky / ambient term fully modulated by RT AO.
-    lin += amb * scene.sky_color.rgb * 0.35 * ao;
-    lin += fre * scene.sky_color.rgb * 0.25 * ao;
+    lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a;
+    lin += amb * scene.sky_color.rgb * 0.35;
+    lin += fre * scene.sky_color.rgb * 0.25;
 
     vec3 col = mate * lin;
 
