@@ -173,8 +173,13 @@ void VulkanEngine::init_rt() {
             .queueFamilyIndexCount = rt_share_count,
             .pQueueFamilyIndices = rt_share_indices,
         };
+        // Device-local with BAR-mapped host write. The AS-build reads
+        // this every frame on the compute queue; over PCIe it would
+        // burn 1-3 ms per frame on large TLAS rebuilds. AUTO_PREFER_DEVICE
+        // + HOST_ACCESS_SEQUENTIAL_WRITE asks VMA for the resizable BAR
+        // path on supported GPUs, falling back to internal staging.
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                     VMA_ALLOCATION_CREATE_MAPPED_BIT;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,

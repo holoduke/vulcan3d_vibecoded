@@ -162,13 +162,15 @@ void VulkanEngine::apply_terrain_brush(float dt) {
     // Mark affected chunks dirty for next-frame mesh rebuild. A chunk's
     // sample range is [origin_ix, origin_ix + chunk_cells] in X and Z,
     // so we mark any chunk whose range overlaps the brush footprint.
+    // Use a vector<bool> indexed by chunk id (was: linear scan of
+    // terrain_dirty_chunks_ per cell — O(N²) on big sculpts).
     const int chunk_cells = terrain_chunks_.chunk_cells;
-    auto mark_chunk_dirty = [&](int ci) {
-        for (int existing : terrain_dirty_chunks_) {
-            if (existing == ci) return;
+    std::vector<bool> already_dirty(terrain_chunks_.chunks.size(), false);
+    for (int ci : terrain_dirty_chunks_) {
+        if (ci >= 0 && ci < static_cast<int>(already_dirty.size())) {
+            already_dirty[ci] = true;
         }
-        terrain_dirty_chunks_.push_back(ci);
-    };
+    }
     for (size_t ci = 0; ci < terrain_chunks_.chunks.size(); ++ci) {
         const auto& c = terrain_chunks_.chunks[ci];
         int cix0 = c.origin_ix;
@@ -176,7 +178,9 @@ void VulkanEngine::apply_terrain_brush(float dt) {
         int ciz0 = c.origin_iz;
         int ciz1 = c.origin_iz + chunk_cells;
         if (ix1 < cix0 || ix0 > cix1 || iz1 < ciz0 || iz0 > ciz1) continue;
-        mark_chunk_dirty(static_cast<int>(ci));
+        if (already_dirty[ci]) continue;
+        already_dirty[ci] = true;
+        terrain_dirty_chunks_.push_back(static_cast<int>(ci));
     }
     terrain_blas_dirty_ = true;
     terrain_jolt_dirty_ = true;
