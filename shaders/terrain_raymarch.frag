@@ -361,28 +361,55 @@ float terrainH(vec2 p) {
 
 float terrainMaxHeight() { return max(TERRAIN_HEIGHT, pc.color.w); }
 
+// Coarse 3-octave heightfield — strictly for AO + GI occlusion
+// raymarches where sub-meter detail doesn't matter. Cuts the per-step
+// noise cost vs terrainM() (which runs the full march octave count,
+// typically 4-6) while staying conservative-ish for occlusion (the
+// gross terrain shape is what blocks light).
+float terrainCoarse(vec2 p) {
+    vec2 wp = p;
+    p *= TERRAIN_SCALE;
+    float a = 0.0, b = 1.0;
+    vec2 d = vec2(0.0);
+    for (int i = 0; i < 3; ++i) {
+        vec3 n = noised(p);
+        d += n.yz;
+        a += b * n.x / (1.0 + dot(d, d));
+        b *= 0.5;
+        p = m2 * p * 2.0;
+    }
+    float h = a * TERRAIN_HEIGHT;
+    float t = plateauWeight(wp);
+    h = mix(h, pc.color.w, t);
+    h += sampleHeightDelta(wp);
+    return h;
+}
+
 // Terrain self-occlusion test for AO + GI. AO and GI rays use TLAS
 // mask 0x02 (terrain BLAS skipped) to avoid procedural-vs-LOD self-
 // hits, but that means terrain features can never shadow the GI/AO
 // of *other* terrain pixels — gaps and cavities in the heightfield
 // stay artificially bright. This function adds back terrain self-
-// occlusion via a coarse heightfield raymarch (the same `h = p.y -
-// terrainM(p.xz)` step bound `raymarch` uses, but capped to a much
-// lower iteration count since we only need approximate "is anything
-// blocking" for AO/GI, not a sub-pixel hit point).
+// occlusion via a coarse heightfield raymarch.
+//
+// Two early-outs keep the cost down:
+//   - rd.y > 0.55 (steep upward) → ray escapes to sky in a few m
+//     vertical, never blocked by terrain. Returns false immediately.
+//   - 8 iterations max (was 12) — the coarse 3-octave heightfield
+//     and 0.2 m initial step rarely need more for AO radius (~1 m)
+//     or first-bounce GI gates.
 //
 // Initial t = 0.2 m skips the immediate-surface band where grazing
 // rays on steep slopes can false-positive against the receiver's own
-// heightfield (the receiver sits exactly ON the surface so any
-// downward-component ray near the origin trivially hits). Caller is
-// expected to bias `ro` along the surface normal a few cm too.
+// heightfield. Caller biases `ro` along the surface normal too.
 bool terrain_blocks_ray(vec3 ro, vec3 rd, float t_max) {
+    if (rd.y > 0.55) return false;
     float t = 0.2;
-    for (int i = 0; i < 12; ++i) {
+    for (int i = 0; i < 8; ++i) {
         vec3 p = ro + t * rd;
-        float h = p.y - terrainM(p.xz);
+        float h = p.y - terrainCoarse(p.xz);
         if (h < 0.001) return true;
-        t += clamp(h, 0.2, 8.0);
+        t += clamp(h, 0.3, 12.0);
         if (t > t_max) return false;
     }
     return false;
@@ -837,7 +864,12 @@ void main() {
     // budget bounded and prevents Windows TDR on a heavy view.
     float dyn_shadow = 0.0;
     float cam_dist_pos = distance(pos, scene.camera_pos.xyz);
-    bool do_rt = cam_dist_pos < 200.0;
+    // Smooth-fade RT contributions instead of a hard cliff at 200 m.
+    // lod_t = 1 inside 150 m, ramps down to 0 at 250 m, lets us early-
+    // out past 250 m without leaving a visible boundary on the
+    // ground.  do_rt stays as the "actually fire any rays" gate.
+    float rt_lod_t = 1.0 - smoothstep(150.0, 250.0, cam_dist_pos);
+    bool do_rt = rt_lod_t > 0.005;
 
     if (dif > 0.0 && scene.rt_flags.x != 0 && do_rt) {
         // base_softness from the global Shadow softness slider,
@@ -959,7 +991,11 @@ void main() {
         // Linear curve (no sqrt) — see commit 12f9ebc rationale.
         float raw = 1.0 - (occluded / float(taken));
         float ao_floor_v = scene.rt_lod.w;
-        ao = mix(ao_floor_v, 1.0, raw);
+        float ao_local = mix(ao_floor_v, 1.0, raw);
+        // Fade AO toward 1.0 (no occlusion) as we approach the LOD
+        // cutoff so distant terrain seamlessly drops back to the
+        // analytical-only path.
+        ao = mix(1.0, ao_local, rt_lod_t);
     }
 
     vec3 mate = getMaterial(pos, nor);
@@ -1102,6 +1138,9 @@ void main() {
         // Hard ceiling to keep a single bright bounce (e.g. a sun-
         // facing white box wall) from spiking the HDR + bloom.
         gi_indirect = min(gi_indirect, vec3(4.0));
+        // Smooth-fade the GI contribution past 150 m so distant
+        // terrain doesn't show a hard boundary where the loop stops.
+        gi_indirect *= rt_lod_t;
     }
 
     vec3 lin = vec3(0.0);
