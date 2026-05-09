@@ -903,12 +903,18 @@ void main() {
         vec3 fogTint   = vec3(0.78, 0.83, 0.90);
         vec3 sunGlow   = scene.sun_color.rgb * scene.sun_color.a;
 
-        // Henyey-Greenstein phase: forward-peaked when looking near the sun.
-        float cosTh = dot(rd, sunDir);
+        // Henyey-Greenstein phase: forward-peaked when looking near
+        // the sun. The denominator goes near-zero as cosTh→1, so
+        // phase can spike past 100 and blow up the bloom + auto-
+        // exposure (visible flash + sometimes drives a TDR).
+        // Clamp the denominator's growth so phase stays bounded.
+        float cosTh = clamp(dot(rd, sunDir), -1.0, 0.985);
         float gg    = kVolPhaseG * kVolPhaseG;
         float phase = (1.0 - gg) /
                       (4.0 * 3.14159265 *
                        pow(1.0 + gg - 2.0 * kVolPhaseG * cosTh, 1.5));
+        // Hard ceiling matches a typical "sun glow" magnitude.
+        phase = min(phase, 4.0);
 
         // Cap march length at the surface hit. Sky pixels never reach
         // here (we returned -1 above), so t is always finite.
