@@ -284,6 +284,8 @@ void VulkanEngine::save_settings() const {
     f << "taa_jitter_strength = " << rt_.taa_jitter_strength << "\n";
     f << "compose_sharpen_strength = " << rt_.compose_sharpen_strength << "\n";
     f << "image_contrast = " << rt_.image_contrast << "\n";
+    f << "image_brightness = " << rt_.image_brightness << "\n";
+    f << "image_gamma = " << rt_.image_gamma << "\n";
     f << "terrain_rt_lod_distance = " << rt_.terrain_rt_lod_distance << "\n";
     f << "terrain_ao_punch = " << rt_.terrain_ao_punch << "\n";
     f << "render_scale = "       << rt_.render_scale       << "\n";
@@ -320,6 +322,14 @@ void VulkanEngine::load_settings() {
         std::string key = trim(line.substr(0, eq));
         std::string val = trim(line.substr(eq + 1));
         try {
+            // Flat fast-path for keys added after the main chain hit
+            // MSVC's nesting depth limit (C1061). Each is independent
+            // of the chain below and short-circuits via `continue`.
+            if (key == "image_contrast")          { rt_.image_contrast = std::stof(val); ++loaded; continue; }
+            if (key == "image_brightness")        { rt_.image_brightness = std::stof(val); ++loaded; continue; }
+            if (key == "image_gamma")             { rt_.image_gamma = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_rt_lod_distance") { rt_.terrain_rt_lod_distance = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_ao_punch")        { rt_.terrain_ao_punch = std::stof(val); ++loaded; continue; }
             if      (key == "sun_pitch_deg")       rt_.sun_pitch_deg = std::stof(val);
             else if (key == "sun_yaw_deg")         rt_.sun_yaw_deg = std::stof(val);
             else if (key == "sun_intensity")       rt_.sun_intensity = std::stof(val);
@@ -446,9 +456,9 @@ void VulkanEngine::load_settings() {
             else if (key == "lens_flare_aberration")rt_.lens_flare_aberration = std::stof(val);
             else if (key == "taa_jitter_strength")  rt_.taa_jitter_strength = std::stof(val);
             else if (key == "compose_sharpen_strength") rt_.compose_sharpen_strength = std::stof(val);
-            else if (key == "image_contrast")           rt_.image_contrast = std::stof(val);
-            else if (key == "terrain_rt_lod_distance")  rt_.terrain_rt_lod_distance = std::stof(val);
-            else if (key == "terrain_ao_punch")         rt_.terrain_ao_punch = std::stof(val);
+            // (image_contrast, image_brightness, image_gamma,
+            //  terrain_rt_lod_distance, terrain_ao_punch are handled
+            //  in the flat fast-path above.)
             else if (key == "render_scale")        rt_.render_scale = std::stof(val);
             else if (key == "quality_preset")      rt_.quality_preset = std::stoi(val);
             else if (key == "ao_mode")             rt_.ao_mode = std::stoi(val);
@@ -508,6 +518,8 @@ void VulkanEngine::load_settings() {
     clampf(rt_.taa_jitter_strength, 0.0f, 4.0f);
     clampf(rt_.compose_sharpen_strength, 0.0f, 2.5f);
     clampf(rt_.image_contrast,           0.5f, 2.0f);
+    clampf(rt_.image_brightness,         0.3f, 2.5f);
+    clampf(rt_.image_gamma,              0.4f, 2.5f);
     clampf(rt_.terrain_rt_lod_distance,  50.0f, 1000.0f);
     clampf(rt_.terrain_ao_punch,         0.5f,  3.0f);
     clampf(rt_.render_scale,     0.4f,    2.5f);

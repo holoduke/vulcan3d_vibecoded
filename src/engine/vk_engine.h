@@ -1276,6 +1276,13 @@ private:
         // ACES tonemap, before sRGB encode. 1.0 = neutral, > 1 punches
         // up midtones, < 1 flattens them. Sane range 0.5..2.0.
         float image_contrast = 1.0f;
+        // Final-image brightness multiplier (post-tonemap, pre-sRGB).
+        // 1.0 = neutral; range 0.3..2.5.
+        float image_brightness = 1.0f;
+        // Output gamma curve (post-tonemap, pre-sRGB encode). 1.0 =
+        // pass-through. > 1 lifts midtones (lighter look); < 1
+        // darkens. Range 0.4..2.5.
+        float image_gamma = 1.0f;
         // Raymarched-terrain RT (shadows / AO / GI) cutoff distance.
         // Effect fades smoothly from `* 0.6` to this value, then turns
         // off entirely past it. 250 m default keeps gameplay-range

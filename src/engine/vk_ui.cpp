@@ -416,8 +416,16 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("AO radius", &rt_.ao_radius, 0.1f, 8.0f);
         ImGui::SliderFloat("AO floor (corner-pile-up cap)",
                             &rt_.ao_floor, 0.0f, 1.0f);
+
+        ImGui::SeparatorText("Tone / Exposure / Contrast / Brightness");
         ImGui::SliderFloat("Auto-exposure (eye adaptation)",
                             &rt_.auto_exposure_strength, 0.0f, 1.5f);
+        ImGui::SliderFloat("image contrast",
+                            &rt_.image_contrast,   0.5f, 2.0f);
+        ImGui::SliderFloat("image brightness",
+                            &rt_.image_brightness, 0.3f, 2.5f);
+        ImGui::SliderFloat("image gamma (curve)",
+                            &rt_.image_gamma,      0.4f, 2.5f);
 
         ImGui::SeparatorText("Path-traced GI (multi-bounce)");
         ImGui::SliderInt("GI samples (0=off)", &rt_.gi_samples, 0, 128);
@@ -444,7 +452,6 @@ void VulkanEngine::build_menu_ui() {
         // recovers detail the TAA spatial filter softened. 0 disables; 0.55
         // is the default; >1 looks deliberately punchy.
         ImGui::SliderFloat("post-TAA sharpening", &rt_.compose_sharpen_strength, 0.0f, 2.0f);
-        ImGui::SliderFloat("image contrast", &rt_.image_contrast, 0.5f, 2.0f);
 
         ImGui::SeparatorText("Bloom (compose-pass spiral-tap)");
         ImGui::Checkbox("bloom enabled", &rt_.bloom_enabled);

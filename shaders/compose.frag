@@ -356,9 +356,13 @@ void main() {
     }
 
     vec3 mapped = aces_fitted(hdr);
-    // Final image contrast: pivot around 0.5 (mid grey), 1.0 = neutral.
-    // > 1 punches midtones, < 1 flattens. Driven by sharpen_params.z.
-    float contrast = max(pc.sharpen_params.z, 0.001);
+    // Tone controls applied post-tonemap, pre-sRGB. Order: brightness
+    // (linear scale) -> contrast (pivot around 0.5) -> gamma curve.
+    float brightness = max(pc.sharpen_params.w, 0.001);
+    float contrast   = max(pc.sharpen_params.z, 0.001);
+    float gamma_v    = max(pc.sun_screen.w,    0.001);
+    mapped *= brightness;
     mapped = clamp((mapped - 0.5) * contrast + 0.5, 0.0, 1.0);
+    mapped = pow(mapped, vec3(1.0 / gamma_v));
     outColor = vec4(to_srgb(mapped), 1.0);
 }

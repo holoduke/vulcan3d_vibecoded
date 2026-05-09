@@ -746,9 +746,11 @@ void VulkanEngine::draw(uint32_t img_index) {
             if (sun_clip.w > 0.0f) {
                 glm::vec2 sun_ndc(sun_clip.x / sun_clip.w, sun_clip.y / sun_clip.w);
                 glm::vec2 sun_uv = sun_ndc * 0.5f + 0.5f;
-                pc_data.sun_screen = glm::vec4(sun_uv.x, sun_uv.y, 1.0f, 0.0f);
+                pc_data.sun_screen = glm::vec4(sun_uv.x, sun_uv.y, 1.0f,
+                                                rt_.image_gamma);
             } else {
-                pc_data.sun_screen = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+                pc_data.sun_screen = glm::vec4(0.0f, 0.0f, 0.0f,
+                                                rt_.image_gamma);
             }
         }
         // Post-TAA unsharp strength. 0.55 is a reasonable default that
@@ -760,7 +762,7 @@ void VulkanEngine::draw(uint32_t img_index) {
         pc_data.sharpen_params = glm::vec4(rt_.compose_sharpen_strength,
                                             rt_.auto_exposure_strength,
                                             rt_.image_contrast,
-                                            0.0f);
+                                            rt_.image_brightness);
         pc_data.inv_view_proj = glm::inverse(last_view_proj_);
         vkCmdPushConstants(frame.command_buffer, compose_pipeline_layout_,
                            VK_SHADER_STAGE_FRAGMENT_BIT, 0,
