@@ -655,8 +655,20 @@ void main() {
         // front (e.g. a cube on a pier) still occludes us.
         vec4 clipW = pc.mvp * vec4(wpos, 1.0);
         gl_FragDepth = clipW.z / clipW.w;
-        outColor  = vec4(col_w, 1.0);
-        outMotion = vec2(0.0);
+        outColor = vec4(col_w, 1.0);
+        // Motion vector for TAA reprojection (same pattern as
+        // terrain branch below). Treats the surface as world-static
+        // — wave-bump animation contributes sub-pixel motion that
+        // TAA's spatial filter absorbs.
+        vec2 current_uv = (gl_FragCoord.xy + 0.5) * scene.viewport.zw;
+        vec4 prev_clipW = pc.prev_mvp * vec4(wpos, 1.0);
+        if (prev_clipW.w > 0.0) {
+            vec2 prev_ndc = prev_clipW.xy / prev_clipW.w;
+            vec2 prev_uv  = prev_ndc * 0.5 + 0.5;
+            outMotion = current_uv - prev_uv;
+        } else {
+            outMotion = vec2(0.0);
+        }
         return;
     }
 
@@ -904,6 +916,21 @@ void main() {
     vec4 clip = pc.mvp * vec4(pos, 1.0);
     gl_FragDepth = clip.z / clip.w;
 
-    outColor  = vec4(col, 1.0);
-    outMotion = vec2(0.0);  // assume stationary terrain — TAA stable
+    outColor = vec4(col, 1.0);
+    // Screen-space motion vector for TAA. World position is stationary
+    // — only the camera moves — so prev_uv comes from prev_view_proj
+    // applied to the same world hit point. Without this, TAA cannot
+    // reproject and per-frame PCSS / fog jitter shows up as moving
+    // square dither artefacts.
+    {
+        vec2 current_uv = (gl_FragCoord.xy + 0.5) * scene.viewport.zw;
+        vec4 prev_clip = pc.prev_mvp * vec4(pos, 1.0);
+        if (prev_clip.w > 0.0) {
+            vec2 prev_ndc = prev_clip.xy / prev_clip.w;
+            vec2 prev_uv  = prev_ndc * 0.5 + 0.5;
+            outMotion = current_uv - prev_uv;
+        } else {
+            outMotion = vec2(0.0);
+        }
+    }
 }
