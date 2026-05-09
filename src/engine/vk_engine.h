@@ -152,6 +152,8 @@ private:
     void init_bloom();
     void destroy_bloom();
     void recreate_bloom_targets();
+    void init_compose();
+    void destroy_compose();
     // Rewrite compose_desc_sets_[]'s image bindings (history, depth, sky,
     // bloom) so they point at the current views. Needed after a swapchain
     // resize destroys and recreates depth + history + bloom — without this,

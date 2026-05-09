@@ -306,7 +306,12 @@ void VulkanEngine::init() {
     // lands on the live scene set.
     init_sun_shadow_resources();
     present_loader_frame("Initialising UI",       0.95f);
+    // Order: TAA owns linear_sampler_ + history images that compose samples;
+    // bloom must run before compose so binding 3's bloom_mip_views_[0] is
+    // live when compose's descriptor set is written.
     init_taa();
+    init_bloom();
+    init_compose();
     init_viewmodel();
     init_spacejet();
     init_imgui();
@@ -1352,7 +1357,11 @@ void VulkanEngine::shutdown() {
     guarded("destroy_imgui",  [&]{ destroy_imgui(); });
     guarded("destroy_viewmodel", [&]{ destroy_viewmodel(); });
     guarded("destroy_spacejet",  [&]{ destroy_spacejet(); });
-    guarded("destroy_taa",    [&]{ destroy_taa(); });
+    // Reverse of init order: compose first (samples bloom + TAA history),
+    // then bloom (samples scene), then TAA (owns linear_sampler_ + history).
+    guarded("destroy_compose", [&]{ destroy_compose(); });
+    guarded("destroy_bloom",   [&]{ destroy_bloom(); });
+    guarded("destroy_taa",     [&]{ destroy_taa(); });
     // Order: tear down the renderer's GPU dependencies on dynamic-prop world
     // matrices (TLAS instance buffer) BEFORE destroying the physics world that
     // owns those bodies. Otherwise the renderer's deferred destruction could
