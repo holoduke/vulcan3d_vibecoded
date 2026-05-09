@@ -303,32 +303,17 @@ float raymarch(vec3 ro, vec3 rd) {
 // linearly with distance (was quadratic — that smeared distant
 // detail far more than required for anti-aliasing) so distant
 // terrain keeps edge crispness while close-up still uses sub-cm
-// epsilon. Then a high-frequency micro-noise is added to the lit
-// normal at distance to give surface detail the FBM (capped at
-// 32 octaves) can't represent.
+// epsilon. The earlier "micro-noise on lit normal" path was removed
+// — its `noise2(p) - noise2(p + 0.5)` cell-boundary derivative
+// produced visible 8–16 pixel square blocks on the surface past
+// 80 m. The FBM normal-octave slider (default 18) gives plenty of
+// distance detail without the artefacts.
 vec3 calcNormal(vec3 pos, float t) {
     float eps = 0.02 + 0.0008 * t;
     float hC = terrainH(pos.xz);
     float hR = terrainH(pos.xz + vec2(eps, 0.0));
     float hU = terrainH(pos.xz + vec2(0.0, eps));
-    vec3 n = normalize(vec3(hC - hR, eps, hC - hU));
-
-    // Distance-mixed micro-detail: a couple of high-frequency noise
-    // taps perturb the normal so the lit surface keeps texture out
-    // to the far plane. Strength fades in past ~80 m (close terrain
-    // already has enough relief from the FBM). Free-ish — 4 noise2
-    // calls per shaded pixel.
-    float det_w = clamp((t - 80.0) / 200.0, 0.0, 1.0) * 0.6;
-    if (det_w > 0.001) {
-        float dn1 = noise2(pos.xz * 0.85);
-        float dn2 = noise2(pos.xz * 1.93 + 17.3);
-        float dn1x = noise2(pos.xz * 0.85 + vec2(0.5, 0.0));
-        float dn1z = noise2(pos.xz * 0.85 + vec2(0.0, 0.5));
-        vec3 dn = vec3((dn1 - dn1x), 0.0, (dn1 - dn1z)) +
-                   0.4 * vec3(dn2 - 0.5, 0.0, dn2 - 0.5);
-        n = normalize(n + dn * det_w * 0.5);
-    }
-    return n;
+    return normalize(vec3(hC - hR, eps, hC - hU));
 }
 
 // Classic heightfield soft-shadow march — `min(k·h/t)` where h is
