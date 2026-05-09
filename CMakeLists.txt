@@ -12,8 +12,45 @@ if(MSVC)
     # not function names — useless for "where did this throw come from".
     add_compile_options(/Zi)
     add_link_options(/DEBUG)
+
+    # Release-only: aggressive optimisation. /O2 is the default but we
+    # explicitly opt into the additional flags below.
+    #   /Ob3       max inlining (above /Ob2 default)
+    #   /Oi        intrinsic functions (memcpy, sin, etc → inline asm)
+    #   /Ot        favour speed over size
+    #   /GL        whole-program optimisation (paired with /LTCG link)
+    #   /Gy        function-level linking (lets /OPT:REF strip unused)
+    #   /Gw        same for global data
+    #   /fp:fast   reorder + denormal-as-zero + don't preserve NaN sign
+    #   /arch:AVX2 enable AVX2 instructions (every x64 CPU since ~2013)
+    #   /Qpar      auto-parallelise simple loops
+    add_compile_options(
+        $<$<CONFIG:Release>:/Ob3>
+        $<$<CONFIG:Release>:/Oi>
+        $<$<CONFIG:Release>:/Ot>
+        $<$<CONFIG:Release>:/GL>
+        $<$<CONFIG:Release>:/Gy>
+        $<$<CONFIG:Release>:/Gw>
+        $<$<CONFIG:Release>:/fp:fast>
+        $<$<CONFIG:Release>:/arch:AVX2>
+        $<$<CONFIG:Release>:/Qpar>
+    )
+    # /DEBUG turns OPT:REF/ICF off by default; re-enable both so unused
+    # functions + identical COMDATs get folded out.
+    add_link_options(
+        $<$<CONFIG:Release>:/LTCG>
+        $<$<CONFIG:Release>:/OPT:REF>
+        $<$<CONFIG:Release>:/OPT:ICF>
+    )
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
+    add_compile_options(
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:Release>:-ffast-math>
+        $<$<CONFIG:Release>:-march=x86-64-v3>   # AVX2 baseline
+        $<$<CONFIG:Release>:-flto>
+    )
+    add_link_options($<$<CONFIG:Release>:-flto>)
 endif()
 
 find_package(Vulkan REQUIRED COMPONENTS glslc)
@@ -147,6 +184,12 @@ target_compile_definitions(qlike_core PUBLIC
     GLM_FORCE_RADIANS
     GLM_FORCE_DEPTH_ZERO_TO_ONE
     GLM_ENABLE_EXPERIMENTAL
+    GLM_FORCE_INLINE             # aggressive inline for hot paths
+    # GLM_FORCE_INTRINSICS intentionally NOT defined — it routes vec
+    # construction through SIMD intrinsics that MSVC can't evaluate at
+    # constexpr (breaks `static constexpr glm::vec3` in player.h etc.).
+    # The scalar path with /arch:AVX2 + /fp:fast gets auto-vectorised
+    # by the compiler anyway.
 )
 
 # qlike_engine: rendering, windowing, Vulkan. Depends on qlike_core.
@@ -218,7 +261,10 @@ foreach(SHADER ${SHADER_SOURCES})
     set(SPV_OUT "${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
     add_custom_command(
         OUTPUT ${SPV_OUT}
-        COMMAND ${Vulkan_GLSLC_EXECUTABLE} --target-env=vulkan1.3 ${SHADER} -o ${SPV_OUT}
+        # -O = SPIR-V optimisation (perf preset). Enables dead-code
+        # elimination, common-subexpression elim, loop unrolling.
+        # Equivalent to running spirv-opt -O on the output.
+        COMMAND ${Vulkan_GLSLC_EXECUTABLE} --target-env=vulkan1.3 -O ${SHADER} -o ${SPV_OUT}
         DEPENDS ${SHADER}
         COMMENT "Compiling shader ${SHADER_NAME}"
         VERBATIM)

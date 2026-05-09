@@ -107,11 +107,27 @@ void AudioEngine::load_clip(std::string_view name, std::string_view path) {
     impl_->clips[std::string(name)] = Impl::Clip{ std::string(path) };
 }
 
+// Reap drained one-shots so the list stays bounded even if
+// set_listener() stops being called (paused loop, menu open).
+// Without this, every fired shot leaks an ma_sound between
+// listener updates.
+static void reap_oneshots(std::list<ma_sound>& oneshots) {
+    for (auto it = oneshots.begin(); it != oneshots.end();) {
+        if (ma_sound_is_playing(&*it) == MA_FALSE) {
+            ma_sound_uninit(&*it);
+            it = oneshots.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 void AudioEngine::play_at(std::string_view name, glm::vec3 pos,
                           float volume, float pitch_jitter, float volume_jitter) {
     if (!impl_->ok) return;
     auto it = impl_->clips.find(std::string(name));
     if (it == impl_->clips.end()) return;
+    reap_oneshots(impl_->oneshots);
     impl_->oneshots.emplace_back();
     ma_sound& s = impl_->oneshots.back();
     if (ma_sound_init_from_file(&impl_->engine, it->second.path.c_str(),
@@ -131,6 +147,7 @@ void AudioEngine::play_local(std::string_view name,
     if (!impl_->ok) return;
     auto it = impl_->clips.find(std::string(name));
     if (it == impl_->clips.end()) return;
+    reap_oneshots(impl_->oneshots);
     impl_->oneshots.emplace_back();
     ma_sound& s = impl_->oneshots.back();
     if (ma_sound_init_from_file(&impl_->engine, it->second.path.c_str(),
