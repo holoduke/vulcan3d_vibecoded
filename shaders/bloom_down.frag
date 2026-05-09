@@ -50,19 +50,26 @@ void main() {
     //  o . o . o
     //  . X . X .
     //  o . o . o
-    vec3 a = texture(src, uv + t * vec2(-2,  2)).rgb;
-    vec3 b = texture(src, uv + t * vec2( 0,  2)).rgb;
-    vec3 c = texture(src, uv + t * vec2( 2,  2)).rgb;
-    vec3 d = texture(src, uv + t * vec2(-2,  0)).rgb;
-    vec3 e = texture(src, uv + t * vec2( 0,  0)).rgb;
-    vec3 f = texture(src, uv + t * vec2( 2,  0)).rgb;
-    vec3 g = texture(src, uv + t * vec2(-2, -2)).rgb;
-    vec3 h = texture(src, uv + t * vec2( 0, -2)).rgb;
-    vec3 i = texture(src, uv + t * vec2( 2, -2)).rgb;
-    vec3 j = texture(src, uv + t * vec2(-1,  1)).rgb;
-    vec3 k = texture(src, uv + t * vec2( 1,  1)).rgb;
-    vec3 l = texture(src, uv + t * vec2(-1, -1)).rgb;
-    vec3 m = texture(src, uv + t * vec2( 1, -1)).rgb;
+    //
+    // NaN/inf guard: clamp each tap at read. lum() of NaN is NaN and
+    // would propagate through Karis (1/(1+NaN) = NaN) into the entire
+    // bloom mip chain, then auto-exposure (which samples the smallest
+    // mip) would oscillate frame-to-frame producing the visible "two
+    // colours alternating" surface flicker.
+    const vec3 kHdrCap = vec3(32.0);
+    vec3 a = clamp(texture(src, uv + t * vec2(-2,  2)).rgb, vec3(0.0), kHdrCap);
+    vec3 b = clamp(texture(src, uv + t * vec2( 0,  2)).rgb, vec3(0.0), kHdrCap);
+    vec3 c = clamp(texture(src, uv + t * vec2( 2,  2)).rgb, vec3(0.0), kHdrCap);
+    vec3 d = clamp(texture(src, uv + t * vec2(-2,  0)).rgb, vec3(0.0), kHdrCap);
+    vec3 e = clamp(texture(src, uv + t * vec2( 0,  0)).rgb, vec3(0.0), kHdrCap);
+    vec3 f = clamp(texture(src, uv + t * vec2( 2,  0)).rgb, vec3(0.0), kHdrCap);
+    vec3 g = clamp(texture(src, uv + t * vec2(-2, -2)).rgb, vec3(0.0), kHdrCap);
+    vec3 h = clamp(texture(src, uv + t * vec2( 0, -2)).rgb, vec3(0.0), kHdrCap);
+    vec3 i = clamp(texture(src, uv + t * vec2( 2, -2)).rgb, vec3(0.0), kHdrCap);
+    vec3 j = clamp(texture(src, uv + t * vec2(-1,  1)).rgb, vec3(0.0), kHdrCap);
+    vec3 k = clamp(texture(src, uv + t * vec2( 1,  1)).rgb, vec3(0.0), kHdrCap);
+    vec3 l = clamp(texture(src, uv + t * vec2(-1, -1)).rgb, vec3(0.0), kHdrCap);
+    vec3 m = clamp(texture(src, uv + t * vec2( 1, -1)).rgb, vec3(0.0), kHdrCap);
 
     vec3 result;
     if (pc.params.x > 0.5) {
