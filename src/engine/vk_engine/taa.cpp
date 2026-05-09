@@ -33,8 +33,10 @@ void VulkanEngine::init_taa() {
                  "linear sampler");
     }
 
-    // UBO buffer (matrices + params).
-    struct TaaUBO { glm::mat4 inv_vp; glm::mat4 prev_vp; glm::vec4 vp; glm::vec4 params; };
+    // UBO buffer. The motion-vec-driven reproject path (svgf-tao-rewrite)
+    // dropped the inverse/prev VP matrices that the depth-reconstruct path
+    // used to need; only viewport + params remain.
+    struct TaaUBO { glm::vec4 vp; glm::vec4 params; };
     {
         VkBufferCreateInfo bci{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,

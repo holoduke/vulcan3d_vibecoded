@@ -608,16 +608,14 @@ void VulkanEngine::draw(uint32_t img_index) {
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-    // Update TAA UBO.
+    // Update TAA UBO. inv_vp/prev_vp dropped after svgf-tao-rewrite —
+    // the motion-vec image (binding 4) provides the reprojection now,
+    // so TAA only needs viewport metrics + the history-blend params.
     {
         struct TaaUBO {
-            glm::mat4 inv_vp;
-            glm::mat4 prev_vp;
             glm::vec4 viewport;
             glm::vec4 params;
         } u{};
-        u.inv_vp = last_inv_view_proj_;     // cached in render_world()
-        u.prev_vp = prev_view_proj_;
         // TAA reads + writes at render_extent_, so the viewport vec it uses
         // for `gl_FragCoord → uv` conversion must reflect that.
         float w = static_cast<float>(render_extent_.width);

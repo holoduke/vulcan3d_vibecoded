@@ -21,8 +21,6 @@ layout(set = 0, binding = 1) uniform sampler2D history_color;
 layout(set = 0, binding = 2) uniform sampler2D current_depth;
 
 layout(set = 0, binding = 3) uniform TaaUBO {
-    mat4 inv_view_proj;
-    mat4 prev_view_proj;
     vec4 viewport;          // x: w, y: h, z: 1/w, w: 1/h
     vec4 params;            // x: history_blend, y: depth_reject_threshold,
                             // z: history_valid (0/1), w: spatial_strength
