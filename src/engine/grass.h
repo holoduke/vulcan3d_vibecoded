@@ -40,7 +40,7 @@ struct GrassParams {
     // Cap on total blades stored in the instance buffer. 200k is a
     // healthy density across a ~150 m grass band on the 2 km world
     // and well under the GPU's vertex throughput at instance-rate.
-    uint32_t max_blades   = 200000;
+    uint32_t max_blades   = 100000;
     // Acceptance band for grass placement. Heights match cube.frag's
     // grass layer (~12..40m by default).
     float    height_min   = 8.0f;
