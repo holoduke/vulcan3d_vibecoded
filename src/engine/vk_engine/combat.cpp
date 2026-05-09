@@ -122,7 +122,7 @@ void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
         // Shot is "local" — happens at the camera, mostly bypasses 3D
         // attenuation. Light pitch jitter so rapid fire doesn't sound
         // mechanical.
-        audio_->play_local("shot", 0.7f, 0.05f, 0.06f);
+        audio_->play_local(ClipID::Shot, 0.7f, 0.05f, 0.06f);
     }
 
     Projectile p{};
@@ -201,7 +201,7 @@ void VulkanEngine::update_projectiles(float dt) {
                 spawn_impact_decal(hit_pos, saved_dir);
                 spawn_hit_particles(hit_pos, reflect, saved_dir);
                 if (audio_) {
-                    audio_->play_at("impact", hit_pos, 0.8f, 0.10f, 0.08f);
+                    audio_->play_at(ClipID::Impact, hit_pos, 0.8f, 0.10f, 0.08f);
                 }
             } else {
                 physics_->remove_body(it->body_id);

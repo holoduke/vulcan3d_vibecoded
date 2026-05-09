@@ -238,9 +238,9 @@ void VulkanEngine::init() {
     // means silence; the renderer keeps working. Clip files are loaded
     // by name from assets/sounds/; missing files are ignored.
     audio_ = std::make_unique<AudioEngine>();
-    audio_->load_clip("shot",     "assets/sounds/shot.ogg");
-    audio_->load_clip("impact",   "assets/sounds/impact.ogg");
-    audio_->load_clip("jump",     "assets/sounds/jump.ogg");
+    audio_->load_clip(ClipID::Shot,   "assets/sounds/shot.ogg");
+    audio_->load_clip(ClipID::Impact, "assets/sounds/impact.ogg");
+    audio_->load_clip(ClipID::Jump,   "assets/sounds/jump.ogg");
     init_vulkan();
     init_pipeline_cache();
     init_swapchain();
@@ -1145,7 +1145,7 @@ void VulkanEngine::run(const RunOptions& opts) {
                 // an unwanted footstep sound. Removed; only jump remains.
                 if (audio_ && state_ == State::Playing) {
                     if (was_on_ground && !player_.on_ground && pin.jump) {
-                        audio_->play_local("jump", 0.7f, 0.06f, 0.10f);
+                        audio_->play_local(ClipID::Jump, 0.7f, 0.06f, 0.10f);
                     }
                 }
                 apply_player_pushes(pre_vel);

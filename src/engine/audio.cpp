@@ -42,26 +42,17 @@ struct AudioEngine::Impl {
     ma_engine engine{};
     bool ok = false;
 
-    // Each loaded clip is decoded once into a ma_sound that we use as a
-    // template. miniaudio doesn't directly support "clone the decoded
-    // data + spawn many independent voices" via a single API, so we
-    // store the file path next to the template; play_at allocates a
-    // fresh ma_sound from the file (uses miniaudio's internal resource
-    // manager which caches decoded audio so this is cheap after first
-    // load).
-    struct Clip {
-        std::string path;
-    };
-    std::unordered_map<std::string, Clip> clips;
+    // Clips indexed by ClipID — was unordered_map<string,Clip>, but
+    // every play call allocated a std::string for the lookup. Now O(1)
+    // array indexed by enum + zero allocations on the hot path.
+    std::string clip_paths[static_cast<size_t>(ClipID::Count)];
 
     // Active one-shot voices. We can't free a ma_sound until it's
     // finished playing, so we keep them in a list and reap drained ones
     // at each set_listener call.
     std::list<ma_sound> oneshots;
 
-    // Long-running loops keyed by name. start_loop creates one,
-    // stop_loop tears it down.
-    std::unordered_map<std::string, ma_sound> loops;
+    // (loops removed — see comment in start_loop deletion below.)
 
     std::default_random_engine rng{ std::random_device{}() };
 };
@@ -80,7 +71,6 @@ AudioEngine::AudioEngine() : impl_(std::make_unique<Impl>()) {
 AudioEngine::~AudioEngine() {
     if (!impl_->ok) return;
     for (auto& s : impl_->oneshots) ma_sound_uninit(&s);
-    for (auto& [name, s] : impl_->loops) ma_sound_uninit(&s);
     ma_engine_uninit(&impl_->engine);
 }
 
@@ -102,9 +92,11 @@ void AudioEngine::set_listener(glm::vec3 pos, glm::vec3 forward) {
     }
 }
 
-void AudioEngine::load_clip(std::string_view name, std::string_view path) {
+void AudioEngine::load_clip(ClipID id, std::string_view path) {
     if (!impl_->ok) return;
-    impl_->clips[std::string(name)] = Impl::Clip{ std::string(path) };
+    auto idx = static_cast<size_t>(id);
+    if (idx >= static_cast<size_t>(ClipID::Count)) return;
+    impl_->clip_paths[idx].assign(path);
 }
 
 // Reap drained one-shots so the list stays bounded even if
@@ -122,15 +114,17 @@ static void reap_oneshots(std::list<ma_sound>& oneshots) {
     }
 }
 
-void AudioEngine::play_at(std::string_view name, glm::vec3 pos,
+void AudioEngine::play_at(ClipID id, glm::vec3 pos,
                           float volume, float pitch_jitter, float volume_jitter) {
     if (!impl_->ok) return;
-    auto it = impl_->clips.find(std::string(name));
-    if (it == impl_->clips.end()) return;
+    auto idx = static_cast<size_t>(id);
+    if (idx >= static_cast<size_t>(ClipID::Count)) return;
+    const std::string& path = impl_->clip_paths[idx];
+    if (path.empty()) return;
     reap_oneshots(impl_->oneshots);
     impl_->oneshots.emplace_back();
     ma_sound& s = impl_->oneshots.back();
-    if (ma_sound_init_from_file(&impl_->engine, it->second.path.c_str(),
+    if (ma_sound_init_from_file(&impl_->engine, path.c_str(),
                                  MA_SOUND_FLAG_DECODE,
                                  nullptr, nullptr, &s) != MA_SUCCESS) {
         impl_->oneshots.pop_back();
@@ -142,15 +136,17 @@ void AudioEngine::play_at(std::string_view name, glm::vec3 pos,
     ma_sound_start(&s);
 }
 
-void AudioEngine::play_local(std::string_view name,
+void AudioEngine::play_local(ClipID id,
                               float volume, float pitch_jitter, float volume_jitter) {
     if (!impl_->ok) return;
-    auto it = impl_->clips.find(std::string(name));
-    if (it == impl_->clips.end()) return;
+    auto idx = static_cast<size_t>(id);
+    if (idx >= static_cast<size_t>(ClipID::Count)) return;
+    const std::string& path = impl_->clip_paths[idx];
+    if (path.empty()) return;
     reap_oneshots(impl_->oneshots);
     impl_->oneshots.emplace_back();
     ma_sound& s = impl_->oneshots.back();
-    if (ma_sound_init_from_file(&impl_->engine, it->second.path.c_str(),
+    if (ma_sound_init_from_file(&impl_->engine, path.c_str(),
                                  MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_SPATIALIZATION,
                                  nullptr, nullptr, &s) != MA_SUCCESS) {
         impl_->oneshots.pop_back();
@@ -161,40 +157,10 @@ void AudioEngine::play_local(std::string_view name,
     ma_sound_start(&s);
 }
 
-void AudioEngine::start_loop(std::string_view name, float volume) {
-    if (!impl_->ok) return;
-    std::string key(name);
-    if (impl_->loops.count(key)) {
-        ma_sound_set_volume(&impl_->loops[key], volume);
-        return;
-    }
-    auto it = impl_->clips.find(key);
-    if (it == impl_->clips.end()) return;
-    ma_sound& s = impl_->loops[key];
-    if (ma_sound_init_from_file(&impl_->engine, it->second.path.c_str(),
-                                 MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_SPATIALIZATION,
-                                 nullptr, nullptr, &s) != MA_SUCCESS) {
-        impl_->loops.erase(key);
-        return;
-    }
-    ma_sound_set_looping(&s, MA_TRUE);
-    ma_sound_set_volume(&s, volume);
-    ma_sound_start(&s);
-}
-
-void AudioEngine::stop_loop(std::string_view name) {
-    if (!impl_->ok) return;
-    std::string key(name);
-    auto it = impl_->loops.find(key);
-    if (it == impl_->loops.end()) return;
-    ma_sound_uninit(&it->second);
-    impl_->loops.erase(it);
-}
-
-bool AudioEngine::is_loop_playing(std::string_view name) const {
-    if (!impl_->ok) return false;
-    return impl_->loops.count(std::string(name)) > 0;
-}
+// start_loop / stop_loop / is_loop_playing removed — no call sites.
+// If we ever need looping audio (ambience, footstep loop), add an
+// enum-keyed version that mirrors play_at / play_local rather than
+// resurrecting the string-keyed map.
 
 void AudioEngine::set_master_volume(float v) {
     if (!impl_->ok) return;
