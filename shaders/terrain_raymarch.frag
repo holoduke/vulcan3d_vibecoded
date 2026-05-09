@@ -361,6 +361,33 @@ float terrainH(vec2 p) {
 
 float terrainMaxHeight() { return max(TERRAIN_HEIGHT, pc.color.w); }
 
+// Terrain self-occlusion test for AO + GI. AO and GI rays use TLAS
+// mask 0x02 (terrain BLAS skipped) to avoid procedural-vs-LOD self-
+// hits, but that means terrain features can never shadow the GI/AO
+// of *other* terrain pixels — gaps and cavities in the heightfield
+// stay artificially bright. This function adds back terrain self-
+// occlusion via a coarse heightfield raymarch (the same `h = p.y -
+// terrainM(p.xz)` step bound `raymarch` uses, but capped to a much
+// lower iteration count since we only need approximate "is anything
+// blocking" for AO/GI, not a sub-pixel hit point).
+//
+// Initial t = 0.2 m skips the immediate-surface band where grazing
+// rays on steep slopes can false-positive against the receiver's own
+// heightfield (the receiver sits exactly ON the surface so any
+// downward-component ray near the origin trivially hits). Caller is
+// expected to bias `ro` along the surface normal a few cm too.
+bool terrain_blocks_ray(vec3 ro, vec3 rd, float t_max) {
+    float t = 0.2;
+    for (int i = 0; i < 12; ++i) {
+        vec3 p = ro + t * rd;
+        float h = p.y - terrainM(p.xz);
+        if (h < 0.001) return true;
+        t += clamp(h, 0.2, 8.0);
+        if (t > t_max) return false;
+    }
+    return false;
+}
+
 // === Adaptive-step heightfield ray march ===
 // h = ray.y - terrain(ray.xz) is a conservative step bound for any
 // heightfield. Step factor 0.4 stays safe on sharp ridges; the
@@ -920,7 +947,13 @@ void main() {
             float u1 = rmRand(ao_seed + uvec3(i, 7u, 53u));
             float u2 = rmRand(ao_seed + uvec3(i, 41u, 5u));
             vec3 d = cos_hemi(u1, u2, nor);
-            if (any_hit_no_terrain(origin_ao, d, ao_radius)) occluded += 1.0;
+            // Combine BLAS occluders (castle / dyn-props) and terrain
+            // self-occlusion. Terrain check is a short heightfield
+            // raymarch — gives proper darkening inside heightmap
+            // valleys and near terrain ridges.
+            bool blocked = any_hit_no_terrain(origin_ao, d, ao_radius)
+                        || terrain_blocks_ray(origin_ao, d, ao_radius);
+            if (blocked) occluded += 1.0;
             ++taken;
         }
         // Linear curve (no sqrt) — see commit 12f9ebc rationale.
@@ -985,10 +1018,28 @@ void main() {
                     if (!closest_hit_material_no_terrain(ray_origin, ray_dir,
                                                           gi_radius,
                                                           t_hit, inst_id, prim_id)) {
-                        // Miss → sky in this direction. Bound by the
-                        // halo's pow(8) so it doesn't firefly badly.
-                        path += throughput * sample_sky(ray_dir);
-                        if (b == 0) ++first_bounce_misses;
+                        // BLAS missed. Check terrain self-occlusion
+                        // before treating this as a sky escape — a
+                        // ray pointed into a hill / heightmap valley
+                        // wall should pick up a dim ground-coloured
+                        // bounce instead of full sky brightness.
+                        // Only the FIRST bounce checks terrain (keeps
+                        // cost bounded and matches the "primary GI
+                        // hits hill" intuition; deeper bounces from
+                        // actual BLAS hits skip it).
+                        if (b == 0 &&
+                            terrain_blocks_ray(ray_origin, ray_dir, gi_radius)) {
+                            // Dim ground tint — the receiver's own
+                            // material modulated by sky_fill stands
+                            // in for the bounce surface's albedo
+                            // (it's terrain too, similar palette).
+                            path += throughput * mate * sky_fill * 1.5;
+                        } else {
+                            // Miss → sky in this direction. Bound by
+                            // the halo's pow(8) so no fireflies.
+                            path += throughput * sample_sky(ray_dir);
+                            if (b == 0) ++first_bounce_misses;
+                        }
                         break;
                     }
                     int mat_idx = (inst_id == kStaticBlasSentinel)
