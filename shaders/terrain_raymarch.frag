@@ -271,7 +271,7 @@ float raymarch(vec3 ro, vec3 rd) {
     // sub-step shift breaks up the per-fragment march alignment, so
     // contour banding from a too-aggressive step factor disperses into
     // noise (then washes out under TAA). Free; no extra texture taps.
-    float jitter = rmRand(uvec3(gl_FragCoord.xy, scene.rt_flags.w));
+    float jitter = rmRand(uvec3(gl_FragCoord.xy, 0u));
     int kSteps = int(pc.tex_params.x);
     float kStep = pc.emissive.x;
     bool relax = pc.grass_params.y > 0.5;
@@ -692,10 +692,14 @@ void main() {
         // 5 cm bias matches calcShadow above so terrain self-shadow
         // and TLAS shadow agree on where the surface is.
         vec3 origin = pos + nor * 0.05;
-        // Per-pixel + per-frame seed: rotating the noise per frame
-        // lets TAA average noisy stratified samples into a smooth
-        // penumbra without raising sample count.
-        uvec3 seed = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
+        // STABLE per-pixel seed (no frame_number). Reseeding every
+        // frame produces white-noise dither in the penumbra that TAA
+        // can't fully average — the visible "moving square holes"
+        // the user reported. With a static pattern the dither stays
+        // fixed in screen space and TAA's spatial filter blurs it
+        // away. Final result: smooth penumbra without per-frame
+        // chatter.
+        uvec3 seed = uvec3(gl_FragCoord.xy, 0u);
 
         // 1. Blocker search — 6 rays in a wide cone (16× sun angular
         // radius) so we find occluders even when the surface is
@@ -727,10 +731,11 @@ void main() {
             float penum = clamp(avg_t * kSunAngular,
                                 kSunAngular * 1.0,    // ~5 mm minimum
                                 kSunAngular * 60.0);   // ~50 cm cap
-            // 3. Stratified shadow rays. 8 rays + per-frame seed
-            // rotation reads as smooth penumbra under TAA without
-            // raising the per-pixel cost.
-            const int kShadow = 8;
+            // 3. Stratified shadow rays. 16 rays in a 4×4 grid keeps
+            // the per-pixel penumbra value within ±1/16 of the true
+            // visibility (vs ±1/8 with 8 rays) — visibly smoother
+            // gradient before TAA's spatial blur even runs.
+            const int kShadow = 16;
             int strata = int(ceil(sqrt(float(kShadow))));
             float inv  = 1.0 / float(strata);
             int taken  = 0;
@@ -824,7 +829,11 @@ void main() {
         float dt    = t_max / float(kVolSteps);
         // Per-pixel jitter on the start position breaks step banding
         // — combined with Phase 5's surface jitter this stays dither-stable.
-        float jStart = rmRand(uvec3(gl_FragCoord.xy, scene.rt_flags.w + 7u));
+        // Stable per-pixel jitter (no frame number) so the volumetric
+        // step pattern is fixed in screen space — TAA's spatial
+        // filter erases it. Per-frame variation made the dither
+        // pattern shift between frames and TAA couldn't keep up.
+        float jStart = rmRand(uvec3(gl_FragCoord.xy, 7u));
         float t_v   = dt * jStart;
 
         vec3  scatter = vec3(0.0);
