@@ -671,17 +671,35 @@ void main() {
     // distant FBM normals.
     float sha = (dif > 0.0) ? calcShadow(pos + nor * 0.05, sunDir) : 1.0;
 
-    // Most basic object shadow: single any-hit ray toward the sun
-    // against the TLAS, mask 0x02 (skips terrain BLAS so we don't
-    // self-shadow). Binary 0/1 — hard-edged, zero noise. No
-    // penumbra. Bias along the sun direction so the origin is
-    // safely above the terrain regardless of the FBM normal's
-    // per-pixel jitter.
+    // Soft object shadow via 5 hard RT rays at FIXED world-space
+    // tangent offsets. Each ray is a binary any-hit (mask 0x02 =
+    // skip terrain BLAS). Averaging gives 6 deterministic levels
+    // (0, 0.2, 0.4, 0.6, 0.8, 1.0). Because the offsets are
+    // identical across pixels, neighbouring pixels see a continuous
+    // shadow value and the silhouette reads as a smooth gradient
+    // — no per-pixel hash noise, no dither. Soft edge ~ 1 m wide.
     if (dif > 0.0 && scene.rt_flags.x != 0) {
-        vec3 origin = pos + sunDir * 0.1;
-        if (any_hit_no_terrain(origin, sunDir, 250.0)) {
-            sha *= (1.0 - scene.rt_params.w);   // shadow strength slider
+        vec3 ref   = abs(sunDir.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
+                                            : vec3(1.0, 0.0, 0.0);
+        vec3 tan_u = normalize(cross(ref, sunDir));
+        vec3 tan_v = cross(sunDir, tan_u);
+        const float kSoftRadius = 0.5;   // metres — half the soft-edge width
+        vec3 origin0 = pos + sunDir * 0.1;
+        // Centre + 4 cardinal taps at fixed tangent offsets.
+        vec3 origins[5];
+        origins[0] = origin0;
+        origins[1] = origin0 + tan_u * kSoftRadius;
+        origins[2] = origin0 - tan_u * kSoftRadius;
+        origins[3] = origin0 + tan_v * kSoftRadius;
+        origins[4] = origin0 - tan_v * kSoftRadius;
+        float blocked = 0.0;
+        for (int i = 0; i < 5; ++i) {
+            if (any_hit_no_terrain(origins[i], sunDir, 250.0)) {
+                blocked += 1.0;
+            }
         }
+        float dyn_shadow = (blocked / 5.0) * scene.rt_params.w;
+        sha *= (1.0 - dyn_shadow);
     }
 
     vec3 mate = getMaterial(pos, nor);
