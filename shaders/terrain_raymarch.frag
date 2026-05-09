@@ -718,7 +718,10 @@ void main() {
                 ao_acc += w * w;   // squared so far hits matter little
             }
         }
-        ao = 1.0 - clamp(ao_acc / 3.0, 0.0, 0.95);
+        // Softer overall: divide by ray count (6) so a single
+        // touching hit darkens by ~17 %, two corner walls ~30 %,
+        // worst case (3+ taps fully occluded) capped at 50 %.
+        ao = 1.0 - clamp(ao_acc / 6.0, 0.0, 0.50);
     }
 
     vec3 mate = getMaterial(pos, nor);
@@ -726,7 +729,8 @@ void main() {
     vec3 lin = vec3(0.0);
     // Sun term partially modulated by AO so cavities still darken
     // even in direct sun (real corners get less bounce light too).
-    float sun_ao = mix(1.0, ao, 0.35);
+    // Gentle coupling — direct-lit areas shouldn't crash to dark.
+    float sun_ao = mix(1.0, ao, 0.15);
     lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a * sun_ao;
     // Sky / ambient term fully modulated by RT AO.
     lin += amb * scene.sky_color.rgb * 0.35 * ao;
