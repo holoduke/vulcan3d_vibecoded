@@ -102,13 +102,22 @@ bool closest_hit_no_terrain(vec3 origin, vec3 dir, float t_max,
 
 // Tiny xorshift32 hash — deterministic per-pixel jitter for the
 // stratified shadow rays.
-float rmRand(uvec3 s) {
-    s.x ^= s.x << 13u;
-    s.x ^= s.x >> 17u;
-    s.x ^= s.x << 5u;
-    s.x += s.y * 19349663u;
-    s.x += s.z * 83492791u;
-    return float(s.x & 0x00FFFFFFu) / 16777216.0;
+// Interleaved Gradient Noise — same dither pattern cube.frag uses
+// for PCSS / RTAO. xorshift hashes (the previous rmRand) produce
+// row-banding correlations that read as moving "lines in shadows"
+// even with TAA. IGN is designed for stochastic rendering: low
+// perceptual structure across pixels, well-distributed across the
+// sample-index axis when you offset the input position.
+float ignBase(vec2 p) {
+    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+}
+float rmRand(uvec3 seed) {
+    // Same recipe as cube.frag::rand — shift the input position by
+    // the sample index along a magic vector so each sample's jitter
+    // is uncorrelated within a pixel but smooth across neighbours.
+    float s = float(seed.x) + 5.588238 * float(seed.z);
+    float t = float(seed.y) + 1.388765 * float(seed.z);
+    return ignBase(vec2(s, t));
 }
 
 // Scene UBO — same layout as cube.frag's binding 0. Only a handful of
