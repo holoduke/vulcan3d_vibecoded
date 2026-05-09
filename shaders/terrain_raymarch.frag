@@ -671,120 +671,13 @@ void main() {
     // distant FBM normals.
     float sha = (dif > 0.0) ? calcShadow(pos + nor * 0.05, sunDir) : 1.0;
 
-    // Castle / dyn-prop / box shadows via TLAS ray queries
-    // (PCSS-style). Mask 0x02 skips the terrain BLAS so we don't
-    // double-count terrain self-shadow (handled by calcShadow above).
-    //   1. blocker search — wide cone, find avg occluder distance
-    //   2. penumbra ∝ avg blocker distance × sun angular radius
-    //   3. stratified shadow rays in the size-adapted cone
-    //   4. results combine multiplicatively with the FBM self-shadow
-    if (dif > 0.0 && scene.rt_flags.x != 0) {
-        // Sun angular radius is ~0.5° = 0.0044 rad. We soften it a
-        // bit (×4) for visible penumbras at gameplay distances —
-        // physically correct values would only show as a ~5 cm
-        // penumbra at 10 m blocker distance.
-        const float kSunAngular = 0.0044 * 4.0;
-        // Tangent basis perpendicular to L for cone jitter.
-        vec3 ref   = abs(sunDir.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
-                                            : vec3(1.0, 0.0, 0.0);
-        vec3 tan_u = normalize(cross(ref, sunDir));
-        vec3 tan_v = cross(sunDir, tan_u);
-        // Bias along the SUN direction, NOT the surface normal. The
-        // raymarch normal is per-pixel finite-differenced from the
-        // FBM, so it has high-frequency variation between adjacent
-        // pixels. Using it for the shadow-ray origin shifted the
-        // ray-cone slightly per pixel; near a castle silhouette
-        // those tiny shifts caused per-pixel hit/miss disagreement,
-        // i.e. the white-noise dither the user reported in faint
-        // shadows. Sun direction is constant across pixels, so the
-        // ray origin moves coherently and the cone samples a
-        // consistent wedge of the BLAS.
-        vec3 origin = pos + sunDir * 0.05;
-        // STABLE per-pixel seed (no frame_number). Reseeding every
-        // frame produces white-noise dither in the penumbra that TAA
-        // can't fully average — the visible "moving square holes"
-        // the user reported. With a static pattern the dither stays
-        // fixed in screen space and TAA's spatial filter blurs it
-        // away. Final result: smooth penumbra without per-frame
-        // chatter.
-        uvec3 seed = uvec3(gl_FragCoord.xy, 0u);
-
-        // 1. Blocker search — 6 rays in a wide cone (16× sun angular
-        // radius) so we find occluders even when the surface is
-        // close to lit.
-        const int kBlocker = 6;
-        float sum_t = 0.0;
-        int   hits  = 0;
-        const float kBlockerCone = kSunAngular * 16.0;
-        for (int i = 0; i < kBlocker; ++i) {
-            float r1 = rmRand(seed + uvec3(i, 91u, 13u));
-            float r2 = rmRand(seed + uvec3(i, 19u, 71u));
-            float r  = sqrt(r1) * kBlockerCone;
-            float ph = 6.28318530718 * r2;
-            vec3 j   = (cos(ph) * tan_u + sin(ph) * tan_v) * r;
-            vec3 d   = normalize(sunDir + j);
-            float t_b;
-            if (closest_hit_no_terrain(origin, d, 250.0, t_b)) {
-                sum_t += t_b;
-                ++hits;
-            }
-        }
-
-        if (hits > 0) {
-            // 2. Penumbra estimate (PCSS): cone half-angle ≈ sun
-            // angular radius; cone radius at receiver = blocker_dist
-            // × angular. Clamped to a sensible range so razor-sharp
-            // contact and very-far soft skirts both stay nice.
-            float avg_t = sum_t / float(hits);
-            // Tight cap on the penumbra cone. Earlier `kSunAngular *
-            // 60` gave a 4° cone — 16 rays sampling a cone that wide
-            // is severely under-sampled, which read as moving white-
-            // noise dither in faint shadows. `kSunAngular * 4` keeps
-            // the cone close to the sun's actual angular extent so
-            // the per-ray contribution is small enough that 16 rays
-            // produce a smooth gradient.
-            float penum = clamp(avg_t * kSunAngular,
-                                kSunAngular * 0.5,
-                                kSunAngular * 4.0);
-            // 3. Stratified shadow rays. The cube.frag terrain path
-            // hides PCSS noise by max-combining with the heightmap
-            // bake (which is 0 or 1, no dither). The raymarch path
-            // has nothing to fall back on, so we need enough rays
-            // for the per-pixel penumbra value to read smooth on
-            // its own. Drive the count from the global slider so
-            // the user can crank it for thicker shadows. 32 default
-            // halves the dither vs 16; 64 makes it imperceptible.
-            int kShadow = clamp(scene.rt_flags.y, 8, 64);
-            int strata = int(ceil(sqrt(float(kShadow))));
-            float inv  = 1.0 / float(strata);
-            int taken  = 0;
-            float blocked = 0.0;
-            for (int sy = 0; sy < strata && taken < kShadow; ++sy) {
-                for (int sx = 0; sx < strata && taken < kShadow; ++sx) {
-                    float r1 = rmRand(seed + uvec3(taken, 11u, 47u));
-                    float r2 = rmRand(seed + uvec3(taken, 53u, 23u));
-                    float u1 = (float(sx) + r1) * inv;
-                    float u2 = (float(sy) + r2) * inv;
-                    float r  = sqrt(u1) * penum;
-                    float ph = 6.28318530718 * u2;
-                    vec3 j   = (cos(ph) * tan_u + sin(ph) * tan_v) * r;
-                    vec3 d   = normalize(sunDir + j);
-                    if (any_hit_no_terrain(origin, d, 250.0)) blocked += 1.0;
-                    ++taken;
-                }
-            }
-            float dyn_shadow = (blocked / float(taken)) * scene.rt_params.w;
-            // Multiply lit-fractions: terrain visibility AND tlas
-            // visibility must both be nonzero for the pixel to be
-            // fully lit.
-            sha *= (1.0 - dyn_shadow);
-        }
-    }
-    // Final cubic smoothstep on the combined visibility — softens
-    // the edge of the merged FBM-self + TLAS-dyn shadow so the
-    // hand-off between the two contributions reads as one smooth
-    // penumbra.
-    sha = sha * sha * (3.0 - 2.0 * sha);
+    // Object shadows from castle / boxes / dyn-props on the
+    // raymarched terrain — REMOVED. The previous PCSS implementation
+    // produced visible per-pixel dither in faint shadow regions
+    // because the raymarched terrain has no clean fallback (unlike
+    // cube.frag's max-combine with the heightmap bake). Will be
+    // replaced with a different technique. For now the surface only
+    // sees terrain self-shadow from `calcShadow` above.
 
     vec3 mate = getMaterial(pos, nor);
 
