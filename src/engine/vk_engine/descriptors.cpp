@@ -282,7 +282,7 @@ void VulkanEngine::update_scene_ubo() {
     data.fog_band = glm::vec4(rt_.terrain_raymarch_fog_y_start,
                                rt_.terrain_raymarch_fog_y_top,
                                rt_.terrain_raymarch_fog_noise,
-                               0.0f);
+                               rt_.terrain_rt_lod_distance);
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

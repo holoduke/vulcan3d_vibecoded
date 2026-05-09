@@ -864,11 +864,13 @@ void main() {
     // budget bounded and prevents Windows TDR on a heavy view.
     float dyn_shadow = 0.0;
     float cam_dist_pos = distance(pos, scene.camera_pos.xyz);
-    // Smooth-fade RT contributions instead of a hard cliff at 200 m.
-    // lod_t = 1 inside 150 m, ramps down to 0 at 250 m, lets us early-
-    // out past 250 m without leaving a visible boundary on the
-    // ground.  do_rt stays as the "actually fire any rays" gate.
-    float rt_lod_t = 1.0 - smoothstep(150.0, 250.0, cam_dist_pos);
+    // Smooth-fade RT contributions across the LOD band rather than
+    // leaving a visible cliff. lod_far comes from the user slider
+    // (fog_band.w); lod_near is 60% of that. Effect ramps from 1.0
+    // inside lod_near, to 0.0 at lod_far. Far pixels early-out.
+    float lod_far  = max(50.0, scene.fog_band.w);
+    float lod_near = lod_far * 0.6;
+    float rt_lod_t = 1.0 - smoothstep(lod_near, lod_far, cam_dist_pos);
     bool do_rt = rt_lod_t > 0.005;
 
     if (dif > 0.0 && scene.rt_flags.x != 0 && do_rt) {

@@ -430,6 +430,8 @@ void VulkanEngine::build_menu_ui() {
                           &rt_.gi_softener, 0.0f, 1.0f);
         ImGui::Checkbox("GI debug viz (raymarch terrain)",
                           &rt_.gi_debug_viz);
+        ImGui::SliderFloat("RT LOD distance (raymarch terrain, m)",
+                          &rt_.terrain_rt_lod_distance, 50.0f, 1000.0f);
 
         ImGui::SeparatorText("Anti-aliasing (TAA + Halton sub-pixel jitter)");
         ImGui::Checkbox("sub-pixel jitter", &rt_.taa_jitter_enabled);
@@ -440,6 +442,7 @@ void VulkanEngine::build_menu_ui() {
         // recovers detail the TAA spatial filter softened. 0 disables; 0.55
         // is the default; >1 looks deliberately punchy.
         ImGui::SliderFloat("post-TAA sharpening", &rt_.compose_sharpen_strength, 0.0f, 2.0f);
+        ImGui::SliderFloat("image contrast", &rt_.image_contrast, 0.5f, 2.0f);
 
         ImGui::SeparatorText("Bloom (compose-pass spiral-tap)");
         ImGui::Checkbox("bloom enabled", &rt_.bloom_enabled);

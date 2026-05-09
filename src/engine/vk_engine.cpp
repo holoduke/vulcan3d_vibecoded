@@ -759,7 +759,8 @@ void VulkanEngine::draw(uint32_t img_index) {
         // can scale pre-tonemap HDR by (target / scene_avg). 0 = off.
         pc_data.sharpen_params = glm::vec4(rt_.compose_sharpen_strength,
                                             rt_.auto_exposure_strength,
-                                            0.0f, 0.0f);
+                                            rt_.image_contrast,
+                                            0.0f);
         pc_data.inv_view_proj = glm::inverse(last_view_proj_);
         vkCmdPushConstants(frame.command_buffer, compose_pipeline_layout_,
                            VK_SHADER_STAGE_FRAGMENT_BIT, 0,

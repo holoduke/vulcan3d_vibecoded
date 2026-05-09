@@ -1266,6 +1266,15 @@ private:
         // a reasonable default that recovers most lost detail without
         // ringing on edges. >1 looks deliberately punchy / over-sharpened.
         float compose_sharpen_strength = 0.55f;
+        // Final-image contrast applied in compose.frag right after the
+        // ACES tonemap, before sRGB encode. 1.0 = neutral, > 1 punches
+        // up midtones, < 1 flattens them. Sane range 0.5..2.0.
+        float image_contrast = 1.0f;
+        // Raymarched-terrain RT (shadows / AO / GI) cutoff distance.
+        // Effect fades smoothly from `* 0.6` to this value, then turns
+        // off entirely past it. 250 m default keeps gameplay-range
+        // pixels fully RT-shaded; lower if you need perf headroom.
+        float terrain_rt_lod_distance = 250.0f;
 
         // Render resolution scale: 0.5 = render at half-res then upscale,
         // 1.0 = native, 2.0 = render at 2× then downscale (SSAA). The scene
