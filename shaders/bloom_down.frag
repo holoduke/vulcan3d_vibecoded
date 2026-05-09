@@ -56,7 +56,14 @@ void main() {
     // bloom mip chain, then auto-exposure (which samples the smallest
     // mip) would oscillate frame-to-frame producing the visible "two
     // colours alternating" surface flicker.
-    const vec3 kHdrCap = vec3(32.0);
+    // Tight cap (was 32) so a single hot tap can't dominate the
+    // averaged downsample. Per-frame HDR variance from RT GI / bounce
+    // hits + bloom_up's spread + compose's `hdr += bloom*strength`
+    // multiplied a >32 spike into a screen-wide cyan wash that
+    // alternated with the normal frame as samples landed differently.
+    // 6 covers legitimate bright sources (sun glints, emissives) while
+    // bounding the per-frame contribution swing.
+    const vec3 kHdrCap = vec3(6.0);
     vec3 a = clamp(texture(src, uv + t * vec2(-2,  2)).rgb, vec3(0.0), kHdrCap);
     vec3 b = clamp(texture(src, uv + t * vec2( 0,  2)).rgb, vec3(0.0), kHdrCap);
     vec3 c = clamp(texture(src, uv + t * vec2( 2,  2)).rgb, vec3(0.0), kHdrCap);
