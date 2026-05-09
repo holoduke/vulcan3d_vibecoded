@@ -685,41 +685,59 @@ void main() {
         }
 
         // 2. RT ambient occlusion against castle / boxes / dyn-props.
-        //    Five short rays in a fixed hemisphere pattern around the
-        //    surface normal. Counts hits within ~3 m → corners darken.
-        //    Pattern is the same for every pixel so the AO reads as a
-        //    smooth gradient instead of dither.
+        //    9 rays in a fixed hemisphere pattern: 1 straight up + 8
+        //    arranged evenly around N. Spread tilted toward horizontal
+        //    so nearby walls actually intersect. Reach 8 m so the AO
+        //    falls off naturally with distance to the occluder.
+        //    Pattern is identical per pixel → smooth AO gradient.
         vec3 N = nor;
         vec3 ref_n = abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
                                        : vec3(1.0, 0.0, 0.0);
         vec3 t1 = normalize(cross(ref_n, N));
         vec3 t2 = cross(N, t1);
-        const float kAoDist = 3.0;
-        // 5 directions: straight up + 4 at 60° from N spread around.
-        vec3 ao_dirs[5];
+        const float kAoDist = 8.0;
+        // Each ring tap is at ~30° elevation (cos 60° = 0.5) so the
+        // ray is mostly horizontal-ish — best for catching nearby
+        // walls of cubes / castle on flat ground.
+        const float c30 = 0.5;
+        const float s30 = 0.866;
+        // 8 azimuth directions on the unit circle in the t1/t2 plane.
+        const float a0 = 1.0,           b0 = 0.0;
+        const float a1 = 0.7071,        b1 = 0.7071;
+        const float a2 = 0.0,           b2 = 1.0;
+        const float a3 = -0.7071,       b3 = 0.7071;
+        const float a4 = -1.0,          b4 = 0.0;
+        const float a5 = -0.7071,       b5 = -0.7071;
+        const float a6 = 0.0,           b6 = -1.0;
+        const float a7 = 0.7071,        b7 = -0.7071;
+        vec3 ao_dirs[9];
         ao_dirs[0] = N;
-        float c45 = 0.5774;     // cos(54.7°) ≈ 1/√3 — even hemisphere taps
-        ao_dirs[1] = normalize(N * c45 + t1);
-        ao_dirs[2] = normalize(N * c45 - t1);
-        ao_dirs[3] = normalize(N * c45 + t2);
-        ao_dirs[4] = normalize(N * c45 - t2);
+        ao_dirs[1] = normalize(N * c30 + (t1 * a0 + t2 * b0) * s30);
+        ao_dirs[2] = normalize(N * c30 + (t1 * a1 + t2 * b1) * s30);
+        ao_dirs[3] = normalize(N * c30 + (t1 * a2 + t2 * b2) * s30);
+        ao_dirs[4] = normalize(N * c30 + (t1 * a3 + t2 * b3) * s30);
+        ao_dirs[5] = normalize(N * c30 + (t1 * a4 + t2 * b4) * s30);
+        ao_dirs[6] = normalize(N * c30 + (t1 * a5 + t2 * b5) * s30);
+        ao_dirs[7] = normalize(N * c30 + (t1 * a6 + t2 * b6) * s30);
+        ao_dirs[8] = normalize(N * c30 + (t1 * a7 + t2 * b7) * s30);
         vec3 ao_origin = pos + N * 0.05;
         float occluded = 0.0;
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < 9; ++i) {
             if (any_hit_no_terrain(ao_origin, ao_dirs[i], kAoDist)) {
                 occluded += 1.0;
             }
         }
-        ao = 1.0 - (occluded / 5.0) * 0.85;   // up to 85 % darken
+        ao = 1.0 - (occluded / 9.0) * 0.95;   // up to 95 % darken
     }
 
     vec3 mate = getMaterial(pos, nor);
 
     vec3 lin = vec3(0.0);
-    // Sun term modulated by hard sun shadow.
-    lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a;
-    // Sky / ambient term modulated by RT AO so corners + recesses
-    // darken without affecting the directly-lit sun term.
+    // Sun term partially modulated by AO so cavities still darken
+    // even in direct sun (real corners get less bounce light too).
+    float sun_ao = mix(1.0, ao, 0.35);
+    lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a * sun_ao;
+    // Sky / ambient term fully modulated by RT AO.
     lin += amb * scene.sky_color.rgb * 0.35 * ao;
     lin += fre * scene.sky_color.rgb * 0.25 * ao;
 
