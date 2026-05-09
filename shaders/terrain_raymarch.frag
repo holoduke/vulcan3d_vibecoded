@@ -1074,7 +1074,13 @@ void main() {
         int requested = (ao_mode == 1) ? min(scene.rt_flags.z, 2)
                                        : scene.rt_flags.z;
         int N_ao = clamp(requested, 1, 32);
-        float ao_radius = scene.rt_params.y * (ao_mode == 1 ? 0.5 : 1.0);
+        // Don't halve the AO radius in fast mode on the terrain shader
+        // — the user's slider is typically dialled for cube.frag's
+        // close-quarters AO (~0.7m) and halving puts it under 0.4m
+        // which can't reach a 1m wall to find it as an occluder.
+        // Lower-bounded at 2m so ground next to walls / boxes still
+        // sees them as occluders.
+        float ao_radius = max(scene.rt_params.y, 2.0);
 
         // Origin lifted along the surface normal a few cm so the
         // FBM-derived hit point doesn't self-intersect a BLAS
@@ -1267,6 +1273,21 @@ void main() {
     lin += fre * scene.sky_color.rgb * 0.25 * ao_shaped;
 
     vec3 col = mate * lin + gi_indirect;
+
+    // Final-colour AO multiplier — dampens the WHOLE pixel (sun term
+    // included) by the shaped AO, making corner darkening visibly
+    // pronounced even when the sun is hitting the ground. Without
+    // this, AO only modulated the ambient term which is small
+    // relative to the sun, so the corner-vs-open contrast was
+    // imperceptible. Mirrors the visible "darker between objects"
+    // look on cube.frag — there the higher-contrast albedos plus
+    // GI hit-shading make the effect read; on terrain we have to
+    // fold AO into the final colour to match.
+    //
+    // Floor at 0.55 keeps fully-occluded ground from going to pure
+    // black (real corners aren't perfectly dark). Strength uses
+    // ao_shaped so the user's "AO darkness" slider drives it too.
+    col *= mix(0.55, 1.0, ao_shaped);
 
     // Debug viz: replace the final colour with the GI contribution
     // only (scaled). 0 = off, 1 = scaled gi_indirect, 2 = scaled raw
