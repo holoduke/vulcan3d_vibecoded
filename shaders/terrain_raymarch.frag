@@ -772,12 +772,61 @@ void main() {
     float shadow = max(dyn_shadow, self_shadow);
     float sha = 1.0 - shadow;
 
+    // RT ambient occlusion against castle / boxes / dyn-props
+    // (mask 0x02 — terrain BLAS skipped). Mirrors cube.frag's RTAO
+    // path: cosine-hemisphere samples around the surface normal,
+    // sqrt-shaped raw occlusion, ao_floor remap. AO darkens the
+    // ambient term — corners between walls + boxes get visibly
+    // shaded, just like the rasterised path.
+    float ao = 1.0;
+    int ao_mode = scene.rt_flags2.w;
+    if (ao_mode > 0 && scene.rt_flags.z > 0) {
+        int requested = (ao_mode == 1) ? min(scene.rt_flags.z, 2)
+                                       : scene.rt_flags.z;
+        // No lod_samples helper here — clamp manually so distant
+        // terrain doesn't waste per-pixel rays on AO that doesn't
+        // visibly contribute.
+        int N_ao = clamp(requested, 1, 32);
+        float ao_radius = scene.rt_params.y * (ao_mode == 1 ? 0.5 : 1.0);
+
+        // Origin lifted along the surface normal a few cm so the
+        // FBM-derived hit point doesn't self-intersect a BLAS
+        // triangle (e.g. a castle pad).
+        vec3 origin_ao = pos + nor * 0.05;
+        uvec3 ao_seed = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
+        int taken = 0;
+        float occluded = 0.0;
+        for (int i = 0; i < N_ao; ++i) {
+            float u1 = rmRand(ao_seed + uvec3(i, 7u, 53u));
+            float u2 = rmRand(ao_seed + uvec3(i, 41u, 5u));
+            // cosine-hemisphere distribution around the surface normal.
+            float r = sqrt(u1);
+            float ph = 6.28318530718 * u2;
+            vec3 d_local = vec3(r * cos(ph), sqrt(max(0.0, 1.0 - u1)),
+                                  r * sin(ph));
+            vec3 ref_n = abs(nor.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
+                                              : vec3(1.0, 0.0, 0.0);
+            vec3 t1 = normalize(cross(ref_n, nor));
+            vec3 t2 = cross(nor, t1);
+            vec3 d = d_local.x * t1 + d_local.y * nor + d_local.z * t2;
+            if (any_hit_no_terrain(origin_ao, d, ao_radius)) occluded += 1.0;
+            ++taken;
+        }
+        // sqrt curve + ao_floor — same shaping as cube.frag.
+        float raw = 1.0 - (occluded / float(taken));
+        raw = sqrt(raw);
+        float ao_floor_v = scene.rt_lod.w;
+        ao = mix(ao_floor_v, 1.0, raw);
+    }
+
     vec3 mate = getMaterial(pos, nor);
 
     vec3 lin = vec3(0.0);
     lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a;
-    lin += amb * scene.sky_color.rgb * 0.35;
-    lin += fre * scene.sky_color.rgb * 0.25;
+    // Ambient + Fresnel rim term darkened by RTAO so corners between
+    // walls / boxes / castle visibly shade the terrain.
+    lin += amb * scene.sky_color.rgb * 0.35 * ao;
+    lin += fre * scene.sky_color.rgb * 0.25 * ao;
 
     vec3 col = mate * lin;
 
