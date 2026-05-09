@@ -962,6 +962,7 @@ void main() {
         int strata = int(ceil(sqrt(float(N_gi))));
         float inv_strata = 1.0 / float(strata);
         int  taken = 0;
+        int  first_bounce_misses = 0;
         vec3 sum   = vec3(0.0);
         uvec3 gi_seed = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
 
@@ -987,6 +988,7 @@ void main() {
                         // Miss → sky in this direction. Bound by the
                         // halo's pow(8) so it doesn't firefly badly.
                         path += throughput * sample_sky(ray_dir);
+                        if (b == 0) ++first_bounce_misses;
                         break;
                     }
                     int mat_idx = (inst_id == kStaticBlasSentinel)
@@ -1029,10 +1031,20 @@ void main() {
             }
         }
         vec3 gi_raw = (taken > 0) ? (sum / float(taken)) : vec3(0.0);
+        // Sky visibility: fraction of FIRST-bounce rays that escaped
+        // all occluders. Used to attenuate the smooth fallback so a
+        // surface deep in a cavity doesn't get a bright "sky from
+        // normal" lift even when the softener slider is high.
+        float sky_vis = (taken > 0)
+                          ? (float(first_bounce_misses) / float(taken))
+                          : 1.0;
         // Softener: lerp toward a noise-free sky-at-normal estimate.
         // 0 = raw path-traced GI (most accurate, noisiest at low N),
         // 1 = smooth fallback (no per-pixel variance).
-        vec3 gi_smooth = sample_sky_atmosphere(nor);
+        // Both terms are AO-modulated AND sky_vis-modulated so corners
+        // and cavities go genuinely dark regardless of softener value.
+        float occl = ao * mix(0.4, 1.0, sky_vis);
+        vec3 gi_smooth = sample_sky_atmosphere(nor) * occl;
         float soft = clamp(scene.terrain_extra.z, 0.0, 1.0);
         gi_indirect = mate * mix(gi_raw, gi_smooth, soft) *
                       scene.rt_params2.x;
