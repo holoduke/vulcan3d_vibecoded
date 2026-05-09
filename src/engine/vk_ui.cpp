@@ -432,6 +432,8 @@ void VulkanEngine::build_menu_ui() {
                           &rt_.gi_debug_viz);
         ImGui::SliderFloat("RT LOD distance (raymarch terrain, m)",
                           &rt_.terrain_rt_lod_distance, 50.0f, 1000.0f);
+        ImGui::SliderFloat("AO darkness (raymarch terrain)",
+                          &rt_.terrain_ao_punch, 0.5f, 3.0f);
 
         ImGui::SeparatorText("Anti-aliasing (TAA + Halton sub-pixel jitter)");
         ImGui::Checkbox("sub-pixel jitter", &rt_.taa_jitter_enabled);

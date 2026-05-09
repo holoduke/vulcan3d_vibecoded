@@ -1121,7 +1121,8 @@ void main() {
         // 1 = smooth fallback (no per-pixel variance).
         // Both terms are AO-modulated AND sky_vis-modulated so corners
         // and cavities go genuinely dark regardless of softener value.
-        float occl = ao * mix(0.4, 1.0, sky_vis);
+        float ao_p     = max(scene.ambient.w, 0.5);
+        float occl = pow(ao, ao_p) * mix(0.4, 1.0, sky_vis);
         vec3 gi_smooth = sample_sky_atmosphere(nor) * occl;
         float soft = clamp(scene.terrain_extra.z, 0.0, 1.0);
         gi_indirect = mate * mix(gi_raw, gi_smooth, soft) *
@@ -1136,10 +1137,14 @@ void main() {
 
     vec3 lin = vec3(0.0);
     lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a;
-    // Ambient + Fresnel rim term darkened by RTAO so corners between
-    // walls / boxes / castle visibly shade the terrain.
-    lin += amb * scene.sky_color.rgb * 0.35 * ao;
-    lin += fre * scene.sky_color.rgb * 0.25 * ao;
+    // Ambient + Fresnel rim term darkened by RTAO. ao_punch pow-curves
+    // the AO so > 1 makes mid-AO drop fast (corners punch dark) while
+    // 1.0 keeps the original linear behaviour. Driven by the
+    // 'AO darkness (raymarch terrain)' slider.
+    float ao_punch  = max(scene.ambient.w, 0.5);
+    float ao_shaped = pow(ao, ao_punch);
+    lin += amb * scene.sky_color.rgb * 0.35 * ao_shaped;
+    lin += fre * scene.sky_color.rgb * 0.25 * ao_shaped;
 
     vec3 col = mate * lin + gi_indirect;
 

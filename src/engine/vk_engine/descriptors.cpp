@@ -177,7 +177,7 @@ void VulkanEngine::update_scene_ubo() {
     sun = glm::normalize(sun);
     data.sun_direction = glm::vec4(sun, 0.0f);
     data.sun_color     = glm::vec4(rt_.sun_color, rt_.sun_intensity);
-    data.ambient       = glm::vec4(rt_.ground_ambient, 1.0f);
+    data.ambient       = glm::vec4(rt_.ground_ambient, rt_.terrain_ao_punch);
     data.sky_color     = glm::vec4(rt_.sky_color, 1.0f);
     data.rt_flags = glm::ivec4(rt_.shadow_enabled ? 1 : 0,
                                rt_.shadow_samples,

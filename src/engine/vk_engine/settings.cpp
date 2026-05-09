@@ -285,6 +285,7 @@ void VulkanEngine::save_settings() const {
     f << "compose_sharpen_strength = " << rt_.compose_sharpen_strength << "\n";
     f << "image_contrast = " << rt_.image_contrast << "\n";
     f << "terrain_rt_lod_distance = " << rt_.terrain_rt_lod_distance << "\n";
+    f << "terrain_ao_punch = " << rt_.terrain_ao_punch << "\n";
     f << "render_scale = "       << rt_.render_scale       << "\n";
     f << "quality_preset = "     << rt_.quality_preset     << "\n";
     f << "ao_mode = "            << rt_.ao_mode            << "\n";
@@ -447,6 +448,7 @@ void VulkanEngine::load_settings() {
             else if (key == "compose_sharpen_strength") rt_.compose_sharpen_strength = std::stof(val);
             else if (key == "image_contrast")           rt_.image_contrast = std::stof(val);
             else if (key == "terrain_rt_lod_distance")  rt_.terrain_rt_lod_distance = std::stof(val);
+            else if (key == "terrain_ao_punch")         rt_.terrain_ao_punch = std::stof(val);
             else if (key == "render_scale")        rt_.render_scale = std::stof(val);
             else if (key == "quality_preset")      rt_.quality_preset = std::stoi(val);
             else if (key == "ao_mode")             rt_.ao_mode = std::stoi(val);
@@ -507,6 +509,7 @@ void VulkanEngine::load_settings() {
     clampf(rt_.compose_sharpen_strength, 0.0f, 2.5f);
     clampf(rt_.image_contrast,           0.5f, 2.0f);
     clampf(rt_.terrain_rt_lod_distance,  50.0f, 1000.0f);
+    clampf(rt_.terrain_ao_punch,         0.5f,  3.0f);
     clampf(rt_.render_scale,     0.4f,    2.5f);
     clampi(rt_.quality_preset,  -1,         3);  // -1 = custom
     clampi(rt_.ao_mode,          0,         2);

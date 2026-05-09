@@ -1213,6 +1213,12 @@ private:
         // clearly visible). Lets you confirm the path-traced GI loop is
         // firing and producing meaningful contribution at this pixel.
         bool  gi_debug_viz = false;
+        // Power curve on the raymarched-terrain AO. 1.0 = linear (current
+        // behaviour). > 1 punches corners darker (pow makes mid AO drop
+        // faster than linear). < 1 flattens. Modulates BOTH the analytical
+        // ambient term AND the GI smooth fallback so cavities go genuinely
+        // dark without depending solely on the ao_floor knob.
+        float terrain_ao_punch = 1.5f;
         // Specular reflection on flagged surfaces (the pedestal).
         bool  reflections_enabled = true;
         float reflection_strength = 0.5f;
