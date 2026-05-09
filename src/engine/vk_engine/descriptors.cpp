@@ -283,6 +283,11 @@ void VulkanEngine::update_scene_ubo() {
                                rt_.terrain_raymarch_fog_y_top,
                                rt_.terrain_raymarch_fog_noise,
                                rt_.terrain_rt_lod_distance);
+    data.terrain_rt_extra = glm::vec4(
+        static_cast<float>(rt_.terrain_pcss_samples_cap),
+        static_cast<float>(rt_.terrain_gi_samples_cap),
+        rt_.terrain_ao_final_strength,
+        static_cast<float>(rt_.terrain_gi_bounces_cap));
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

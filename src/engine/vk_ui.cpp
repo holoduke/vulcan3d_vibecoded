@@ -443,6 +443,18 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("AO darkness (raymarch terrain)",
                           &rt_.terrain_ao_punch, 0.5f, 3.0f);
 
+        ImGui::SeparatorText("Raymarched terrain RT (per-pixel caps)");
+        ImGui::TextDisabled("Higher = better visuals + heavier GPU. "
+                            "Lower if you hit GPU TDR / device_lost.");
+        ImGui::SliderInt("PCSS shadow rays cap (terrain)",
+                          &rt_.terrain_pcss_samples_cap, 2, 16);
+        ImGui::SliderInt("GI rays cap (terrain)",
+                          &rt_.terrain_gi_samples_cap, 0, 16);
+        ImGui::SliderInt("GI bounces cap (terrain)",
+                          &rt_.terrain_gi_bounces_cap, 1, 3);
+        ImGui::SliderFloat("AO final strength (terrain)",
+                          &rt_.terrain_ao_final_strength, 0.0f, 1.0f);
+
         ImGui::SeparatorText("Anti-aliasing (TAA + Halton sub-pixel jitter)");
         ImGui::Checkbox("sub-pixel jitter", &rt_.taa_jitter_enabled);
         ImGui::SliderFloat("jitter strength", &rt_.taa_jitter_strength, 0.0f, 2.0f);

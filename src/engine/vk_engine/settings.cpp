@@ -288,6 +288,10 @@ void VulkanEngine::save_settings() const {
     f << "image_gamma = " << rt_.image_gamma << "\n";
     f << "terrain_rt_lod_distance = " << rt_.terrain_rt_lod_distance << "\n";
     f << "terrain_ao_punch = " << rt_.terrain_ao_punch << "\n";
+    f << "terrain_pcss_samples_cap = "  << rt_.terrain_pcss_samples_cap  << "\n";
+    f << "terrain_gi_samples_cap = "    << rt_.terrain_gi_samples_cap    << "\n";
+    f << "terrain_gi_bounces_cap = "    << rt_.terrain_gi_bounces_cap    << "\n";
+    f << "terrain_ao_final_strength = " << rt_.terrain_ao_final_strength << "\n";
     f << "render_scale = "       << rt_.render_scale       << "\n";
     f << "quality_preset = "     << rt_.quality_preset     << "\n";
     f << "ao_mode = "            << rt_.ao_mode            << "\n";
@@ -330,6 +334,10 @@ void VulkanEngine::load_settings() {
             if (key == "image_gamma")             { rt_.image_gamma = std::stof(val); ++loaded; continue; }
             if (key == "terrain_rt_lod_distance") { rt_.terrain_rt_lod_distance = std::stof(val); ++loaded; continue; }
             if (key == "terrain_ao_punch")        { rt_.terrain_ao_punch = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_pcss_samples_cap")  { rt_.terrain_pcss_samples_cap  = std::stoi(val); ++loaded; continue; }
+            if (key == "terrain_gi_samples_cap")    { rt_.terrain_gi_samples_cap    = std::stoi(val); ++loaded; continue; }
+            if (key == "terrain_gi_bounces_cap")    { rt_.terrain_gi_bounces_cap    = std::stoi(val); ++loaded; continue; }
+            if (key == "terrain_ao_final_strength") { rt_.terrain_ao_final_strength = std::stof(val); ++loaded; continue; }
             if      (key == "sun_pitch_deg")       rt_.sun_pitch_deg = std::stof(val);
             else if (key == "sun_yaw_deg")         rt_.sun_yaw_deg = std::stof(val);
             else if (key == "sun_intensity")       rt_.sun_intensity = std::stof(val);
@@ -522,6 +530,10 @@ void VulkanEngine::load_settings() {
     clampf(rt_.image_gamma,              0.4f, 2.5f);
     clampf(rt_.terrain_rt_lod_distance,  50.0f, 1000.0f);
     clampf(rt_.terrain_ao_punch,         0.5f,  3.0f);
+    clampi(rt_.terrain_pcss_samples_cap, 2,    32);
+    clampi(rt_.terrain_gi_samples_cap,   0,    32);
+    clampi(rt_.terrain_gi_bounces_cap,   1,     4);
+    clampf(rt_.terrain_ao_final_strength,0.0f, 1.0f);
     clampf(rt_.render_scale,     0.4f,    2.5f);
     clampi(rt_.quality_preset,  -1,         3);  // -1 = custom
     clampi(rt_.ao_mode,          0,         2);

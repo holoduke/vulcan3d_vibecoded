@@ -143,6 +143,17 @@ struct SceneUBO {
     //   z: noise strength (0..1, FBM modulation on density)
     //   w: unused
     glm::vec4  fog_band;
+    // Raymarched-terrain RT tuning, exposed as sliders so the user can
+    // trade visual fidelity vs perf without recompiling. Each value is
+    // the per-pixel cap applied INSIDE the terrain shader (cube.frag
+    // continues to honour the global rt_flags / rt_params sliders for
+    // its own RT work).
+    //   x: terrain_pcss_samples_cap   — max PCSS shadow rays per terrain pixel
+    //   y: terrain_gi_samples_cap     — max GI primary rays per terrain pixel
+    //   z: terrain_ao_final_strength  — strength of final-colour AO multiplier
+    //                                   (0 = no extra AO darkening; 1 = full)
+    //   w: terrain_gi_bounces_cap     — max bounces in terrain GI loop
+    glm::vec4  terrain_rt_extra;
 };
 
 // ---- KHR ray tracing entry points ----

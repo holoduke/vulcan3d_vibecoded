@@ -1227,6 +1227,14 @@ private:
         // ambient term AND the GI smooth fallback so cavities go genuinely
         // dark without depending solely on the ao_floor knob.
         float terrain_ao_punch = 1.5f;
+        // Per-pixel RT caps for the raymarched terrain shader. Lower
+        // them when the GPU TDRs; raise for visual fidelity. Defaults
+        // chosen to keep total per-frame RT work under the Windows TDR
+        // threshold even with the heaviest scene (kMaxDynProps=60).
+        int   terrain_pcss_samples_cap   = 4;     // max PCSS rays per pixel
+        int   terrain_gi_samples_cap     = 4;     // max GI primary rays per pixel
+        int   terrain_gi_bounces_cap     = 1;     // max GI bounces per ray
+        float terrain_ao_final_strength  = 0.45f; // 0=no final-colour AO, 1=full
         // Specular reflection on flagged surfaces (the pedestal).
         bool  reflections_enabled = true;
         float reflection_strength = 0.5f;

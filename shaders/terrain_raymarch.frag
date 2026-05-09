@@ -227,6 +227,12 @@ layout(set = 0, binding = 0) uniform Scene {
     vec4 water_shore;
     // Fog band: x = y_start, y = y_top, z = noise strength.
     vec4 fog_band;
+    // Per-pixel RT caps for the terrain shader (sliders exposed to UI):
+    //   x: PCSS sample cap
+    //   y: GI sample cap
+    //   z: final-colour AO multiplier strength (0..1)
+    //   w: GI bounces cap
+    vec4 terrain_rt_extra;
 } scene;
 
 // Cheap directional sky model вЂ” horizon -> zenith ramp around the
@@ -989,8 +995,9 @@ void main() {
         // over the GPU TDR threshold once the TLAS grew with streamed
         // dyn-props. cube.frag PCSS still uses the full slider.
         float near_mult = max(1.0, scene.terrain_extra.y);
+        int N_s_cap = max(2, int(scene.terrain_rt_extra.x));
         int N_s = clamp(int(ceil(float(scene.rt_flags.y) * near_mult)),
-                        4, 4);
+                        2, N_s_cap);
 
         vec3 ref_l = abs(sunDir.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
                                             : vec3(1.0, 0.0, 0.0);
@@ -1138,11 +1145,10 @@ void main() {
     // dyn-props. Slider still controls; we just clamp to 6 for the
     // raymarched terrain path. Cube.frag GI uses the full slider.
     int N_gi_user = scene.rt_flags2.x;
-    int N_gi = (N_gi_user > 0 && do_rt) ? min(N_gi_user, 4) : 0;
+    int N_gi_cap  = max(0, int(scene.terrain_rt_extra.y));
+    int N_gi = (N_gi_user > 0 && do_rt) ? min(N_gi_user, N_gi_cap) : 0;
     if (N_gi > 0) {
-        // Single bounce only on the terrain вЂ” multi-bounce explodes
-        // RT cost for limited visual gain on a flat heightfield.
-        int N_bounces     = 1;
+        int N_bounces     = max(1, int(scene.terrain_rt_extra.w));
         int gi_shadow_max = int(scene.rt_lod.z);
         // GI search radius вЂ” driven directly by the user's slider.
         // Earlier we forced a min of 80m so first-bounce rays could
@@ -1284,10 +1290,14 @@ void main() {
     // GI hit-shading make the effect read; on terrain we have to
     // fold AO into the final colour to match.
     //
-    // Floor at 0.55 keeps fully-occluded ground from going to pure
-    // black (real corners aren't perfectly dark). Strength uses
-    // ao_shaped so the user's "AO darkness" slider drives it too.
-    col *= mix(0.55, 1.0, ao_shaped);
+    // Strength comes from the user-facing 'AO final strength' slider
+    // (terrain_rt_extra.z). 0 = no extra darkening, 1 = full punch.
+    // ao_shaped drives the AO contour, so the 'AO darkness' slider
+    // tunes the curve and 'AO final strength' tunes how much that
+    // curve actually shows up on screen.
+    float ao_final_str = clamp(scene.terrain_rt_extra.z, 0.0, 1.0);
+    float ao_floor     = 1.0 - ao_final_str;
+    col *= mix(ao_floor, 1.0, ao_shaped);
 
     // Debug viz: replace the final colour with the GI contribution
     // only (scaled). 0 = off, 1 = scaled gi_indirect, 2 = scaled raw
