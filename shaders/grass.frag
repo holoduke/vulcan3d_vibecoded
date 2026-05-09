@@ -83,22 +83,15 @@ void main() {
     float sun_amt = scene.sun_color.a * 0.35 * n_dot_l;
     float sky_amt = 0.20;
 
-    // Shadow factor:
-    //   - Sun shadow comes from the pre-baked heightmap shadow texture
-    //     sampled in grass.vert (vSunShadow). Mountain/terrain self-
-    //     shadows now apply at any distance with zero per-frame ray
-    //     cost.
-    //   - Sky-up "is roofed" ray still fires per fragment for blades
-    //     within 30m — handles "inside the keep" but not at distance.
-    const float kSkyShadowDist = 30.0;
-    float shadow_factor = 1.0;
-    if (vSunShadow > 0.5) shadow_factor *= 0.18;
-    if (scene.rt_flags.x != 0 && vDistToCam < kSkyShadowDist) {
-        vec3 origin = vWorldPos + vec3(0.0, 0.5, 0.0);
-        if (sun_blocked(origin, vec3(0.0, 1.0, 0.0))) {
-            shadow_factor *= 0.45;
-        }
-    }
+    // Shadow factor: rely on the sun shadow map sampled in grass.vert
+    // (vSunShadow) plus the heightmap-bake fallback. The previous
+    // per-fragment "sky-up" RT ray within 30m was firing once per
+    // grass pixel — at typical near-camera grass coverage that's
+    // millions of TLAS traversals per frame, AND each ray races the
+    // TLAS rebuild as dyn-props stream in, flickering between
+    // hit/miss as the BVH is half-built. Drop it; vSunShadow alone
+    // covers the cases that matter (sun shadow map + bake).
+    float shadow_factor = mix(1.0, 0.18, vSunShadow);
     // Translucent back-lit term — when the sun is behind the blade
     // (camera looks roughly toward sun, blade between), foliage
     // glows from forward subsurface scattering. n_dot_l is small in

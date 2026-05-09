@@ -1008,6 +1008,14 @@ void main() {
             }
         }
         gi_indirect = albedo * (sum / float(taken)) * scene.rt_params2.x;
+        // Hard ceiling — a bounce ray happening to land on a sun-lit
+        // white wall + multiple bounces can compound to 10×+ sun color
+        // for a single sample. Without a cap the bright spike feeds
+        // bloom + auto-exposure → next frame's exposure plummets →
+        // next frame brightens → oscillation reads as surface flicker.
+        // Clamp at 6 per channel: caps the firefly without crushing
+        // legitimate strong bounces in the visible range.
+        gi_indirect = min(gi_indirect, vec3(6.0));
         sky_total = taken;
         sky_vis = float(sky_misses) / float(max(1, sky_total));
 

@@ -351,9 +351,21 @@ void main() {
         ratio = clamp(ratio, 0.4, 4.0);    // bound the auto-correction
         // strength = 0 -> ratio collapses to 1 (no scaling)
         // strength = 1 -> full ratio applied
-        float exposure = pow(ratio, pc.sharpen_params.y);
+        float exposure = pow(ratio, pc.sharpen_params.y * 0.5);
+        // Halved strength + tighter clamp [0.7, 1.6] above keeps the
+        // exposure from oscillating frame-to-frame when a bright cube
+        // briefly enters the bloom-mip's average — that swing was the
+        // visible "surface flicker" between bright and dark frames.
+        exposure = clamp(exposure, 0.7, 1.6);
         hdr *= exposure;
     }
+
+    // NaN / inf guard — any single corrupt pixel before tonemap (e.g. a
+    // path-traced bounce that happened to land on a sun-disk halo and
+    // compounded to inf) propagates through bloom, eventually painting
+    // the whole frame and triggering surface flicker. Clamp finite
+    // values defensively.
+    hdr = clamp(hdr, vec3(0.0), vec3(64.0));
 
     vec3 mapped = aces_fitted(hdr);
     // Tone controls applied post-tonemap, pre-sRGB. Order: brightness
