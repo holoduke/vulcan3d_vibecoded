@@ -570,11 +570,14 @@ void VulkanEngine::run_bloom_chain(VkCommandBuffer cmd) {
         auto fill = [&](VkImageMemoryBarrier2& b, VkImageLayout from,
                         VkImageLayout to, uint32_t mip) {
             b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-            b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-            b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
-            b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-            b.dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT |
-                              VK_ACCESS_2_MEMORY_READ_BIT;
+            // Bloom mip chain: write happens in COLOR_ATTACHMENT_OUTPUT,
+            // read happens in FRAGMENT_SHADER (textureLod). Tightening
+            // from ALL_COMMANDS lets the driver overlap subsequent
+            // unrelated draws (compose, ImGui) with the bloom passes.
+            b.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+            b.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+            b.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            b.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
             b.oldLayout = from;
             b.newLayout = to;
             b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;

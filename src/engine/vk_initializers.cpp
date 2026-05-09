@@ -156,15 +156,48 @@ static VkAccessFlags2 access_for_layout(VkImageLayout layout) {
     }
 }
 
+// Pipeline-stage mask derived from a layout. Avoids the ALL_COMMANDS_BIT
+// hammer that forces a full pipeline serialization on every transition.
+// For layouts that genuinely could be touched by multiple stages we still
+// fall back to ALL_GRAPHICS / ALL_COMMANDS — the perf wins come from the
+// common cases (color out → shader read, transfer dst → shader read).
+static VkPipelineStageFlags2 stage_for_layout(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_UNDEFINED:
+            return VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            return VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            return VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
+            return VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                   VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            // Could be VS or FS; safe to cover both. Avoids ALL_COMMANDS
+            // which would also fence ray queries / compute / transfer.
+            return VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_PIPELINE_STAGE_2_COPY_BIT |
+                   VK_PIPELINE_STAGE_2_BLIT_BIT |
+                   VK_PIPELINE_STAGE_2_RESOLVE_BIT;
+        case VK_IMAGE_LAYOUT_GENERAL:
+        default:
+            return VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    }
+}
+
 void transition_image_aspect(VkCommandBuffer cmd, VkImage image,
                              VkImageLayout from, VkImageLayout to,
                              VkImageAspectFlags aspect) {
     VkImageMemoryBarrier2 barrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .pNext = nullptr,
-        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .srcStageMask = stage_for_layout(from),
         .srcAccessMask = access_for_layout(from),
-        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstStageMask = stage_for_layout(to),
         .dstAccessMask = access_for_layout(to),
         .oldLayout = from, .newLayout = to,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -198,9 +231,9 @@ void transition_image_mip(VkCommandBuffer cmd, VkImage image,
     VkImageMemoryBarrier2 barrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .pNext = nullptr,
-        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .srcStageMask = stage_for_layout(from),
         .srcAccessMask = access_for_layout(from),
-        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstStageMask = stage_for_layout(to),
         .dstAccessMask = access_for_layout(to),
         .oldLayout = from, .newLayout = to,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,

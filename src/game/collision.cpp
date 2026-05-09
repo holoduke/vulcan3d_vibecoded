@@ -129,7 +129,17 @@ MoveResult slide_move(const AABB& player, glm::vec3 position, glm::vec3 velocity
     struct SweepHit { float t; glm::vec3 n; size_t idx; };
     auto best_sweep = [&](AABB swept_box, glm::vec3 displacement) {
         SweepHit best{1.0f, glm::vec3(0.0f), static_cast<size_t>(-1)};
+        // Broadphase: build the AABB enclosing the entire swept volume
+        // (swept_box ∪ swept_box+displacement), then test each world
+        // AABB against it cheaply before doing the full sweep_aabb.
+        // sweep_aabb itself is ~30 cycles per call; aabb_overlap is ~6.
+        // With ~190 brushes × 60 dyn_props × 4 iters × 6 ticks the
+        // skip rate dominates the tick cost.
+        AABB env;
+        env.min = glm::min(swept_box.min, swept_box.min + displacement);
+        env.max = glm::max(swept_box.max, swept_box.max + displacement);
         for (size_t i = 0; i < world.size(); ++i) {
+            if (!aabb_overlap(env, world[i])) continue;
             SweepResult r = sweep_aabb(swept_box, displacement, world[i]);
             if (r.hit && r.t < best.t) { best = {r.t, r.normal, i}; }
         }
