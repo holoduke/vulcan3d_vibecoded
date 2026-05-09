@@ -728,9 +728,16 @@ void main() {
             // × angular. Clamped to a sensible range so razor-sharp
             // contact and very-far soft skirts both stay nice.
             float avg_t = sum_t / float(hits);
+            // Tight cap on the penumbra cone. Earlier `kSunAngular *
+            // 60` gave a 4° cone — 16 rays sampling a cone that wide
+            // is severely under-sampled, which read as moving white-
+            // noise dither in faint shadows. `kSunAngular * 4` keeps
+            // the cone close to the sun's actual angular extent so
+            // the per-ray contribution is small enough that 16 rays
+            // produce a smooth gradient.
             float penum = clamp(avg_t * kSunAngular,
-                                kSunAngular * 1.0,    // ~5 mm minimum
-                                kSunAngular * 60.0);   // ~50 cm cap
+                                kSunAngular * 0.5,
+                                kSunAngular * 4.0);
             // 3. Stratified shadow rays. 16 rays in a 4×4 grid keeps
             // the per-pixel penumbra value within ±1/16 of the true
             // visibility (vs ±1/8 with 8 rays) — visibly smoother
