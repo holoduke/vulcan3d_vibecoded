@@ -665,7 +665,10 @@ void main() {
         // Write hit depth; rasterised geometry that's actually in
         // front (e.g. a cube on a pier) still occludes us.
         vec4 clipW = pc.mvp * vec4(wpos, 1.0);
-        gl_FragDepth = clipW.z / clipW.w;
+        // See main terrain branch — cap below the compose sky-cutoff
+        // threshold so far water doesn't get repainted as sky-below-
+        // horizon (black).
+        gl_FragDepth = min(clipW.z / clipW.w, 0.9998);
         outColor = vec4(col_w, 1.0);
         // Motion vector for TAA reprojection (same pattern as
         // terrain branch below). Treats the surface as world-static
@@ -1043,8 +1046,15 @@ void main() {
 
     // Write the hit-point depth so rasterised geometry that wrote
     // depth earlier in the same pass occludes the terrain correctly.
+    // Cap below 0.9999 — the compose pass treats depth >= 0.99999 as
+    // a sky pixel and paints `sample_sky(dir)`. For terrain hits past
+    // ~800 m the projected depth crosses the threshold and compose
+    // overwrites our colour with the skybox sampled below the horizon
+    // (which is black for typical HDRIs). Result: distant raymarch
+    // terrain renders as pure black. Capping keeps compose's sky-
+    // detection from misfiring on far terrain hits.
     vec4 clip = pc.mvp * vec4(pos, 1.0);
-    gl_FragDepth = clip.z / clip.w;
+    gl_FragDepth = min(clip.z / clip.w, 0.9998);
 
     outColor = vec4(col, 1.0);
     // Screen-space motion vector for TAA. World position is stationary
