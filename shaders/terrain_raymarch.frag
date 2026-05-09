@@ -335,6 +335,38 @@ float terrainM(vec2 p) {
     return h;
 }
 
+// Distance-LOD variant: drops octaves smoothly as the ray distance
+// grows. The full octave count is the user's pc.tex_params.z; we
+// fade down to ~2 octaves past 600 m. Same outer wrapping (plateau
+// blend + sculpt delta) so close vs far results stay continuous —
+// only the inner FBM converges to a coarser sum past the LOD start.
+// Uses a uniform `kMaxOct` cap with an early-break so the loop body
+// stays branch-friendly for the GPU.
+float terrainM_lod(vec2 p, float ray_t) {
+    vec2 wp = p;
+    p *= TERRAIN_SCALE;
+    int oct_full = int(pc.tex_params.z);
+    int oct_min  = max(2, oct_full - 4);
+    float lod_f  = smoothstep(120.0, 600.0, ray_t);
+    int oct      = oct_full - int(lod_f * float(oct_full - oct_min));
+    float a = 0.0, b = 1.0;
+    vec2 d = vec2(0.0);
+    const int kMaxOct = 16;
+    for (int i = 0; i < kMaxOct; i++) {
+        if (i >= oct) break;
+        vec3 n = noised(p);
+        d += n.yz;
+        a += b * n.x / (1.0 + dot(d, d));
+        b *= 0.5;
+        p = m2 * p * 2.0;
+    }
+    float h = a * TERRAIN_HEIGHT;
+    float tpl = plateauWeight(wp);
+    h = mix(h, pc.color.w, tpl);
+    h += sampleHeightDelta(wp);
+    return h;
+}
+
 // Normal-detail FBM — finite-difference normals call this 3× per hit
 // pixel, so it's the single biggest cost in calcNormal. Octave count
 // is pc.tex_params.w (4..16). 8 is barely-distinguishable from 16 at
@@ -446,7 +478,12 @@ float raymarch(vec3 ro, vec3 rd) {
     t += jitter * 0.5;
     for (int i = 0; i < kSteps; i++) {
         vec3 pos = ro + t * rd;
-        float h = pos.y - terrainM(pos.xz);
+        // Distance-LOD on the FBM octave count — full octaves close
+        // to camera, smoothly fading down to ~2 octaves past 600 m.
+        // Equivalent visual quality past the LOD onset (sub-pixel
+        // detail) but big perf saving for rays that cover hundreds
+        // of metres before hitting.
+        float h = pos.y - terrainM_lod(pos.xz, t);
         if (abs(h) < 0.0015 * t) break;
         if (t > 1500.0) return -1.0;
         // Phase 6 — relaxation cone-stepping. Step grows with
@@ -578,18 +615,48 @@ float raymarchReflect(vec3 ro, vec3 rd) {
 // summed at slightly off-axis frequencies. `scale` multiplies the
 // base frequencies (1.0 = ~30 m wavelengths; 2.0 = half-wavelength
 // finer ripples; 0.5 = bigger sweeping waves).
+// Lake-style multi-octave wave normal. Combines a low-frequency
+// directional swell (wind blowing along +X) with three cross-direction
+// chops, then layers two high-frequency ripples for the close-up
+// detail. Each octave is biased toward sharper crests via a sin²-ish
+// shape (we use cos for the analytical derivative, equivalent up to
+// a phase shift). The result reads as proper lake water rather than
+// the previous uniform sinusoidal grid.
 vec3 waterNormal(vec2 worldXZ, float t, float strength, float scale) {
-    float k1 = 0.13 * scale;
-    float k2 = 0.17 * scale;
-    float k3 = 0.21 * scale;
-    float k4 = 0.27 * scale;
-    // Analytical partials (chain rule on the wave sums).
-    float dx = k1 * cos(worldXZ.x * k1 + t * 0.7) +
-               k3 * cos((worldXZ.x + worldXZ.y) * k3 + t * 1.1) +
-               k4 * cos((worldXZ.x - worldXZ.y) * k4 - t * 0.9);
-    float dz = k2 * cos(worldXZ.y * k2 - t * 0.6) +
-               k3 * cos((worldXZ.x + worldXZ.y) * k3 + t * 1.1) -
-               k4 * cos((worldXZ.x - worldXZ.y) * k4 - t * 0.9);
+    // Wind axis biased on +X — most lakes have a dominant direction.
+    vec2 wind  = normalize(vec2(1.0, 0.35));
+    vec2 cross1 = normalize(vec2(0.7, -0.7));
+    vec2 cross2 = normalize(vec2(-0.5, 0.85));
+
+    // Octaves: low (long swell) → high (ripple) wave numbers.
+    // amp[i] decays so high frequencies don't dominate the normal.
+    const int kOct = 6;
+    float k_base[6]   = float[6](0.06, 0.11, 0.18, 0.27, 0.42, 0.65);
+    float spd_base[6] = float[6](0.55, 0.70, 0.95, 1.20, 1.55, 2.10);
+    float amp[6]      = float[6](1.00, 0.75, 0.55, 0.40, 0.28, 0.18);
+
+    float dx = 0.0;
+    float dz = 0.0;
+    // Two octaves go along the wind axis; rest distributed across
+    // the cross directions for a non-grid wave field.
+    vec2  dir;
+    for (int i = 0; i < kOct; ++i) {
+        if (i < 2)        dir = wind;
+        else if (i < 4)   dir = cross1;
+        else              dir = cross2;
+        float k = k_base[i] * scale;
+        // Phase: dir·worldXZ * k - speed * t.
+        float ph = (worldXZ.x * dir.x + worldXZ.y * dir.y) * k -
+                   spd_base[i] * t;
+        // d/dx of sin(ph) wrt worldXZ = cos(ph) * k * dir.x. Sharpen
+        // by raising to a 1.4 power on the absolute term — keeps the
+        // sign while pinching crests.
+        float c = cos(ph);
+        float abs_c = abs(c);
+        float sharp = sign(c) * pow(abs_c, 1.4);
+        dx += amp[i] * k * dir.x * sharp;
+        dz += amp[i] * k * dir.y * sharp;
+    }
     return normalize(vec3(-dx * strength, 1.0, -dz * strength));
 }
 
