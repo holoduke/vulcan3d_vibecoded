@@ -50,3 +50,4 @@ shot*.ppm
 shot*.jpg
 
 assets/level1_heights.bin
+qlike_imgui.ini
