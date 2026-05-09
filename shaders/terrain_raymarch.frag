@@ -685,49 +685,40 @@ void main() {
         }
 
         // 2. RT ambient occlusion against castle / boxes / dyn-props.
-        //    9 rays in a fixed hemisphere pattern: 1 straight up + 8
-        //    arranged evenly around N. Spread tilted toward horizontal
-        //    so nearby walls actually intersect. Reach 8 m so the AO
-        //    falls off naturally with distance to the occluder.
-        //    Pattern is identical per pixel → smooth AO gradient.
+        //    6 closest-hit rays in a fixed hemisphere pattern. Each
+        //    ray's hit distance is weighted: very close hits darken
+        //    nearly fully, far hits don't darken at all. That way
+        //    even 1 horizontal ray hitting a wall 0.5 m away drops
+        //    the AO factor enough to read as "in a corner".
         vec3 N = nor;
         vec3 ref_n = abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
                                        : vec3(1.0, 0.0, 0.0);
         vec3 t1 = normalize(cross(ref_n, N));
         vec3 t2 = cross(N, t1);
-        const float kAoDist = 8.0;
-        // Each ring tap is at ~30° elevation (cos 60° = 0.5) so the
-        // ray is mostly horizontal-ish — best for catching nearby
-        // walls of cubes / castle on flat ground.
+        const float kAoDist = 6.0;
         const float c30 = 0.5;
         const float s30 = 0.866;
-        // 8 azimuth directions on the unit circle in the t1/t2 plane.
-        const float a0 = 1.0,           b0 = 0.0;
-        const float a1 = 0.7071,        b1 = 0.7071;
-        const float a2 = 0.0,           b2 = 1.0;
-        const float a3 = -0.7071,       b3 = 0.7071;
-        const float a4 = -1.0,          b4 = 0.0;
-        const float a5 = -0.7071,       b5 = -0.7071;
-        const float a6 = 0.0,           b6 = -1.0;
-        const float a7 = 0.7071,        b7 = -0.7071;
-        vec3 ao_dirs[9];
+        // 5 ring taps at 30° elevation, evenly around the surface,
+        // plus 1 straight up. Cheap (6 rays).
+        vec3 ao_dirs[6];
         ao_dirs[0] = N;
-        ao_dirs[1] = normalize(N * c30 + (t1 * a0 + t2 * b0) * s30);
-        ao_dirs[2] = normalize(N * c30 + (t1 * a1 + t2 * b1) * s30);
-        ao_dirs[3] = normalize(N * c30 + (t1 * a2 + t2 * b2) * s30);
-        ao_dirs[4] = normalize(N * c30 + (t1 * a3 + t2 * b3) * s30);
-        ao_dirs[5] = normalize(N * c30 + (t1 * a4 + t2 * b4) * s30);
-        ao_dirs[6] = normalize(N * c30 + (t1 * a5 + t2 * b5) * s30);
-        ao_dirs[7] = normalize(N * c30 + (t1 * a6 + t2 * b6) * s30);
-        ao_dirs[8] = normalize(N * c30 + (t1 * a7 + t2 * b7) * s30);
+        // 5 azimuth angles 0/72/144/216/288°
+        ao_dirs[1] = normalize(N * c30 + (t1 *  1.0000 + t2 *  0.0000) * s30);
+        ao_dirs[2] = normalize(N * c30 + (t1 *  0.3090 + t2 *  0.9511) * s30);
+        ao_dirs[3] = normalize(N * c30 + (t1 * -0.8090 + t2 *  0.5878) * s30);
+        ao_dirs[4] = normalize(N * c30 + (t1 * -0.8090 + t2 * -0.5878) * s30);
+        ao_dirs[5] = normalize(N * c30 + (t1 *  0.3090 + t2 * -0.9511) * s30);
         vec3 ao_origin = pos + N * 0.05;
-        float occluded = 0.0;
-        for (int i = 0; i < 9; ++i) {
-            if (any_hit_no_terrain(ao_origin, ao_dirs[i], kAoDist)) {
-                occluded += 1.0;
+        float ao_acc = 0.0;
+        for (int i = 0; i < 6; ++i) {
+            float t_hit;
+            if (closest_hit_no_terrain(ao_origin, ao_dirs[i], kAoDist, t_hit)) {
+                // Distance falloff: 1 = touching, 0 = at max range.
+                float w = 1.0 - clamp(t_hit / kAoDist, 0.0, 1.0);
+                ao_acc += w * w;   // squared so far hits matter little
             }
         }
-        ao = 1.0 - (occluded / 9.0) * 0.95;   // up to 95 % darken
+        ao = 1.0 - clamp(ao_acc / 3.0, 0.0, 0.95);
     }
 
     vec3 mate = getMaterial(pos, nor);
