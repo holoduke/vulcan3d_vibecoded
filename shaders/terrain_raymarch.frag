@@ -1050,6 +1050,14 @@ void main() {
 
     vec3 col = mate * lin + gi_indirect;
 
+    // Debug viz: replace the final colour with the GI contribution
+    // only (scaled). 0 = off, 1 = scaled gi_indirect, 2 = scaled raw
+    // gi (no albedo modulation, no softener). Toggled from
+    // Settings -> Lighting -> "GI debug viz (raymarch terrain)".
+    if (scene.terrain_extra.w > 0.5) {
+        col = gi_indirect * 4.0;
+    }
+
     // Wavelength-dependent atmospheric extinction (blue attenuates
     // ~4× faster than red), with a sun-tinted fog colour near the sun
     // direction so the horizon glows warm where the sun touches it.

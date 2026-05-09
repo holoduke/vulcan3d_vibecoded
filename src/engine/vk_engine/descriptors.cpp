@@ -256,7 +256,8 @@ void VulkanEngine::update_scene_ubo() {
     data.light_vp = sun_shadow_light_vp_;
     data.terrain_extra = glm::vec4(rt_.terrain_shading_contrast,
                                     rt_.shadow_near_mult,
-                                    rt_.gi_softener, 0.0f);
+                                    rt_.gi_softener,
+                                    rt_.gi_debug_viz ? 1.0f : 0.0f);
     // Ocean / water plane params. Time is derived from frame number
     // at a nominal 60 Hz — exact wall-clock isn't needed for waves
     // and avoids threading a real timer here.

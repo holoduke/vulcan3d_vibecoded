@@ -1208,6 +1208,11 @@ private:
         //     (no per-pixel noise but loses occluder-aware GI variation).
         // Useful when gi_samples is too low to converge on its own.
         float gi_softener = 0.5f;
+        // Debug viz: when true, the raymarched-terrain shader replaces its
+        // final colour with the gi_indirect term only (scaled up so it's
+        // clearly visible). Lets you confirm the path-traced GI loop is
+        // firing and producing meaningful contribution at this pixel.
+        bool  gi_debug_viz = false;
         // Specular reflection on flagged surfaces (the pedestal).
         bool  reflections_enabled = true;
         float reflection_strength = 0.5f;
