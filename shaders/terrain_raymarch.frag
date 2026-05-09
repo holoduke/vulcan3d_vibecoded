@@ -881,6 +881,21 @@ void main() {
         // Subtle darkening of the surface tint when in shadow.
         col_w *= mix(0.7, 1.0, water_lit);
 
+        // Wave-peak foam — wnor.y drops on steep wave faces; fold in
+        // a 2-octave drifting noise so the foam reads as a stochastic
+        // froth rather than a clean steepness mask. Scrolling along
+        // the wind direction gives the field motion. Foam intensity
+        // also modulated by `water_lit` so shadowed water doesn't get
+        // bright white speckles.
+        {
+            float steepness = clamp(1.0 - wnor.y * 1.04, 0.0, 1.0);
+            vec2 fp = wpos.xz * 0.55 + vec2(wave_t * 0.30, wave_t * 0.18);
+            float fn = noise2(fp) * 0.6 + noise2(fp * 2.13) * 0.4;
+            float foam = smoothstep(0.45, 0.85, fn * steepness * 1.6);
+            col_w = mix(col_w, vec3(0.95, 0.97, 1.0),
+                        foam * 0.85 * water_lit);
+        }
+
         // Apply the same volumetric fog as terrain (reuse the
         // existing block by jumping to a tail). To keep the diff
         // tight we re-do the fog inline here using the same code path.
