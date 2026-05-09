@@ -886,17 +886,16 @@ void main() {
 
     vec3 lin = vec3(0.0);
     lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a;
-    // Path-traced sky GI — averaged sky colour seen by the
-    // hemisphere rays in the AO loop. Replaces the analytical
-    // ambient when the GI ray budget is non-zero (rt_flags2.x); the
-    // analytical fallback stays when GI is off so the surface
-    // doesn't go pitch-black.
-    if (scene.rt_flags2.x > 0 && do_rt) {
-        lin += gi_sky * 0.6;     // GI strength; could expose to a slider
-        lin += fre * scene.sky_color.rgb * 0.25 * ao;
-    } else {
-        lin += amb * scene.sky_color.rgb * 0.35 * ao;
-        lin += fre * scene.sky_color.rgb * 0.25 * ao;
+    // Analytical ambient + Fresnel rim — always applies, modulated
+    // by AO so corners darken.
+    lin += amb * scene.sky_color.rgb * 0.35 * ao;
+    lin += fre * scene.sky_color.rgb * 0.25 * ao;
+    // Path-traced sky GI — averaged sky colour from the hemisphere
+    // rays in the AO loop. ADDITIVE on top, only contributes when
+    // the AO loop actually ran AND GI samples > 0; otherwise gi_sky
+    // is zero and this is a no-op.
+    if (scene.rt_flags2.x > 0) {
+        lin += gi_sky * 0.4 * scene.rt_params2.x;   // strength × global GI slider
     }
 
     vec3 col = mate * lin;
