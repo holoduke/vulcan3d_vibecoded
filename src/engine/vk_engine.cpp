@@ -1251,6 +1251,8 @@ void VulkanEngine::run(const RunOptions& opts) {
         if (audio_) {
             audio_->set_listener(player_.eye_position(), player_.forward());
         }
+        // Spacejet flyovers: advance active flights, spawn next wave.
+        tick_spacejet(frame_dt);
         maybe_autosave_settings(frame_dt);
 
         // ImGui frame begins regardless; we just don't fill it when playing.

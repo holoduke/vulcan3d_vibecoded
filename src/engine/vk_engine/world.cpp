@@ -1809,28 +1809,14 @@ void VulkanEngine::init_spacejet() {
         log::info("spacejet: no asset at assets/spacejet/scene.gltf — skipping");
         return;
     }
-    // Place next to the castle on the plateau. Castle origin is
-    // (0, plateau_height) with brushes filling roughly the inner
-    // 56 m square; we drop the jet 18 m east of centre and 8 m
-    // up so it hovers comfortably above the parapet.
-    const float plateau_h = 22.0f;
-    glm::vec3 jet_world(18.0f, plateau_h + 8.0f, 6.0f);
-
     // Normalise to a sensible visual size — scale so the asset's
-    // longest dimension is ~6 m.
+    // longest dimension is ~6 m. Per-flight scale jitter multiplies
+    // this base value.
     glm::vec3 center = (gltf.aabb_min + gltf.aabb_max) * 0.5f;
     glm::vec3 extent = gltf.aabb_max - gltf.aabb_min;
     float max_side = std::max({extent.x, extent.y, extent.z, 1e-3f});
-    float scale = 6.0f / max_side;
-
-    // Asset is standard glTF (Y-up, -Z forward) — no axis-swap
-    // rotation needed. -90° X put nose at -Y (down), +90° X put nose
-    // at +Y (up); identity puts nose at -Z (engine-forward) with top
-    // at +Y (engine-up), which is what we want.
-    spacejet_base_xform_ =
-        glm::translate(glm::mat4(1.0f), jet_world) *
-        glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
-        glm::translate(glm::mat4(1.0f), -center);
+    spacejet_centre_offset_ = -center;
+    spacejet_base_scale_    = 6.0f / max_side;
 
     spacejet_meshes_.reserve(gltf.primitives.size());
     for (const auto& prim : gltf.primitives) {
@@ -1844,14 +1830,93 @@ void VulkanEngine::init_spacejet() {
         sm.base_color = prim.base_color;
         spacejet_meshes_.push_back(std::move(sm));
     }
-    log::infof("spacejet: loaded %zu primitives, scale=%.3f, pos=(%.1f,%.1f,%.1f)",
-               spacejet_meshes_.size(), scale,
-               jet_world.x, jet_world.y, jet_world.z);
+    log::infof("spacejet: loaded %zu primitives, base_scale=%.3f — flyover system armed",
+               spacejet_meshes_.size(), spacejet_base_scale_);
 }
 
 void VulkanEngine::destroy_spacejet() {
     for (auto& sm : spacejet_meshes_) destroy_mesh(allocator_, sm.mesh);
     spacejet_meshes_.clear();
+    spacejet_flights_.clear();
+}
+
+void VulkanEngine::tick_spacejet(float dt) {
+    if (spacejet_meshes_.empty()) return;
+
+    // Per-tick: integrate heading (turn_rate * dt), then position
+    // along the new heading. Despawn when ttl elapses.
+    for (auto& f : spacejet_flights_) {
+        f.prev_pos     = f.pos;
+        f.prev_heading = f.heading;
+        f.heading += f.turn_rate * dt;
+        glm::vec3 fwd{ std::sin(f.heading), 0.0f, std::cos(f.heading) };
+        f.pos += fwd * (f.speed * dt);
+        f.t   += dt;
+    }
+    spacejet_flights_.erase(
+        std::remove_if(spacejet_flights_.begin(), spacejet_flights_.end(),
+                       [](const SpacejetFlight& f){ return f.t >= f.ttl; }),
+        spacejet_flights_.end());
+
+    // Spawn cadence — random next wave 4-12 s out, wave size 1-5 jets.
+    spacejet_spawn_timer_ -= dt;
+    if (spacejet_spawn_timer_ > 0.0f) return;
+    spacejet_spawn_timer_ = frand_range(spacejet_rng_state_, 4.0f, 12.0f);
+
+    // Wave size weighted toward 1: heavy-tail distribution so 5-jet
+    // formations are rare-but-cool.
+    uint32_t r = xorshift32(spacejet_rng_state_) % 100u;
+    int wave = (r < 55) ? 1 :          // 55% solo
+               (r < 85) ? 2 :          //  30% pair
+               (r < 95) ? 3 : 5;       //  10% trio, 5% formation of five
+
+    // Pick a flight heading. 0..2π, 0 = +Z. Spawn point is 1.4 km
+    // behind the castle (i.e. opposite the heading direction) so the
+    // jet flies inbound, over, and out the other side.
+    float heading = frand(spacejet_rng_state_) * 6.28318530718f;
+    glm::vec3 fwd{ std::sin(heading), 0.0f, std::cos(heading) };
+    glm::vec3 right{ fwd.z, 0.0f, -fwd.x };
+
+    constexpr float kTrackLen = 2800.0f;
+    constexpr float kSideJit  = 80.0f;
+    float lateral  = frand_range(spacejet_rng_state_, -kSideJit, kSideJit);
+    // Altitude clear of FBM peaks (TERRAIN_HEIGHT = 120 m).
+    float altitude = frand_range(spacejet_rng_state_, 150.0f, 190.0f);
+    float speed    = frand_range(spacejet_rng_state_,  70.0f, 130.0f);
+
+    // Random gentle turn rate. Most waves go straight; some bank
+    // through a wide arc for variety. Cap at ~6 deg/s (0.1 rad/s)
+    // so the curve is visible but not aerobatic. ~30% chance of any
+    // turn at all.
+    float turn_rate = 0.0f;
+    if ((xorshift32(spacejet_rng_state_) & 0xFFu) < 80u) {
+        turn_rate = frand_range(spacejet_rng_state_, -0.10f, 0.10f);
+    }
+
+    glm::vec3 wave_origin = -fwd * (kTrackLen * 0.5f) +
+                            right * lateral +
+                            glm::vec3(0.0f, altitude, 0.0f);
+
+    for (int i = 0; i < wave; ++i) {
+        float side  = (wave == 1) ? 0.0f
+                                  : (float(i) - float(wave - 1) * 0.5f) * 12.0f;
+        float along = (wave == 1) ? 0.0f
+                                  : float(i) * 6.0f;
+        SpacejetFlight f{};
+        f.pos          = wave_origin + right * side - fwd * along;
+        f.heading      = heading;
+        f.prev_heading = heading;
+        f.turn_rate    = turn_rate;
+        f.speed        = speed + frand_range(spacejet_rng_state_, -8.0f, 8.0f);
+        f.scale        = 1.0f + frand_range(spacejet_rng_state_, -0.2f, 0.4f);
+        f.t            = 0.0f;
+        f.ttl          = kTrackLen / std::max(40.0f, f.speed) + 2.0f;
+        f.prev_pos     = f.pos;
+        spacejet_flights_.push_back(f);
+    }
+    log::infof("[spacejet] wave of %d launched (heading=%.1f deg, alt=%.0f, "
+               "spd=%.0f, turn=%.2f rad/s)",
+               wave, glm::degrees(heading), altitude, speed, turn_rate);
 }
 
 void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,
@@ -2515,31 +2580,47 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // Spacejet — hovering decoration on the plateau. One draw per
     // glTF primitive. Animated via sin(time) for the bob and a
     // slow yaw rotation. Raster-only; no physics, no BLAS.
-    if (!spacejet_meshes_.empty()) {
-        float t = static_cast<float>(frame_number_) * (1.0f / 60.0f);
-        float bob = std::sin(t * 1.2f) * 0.35f;          // ±35 cm sway
-        float yaw = t * 0.08f;                            // slow spin
-        glm::mat4 anim =
-            glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, bob, 0.0f)) *
-            glm::rotate   (glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f));
-        glm::mat4 model = anim * spacejet_base_xform_;
-        for (const auto& sm : spacejet_meshes_) {
-            VkDeviceSize off = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &sm.mesh.vertex_buffer, &off);
-            vkCmdBindIndexBuffer(cmd, sm.mesh.index_buffer, 0,
-                                  VK_INDEX_TYPE_UINT32);
-            PushConstants pc{};
-            pc.mvp      = vp * model;
-            pc.model    = model;
-            pc.prev_mvp = prev_vp * model;   // mostly stationary, fine for TAA
-            pc.color    = sm.base_color;
-            pc.emissive = glm::vec4(0.0f);
-            pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
-            vkCmdPushConstants(cmd, pipeline_layout_,
-                               VK_SHADER_STAGE_VERTEX_BIT |
-                                 VK_SHADER_STAGE_FRAGMENT_BIT,
-                               0, sizeof(PushConstants), &pc);
-            vkCmdDrawIndexed(cmd, sm.mesh.index_count, 1, 0, 0, 0);
+    if (!spacejet_meshes_.empty() && !spacejet_flights_.empty()) {
+        for (const auto& f : spacejet_flights_) {
+            // Asset's nose points -Z in glTF space; we need it pointing
+            // along the heading direction +Z(rotated). Yaw value
+            // (heading + π) flips so rotY puts -Z in line with fwd.
+            const float yaw_now  = f.heading      + 3.14159265f;
+            const float yaw_prev = f.prev_heading + 3.14159265f;
+            // Bank roll proportional to turn rate — banked-into-the-turn
+            // look. Cap at ±35° so even tight turns stay readable.
+            const float bank_now  = glm::clamp(-f.turn_rate * 4.0f,
+                                                -0.61f, 0.61f);
+            const float bank_prev = bank_now;     // bank changes very slowly
+            auto build_model = [&](glm::vec3 pos, float yaw, float bank) {
+                return glm::translate(glm::mat4(1.0f), pos) *
+                       glm::rotate   (glm::mat4(1.0f), yaw,  glm::vec3(0,1,0)) *
+                       glm::rotate   (glm::mat4(1.0f), bank, glm::vec3(0,0,1)) *
+                       glm::scale    (glm::mat4(1.0f),
+                                       glm::vec3(spacejet_base_scale_ * f.scale)) *
+                       glm::translate(glm::mat4(1.0f), spacejet_centre_offset_);
+            };
+            glm::mat4 model      = build_model(f.pos,      yaw_now,  bank_now);
+            glm::mat4 prev_model = build_model(f.prev_pos, yaw_prev, bank_prev);
+
+            for (const auto& sm : spacejet_meshes_) {
+                VkDeviceSize off = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &sm.mesh.vertex_buffer, &off);
+                vkCmdBindIndexBuffer(cmd, sm.mesh.index_buffer, 0,
+                                      VK_INDEX_TYPE_UINT32);
+                PushConstants pc{};
+                pc.mvp      = vp * model;
+                pc.model    = model;
+                pc.prev_mvp = prev_vp * prev_model;
+                pc.color    = sm.base_color;
+                pc.emissive = glm::vec4(0.0f);
+                pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
+                vkCmdPushConstants(cmd, pipeline_layout_,
+                                   VK_SHADER_STAGE_VERTEX_BIT |
+                                     VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(PushConstants), &pc);
+                vkCmdDrawIndexed(cmd, sm.mesh.index_count, 1, 0, 0, 0);
+            }
         }
         // Restore cube mesh binding for the grass / dust passes that
         // assume the cube vertex/index buffer is current.

@@ -469,18 +469,36 @@ private:
     std::vector<ViewmodelMesh> viewmodel_gltf_;
     glm::mat4 viewmodel_root_offset_{ 1.0f };    // local-to-camera placement
 
-    // Spacejet decoration — glTF asset that hovers next to the
-    // castle on the plateau. One Mesh per primitive, drawn raster-
-    // only (no physics, no BLAS). Position + bob set at init time;
-    // animated via sin(frame_time) in render_world.
+    // Spacejet flyover system — glTF asset loaded once, rendered as
+    // an instanced flock that periodically streams across the level.
+    // No physics, no BLAS; raster-only. Each `SpacejetFlight` is a
+    // straight-line path at constant velocity at high altitude over
+    // the castle area. spacejet_spawn_timer_ counts down to the
+    // next wave (1-5 jets in tight formation, random direction).
     struct SpacejetMesh {
         Mesh mesh;
         glm::vec4 base_color = glm::vec4(0.7f, 0.72f, 0.78f, 1.0f);
     };
-    std::vector<SpacejetMesh> spacejet_meshes_;
-    glm::mat4 spacejet_base_xform_{ 1.0f };       // position+scale, no animation
+    struct SpacejetFlight {
+        glm::vec3 pos{};          // current world position (XZ tracked, Y constant)
+        float     heading = 0.0f; // current yaw (radians, 0 = +Z)
+        float     turn_rate = 0.0f; // rad/sec (signed; 0 = straight line)
+        float     speed   = 90.0f;
+        float     scale   = 1.0f;
+        float     t       = 0.0f;
+        float     ttl     = 30.0f;
+        glm::vec3 prev_pos{};     // previous-frame pos for TAA motion vec
+        float     prev_heading = 0.0f;
+    };
+    std::vector<SpacejetMesh>   spacejet_meshes_;
+    std::vector<SpacejetFlight> spacejet_flights_;
+    glm::vec3 spacejet_centre_offset_{0.0f};      // gltf bbox-centre, applied per draw
+    float     spacejet_base_scale_      = 1.0f;   // gltf-bbox-derived scale
+    float     spacejet_spawn_timer_     = 2.0f;   // first wave after 2s
+    uint32_t  spacejet_rng_state_       = 0xC0DEFEEDu;
     void init_spacejet();
     void destroy_spacejet();
+    void tick_spacejet(float dt);                 // move + spawn + despawn
 
     // 60 dynamic crates: 100 still let the autodemo TDR (~2.4s on a 4080
     // even with the merged-static BLAS), so we drop further. The bottleneck
