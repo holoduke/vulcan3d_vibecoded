@@ -894,13 +894,8 @@ void main() {
     // by AO so corners darken.
     lin += amb * scene.sky_color.rgb * 0.35 * ao;
     lin += fre * scene.sky_color.rgb * 0.25 * ao;
-    // Path-traced sky GI — averaged sky colour from the hemisphere
-    // rays in the AO loop. ADDITIVE on top, only contributes when
-    // the AO loop actually ran AND GI samples > 0; otherwise gi_sky
-    // is zero and this is a no-op.
-    if (scene.rt_flags2.x > 0) {
-        lin += gi_sky * 0.4 * scene.rt_params2.x;   // strength × global GI slider
-    }
+    // GI add temporarily disabled while diagnosing black-tile artifact
+    // the user reports. Was: `lin += gi_sky * 0.4 * scene.rt_params2.x`.
 
     vec3 col = mate * lin;
 
