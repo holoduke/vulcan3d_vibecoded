@@ -13,6 +13,8 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
+#include <cmath>
+
 #include <cstdint>
 #include <vector>
 
@@ -136,6 +138,20 @@ struct TerrainChunkSet {
     int chunks_per_side = 0;
     int chunk_cells = 0;       // cells per chunk side
 };
+
+// Camera-distance LOD picker. Same thresholds drive depth pre-pass +
+// color pass + sun-shadow pass so depth values match across passes
+// (mismatch breaks the depth pre-pass's LESS_OR_EQUAL test).
+inline int pick_terrain_lod(const TerrainChunk& c, glm::vec3 cam_xz,
+                            float lod1, float lod2, float lod3) {
+    float dx = c.center.x - cam_xz.x;
+    float dz = c.center.z - cam_xz.z;
+    float d = std::sqrt(dx * dx + dz * dz);
+    if (d < lod1) return 0;
+    if (d < lod2) return 1;
+    if (d < lod3) return 2;
+    return 3;
+}
 
 // Builds chunks_per_side² chunks from `hm`. `chunks_per_side` must
 // divide `hm.dim`. Each chunk covers chunk_cells = hm.dim/chunks_per_side

@@ -748,53 +748,8 @@ void VulkanEngine::destroy_terrain_raymarch_compose_pipeline() {
     }
 }
 
-void VulkanEngine::init_sun_shadow_pipeline() {
-    std::string sd = QLIKE_SHADER_DIR;
-    sun_shadow_vert_module_ = vkpipe::load_shader_module(device_, sd + "/shadow.vert.spv");
-
-    vkpipe::GraphicsPipelineConfig cfg{};
-    cfg.vert = sun_shadow_vert_module_;
-    cfg.frag = VK_NULL_HANDLE;          // depth-only
-    cfg.layout = pipeline_layout_;       // shares the cube push-constant layout
-    cfg.color_attachment_count = 0;
-    cfg.depth_format = VK_FORMAT_D32_SFLOAT;
-    // CULL_NONE on shadow casters: at a ground-contact line (cube on
-    // terrain) the bottom face is back-facing the light and equals the
-    // ground depth, so CULL_FRONT would let the ground test as lit at
-    // the contact. Recording both faces with positive depth bias gives
-    // a sun-facing caster depth at the contact line and the existing
-    // bias still controls self-acne.
-    cfg.cull = VK_CULL_MODE_NONE;
-    cfg.depth_test = true;
-    cfg.depth_write = true;
-    cfg.depth_compare = VK_COMPARE_OP_LESS;
-    cfg.depth_bias_enable = true;        // dynamic slope/constant bias
-
-    VkVertexInputBindingDescription vb{};
-    vb.binding = 0;
-    vb.stride = sizeof(Vertex);
-    vb.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    cfg.vbindings.push_back(vb);
-    VkVertexInputAttributeDescription a0{};
-    a0.location = 0; a0.binding = 0;
-    a0.format = VK_FORMAT_R32G32B32_SFLOAT;
-    a0.offset = offsetof(Vertex, position);
-    cfg.vattrs = { a0 };
-
-    sun_shadow_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
-    log::info("sun shadow pipeline built");
-}
-
-void VulkanEngine::destroy_sun_shadow_pipeline() {
-    if (sun_shadow_pipeline_) {
-        vkDestroyPipeline(device_, sun_shadow_pipeline_, nullptr);
-        sun_shadow_pipeline_ = VK_NULL_HANDLE;
-    }
-    if (sun_shadow_vert_module_) {
-        vkDestroyShaderModule(device_, sun_shadow_vert_module_, nullptr);
-        sun_shadow_vert_module_ = VK_NULL_HANDLE;
-    }
-}
+// init_sun_shadow_pipeline / destroy_sun_shadow_pipeline moved to
+// vk_engine/sun_shadow.cpp.
 
 void VulkanEngine::init_grass_pipeline() {
     std::string sd = QLIKE_SHADER_DIR;

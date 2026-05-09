@@ -1,0 +1,99 @@
+00:01:16.547 INFO  [crash] handler installed (SEH + set_terminate)
+00:01:16.550 INFO  quake-like startup (argc=3)
+00:01:16.552 INFO  VulkanEngine::init()
+00:01:16.639 INFO  [audio] miniaudio engine initialized
+00:01:16.808 INFO  vk instance created (validation=off)
+00:01:16.820 INFO  vk physical device: NVIDIA GeForce RTX 4080
+00:01:16.953 INFO  vk device created, graphics queue family=0
+00:01:16.956 INFO  vk compute queue family=2 (ASYNC — separate from graphics)
+00:01:16.958 INFO  RT extension function pointers loaded
+00:01:16.964 INFO  pipeline cache loaded: qlike_pipeline.cache (5261737 bytes)
+00:01:17.113 INFO  render_extent: 1280x720 (swapchain 1280x720 × 1.00 scale)
+00:01:17.113 INFO  swapchain: 1280x720, 3 images, format=44
+00:01:17.114 INFO  depth image created
+00:01:17.115 INFO  readback buffer allocated (3686400 bytes)
+00:01:17.116 INFO  preload: terrain_raymarch_enabled = 1
+00:01:17.120 INFO  cube mesh created: 24 verts, 36 indices
+00:01:17.120 INFO  cylinder mesh created: 66 verts, 192 indices (16 segments)
+00:01:17.121 INFO  world: 134 brushes
+00:01:17.174 INFO  [terrain] heightmap_raymarch 2048x2048 cells, 2048m side, plateau h=22.0
+00:01:17.326 INFO  [terrain] mesh: 4206597 verts, 25165824 indices
+00:01:17.789 INFO  [terrain] chunks: 32x32 (= 1024) at 64 cells/chunk; verts/chunk=4485 lod0_tris=8704 lod1=2304 lod2=640 lod3=192
+00:01:17.854 INFO  [grass] placed 800000 blades (806600 attempts, 800000 max)
+00:01:17.857 INFO  [jolt] global init complete
+00:01:17.858 INFO  PhysicsWorld initialized (Jolt)
+00:01:18.053 INFO  [jolt] heightfield: 2048x2048 samples, block=8, cell=1.0m
+00:01:18.054 INFO  Jolt: 135 static bodies; dynamic boxes will spawn over time (max 60, every 0.40s)
+00:01:18.515 INFO  [skybox] EXR loaded assets/sky/MorningSkyHDRI002B_4K_HDR.exr: 4096x2048 (RGBA32F)
+00:01:18.516 INFO  [skybox] HDR sun extracted at uv=(0.504, 0.432) lum=31774.44 → dir=(0.02, 0.21, 0.98)
+00:01:18.549 INFO  [skybox] sun synced to UI: pitch=12.3В° yaw=1.5В°
+00:01:18.614 INFO  [texture] uploaded assets/tex/Ground054/Ground054_2K-JPG_Color.jpg: 2048x2048
+00:01:18.695 INFO  [texture] uploaded assets/tex/Ground054/Ground054_2K-JPG_NormalGL.jpg: 2048x2048
+00:01:18.745 INFO  [texture] uploaded assets/tex/Bricks067/Bricks067_2K-JPG_Color.jpg: 2048x2048
+00:01:18.819 INFO  [texture] uploaded assets/tex/Bricks067/Bricks067_2K-JPG_NormalGL.jpg: 2048x2048
+00:01:18.872 INFO  [texture] uploaded assets/tex/Wood048/Wood048_2K-JPG_Color.jpg: 2048x2048
+00:01:18.943 INFO  [texture] uploaded assets/tex/Wood048/Wood048_2K-JPG_NormalGL.jpg: 2048x2048
+00:01:18.980 INFO  [texture] uploaded assets/tex/Metal042A/Metal042A_2K-JPG_Color.jpg: 2048x2048
+00:01:19.006 INFO  [texture] uploaded assets/tex/Metal042A/Metal042A_2K-JPG_NormalGL.jpg: 2048x2048
+00:01:19.027 INFO  [texture] uploaded assets/tex/PaintedPlaster017/PaintedPlaster017_2K-JPG_Color.jpg: 2048x1024
+00:01:19.066 INFO  [texture] uploaded assets/tex/PaintedPlaster017/PaintedPlaster017_2K-JPG_NormalGL.jpg: 2048x1024
+00:01:19.066 INFO  settings loaded from qlike_settings.cfg (129 keys)  textures=0  shadows=1/10  gi=8
+00:01:19.067 INFO  descriptors created
+00:01:19.070 INFO  BLAS (cube) built: 12 tris
+00:01:19.071 INFO  BLAS (cylinder) built: 64 tris
+00:01:19.107 INFO  BLAS (terrain) built: 8388608 tris
+00:01:19.107 INFO  BLAS (merged-static) compacted: 117632 -> 55552 bytes (47%)
+00:01:19.107 INFO  BLAS (merged-static): 134 brushes, 1608 tris
+00:01:19.108 INFO  RT initialized: max 768 instances, TLAS buffer 268032 B
+00:01:19.108 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/cube.vert.spv (2264 bytes)
+00:01:19.108 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/cube.frag.spv (40744 bytes)
+00:01:19.109 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/cube_depth.frag.spv (152 bytes)
+00:01:19.109 INFO  graphics + depth-prepass pipelines built
+00:01:19.109 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/terrain.vert.spv (2464 bytes)
+00:01:19.110 INFO  terrain pipelines built (CD-LOD morph)
+00:01:19.110 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/terrain_raymarch.vert.spv (900 bytes)
+00:01:19.110 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/terrain_raymarch.frag.spv (130428 bytes)
+00:01:19.111 INFO  terrain raymarch pipeline built
+00:01:19.111 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/terrain_raymarch_compose.frag.spv (4824 bytes)
+00:01:19.111 INFO  terrain raymarch compose pipeline built
+00:01:19.122 INFO  terrain raymarch low-res targets: 1280x720 (100%)
+00:01:19.122 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/shadow.vert.spv (1032 bytes)
+00:01:19.122 INFO  sun shadow pipeline built
+00:01:19.123 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/grass.vert.spv (10700 bytes)
+00:01:19.123 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/grass.frag.spv (4072 bytes)
+00:01:19.123 INFO  grass pipeline built
+00:01:19.129 INFO  heightmap texture uploaded (2049x2049, 16.0 MB)
+00:01:19.920 INFO  [terrain] heightmap shadow baked: 2049x2049 (16 threads)
+00:01:19.924 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/taa.vert.spv (852 bytes)
+00:01:19.924 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/taa.frag.spv (5868 bytes)
+00:01:19.925 INFO  TAA initialized
+00:01:19.925 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/bloom_down.frag.spv (8928 bytes)
+00:01:19.925 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/bloom_up.frag.spv (2604 bytes)
+00:01:19.925 INFO  Bloom mip chain initialized
+00:01:19.926 INFO  loaded shader: C:/Users/gillis/dev/quake-like/build/shaders/compose.frag.spv (13672 bytes)
+00:01:19.926 INFO  Compose pass initialized (ACES Fitted tonemap + sRGB encode)
+00:01:19.926 INFO  [gltf] no asset at assets/gun.glb — using procedural viewmodel
+00:01:19.926 INFO  viewmodel: using procedural placeholder (drop assets/gun.glb to override)
+00:01:19.928 INFO  [gltf] loaded assets/spacejet/scene.gltf: 6 primitives, 27453 verts, 134592 indices, extent=(15.00,2.50,15.00)
+00:01:19.929 INFO  spacejet: loaded 6 primitives, base_scale=0.400 — flyover system armed
+00:01:19.930 INFO  ImGui initialized (Vulkan, dynamic rendering)
+00:01:19.930 INFO  VulkanEngine::init() done
+00:01:19.930 INFO  run(): max_frames=-1 screenshot='' after=5
+00:01:19.931 INFO  [autodemo] running for 8.00s (forward+turn+fire)
+00:01:19.931 INFO  fps cap: 180 Hz (monitor refresh)
+00:01:20.931 INFO  player pos=(26.316, 23.448, 29.840) vel=(1.369, -4.268, -1.013) speed_h=1.703 grounded=0 feet_y=22.548 fps=130.1 ticks=2
+00:01:20.931 INFO  state  proj=1 particles=222 dyn_props=0 tlas_n=3 frame=119 vk_warn=0 vk_err=0
+00:01:21.932 INFO  player pos=(28.362, 23.815, 28.888) vel=(2.444, -2.910, -0.777) speed_h=2.564 grounded=0 feet_y=22.915 fps=131.9 ticks=1
+00:01:21.932 INFO  state  proj=1 particles=227 dyn_props=0 tlas_n=3 frame=235 vk_warn=0 vk_err=0
+00:01:21.932 INFO  [spacejet] wave of 3 launched (heading=308.3 deg, alt=181, spd=85, turn=0.00 rad/s)
+00:01:22.942 INFO  player pos=(30.308, 20.840, 34.638) vel=(-1.883, 0.000, 7.907) speed_h=8.128 grounded=1 feet_y=19.940 fps=131.1 ticks=1
+00:01:22.942 INFO  state  proj=0 particles=231 dyn_props=0 tlas_n=3 frame=356 vk_warn=0 vk_err=0
+00:01:23.946 INFO  player pos=(25.129, 16.834, 40.501) vel=(-7.193, 0.000, 3.584) speed_h=8.037 grounded=1 feet_y=15.934 fps=146.6 ticks=1
+00:01:23.946 INFO  state  proj=1 particles=216 dyn_props=0 tlas_n=3 frame=480 vk_warn=0 vk_err=0
+00:01:24.952 INFO  player pos=(17.451, 14.326, 42.968) vel=(-7.569, 0.000, 2.644) speed_h=8.017 grounded=1 feet_y=13.426 fps=152.4 ticks=1
+00:01:24.953 INFO  state  proj=1 particles=223 dyn_props=0 tlas_n=3 frame=632 vk_warn=0 vk_err=0
+00:01:27.536 INFO  VulkanEngine::shutdown() (device_lost=1)
+00:01:27.537 INFO  settings saved to qlike_settings.cfg
+00:01:27.543 INFO  [jolt] global shutdown complete
+00:01:27.557 INFO  pipeline cache saved: qlike_pipeline.cache (5261737 bytes)
+00:01:27.642 INFO  quake-like shutdown

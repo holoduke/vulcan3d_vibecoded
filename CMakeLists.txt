@@ -210,6 +210,7 @@ add_library(qlike_engine STATIC
     src/engine/vk_engine/post.cpp
     src/engine/vk_engine/bloom.cpp
     src/engine/vk_engine/taa.cpp
+    src/engine/vk_engine/sun_shadow.cpp
     src/engine/vk_engine/combat.cpp
     src/engine/vk_engine/screenshot.cpp
     src/engine/vk_engine/setup.cpp
