@@ -102,13 +102,22 @@ bool closest_hit_no_terrain(vec3 origin, vec3 dir, float t_max,
 
 // Tiny xorshift32 hash — deterministic per-pixel jitter for the
 // stratified shadow rays.
-float rmRand(uvec3 s) {
-    s.x ^= s.x << 13u;
-    s.x ^= s.x >> 17u;
-    s.x ^= s.x << 5u;
-    s.x += s.y * 19349663u;
-    s.x += s.z * 83492791u;
-    return float(s.x & 0x00FFFFFFu) / 16777216.0;
+// Interleaved Gradient Noise — same dither pattern cube.frag uses
+// for PCSS / RTAO. xorshift hashes (the previous rmRand) produce
+// row-banding correlations that read as moving "lines in shadows"
+// even with TAA. IGN is designed for stochastic rendering: low
+// perceptual structure across pixels, well-distributed across the
+// sample-index axis when you offset the input position.
+float ignBase(vec2 p) {
+    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+}
+float rmRand(uvec3 seed) {
+    // Same recipe as cube.frag::rand — shift the input position by
+    // the sample index along a magic vector so each sample's jitter
+    // is uncorrelated within a pixel but smooth across neighbours.
+    float s = float(seed.x) + 5.588238 * float(seed.z);
+    float t = float(seed.y) + 1.388765 * float(seed.z);
+    return ignBase(vec2(s, t));
 }
 
 // Scene UBO — same layout as cube.frag's binding 0. Only a handful of
@@ -316,15 +325,22 @@ vec3 calcNormal(vec3 pos, float t) {
     return normalize(vec3(hC - hR, eps, hC - hU));
 }
 
-// Classic heightfield soft-shadow march — `min(k·h/t)` where h is
-// the vertical gap between the ray and the FBM surface. Works on
-// heightfields where steps don't equal the geodesic distance (we
-// clamp the step to a useful range, decoupling step from h, which
-// breaks Inigo Quilez's geometric-triangulation variant — that
-// formula assumes sphere-trace properties). Cubic smoothstep at
-// the end softens the linear penumbra ramp into a more natural
-// curve. k = 16 gives a moderate softness; lower = softer.
+// Classic heightfield soft-shadow march — `min(k·h/t)`. k ties to
+// the global Shadow softness slider (rt_params.x) so a single
+// control softens both terrain self-shadow AND PCSS castle/box
+// shadows. Slider 0 → k=64 (razor sharp), slider 0.15 → k=4
+// (very soft). Cubic smoothstep at the end softens the linear
+// penumbra ramp.
 float calcShadow(vec3 pos, vec3 sunDir) {
+    // Driven by global Shadow softness slider × per-terrain
+    // softness scale. Same combination the PCSS below uses so both
+    // shadow types respond to the same UI controls in lock-step.
+    float soft_g = scene.rt_params.x;
+    if (scene.terrain_params.w > 0.0) {
+        soft_g *= max(0.05, scene.terrain_params.w);
+    }
+    float soft = clamp(soft_g / 0.15, 0.0, 1.0);
+    float k    = mix(64.0, 4.0, soft);
     float res = 1.0;
     float t   = 0.05;
     int kSteps = int(pc.tex_params.y);
@@ -332,7 +348,7 @@ float calcShadow(vec3 pos, vec3 sunDir) {
         vec3 p = pos + t * sunDir;
         float h = p.y - terrainM(p.xz);
         if (h < 0.001) { res = 0.0; break; }
-        res = min(res, 16.0 * h / t);
+        res = min(res, k * h / t);
         t += clamp(h, 0.5, 100.0);
         if (t > 800.0 || res < 0.001) break;
     }
@@ -639,7 +655,10 @@ void main() {
         // Write hit depth; rasterised geometry that's actually in
         // front (e.g. a cube on a pier) still occludes us.
         vec4 clipW = pc.mvp * vec4(wpos, 1.0);
-        gl_FragDepth = clipW.z / clipW.w;
+        // See main terrain branch — cap below the compose sky-cutoff
+        // threshold so far water doesn't get repainted as sky-below-
+        // horizon (black).
+        gl_FragDepth = min(clipW.z / clipW.w, 0.9998);
         outColor = vec4(col_w, 1.0);
         // Motion vector for TAA reprojection (same pattern as
         // terrain branch below). Treats the surface as world-static
@@ -809,7 +828,12 @@ void main() {
         float fogStrength = pc.grass_params.x;
         bool  fogGodRays  = pc.grass_params.z > 0.5;
         if (fogStrength > 0.001) {
-        const int   kVolSteps         = 16;     // dense enough to hide stepping w/ jitter
+        // Distance-LOD on the fog march: full 12 steps near the
+        // camera, drop to 4 past 150 m. Distant terrain pixels with
+        // 16-step fog were the dominant per-pixel cost and the
+        // direct cause of the GPU TDR — far fog can't visibly
+        // resolve sub-step density anyway.
+        int kVolSteps = (distance(pos, scene.camera_pos.xyz) < 150.0) ? 12 : 4;
         const float kVolDensityBase   = 0.030;  // σe at full density inside the band
         const float kVolPhaseG        = 0.65;   // forward-scattering bias
         // Band parameters from settings (fog_band slot in scene UBO).
@@ -820,12 +844,18 @@ void main() {
         vec3 fogTint   = vec3(0.78, 0.83, 0.90);
         vec3 sunGlow   = scene.sun_color.rgb * scene.sun_color.a;
 
-        // Henyey-Greenstein phase: forward-peaked when looking near the sun.
-        float cosTh = dot(rd, sunDir);
+        // Henyey-Greenstein phase: forward-peaked when looking near
+        // the sun. The denominator goes near-zero as cosTh→1, so
+        // phase can spike past 100 and blow up the bloom + auto-
+        // exposure (visible flash + sometimes drives a TDR).
+        // Clamp the denominator's growth so phase stays bounded.
+        float cosTh = clamp(dot(rd, sunDir), -1.0, 0.985);
         float gg    = kVolPhaseG * kVolPhaseG;
         float phase = (1.0 - gg) /
                       (4.0 * 3.14159265 *
                        pow(1.0 + gg - 2.0 * kVolPhaseG * cosTh, 1.5));
+        // Hard ceiling matches a typical "sun glow" magnitude.
+        phase = min(phase, 4.0);
 
         // Cap march length at the surface hit. Sky pixels never reach
         // here (we returned -1 above), so t is always finite.
@@ -912,8 +942,15 @@ void main() {
 
     // Write the hit-point depth so rasterised geometry that wrote
     // depth earlier in the same pass occludes the terrain correctly.
+    // Cap below 0.9999 — the compose pass treats depth >= 0.99999 as
+    // a sky pixel and paints `sample_sky(dir)`. For terrain hits past
+    // ~800 m the projected depth crosses the threshold and compose
+    // overwrites our colour with the skybox sampled below the horizon
+    // (which is black for typical HDRIs). Result: distant raymarch
+    // terrain renders as pure black. Capping keeps compose's sky-
+    // detection from misfiring on far terrain hits.
     vec4 clip = pc.mvp * vec4(pos, 1.0);
-    gl_FragDepth = clip.z / clip.w;
+    gl_FragDepth = min(clip.z / clip.w, 0.9998);
 
     outColor = vec4(col, 1.0);
     // Screen-space motion vector for TAA. World position is stationary
