@@ -31,32 +31,53 @@ float halton(int i, int b) {
     return r;
 }
 
-// Local-space blade mesh: two-segment ribbon, 5 vertices, 3 triangles.
-//   v0 ----- v1     y=0  (base, full width)
-//    \      /
-//     v2 - v3       y=0.5 (mid, full width — used for the curve)
-//      \  /
-//       v4         y=1.0  (tip)
+// Higher-resolution blade for Bezier curve evaluation in the vertex
+// shader. 4 mid levels + base + tip = 9 vertices, 7 triangles (3 mid
+// quads + 1 tip cap). The vertex shader treats inUv.y as the t
+// parameter on a quadratic Bezier (base → control → tip) and bends
+// the blade per-instance via tilt + tip_bend params. Width tapers
+// from full at the base to 0 at the tip via a smooth (1 - t)
+// envelope so the silhouette reads as a natural blade.
 //
-// Width = ±blade_width at base/mid, 0 at the tip. The vertex shader
-// scales y by per-instance height_factor and applies wind sway.
+// inUv layout is preserved from the previous mesh:
+//   .x = side (0 left / 1 right; 0.5 for the tip)
+//   .y = height ratio in [0, 1]
 void make_blade_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
                      uint32_t queue_family, float w, float h, Mesh& out) {
-    const float h2 = h * 0.5f;
-    Vertex verts[5] = {
-        // pos              normal               uv (x = side, y = height ratio)
-        {{-w, 0.0f,  0.0f}, {0, 0, 1}, {0.0f, 0.0f}}, // 0 base-left
-        {{ w, 0.0f,  0.0f}, {0, 0, 1}, {1.0f, 0.0f}}, // 1 base-right
-        {{-w, h2,    0.0f}, {0, 0, 1}, {0.0f, 0.5f}}, // 2 mid-left
-        {{ w, h2,    0.0f}, {0, 0, 1}, {1.0f, 0.5f}}, // 3 mid-right
-        {{ 0.0f, h,  0.0f}, {0, 0, 1}, {0.5f, 1.0f}}, // 4 tip
-    };
-    uint32_t indices[9] = {
-        0, 1, 3,    0, 3, 2,   // base segment (quad as 2 tris)
-        2, 3, 4               // top triangle to the tip
-    };
+    // 4 evenly-spaced mid levels at t = 0.25, 0.50, 0.75 (then tip at 1.0).
+    // Plus base level at t = 0. Keeps the level count modest for vertex
+    // throughput while still giving a smooth Bezier curve.
+    const float t_levels[4] = { 0.0f, 0.25f, 0.50f, 0.75f };
+    Vertex verts[9];
+    int v = 0;
+    for (int i = 0; i < 4; ++i) {
+        float t = t_levels[i];
+        float yw = h * t;
+        float ww = w * (1.0f - t * 0.35f);   // gentle linear taper
+        verts[v++] = { { -ww, yw, 0.0f }, { 0, 0, 1 }, { 0.0f, t } }; // left
+        verts[v++] = { {  ww, yw, 0.0f }, { 0, 0, 1 }, { 1.0f, t } }; // right
+    }
+    // Tip
+    verts[v++] = { { 0.0f, h, 0.0f }, { 0, 0, 1 }, { 0.5f, 1.0f } };
+
+    uint32_t indices[24];
+    int idx = 0;
+    // 3 mid-quads between consecutive (left, right) pairs.
+    for (int i = 0; i < 3; ++i) {
+        int bL = i * 2 + 0;
+        int bR = i * 2 + 1;
+        int tL = (i + 1) * 2 + 0;
+        int tR = (i + 1) * 2 + 1;
+        // CCW from outside (looking down +z).
+        indices[idx++] = bL; indices[idx++] = bR; indices[idx++] = tR;
+        indices[idx++] = bL; indices[idx++] = tR; indices[idx++] = tL;
+    }
+    // Tip cap: top mid-quad → tip.
+    int tipL = 6, tipR = 7, tip = 8;
+    indices[idx++] = tipL; indices[idx++] = tipR; indices[idx++] = tip;
+
     out = create_mesh_from_data(device, alloc, queue, queue_family,
-                                verts, 5, indices, 9);
+                                verts, 9, indices, idx);
 }
 
 } // namespace
@@ -181,14 +202,26 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
         // shader to read the wrong fields — tint came out as garbage
         // and blades rendered teal instead of green.
         GrassBlade b{};
-        b.pos_pad        = glm::vec4(wx, wy, wz, 0.0f);
+        // Per-blade lean angle (tilt of the blade off vertical, before
+        // wind / Bezier curve). Stored in pos_pad.w. Sane range is a
+        // few tenths of a radian — enough that a field of blades has
+        // visible "leaning here, upright there" texture instead of
+        // every blade pointing straight up.
+        float tilt = (u01(rng) - 0.5f) * 0.6f;       // [-0.30, 0.30] rad
+        b.pos_pad        = glm::vec4(wx, wy, wz, tilt);
         float rotation   = rot(rng);
         float h_factor   = 0.65f + u01(rng) * 0.7f;
-        // .z = surface normal Y at the blade, fed to grass.vert so it
-        // can fade blades on slopes when the user tightens the slope
-        // threshold via the Settings slider.
-        b.rot_height_pad = glm::vec4(rotation, h_factor, n_with_noise, 0.0f);
-        b.tint_pad       = glm::vec4(random_tint(), 0.0f);
+        // Clump id: a per-blade hash that the shader blends with the
+        // base tint so neighbouring blades tend to share colour, giving
+        // the "patches of slightly different green" look characteristic
+        // of clump-style grass renderers (Unity-Grass / Ghost of Tsushima).
+        float clump_id = std::floor(u01(rng) * 32.0f);
+        b.rot_height_pad = glm::vec4(rotation, h_factor, n_with_noise, clump_id);
+        // Tip bend amount — how strongly the blade curves forward at
+        // the top. > 1 = pronounced cane-shape; < 1 = nearly straight.
+        // Stored in tint_pad.w.
+        float tip_bend = 0.55f + u01(rng) * 0.95f;   // [0.55, 1.50]
+        b.tint_pad       = glm::vec4(random_tint(), tip_bend);
         blades.push_back(b);
         ++kept;
     }

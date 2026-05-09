@@ -88,10 +88,18 @@ void main() {
     float rotation     = inRotHeight.x;
     float height_scale = inRotHeight.y;
     vec3  base_world   = inWorldPos.xyz;
+    // Per-blade lean (radians off vertical, packed in inWorldPos.w).
+    float tilt         = inWorldPos.w;
+    // Per-blade tip-bend amount (curl strength), packed in inTint.w.
+    float tip_bend     = inTint.w;
+    // Per-blade clump id used for tint co-variation (packed in inRotHeight.w).
+    float clump_id     = inRotHeight.w;
 
-    // Local position scaled by per-blade height variation × the
-    // global grass height slider so users can dial blade height
-    // up/down in real time.
+    // Local position. uv.y is the t parameter on a [0,1] curve; uv.x
+    // is the side (0/1, with 0.5 for the tip). We'll move lp via a
+    // quadratic Bezier eval — mesh's local x,y are the *envelope*
+    // (width tapered, base→tip) and we add the curve displacement on
+    // top so the side faces curve naturally with the spine.
     vec3 lp = inPos;
     lp.y *= height_scale * scene.grass_extra.x;
 
@@ -181,10 +189,67 @@ void main() {
     lp.x += sway_xz.x * bend;
     lp.z += sway_xz.y * bend;
 
-    // Per-blade Y rotation, then translate to world.
+    // ---- Per-blade Bezier curve (Unity-Grass-style) -----------------
+    // Quadratic Bezier: P0 = base, P1 = mid control, P2 = tip. Bends
+    // the spine forward + sideways by per-instance `tilt` and
+    // `tip_bend`. The mesh's inPos.x carries the side envelope (±w);
+    // we keep that and add the spine displacement on top so each
+    // height-level still has its quad width.
+    {
+        float t_par = inUv.y;                 // 0..1 along blade
+        float h_local = height_scale * scene.grass_extra.x;
+        // Control point: lifted halfway, biased forward by tip_bend.
+        // The lateral lean is split halfway (P1 ≈ tilt*0.4, P2 ≈ tilt).
+        vec3 P0 = vec3(0.0);
+        vec3 P1 = vec3(tilt * h_local * 0.40,
+                       h_local * 0.55,
+                       tip_bend * h_local * 0.18);
+        vec3 P2 = vec3(tilt * h_local,
+                       h_local,
+                       tip_bend * h_local * 0.45);
+        float omt = 1.0 - t_par;
+        vec3 spine = omt*omt*P0 + 2.0*omt*t_par*P1 + t_par*t_par*P2;
+        // Replace lp.y/z with the curved spine; keep lp.x as the side
+        // envelope (mesh authored width, possibly already tweaked by
+        // the wind-sway block above) and add the spine's lateral.
+        lp.y = spine.y;
+        lp.z = spine.z;
+        lp.x += spine.x;
+    }
+
+    // ---- Per-blade Y rotation, then translate to world. ------------
     mat3 R = rotY(rotation);
 
     float view_dist_base = distance(base_world, scene.camera_pos.xyz);
+
+    // ---- Side-on realignment (Unity-Grass trick) -------------------
+    // When the camera is looking nearly edge-on at the blade plane,
+    // the rasteriser would render a sub-pixel sliver. Widen the blade
+    // lateral in that case so it stays visible. Cheap because we can
+    // compute the alignment from the blade's rotation alone.
+    {
+        vec3  view_dir = scene.camera_pos.xyz - base_world;
+        vec2  view_xz  = normalize(view_dir.xz + vec2(1e-4));
+        // Local +Z (blade plane normal) → world via R: rotY column 2
+        // = (sin(rot), 0, cos(rot)).
+        vec2 plane_n_xz = vec2(sin(rotation), cos(rotation));
+        float align = abs(dot(view_xz, plane_n_xz));
+        float side_on = 1.0 - align;
+        // Widen lateral up to 1.6x when fully edge-on. Smoothstep so
+        // the boost only kicks in below align ≈ 0.4 (≥66°-off-axis).
+        float boost = 1.0 + smoothstep(0.4, 0.0, align) * 0.6;
+        lp.x *= boost;
+    }
+
+    // ---- Distance-LOD width + height morph -------------------------
+    // Far blades narrow + shorten smoothly so alpha-coverage at the
+    // scale of one screen pixel stays reasonable, eliminating shimmer.
+    // No hard LOD swap — same mesh, just scaled.
+    {
+        float dlod = smoothstep(40.0, pc.grass_params.x * 0.85, view_dist_base);
+        lp.x *= mix(1.0, 0.55, dlod);
+        lp.y *= mix(1.0, 0.85, dlod);
+    }
 
     // Smooth distance fade — blades shrink over the last 25% of the
     // max-distance slider so the cull doesn't pop visibly.
@@ -310,12 +375,28 @@ void main() {
     // that residual.
     vPrevClip   = pc.prev_mvp * vec4(world, 1.0);
 
-    // Normal in world space — the blade billboards roughly toward
-    // camera by virtue of its random rotation; for shading we use a
-    // mostly-up normal mixed with a slight side bias. Good enough for
-    // foliage reads.
-    vNormal = normalize(R * vec3(0.0, 0.8, 0.6));
-    vColor  = inTint.xyz;
+    // ---- Curved normal across blade width (Unity-Grass trick) -----
+    // Fakes roundness across the blade without extra verts: uv.x = 0
+    // (left edge) → normal tilts left; uv.x = 1 (right) → tilts right.
+    // Smoother shading + better light wrap than a flat per-blade
+    // normal. Distance-fade toward world-up past 60 m so distant
+    // grass doesn't shimmer with specular highlights.
+    float side_amt = (inUv.x - 0.5) * 2.0;             // -1..1
+    vec3 local_normal = normalize(vec3(side_amt * 0.5, 0.7, 0.6));
+    vec3 world_normal = R * local_normal;
+    float n_fade = smoothstep(60.0, 200.0, view_dist_base);
+    vNormal = normalize(mix(world_normal, vec3(0.0, 1.0, 0.0), n_fade));
+
+    // ---- Clump-style colour blending -------------------------------
+    // Each blade's clump_id (set on CPU) maps to a shared clump tint;
+    // we blend 50% with the per-blade tint so neighbouring blades
+    // trend toward the same green while still showing variation.
+    vec3 clump_color = vec3(
+        0.30 + 0.18 * fract(clump_id * 0.137),
+        0.45 + 0.20 * fract(clump_id * 0.231),
+        0.18 + 0.12 * fract(clump_id * 0.413)
+    );
+    vColor = mix(inTint.xyz, clump_color, 0.5);
     vUv     = inUv;
     vHeightRatio = inUv.y;
     vWorldPos = world;
