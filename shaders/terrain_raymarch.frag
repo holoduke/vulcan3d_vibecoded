@@ -159,6 +159,17 @@ layout(set = 0, binding = 0) uniform Scene {
     vec4 fog_band;
 } scene;
 
+// Cheap directional sky model — horizon -> zenith ramp around the
+// scene's sky colour, with a small sun-tinted lift near the horizon.
+// Used as the "no-noise" reference for the GI softener and as the
+// sample value for hemisphere rays that miss any occluder.
+vec3 sample_sky_atmosphere(vec3 dir) {
+    float up = clamp(dir.y, 0.0, 1.0);
+    vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
+    vec3 zenith  = scene.sky_color.rgb;
+    return mix(horizon, zenith, pow(up, 0.45));
+}
+
 // === Hash + Value-Noise with analytical derivatives ===
 // dot/fract pattern (avoids sin() precision artifacts on some GPUs).
 float hash21(vec2 p) {
@@ -804,6 +815,7 @@ void main() {
     // ambient term — corners between walls + boxes get visibly
     // shaded, just like the rasterised path.
     float ao = 1.0;
+    vec3  gi_sky = vec3(0.0);
     int ao_mode = scene.rt_flags2.w;
     if (ao_mode > 0 && scene.rt_flags.z > 0 && do_rt) {
         int requested = (ao_mode == 1) ? min(scene.rt_flags.z, 2)
@@ -821,6 +833,8 @@ void main() {
         uvec3 ao_seed = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
         int taken = 0;
         float occluded = 0.0;
+        vec3 sky_gi = vec3(0.0);
+        int  gi_misses = 0;
         for (int i = 0; i < N_ao; ++i) {
             float u1 = rmRand(ao_seed + uvec3(i, 7u, 53u));
             float u2 = rmRand(ao_seed + uvec3(i, 41u, 5u));
@@ -834,9 +848,27 @@ void main() {
             vec3 t1 = normalize(cross(ref_n, nor));
             vec3 t2 = cross(nor, t1);
             vec3 d = d_local.x * t1 + d_local.y * nor + d_local.z * t2;
-            if (any_hit_no_terrain(origin_ao, d, ao_radius)) occluded += 1.0;
+            if (any_hit_no_terrain(origin_ao, d, ao_radius)) {
+                occluded += 1.0;
+            } else {
+                sky_gi += sample_sky_atmosphere(d);
+                ++gi_misses;
+            }
             ++taken;
         }
+        // Sky-bounce GI: average of the sky colour along the rays
+        // that *missed* any occluder. Diving by misses (not by total)
+        // keeps the GI brightness independent of how much of the
+        // hemisphere is occluded — AO alone handles the darkening
+        // there. Then soften toward the noise-free sky-at-normal
+        // reference so users can trade per-pixel variance for a
+        // smoother estimate.
+        vec3 sky_at_n = sample_sky_atmosphere(nor);
+        vec3 gi_raw   = (gi_misses > 0)
+                          ? (sky_gi / float(gi_misses))
+                          : sky_at_n;
+        float soft = clamp(scene.terrain_extra.z, 0.0, 1.0);
+        gi_sky = mix(gi_raw, sky_at_n, soft);
         // Linear curve (no sqrt) — sqrt compresses the dark side
         // of the [0,1] range, so a 25 % hit ratio reads as
         // sqrt(0.75) ≈ 0.87 and corners barely darken. With more
@@ -859,6 +891,14 @@ void main() {
     // walls / boxes / castle visibly shade the terrain.
     lin += amb * scene.sky_color.rgb * 0.35 * ao;
     lin += fre * scene.sky_color.rgb * 0.25 * ao;
+    // Sky-bounce GI — additive on top of the analytical ambient so
+    // disabling GI never goes darker than the no-RT path. Modulated
+    // by the global GI strength slider; the gi_sky term has already
+    // been blended toward the noise-free sky-at-normal sample by the
+    // GI-softener slider so cranking softener → smooth, low-noise GI.
+    if (scene.rt_flags2.x > 0) {
+        lin += gi_sky * 0.40 * scene.rt_params2.x * ao;
+    }
 
     vec3 col = mate * lin;
 

@@ -1202,6 +1202,12 @@ private:
 
         float gi_strength = 1.0f;
         float gi_radius   = 60.0f;
+        // Spatial smoothing factor on the raymarched-terrain sky-bounce GI.
+        // 0 = raw per-pixel GI from the sample loop (noisiest, most accurate).
+        // 1 = collapse the GI estimate to the smooth sky-at-normal sample
+        //     (no per-pixel noise but loses occluder-aware GI variation).
+        // Useful when gi_samples is too low to converge on its own.
+        float gi_softener = 0.5f;
         // Specular reflection on flagged surfaces (the pedestal).
         bool  reflections_enabled = true;
         float reflection_strength = 0.5f;

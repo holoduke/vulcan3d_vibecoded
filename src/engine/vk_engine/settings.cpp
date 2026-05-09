@@ -262,6 +262,7 @@ void VulkanEngine::save_settings() const {
     f << "shadow_near_mult = " << rt_.shadow_near_mult << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
+    f << "gi_softener = "        << rt_.gi_softener        << "\n";
     f << "reflections_enabled = "<< (rt_.reflections_enabled ? 1 : 0) << "\n";
     f << "reflection_strength = "<< rt_.reflection_strength << "\n";
     f << "taa_history_blend = " << rt_.taa_history_blend    << "\n";
@@ -421,6 +422,7 @@ void VulkanEngine::load_settings() {
             else if (key == "shadow_near_mult") rt_.shadow_near_mult = std::stof(val);
             else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
             else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);
+            else if (key == "gi_softener")         rt_.gi_softener = std::stof(val);
             else if (key == "reflections_enabled") rt_.reflections_enabled = std::stoi(val) != 0;
             else if (key == "reflection_strength") rt_.reflection_strength = std::stof(val);
             else if (key == "taa_history_blend")    rt_.taa_history_blend = std::stof(val);
@@ -489,6 +491,7 @@ void VulkanEngine::load_settings() {
     clampf(rt_.auto_exposure_strength, 0.0f, 1.5f);
     clampf(rt_.gi_strength,      0.0f,    8.0f);
     clampf(rt_.gi_radius,        0.5f,  500.0f);
+    clampf(rt_.gi_softener,      0.0f,    1.0f);
     clampf(rt_.reflection_strength, 0.0f, 1.0f);
     clampf(rt_.taa_history_blend,   0.0f, 0.98f);
     clampf(rt_.taa_spatial_strength,0.0f, 1.0f);

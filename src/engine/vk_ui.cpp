@@ -426,6 +426,8 @@ void VulkanEngine::build_menu_ui() {
                           &rt_.gi_shadow_max_bounce, 0, 5);
         ImGui::SliderFloat("GI strength", &rt_.gi_strength, 0.0f, 3.0f);
         ImGui::SliderFloat("GI radius", &rt_.gi_radius, 1.0f, 400.0f);
+        ImGui::SliderFloat("GI softener (raymarch terrain)",
+                          &rt_.gi_softener, 0.0f, 1.0f);
 
         ImGui::SeparatorText("Anti-aliasing (TAA + Halton sub-pixel jitter)");
         ImGui::Checkbox("sub-pixel jitter", &rt_.taa_jitter_enabled);
