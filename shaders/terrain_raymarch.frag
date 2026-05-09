@@ -325,15 +325,22 @@ vec3 calcNormal(vec3 pos, float t) {
     return normalize(vec3(hC - hR, eps, hC - hU));
 }
 
-// Classic heightfield soft-shadow march — `min(k·h/t)` where h is
-// the vertical gap between the ray and the FBM surface. Works on
-// heightfields where steps don't equal the geodesic distance (we
-// clamp the step to a useful range, decoupling step from h, which
-// breaks Inigo Quilez's geometric-triangulation variant — that
-// formula assumes sphere-trace properties). Cubic smoothstep at
-// the end softens the linear penumbra ramp into a more natural
-// curve. k = 16 gives a moderate softness; lower = softer.
+// Classic heightfield soft-shadow march — `min(k·h/t)`. k ties to
+// the global Shadow softness slider (rt_params.x) so a single
+// control softens both terrain self-shadow AND PCSS castle/box
+// shadows. Slider 0 → k=64 (razor sharp), slider 0.15 → k=4
+// (very soft). Cubic smoothstep at the end softens the linear
+// penumbra ramp.
 float calcShadow(vec3 pos, vec3 sunDir) {
+    // Driven by global Shadow softness slider × per-terrain
+    // softness scale. Same combination the PCSS below uses so both
+    // shadow types respond to the same UI controls in lock-step.
+    float soft_g = scene.rt_params.x;
+    if (scene.terrain_params.w > 0.0) {
+        soft_g *= max(0.05, scene.terrain_params.w);
+    }
+    float soft = clamp(soft_g / 0.15, 0.0, 1.0);
+    float k    = mix(64.0, 4.0, soft);
     float res = 1.0;
     float t   = 0.05;
     int kSteps = int(pc.tex_params.y);
@@ -341,7 +348,7 @@ float calcShadow(vec3 pos, vec3 sunDir) {
         vec3 p = pos + t * sunDir;
         float h = p.y - terrainM(p.xz);
         if (h < 0.001) { res = 0.0; break; }
-        res = min(res, 16.0 * h / t);
+        res = min(res, k * h / t);
         t += clamp(h, 0.5, 100.0);
         if (t > 800.0 || res < 0.001) break;
     }
