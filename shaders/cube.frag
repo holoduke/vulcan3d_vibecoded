@@ -732,14 +732,29 @@ void main() {
                                    base_softness * 6.0);
 
             // 3. Stratified shadow rays in the size-adapted cone.
-            int strata = int(ceil(sqrt(float(N_s))));
+            // Half-rate PCSS: each frame fire only HALF the ray budget,
+            // alternating which half via a per-pixel checkerboard +
+            // frame-parity. TAA's history blend (cube fragments use the
+            // same TAA pass) accumulates the missing samples over two
+            // frames so steady-state quality matches full-rate. Kicks
+            // ~50% of the per-pixel PCSS cost off the GPU without a
+            // visible quality drop on TAA-on configurations.
+            ivec2 ip2     = ivec2(gl_FragCoord.xy);
+            int   parity  = ((ip2.x + ip2.y) ^ scene.rt_flags.w) & 1;
+            int   N_s_eff = max(1, (N_s + (parity == 0 ? 1 : 0)) / 2);
+            int strata = int(ceil(sqrt(float(N_s_eff))));
             float inv_strata = 1.0 / float(strata);
             float blocked = 0.0;
             int taken = 0;
-            for (int sy = 0; sy < strata && taken < N_s; ++sy) {
-                for (int sx = 0; sx < strata && taken < N_s; ++sx) {
-                    float r1 = rand(seed_base + uvec3(taken, 11u, 47u));
-                    float r2 = rand(seed_base + uvec3(taken, 53u, 23u));
+            for (int sy = 0; sy < strata && taken < N_s_eff; ++sy) {
+                for (int sx = 0; sx < strata && taken < N_s_eff; ++sx) {
+                    // Offset sample indices by parity so adjacent pixels
+                    // sample DIFFERENT rays in the cone (not just the
+                    // first half each). The full set comes back over
+                    // the 2x2 checkerboard.
+                    int idx = taken * 2 + parity;
+                    float r1 = rand(seed_base + uvec3(idx, 11u, 47u));
+                    float r2 = rand(seed_base + uvec3(idx, 53u, 23u));
                     float u1 = (float(sx) + r1) * inv_strata;
                     float u2 = (float(sy) + r2) * inv_strata;
                     float r   = sqrt(u1) * penumbra;
