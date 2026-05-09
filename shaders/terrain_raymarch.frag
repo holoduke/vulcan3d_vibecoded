@@ -671,43 +671,57 @@ void main() {
     // distant FBM normals.
     float sha = (dif > 0.0) ? calcShadow(pos + nor * 0.05, sunDir) : 1.0;
 
-    // Soft object shadow via 5 hard RT rays at FIXED world-space
-    // tangent offsets. Each ray is a binary any-hit (mask 0x02 =
-    // skip terrain BLAS). Averaging gives 6 deterministic levels
-    // (0, 0.2, 0.4, 0.6, 0.8, 1.0). Because the offsets are
-    // identical across pixels, neighbouring pixels see a continuous
-    // shadow value and the silhouette reads as a smooth gradient
-    // — no per-pixel hash noise, no dither. Soft edge ~ 1 m wide.
-    if (dif > 0.0 && scene.rt_flags.x != 0) {
-        vec3 ref   = abs(sunDir.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
-                                            : vec3(1.0, 0.0, 0.0);
-        vec3 tan_u = normalize(cross(ref, sunDir));
-        vec3 tan_v = cross(sunDir, tan_u);
-        const float kSoftRadius = 0.5;   // metres — half the soft-edge width
-        vec3 origin0 = pos + sunDir * 0.1;
-        // Centre + 4 cardinal taps at fixed tangent offsets.
-        vec3 origins[5];
-        origins[0] = origin0;
-        origins[1] = origin0 + tan_u * kSoftRadius;
-        origins[2] = origin0 - tan_u * kSoftRadius;
-        origins[3] = origin0 + tan_v * kSoftRadius;
-        origins[4] = origin0 - tan_v * kSoftRadius;
-        float blocked = 0.0;
+    // Hard sun shadow + RT ambient occlusion. Both use a deterministic
+    // tap pattern (no per-pixel hash) so adjacent pixels see continuous
+    // values and there's no dither.
+    //
+    // 1. Sun shadow — single ray toward the sun, mask 0x02 (skip
+    //    terrain BLAS). Binary, hard-edged.
+    float ao = 1.0;
+    if (scene.rt_flags.x != 0) {
+        vec3 origin = pos + sunDir * 0.2 + vec3(0.0, 0.05, 0.0);
+        if (any_hit_no_terrain(origin, sunDir, 500.0)) {
+            sha = 0.0;
+        }
+
+        // 2. RT ambient occlusion against castle / boxes / dyn-props.
+        //    Five short rays in a fixed hemisphere pattern around the
+        //    surface normal. Counts hits within ~3 m → corners darken.
+        //    Pattern is the same for every pixel so the AO reads as a
+        //    smooth gradient instead of dither.
+        vec3 N = nor;
+        vec3 ref_n = abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
+                                       : vec3(1.0, 0.0, 0.0);
+        vec3 t1 = normalize(cross(ref_n, N));
+        vec3 t2 = cross(N, t1);
+        const float kAoDist = 3.0;
+        // 5 directions: straight up + 4 at 60° from N spread around.
+        vec3 ao_dirs[5];
+        ao_dirs[0] = N;
+        float c45 = 0.5774;     // cos(54.7°) ≈ 1/√3 — even hemisphere taps
+        ao_dirs[1] = normalize(N * c45 + t1);
+        ao_dirs[2] = normalize(N * c45 - t1);
+        ao_dirs[3] = normalize(N * c45 + t2);
+        ao_dirs[4] = normalize(N * c45 - t2);
+        vec3 ao_origin = pos + N * 0.05;
+        float occluded = 0.0;
         for (int i = 0; i < 5; ++i) {
-            if (any_hit_no_terrain(origins[i], sunDir, 250.0)) {
-                blocked += 1.0;
+            if (any_hit_no_terrain(ao_origin, ao_dirs[i], kAoDist)) {
+                occluded += 1.0;
             }
         }
-        float dyn_shadow = (blocked / 5.0) * scene.rt_params.w;
-        sha *= (1.0 - dyn_shadow);
+        ao = 1.0 - (occluded / 5.0) * 0.85;   // up to 85 % darken
     }
 
     vec3 mate = getMaterial(pos, nor);
 
     vec3 lin = vec3(0.0);
+    // Sun term modulated by hard sun shadow.
     lin += dif * sha * scene.sun_color.rgb * scene.sun_color.a;
-    lin += amb * scene.sky_color.rgb * 0.35;
-    lin += fre * scene.sky_color.rgb * 0.25;
+    // Sky / ambient term modulated by RT AO so corners + recesses
+    // darken without affecting the directly-lit sun term.
+    lin += amb * scene.sky_color.rgb * 0.35 * ao;
+    lin += fre * scene.sky_color.rgb * 0.25 * ao;
 
     vec3 col = mate * lin;
 
