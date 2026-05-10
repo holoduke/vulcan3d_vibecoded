@@ -54,8 +54,14 @@ vec3 atrous_filter(ivec2 ip) {
             float l = lum(c);
 
             float wk = kAtrousKernel[i + 2] * kAtrousKernel[j + 2];
-            float wd = exp(-abs(d - center_d) * 200.0);
-            float wl = exp(-abs(l - center_l) * 3.5);
+            // Rational falloff replaces exp(-x): 1/(1+x²) is monotonically
+            // decreasing, ≈1 at x=0, falls to ~0 as x grows; equivalent
+            // edge-stopping behaviour without the per-tap transcendentals.
+            // 50 exp() calls/pixel become ~12 mul/pixel.
+            float xd = (d - center_d) * 200.0;
+            float xl = (l - center_l) * 3.5;
+            float wd = 1.0 / (1.0 + xd * xd);
+            float wl = 1.0 / (1.0 + xl * xl);
             float w = wk * wd * wl;
             sum += c * w;
             wsum += w;

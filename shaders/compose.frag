@@ -134,11 +134,14 @@ float sun_visibility() {
     // depth is beyond kFar (no geometry occluding).
     float vis = 0.0;
     const float r = 0.012;
-    vis += float(texture(history_depth, c).r              >= kFar);
-    vis += float(texture(history_depth, c + vec2( r, 0)).r >= kFar);
-    vis += float(texture(history_depth, c + vec2(-r, 0)).r >= kFar);
-    vis += float(texture(history_depth, c + vec2(0,  r)).r >= kFar);
-    vis += float(texture(history_depth, c + vec2(0, -r)).r >= kFar);
+    // Clamp UVs so the cross taps near screen edges don't sample past the
+    // [0,1] range and pick up CLAMP_TO_EDGE results that read as "sky"
+    // (depth ≈ 1.0) → false-positive flare visibility at corners.
+    vis += float(texture(history_depth, c).r                                            >= kFar);
+    vis += float(texture(history_depth, clamp(c + vec2( r, 0), vec2(0.0), vec2(1.0))).r >= kFar);
+    vis += float(texture(history_depth, clamp(c + vec2(-r, 0), vec2(0.0), vec2(1.0))).r >= kFar);
+    vis += float(texture(history_depth, clamp(c + vec2(0,  r), vec2(0.0), vec2(1.0))).r >= kFar);
+    vis += float(texture(history_depth, clamp(c + vec2(0, -r), vec2(0.0), vec2(1.0))).r >= kFar);
     return vis * 0.2;  // 0/5 .. 5/5
 }
 

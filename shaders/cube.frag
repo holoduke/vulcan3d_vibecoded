@@ -104,7 +104,9 @@ layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 // world-aligned regardless of brush dimensions. Cost is 3 samples per pass,
 // which is fine for the coverage we have.
 vec3 triplanar_sample(sampler2D tex, vec3 wp, vec3 N) {
-    vec3 blend = pow(abs(N), vec3(4.0));
+    // pow(abs(N), 4) via two squarings — saves one exp/log/mul per
+    // triplanar call vs the pow() intrinsic, on every textured pixel.
+    vec3 blend = abs(N); blend *= blend; blend *= blend;
     blend /= max(blend.x + blend.y + blend.z, 1e-3);
     // Now that mipmaps exist (texture.cpp generates them via blit chain) and
     // vTexParams is `flat` so the sampler-array index is dynamically uniform,
@@ -121,7 +123,8 @@ vec3 triplanar_sample(sampler2D tex, vec3 wp, vec3 N) {
 // for that axis. Then blend by face weight, same as the albedo. Cheap,
 // works without explicit per-vertex tangents.
 vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
-    vec3 blend = pow(abs(N), vec3(4.0));
+    // Same pow(abs(N), 4) → squarings trick as triplanar_sample.
+    vec3 blend = abs(N); blend *= blend; blend *= blend;
     blend /= max(blend.x + blend.y + blend.z, 1e-3);
 
     vec3 nx = texture(ntex, wp.zy).rgb * 2.0 - 1.0;
@@ -771,6 +774,10 @@ void main() {
             shadow = (blocked / float(taken)) * scene.rt_params.w;
         }
       }  // end fire_rt_shadow
+        // shadow_strength can exceed 1.0 via the slider — without this clamp
+        // the (1 - shadow) factor at line ~808 goes negative and produces
+        // black-and-then-some pixels (max() in compose can't recover them).
+        shadow = clamp(shadow, 0.0, 1.0);
 
         // Terrain hybrid: RT (castle / dyn-props) + bake (terrain
         // self-shadow). `shadow` holds the RT no-terrain result, the

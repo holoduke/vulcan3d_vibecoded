@@ -503,6 +503,11 @@ float raymarch(vec3 ro, vec3 rd) {
         } else {
             advance = kStep * h;
         }
+        // Once h goes negative we've crossed the surface — the next step
+        // would walk us back, and with rl > 1 the back-step grows enough to
+        // ping-pong indefinitely until kSteps caps. Break out instead so
+        // the caller gets the closest approach.
+        if (advance < 0.0) break;
         t += advance;
     }
     return t;
@@ -917,8 +922,9 @@ void main() {
         vec4 clipW = pc.mvp * vec4(wpos, 1.0);
         // See main terrain branch вЂ” cap below the compose sky-cutoff
         // threshold so far water doesn't get repainted as sky-below-
-        // horizon (black).
-        gl_FragDepth = min(clipW.z / clipW.w, 0.9998);
+        // horizon (black). Guard against w<=0 (point behind camera) so
+        // the depth divide doesn't produce NaN.
+        gl_FragDepth = min(clipW.z / max(clipW.w, 1e-4), 0.9998);
         outColor = vec4(col_w, 1.0);
         // Motion vector for TAA reprojection (same pattern as
         // terrain branch below). Treats the surface as world-static
@@ -1457,7 +1463,7 @@ void main() {
     // terrain renders as pure black. Capping keeps compose's sky-
     // detection from misfiring on far terrain hits.
     vec4 clip = pc.mvp * vec4(pos, 1.0);
-    gl_FragDepth = min(clip.z / clip.w, 0.9998);
+    gl_FragDepth = min(clip.z / max(clip.w, 1e-4), 0.9998);
 
     outColor = vec4(col, 1.0);
     // Screen-space motion vector for TAA. World position is stationary
