@@ -291,6 +291,11 @@ private:
     void render_terrain_raymarch_lr(VkCommandBuffer cmd);
     void render_terrain_raymarch_compose(VkCommandBuffer cmd);
     VkShaderModule depth_frag_module_ = VK_NULL_HANDLE;
+    // Minimal vertex shader bound to the depth-prepass pipeline.
+    // Replaces cube.vert in that pipeline so the prepass doesn't pay
+    // the cost of model + prev_mvp matrix multiplies and 9 unused
+    // varyings (cube_depth.frag is empty — no varyings consumed).
+    VkShaderModule depth_vert_module_ = VK_NULL_HANDLE;
 
     Mesh cube_mesh_{};
     Mesh cylinder_mesh_{};

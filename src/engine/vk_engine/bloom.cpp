@@ -359,16 +359,16 @@ void VulkanEngine::run_bloom_chain(VkCommandBuffer cmd) {
     }
 
     // 2. Upsample chain (additive). Source = mip m+1, dest = mip m.
+    // Each iteration needs the previous draw's COLOR_ATTACHMENT write
+    // visible to this draw's FRAGMENT_SHADER read. BY_REGION_BIT lets
+    // tile-based GPUs do the dependency per-tile instead of full-frame
+    // — desktop drivers ignore the flag, so it's free downside.
     for (int m = kBloomMips - 2; m >= 0; --m) {
         VkImageMemoryBarrier2 barriers[2]{};
         uint32_t bn = 0;
         auto fill = [&](VkImageMemoryBarrier2& b, VkImageLayout from,
                         VkImageLayout to, uint32_t mip) {
             b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-            // Bloom mip chain: write happens in COLOR_ATTACHMENT_OUTPUT,
-            // read happens in FRAGMENT_SHADER (textureLod). Tightening
-            // from ALL_COMMANDS lets the driver overlap subsequent
-            // unrelated draws (compose, ImGui) with the bloom passes.
             b.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
             b.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
             b.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
@@ -388,7 +388,8 @@ void VulkanEngine::run_bloom_chain(VkCommandBuffer cmd) {
              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, static_cast<uint32_t>(m));
         VkDependencyInfo dep{
             .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            .pNext = nullptr, .dependencyFlags = 0,
+            .pNext = nullptr,
+            .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
             .memoryBarrierCount = 0, .pMemoryBarriers = nullptr,
             .bufferMemoryBarrierCount = 0, .pBufferMemoryBarriers = nullptr,
             .imageMemoryBarrierCount = bn, .pImageMemoryBarriers = barriers,

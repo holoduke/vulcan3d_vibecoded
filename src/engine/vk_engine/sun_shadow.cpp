@@ -22,11 +22,15 @@ void VulkanEngine::init_sun_shadow_pipeline() {
     // forcing the cube pipeline_layout_ here meant render_sun_shadow_pass
     // had to vkCmdBindDescriptorSets the entire scene set (TLAS + texture
     // arrays + materials SSBO) for code that consumes none of it.
+    // 16-byte PC range — only the light-clip mvp matrix. The shadow
+    // shader doesn't read model / prev_mvp / color / etc., so pushing
+    // the full 256-byte cube PushConstants per draw was wasted host
+    // bandwidth (hundreds of KB/frame across all caster draws).
     {
         VkPushConstantRange pc{};
-        pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
         pc.offset = 0;
-        pc.size = sizeof(PushConstants);
+        pc.size = sizeof(glm::mat4);
         VkPipelineLayoutCreateInfo plci{};
         plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         plci.setLayoutCount = 0;
@@ -305,12 +309,10 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
     Frustum light_frustum = extract_frustum(vp);
 
     auto push_shadow = [&](const glm::mat4& model) {
-        PushConstants pc{};
-        pc.mvp = vp * model;
-        pc.model = model;
+        glm::mat4 mvp = vp * model;
         vkCmdPushConstants(cmd, sun_shadow_pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pc);
+                           VK_SHADER_STAGE_VERTEX_BIT,
+                           0, sizeof(glm::mat4), &mvp);
     };
 
     // Static brushes (castle, towers). Light-frustum cull: only brushes

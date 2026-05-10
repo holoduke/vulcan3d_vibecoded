@@ -486,8 +486,14 @@ float raymarch(vec3 ro, vec3 rd) {
     // Tiny initial offset; max half-cell so the surface hit shifts
     // sub-pixel only.
     t += jitter * 0.5;
+    float maxH_cap = terrainMaxHeight();
     for (int i = 0; i < kSteps; i++) {
         vec3 pos = ro + t * rd;
+        // Sky escape: any ray rising above the FBM ceiling with a
+        // positive y-component cannot ever hit terrain — bail early
+        // instead of walking the budget out to t=1500. Saves the worst-
+        // case grazing-ray cost (which used to burn the full kSteps).
+        if (rd.y > 0.0 && pos.y > maxH_cap) return -1.0;
         // Distance-LOD on the FBM octave count вЂ” full octaves close
         // to camera, smoothly fading down to ~2 octaves past 600 m.
         // Equivalent visual quality past the LOD onset (sub-pixel
@@ -544,8 +550,11 @@ vec3 calcNormal(vec3 pos, float t) {
     // / pebbly instead of glass-smooth. Falls off past 60 m so it
     // only costs the always-near pixels and never aliases at depth.
     // Uses noised() which returns (value, dN/dx, dN/dy) in one call.
+    // Tightened from 0.001 → 0.05: pixels in the 50–60 m band were
+    // paying full noised() cost for sub-1 % blend weight. The lost
+    // detail is invisible at the cutoff distance.
     float detail_w = 1.0 - smoothstep(15.0, 60.0, t);
-    if (detail_w > 0.001) {
+    if (detail_w > 0.05) {
         vec3 d1 = noised(pos.xz * 4.0);
         vec3 d2 = noised(pos.xz * 13.0);
         vec2 grad = (d1.yz * 0.30 + d2.yz * 0.18) * detail_w;
@@ -576,7 +585,11 @@ float calcShadow(vec3 pos, vec3 sunDir) {
     int kSteps = int(pc.tex_params.y);
     for (int i = 0; i < kSteps; ++i) {
         vec3 p = pos + t * sunDir;
-        float h = p.y - terrainM(p.xz);
+        // Distance-LOD: deep-valley shadow taps don't need full 8-octave
+        // resolution. Same `terrainM_lod(t)` the primary raymarch uses
+        // — drops to ~2 octaves past 600 m. Soft shadows are a low-pass
+        // signal; the high-octave detail dropped here is sub-pixel.
+        float h = p.y - terrainM_lod(p.xz, t);
         if (h < 0.001) { res = 0.0; break; }
         res = min(res, k * h / t);
         t += clamp(h, 0.5, 100.0);

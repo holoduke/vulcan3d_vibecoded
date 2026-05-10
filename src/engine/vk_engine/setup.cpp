@@ -407,8 +407,10 @@ void VulkanEngine::init_pipeline() {
     {
         std::string sd2 = QLIKE_SHADER_DIR;
         depth_frag_module_ = vkpipe::load_shader_module(device_, sd2 + "/cube_depth.frag.spv");
+        depth_vert_module_ = vkpipe::load_shader_module(device_, sd2 + "/cube_depth.vert.spv");
     }
     vkpipe::GraphicsPipelineConfig dcfg = cfg;
+    dcfg.vert = depth_vert_module_;
     dcfg.frag = depth_frag_module_;
     // Depth-only pre-pass: no color attachments at all. Clear the inherited
     // color_formats vector — otherwise build_graphics_pipeline would pick its
@@ -856,9 +858,10 @@ void VulkanEngine::destroy_pipeline() {
     if (vert_module_)      vkDestroyShaderModule(device_, vert_module_, nullptr);
     if (frag_module_)      vkDestroyShaderModule(device_, frag_module_, nullptr);
     if (depth_frag_module_) vkDestroyShaderModule(device_, depth_frag_module_, nullptr);
+    if (depth_vert_module_) vkDestroyShaderModule(device_, depth_vert_module_, nullptr);
     pipeline_ = depth_pipeline_ = VK_NULL_HANDLE;
     pipeline_layout_ = VK_NULL_HANDLE;
-    vert_module_ = frag_module_ = depth_frag_module_ = VK_NULL_HANDLE;
+    vert_module_ = frag_module_ = depth_frag_module_ = depth_vert_module_ = VK_NULL_HANDLE;
 }
 
 void VulkanEngine::init_pipeline_cache() {
