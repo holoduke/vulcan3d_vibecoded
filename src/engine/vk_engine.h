@@ -852,6 +852,12 @@ private:
     // big perf win since update is much cheaper than full build. Reset to
     // UINT32_MAX to force a full rebuild next frame (e.g., on resize).
     uint32_t prev_tlas_n_ = UINT32_MAX;
+    // Skip the TLAS update entirely when the dynamic instance set hasn't
+    // moved since last frame. Hash of dyn-prop transforms + projectile
+    // poses; if it matches AND nothing structural changed, the existing
+    // tlas_ contents are still valid for cube.frag's reads.
+    uint64_t prev_dyn_signature_ = 0;
+    bool     tlas_first_build_done_ = false;
 
     // Static-brush portion of the TLAS instance + material buffer is baked
     // once per (level, textures_enabled) and memcpy'd into slots

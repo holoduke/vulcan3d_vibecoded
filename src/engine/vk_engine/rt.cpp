@@ -772,6 +772,48 @@ void VulkanEngine::bake_static_brushes() {
 void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     if (!rt_initialized_) return;
 
+    // Skip the entire build when nothing in the dynamic set moved since
+    // last frame. Static brushes are baked + memcpyed once per change;
+    // dynamic instances are the only thing the per-frame TLAS rebuild
+    // exists to track. Hash the (translation, projectile pose) state and
+    // compare. On a static scene (no dyn motion, no projectiles) this
+    // skips the AS-build + scratch + cross-queue semaphore signal path
+    // entirely — frees the compute queue most frames.
+    auto mix64 = [](uint64_t h, uint64_t v) {
+        h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        return h;
+    };
+    auto hash_f = [](float f) {
+        uint32_t u; std::memcpy(&u, &f, 4); return uint64_t(u);
+    };
+    uint64_t sig = 0xcbf29ce484222325ULL;
+    sig = mix64(sig, dyn_props_.size());
+    sig = mix64(sig, projectiles_.size());
+    sig = mix64(sig, static_brush_dirty_ ? 1u : 0u);
+    sig = mix64(sig, rt_.textures_enabled ? 1u : 0u);
+    sig = mix64(sig, rt_.use_merged_static_blas ? 1u : 0u);
+    for (size_t i = 0; i < dyn_render_cache_.size(); ++i) {
+        const DynRender& dr = dyn_render_cache_[i];
+        if (!dr.valid) continue;
+        sig = mix64(sig, hash_f(dr.world[3].x));
+        sig = mix64(sig, hash_f(dr.world[3].y));
+        sig = mix64(sig, hash_f(dr.world[3].z));
+        sig = mix64(sig, hash_f(dr.world[0].x));   // rotation hint
+        sig = mix64(sig, hash_f(dr.world[2].z));
+    }
+    for (const auto& p : projectiles_) {
+        glm::mat4 w;
+        if (!physics_->get_body_world_matrix_h(p.jolt_handle, w)) continue;
+        sig = mix64(sig, hash_f(w[3].x));
+        sig = mix64(sig, hash_f(w[3].y));
+        sig = mix64(sig, hash_f(w[3].z));
+    }
+    if (tlas_first_build_done_ && sig == prev_dyn_signature_) {
+        return;   // tlas_ contents still valid — skip build + signal
+    }
+    prev_dyn_signature_ = sig;
+    tlas_first_build_done_ = true;
+
     // Inter-submission AS-build hazard fence. Two TLAS builds across
     // consecutive frames write to the same `tlas_` buffer; submission order
     // on a single queue does NOT imply memory ordering for AS builds. Without
