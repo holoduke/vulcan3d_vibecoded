@@ -747,6 +747,8 @@ private:
     void enqueue_terrain_shadow_rebake(glm::vec3 target_sun);
     void tick_terrain_shadow_progressive();
     void destroy_terrain_shadow_texture();
+    // Shared upload helper for init_/refresh_terrain_height_texture.
+    void upload_terrain_height_payload(VkImageLayout src_layout);
     void start_terrain_shadow_worker();
     void stop_terrain_shadow_worker();
     void terrain_shadow_worker_loop();
