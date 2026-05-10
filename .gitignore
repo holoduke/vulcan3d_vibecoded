@@ -54,3 +54,6 @@ qlike_imgui.ini
 autodemo_*.out
 autodemo_*.err
 
+d*.out
+d*.err
+
