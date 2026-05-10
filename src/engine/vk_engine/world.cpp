@@ -1469,14 +1469,25 @@ void VulkanEngine::init_viewmodel() {
         glm::mat4 rot_y180 = glm::rotate(glm::mat4(1.0f),
                                           glm::radians(180.0f),
                                           glm::vec3(0.0f, 1.0f, 0.0f));
+        // +90° Z roll un-tilts (asset's local up axis was reversed
+        // relative to camera-up). Yaw-trim corrects the barrel's drift
+        // off the crosshair; the asset's "forward" axis isn't a clean
+        // -Z so even after Y-180 the barrel points slightly off-screen.
+        // Tune yaw_trim (positive = barrel rotates left in screen
+        // space) by single-degree increments if the crosshair shifts
+        // when the asset is replaced.
         glm::mat4 rot_z = glm::rotate(glm::mat4(1.0f),
-                                       glm::radians(-90.0f),
+                                       glm::radians(90.0f),
                                        glm::vec3(0.0f, 0.0f, 1.0f));
+        const float yaw_trim_deg = -6.0f;
+        glm::mat4 rot_y_trim = glm::rotate(glm::mat4(1.0f),
+                                            glm::radians(yaw_trim_deg),
+                                            glm::vec3(0.0f, 1.0f, 0.0f));
 
         viewmodel_root_offset_ =
             glm::translate(glm::mat4(1.0f), glm::vec3(0.16f, -0.20f, -0.35f)) *
             glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
-            rot_z * rot_y180 *
+            rot_y_trim * rot_z * rot_y180 *
             glm::translate(glm::mat4(1.0f), -center);
 
         for (const auto& prim : gltf.primitives) {
