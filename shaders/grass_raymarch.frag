@@ -205,9 +205,23 @@ float map(vec3 p) {
     // adjacent cells, so we have to query the immediate neighbors for the
     // closest blade.
     const float kPi2 = 6.28318530718;
+    // Presence + slope thresholds. Tuneable; drawn-mask binding will
+    // replace the noise-based presence later.
+    const float kPresenceThresh = 0.45;     // value ≥ thresh → grass cell
+    const float kSlopeMaxGrad   = 0.6;      // |∇noise2| over the cell_n
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
             vec2 nId = cellId + vec2(float(dx), float(dy));
+            // Per-cell eligibility — one noised() lookup at low frequency
+            // gives both a presence mask (clumps grass into ~50 m cell_nes
+            // with bare gaps) AND a slope proxy (the gradient magnitude
+            // of the same low-freq field correlates with macro terrain
+            // slope; flat zones → low gradient → grass, ridges/cliffs →
+            // high gradient → no grass).
+            vec2 cellW = nId * kPeriod;
+            vec3 cell_n = noised(cellW * 0.02);   // ~50 m feature size
+            if (cell_n.x < kPresenceThresh) continue;
+            if (length(cell_n.yz) > kSlopeMaxGrad) continue;
             vec4 r = hash42(nId);
             vec3 np = lp - vec3(float(dx), 0.0, float(dy)) * kPeriod;
             // Per-blade rotation + sub-cell xy offset.
