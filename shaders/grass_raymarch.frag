@@ -184,7 +184,14 @@ float sdGrassBlade(vec3 p, float thickness) {
 // Distance to the grass field at a world-space point. terrainY is sampled
 // once per call and reused for the cell-neighbor loop (the original SDF
 // would call calcTerrainHeight per neighbor — ~9× more samples).
-float map(vec3 p) {
+//
+// out_blade_hit flags whether the closest feature is a grass blade
+// (true) or just the terrain plane (false). Caller uses this to
+// `discard` terrain-plane hits — those would z-fight with the actual
+// rasterised / raymarched terrain renderer's output and read as a
+// flickering green tint over bare ground.
+float map(vec3 p, out bool out_blade_hit) {
+    out_blade_hit = false;
     float terrainY = sampleHeight(p.xz);
     float distToTerrain = 0.5 * (p.y - terrainY);
 
@@ -236,7 +243,11 @@ float map(vec3 p) {
             // sqrt(r.w) gives a more uniform-looking height distribution
             // than the raw [0,1] hash.
             float scale = max(0.65, sqrt(r.w));
-            d = min(d, sdGrassBlade(np / scale, 0.002));
+            float bladeDist = sdGrassBlade(np / scale, 0.002);
+            if (bladeDist < d) {
+                d = bladeDist;
+                out_blade_hit = true;
+            }
         }
     }
     return d;
@@ -273,22 +284,32 @@ void main() {
     const int   kMaxSteps = 192;
     float t = 0.0;
     bool hit = false;
+    bool blade_hit = false;
     // Pixel size projected at unit distance — used to early-out when the
     // SDF distance is below sub-pixel detail at this t.
     float pixSize = 2.0 * scene.viewport.z;
     for (int i = 0; i < kMaxSteps; ++i) {
         if (t >= kMaxDist) break;
         vec3 p = ro + t * rd;
-        float d = map(p);
+        bool step_blade;
+        float d = map(p, step_blade);
         // Hit threshold loosens with distance so the loop terminates on
         // sub-pixel features instead of trying to converge on a blade
         // edge from 50 m away.
-        if (d < 0.5 * pixSize * t + 0.0008) { hit = true; break; }
+        if (d < 0.5 * pixSize * t + 0.0008) {
+            hit = true;
+            blade_hit = step_blade;
+            break;
+        }
         // 0.7 step factor for cone safety on near-tangent grazing rays.
         t += d * 0.7;
     }
 
-    if (!hit) { discard; }
+    // Discard pure terrain-plane hits (no grass blade closer) so the
+    // existing terrain renderer's pixel shows through unaltered. Without
+    // this, no-grass cells (presence/slope rejected) painted the bare
+    // ground green at z-fight depth → flickering green tint.
+    if (!hit || !blade_hit) { discard; }
 
     vec3 p = ro + t * rd;
     vec3 L = normalize(scene.sun_direction.xyz);
