@@ -99,7 +99,7 @@ Level make_arena(float r, float wh) {
         // around an entrance gap. North wall (player-facing) gets the gap.
         auto add_wall = [&](float cx, float cz, float sx, float sz) {
             add(lv, glm::vec3(cx, wh * 0.5f, cz), glm::vec3(sx, wh, sz),
-                castle_tint, kBrick, kBrick, 0.7f, castle_proto);
+                castle_tint, kBrick, kBrick, 0.35f, castle_proto);
         };
         add_wall(0.0f, -cr, 2.0f * cr, wt);                 // south
         add_wall( cr, 0.0f, wt, 2.0f * cr);                 // east
@@ -113,7 +113,7 @@ Level make_arena(float r, float wh) {
         // player walk through (clearance = wh - arch_h ≈ 3.6 m).
         add(lv, glm::vec3(0.0f, wh - arch_h * 0.5f,  cr),
             glm::vec3(ent_w, arch_h, wt),
-            castle_tint, kBrick, kBrick, 0.7f, castle_proto);
+            castle_tint, kBrick, kBrick, 0.35f, castle_proto);
 
         // Crenelations along all 4 walls — small merlons every ~1.4 m on
         // each wall's outer edge, sitting on top of the wall.
@@ -130,7 +130,7 @@ Level make_arena(float r, float wh) {
                  x += merlon_gap) {
                 add(lv, glm::vec3(x, wall_top_y, cz_outer),
                     glm::vec3(merlon_s, merlon_h, merlon_s),
-                    castle_tint, kBrick, kBrick, 1.0f, crenel_proto);
+                    castle_tint, kBrick, kBrick, 0.5f, crenel_proto);
             }
         };
         auto add_merlons_along_z = [&](float cx_outer) {
@@ -139,7 +139,7 @@ Level make_arena(float r, float wh) {
                  z += merlon_gap) {
                 add(lv, glm::vec3(cx_outer, wall_top_y, z),
                     glm::vec3(merlon_s, merlon_h, merlon_s),
-                    castle_tint, kBrick, kBrick, 1.0f, crenel_proto);
+                    castle_tint, kBrick, kBrick, 0.5f, crenel_proto);
             }
         };
         add_merlons_along_x(-(cr - wt * 0.5f));  // south outer edge (z = -cr + wt/2)
@@ -160,7 +160,7 @@ Level make_arena(float r, float wh) {
         for (int i = 0; i < 4; ++i) {
             add(lv, tower_centers[i],
                 glm::vec3(tw_s, tw_h, tw_s),
-                castle_tint, kBrick, kBrick, 0.7f, castle_proto);
+                castle_tint, kBrick, kBrick, 0.35f, castle_proto);
             // Crenelations around the tower top: 8 merlons (corners + mid-
             // edges) form a battlement ring.
             const float c_s = 0.4f;
@@ -180,7 +180,7 @@ Level make_arena(float r, float wh) {
                 const glm::vec2& o = offs[k];
                 add(lv, base + glm::vec3(o.x * c_o, 0.0f, o.y * c_o),
                     glm::vec3(c_s, c_h, c_s),
-                    castle_tint, kBrick, kBrick, 1.0f, crenel_proto);
+                    castle_tint, kBrick, kBrick, 0.5f, crenel_proto);
             }
         }
 
@@ -193,17 +193,17 @@ Level make_arena(float r, float wh) {
         // North + south strips (full inside length minus tower bases)
         add(lv, glm::vec3(0.0f, walk_y,  cr - walk_in),
             glm::vec3(2.0f * cr - 2.0f * tw_s, 0.1f, walk_w),
-            stair_tint, kBrick, kBrick, 0.6f, stair_proto);
+            stair_tint, kBrick, kBrick, 0.3f, stair_proto);
         add(lv, glm::vec3(0.0f, walk_y, -cr + walk_in),
             glm::vec3(2.0f * cr - 2.0f * tw_s, 0.1f, walk_w),
-            stair_tint, kBrick, kBrick, 0.6f, stair_proto);
+            stair_tint, kBrick, kBrick, 0.3f, stair_proto);
         // East + west strips
         add(lv, glm::vec3( cr - walk_in, walk_y, 0.0f),
             glm::vec3(walk_w, 0.1f, 2.0f * cr - 2.0f * tw_s),
-            stair_tint, kBrick, kBrick, 0.6f, stair_proto);
+            stair_tint, kBrick, kBrick, 0.3f, stair_proto);
         add(lv, glm::vec3(-cr + walk_in, walk_y, 0.0f),
             glm::vec3(walk_w, 0.1f, 2.0f * cr - 2.0f * tw_s),
-            stair_tint, kBrick, kBrick, 0.6f, stair_proto);
+            stair_tint, kBrick, kBrick, 0.3f, stair_proto);
 
         // Stairway up to the walkway. East wall inside, climbing south to
         // north. step_h stays under collision::kStepHeight (0.45) so the
@@ -219,7 +219,7 @@ Level make_arena(float r, float wh) {
             float z = stair_z0 + float(i) * step_d;
             add(lv, glm::vec3(stair_x, h * 0.5f, z),
                 glm::vec3(stair_w, h, step_d),
-                stair_tint, kBrick, kBrick, 0.6f, stair_proto);
+                stair_tint, kBrick, kBrick, 0.3f, stair_proto);
         }
 
         // Inner keep / house — 6×6 m footprint × 4 m tall, centered in the
