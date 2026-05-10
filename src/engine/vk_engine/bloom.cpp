@@ -252,9 +252,31 @@ void VulkanEngine::destroy_bloom() {
 
 void VulkanEngine::run_bloom_chain(VkCommandBuffer cmd) {
     if (!bloom_image_) return;
-    // Run unconditionally even if bloom_enabled is off — compose's binding 3
-    // points at this image and Vulkan requires it to be in a defined layout
-    // when the descriptor is bound.
+
+    // Bloom-disabled fast path. compose's binding 3 still needs a valid
+    // image layout, but it doesn't need actual bloom contents — compose's
+    // bloom_params.x (strength) is gated separately, and a zero-clear
+    // means even if the user toggles strength back on without bloom we
+    // contribute zero color. Skips the whole downsample + upsample chain
+    // (~kBloomMips × 2 fullscreen draws + ~kBloomMips barriers) when the
+    // user has bloom off in the UI.
+    if (!rt_.bloom_enabled) {
+        vkinit::transition_image_mip(cmd, bloom_image_,
+                                     VK_IMAGE_LAYOUT_UNDEFINED,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     0, kBloomMips);
+        VkClearColorValue clear_c{};                       // zero
+        VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT,
+                                        0, kBloomMips, 0, 1 };
+        vkCmdClearColorImage(cmd, bloom_image_,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              &clear_c, 1, &range);
+        vkinit::transition_image_mip(cmd, bloom_image_,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                     0, kBloomMips);
+        return;
+    }
 
     auto draw_fullscreen = [&](VkPipeline pipe, VkDescriptorSet set,
                                VkImageView dst_view, VkExtent2D dst_ext,
