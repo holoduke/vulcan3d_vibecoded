@@ -59,8 +59,10 @@ layout(push_constant) uniform PC {
     vec4 grass_params;
 } pc;
 
-const float kTerrainExtent = 2048.0;
-const vec2  kHeightTexel   = vec2(1.0 / 257.0);   // dim+1 — see terrain.cpp
+// dim=256 cells × cell_size=4m = 1024m world extent (terrain.h defaults).
+// Heightmap texture is (dim+1)² = 257² texels covering this span.
+const float kTerrainExtent = 1024.0;
+const vec2  kHeightTexel   = vec2(1.0 / 257.0);
 
 // Sample the engine's heightmap at world XZ. Returns a sentinel low
 // value outside the heightmap so off-map rays bottom out and exit.
