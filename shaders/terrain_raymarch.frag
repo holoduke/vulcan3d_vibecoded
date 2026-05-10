@@ -578,6 +578,18 @@ float calcShadow(vec3 pos, vec3 sunDir) {
     return res * res * (3.0 - 2.0 * res);
 }
 
+// Same per-cell eligibility the raymarched-grass pass uses (low-freq
+// noise value gates presence + gradient magnitude gates slope). Smooth
+// 0..1 output so the terrain-tint blend has no visible hard edge at
+// the mask boundary. Keep these thresholds in sync with
+// grass_raymarch.frag's kPresenceThresh / kSlopeMaxGrad.
+float grassEligibility(vec2 worldXZ) {
+    vec3 cell_n = noised(worldXZ * 0.02);
+    float presence = smoothstep(0.40, 0.55, cell_n.x);
+    float slope_factor = 1.0 - smoothstep(0.55, 0.80, length(cell_n.yz));
+    return presence * slope_factor;
+}
+
 // Layered material: rock base, grass on flats, snow up high (with
 // noise-broken transition), sand near the floor. Multi-frequency
 // noise (`nz`) breaks regularity in the transition lines.
@@ -597,6 +609,14 @@ vec3 getMaterial(vec3 pos, vec3 nor) {
     col = mix(col, snow, snowMask);
     float beachMask = smoothstep(2.5, 1.0, h) * smoothstep(0.5, 0.9, slope);
     col = mix(col, sand, beachMask);
+    // Grass-density green tint — drives the ground colour where the
+    // raymarched grass pass (grass_raymarch.frag) would place blades.
+    // Without this, the bare terrain shows through between blades and
+    // reads as desaturated rock instead of a meadow surface.
+    float grass_amt = grassEligibility(pos.xz);
+    vec3 grass_top  = mix(vec3(0.18, 0.30, 0.09),
+                           vec3(0.13, 0.22, 0.06), nz);
+    col = mix(col, grass_top, grass_amt * 0.85);
     return col;
 }
 
