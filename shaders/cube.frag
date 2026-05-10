@@ -1323,7 +1323,16 @@ void main() {
     // ground term keeps a baseline). 0.10 floor on sky_factor is a tiny
     // gesture toward "windowless rooms still have some light leakage."
     float sky_factor = mix(0.10, 1.0, smoothstep(0.0, 0.6, sky_vis));
-    vec3 ambient_combined = mix(ambient_ground,
+    // Non-terrain receivers (brick walls, keep walls, tile floors) also
+    // attenuate the constant ground term by sky_factor so deep cracks /
+    // corners actually go dark — without this, the ground baseline keeps
+    // walls bright even when GI rays mostly hit other walls and never
+    // see the sky. Terrain keeps the original "ground term carries
+    // through everywhere" behaviour because its GI is gated off and
+    // sky_factor would otherwise stick at 0.10 forever.
+    float ground_atten = is_terrain_pre ? 1.0
+                                        : mix(0.25, 1.0, sky_factor);
+    vec3 ambient_combined = mix(ambient_ground * ground_atten,
                                  ambient_sky * sky_factor, up);
     vec3 indirect = albedo * ambient_combined * ao + gi_indirect;
     // Terrain sky-bounce wrap. Back-facing pixels (-NВ·L > 0) pick up a
