@@ -1447,7 +1447,12 @@ void VulkanEngine::init_viewmodel() {
         grip,
     });
 
+    // Try the user-droppable single-file path first, then the multi-file
+    // scene layout (matches the spacejet asset). Either format works.
     GltfModel gltf = load_gltf("assets/gun.glb");
+    if (gltf.primitives.empty()) {
+        gltf = load_gltf("assets/gun/scene.gltf");
+    }
     if (!gltf.primitives.empty()) {
         glm::vec3 center = (gltf.aabb_min + gltf.aabb_max) * 0.5f;
         glm::vec3 extent = gltf.aabb_max - gltf.aabb_min;

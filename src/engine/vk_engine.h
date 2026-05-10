@@ -1093,7 +1093,7 @@ private:
         bool  grass_raymarch_enabled = false;
         // Max ray distance for the raymarched grass (metres). Cuts the
         // per-pixel step budget; beyond this, grass fades to sky.
-        float grass_raymarch_distance = 35.0f;
+        float grass_raymarch_distance = 80.0f;
         // Max blade-render distance in metres. Beyond this, blades
         // collapse to NaN clip space (no fragment work).
         float grass_distance       = 80.0f;
