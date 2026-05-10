@@ -281,7 +281,10 @@ void main() {
 
     // Altitude band fade with 2m soft edges on each side.
     float alt_min = scene.grass_extra2.x;
-    float alt_max = scene.grass_extra2.y;
+    // Guard against a misset slider where alt_max <= alt_min — without
+    // it the two smoothsteps' ramps overlap and alt_fade collapses to 0
+    // for every blade, culling all grass. Force a small minimum band.
+    float alt_max = max(scene.grass_extra2.y, alt_min + 4.0);
     float alt_fade =
         smoothstep(alt_min - 2.0, alt_min + 2.0, base_world.y) *
         (1.0 - smoothstep(alt_max - 2.0, alt_max + 2.0, base_world.y));

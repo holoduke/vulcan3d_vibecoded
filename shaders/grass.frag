@@ -82,7 +82,10 @@ void main() {
     // that case but `view_dot_l = dot(view_dir, L)` is large. A 0.45
     // power tightens the lobe to grazing-only. Yellow-green tint
     // matches plant chlorophyll's transmittance peak.
-    vec3 V = normalize(scene.camera_pos.xyz - vWorldPos);
+    // Tiny offset prevents normalize(0) → NaN when a blade vertex lands
+    // exactly on the camera position (near-plane clip + supersample
+    // jitter can hit this); without the guard the blade goes black.
+    vec3 V = normalize(scene.camera_pos.xyz - vWorldPos + vec3(1e-5));
     float view_dot_l = max(dot(-V, L), 0.0);
     float backlit = pow(view_dot_l, 4.0) * (1.0 - n_dot_l) * vHeightRatio;
     vec3  trans   = vec3(0.95, 1.05, 0.55) *
