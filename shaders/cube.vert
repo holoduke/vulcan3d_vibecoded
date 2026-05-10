@@ -41,8 +41,25 @@ layout(location = 7) out vec3 vObjectNormal;
 layout(location = 8) out vec4 vPrevClip;
 
 void main() {
-    gl_Position = pc.mvp * vec4(inPosition, 1.0);
-    vec4 wp = pc.model * vec4(inPosition, 1.0);
+    // Conservative-geometry SPOM extrusion for the brick slot. cube.frag
+    // ray-marches up to ~12cm of world-space depth into the brick height
+    // map; if the silhouette is the original cube edge, that depth is
+    // hidden at corners. Push brick-brush vertices outward along their
+    // normal by the same world distance — the discarded pixels in the
+    // extension zone then have valid depth (depth pre-pass writes the
+    // extruded surface too, so depth-EQUAL passes in the color pass).
+    // Gated on tex_params.x == 1 (brick) and not emissive (skip lamps),
+    // matches the spom_path gate in cube.frag.
+    const float kSpomExtWorld = 0.12;
+    bool brick_extrude = int(pc.tex_params.x) == 1 && pc.emissive.a < 0.5;
+    vec3 world_n_unscaled = mat3(pc.model) * inNormal;
+    float ext_factor = brick_extrude
+        ? kSpomExtWorld / max(length(world_n_unscaled), 0.01)
+        : 0.0;
+    vec3 inPos_ext = inPosition + inNormal * ext_factor;
+
+    gl_Position = pc.mvp * vec4(inPos_ext, 1.0);
+    vec4 wp = pc.model * vec4(inPos_ext, 1.0);
     vWorldPos = wp.xyz;
     // For uniform-scale or rotation-only models, mat3(model) is fine. We accept
     // small error on non-uniform scale (the static brushes use non-uniform
@@ -53,7 +70,7 @@ void main() {
     vEmissive = pc.emissive;
     vUv = inUv;
     vTexParams = pc.tex_params;
-    vObjectPos = inPosition;
+    vObjectPos = inPos_ext;
     vObjectNormal = inNormal;
-    vPrevClip = pc.prev_mvp * vec4(inPosition, 1.0);
+    vPrevClip = pc.prev_mvp * vec4(inPos_ext, 1.0);
 }

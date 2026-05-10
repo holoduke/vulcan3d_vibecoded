@@ -729,22 +729,11 @@ void main() {
             vec2 spom_uv_off = spom_uv(sample_pos, proj_n, face_size, scale,
                                         axis, spom_T, spom_B, spom_face_n,
                                         spom_disc);
-            // Real `discard` here triggers GPU TDR on this engine's MRT
-            // cube color pass (depth + motion attachments must always
-            // write or TAA reads garbage history). Fall back to the flat
-            // un-parallaxed UV at the silhouette pixel — it still reads
-            // as a flat clipped edge, but it's stable. True silhouette
-            // SPOM with conservative geometry stays queued.
-            // Use the un-parallaxed UV when silhouette would have discarded.
-            vec2 sample_uv;
-            if (axis == 0)      sample_uv = vec2(sample_pos.z * sign(proj_n.x), sample_pos.y);
-            else if (axis == 1) sample_uv = vec2(sample_pos.x, sample_pos.z * sign(proj_n.y));
-            else                sample_uv = vec2(sample_pos.x * sign(proj_n.z), sample_pos.y);
-            vec2 use_uv = spom_disc ? sample_uv : spom_uv_off;
-            vec3 tex_albedo = texture(u_albedo[1], use_uv).rgb;
+            if (spom_disc) discard;
+            vec3 tex_albedo = texture(u_albedo[1], spom_uv_off).rgb;
             albedo = tex_albedo * vColor;
             if (use_normal) {
-                vec3 n_t = texture(u_normal[1], use_uv).rgb * 2.0 - 1.0;
+                vec3 n_t = texture(u_normal[1], spom_uv_off).rgb * 2.0 - 1.0;
                 N = normalize(spom_T  * n_t.x +
                               spom_B  * n_t.y +
                               spom_face_n * n_t.z);
