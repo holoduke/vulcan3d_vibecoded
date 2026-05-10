@@ -703,18 +703,33 @@ void main() {
         const int kBlockerSearch = 4;
         float sum_t = 0.0;
         int   hits = 0;
-        for (int i = 0; i < kBlockerSearch; ++i) {
-            float br1 = rand(seed_base + uvec3(i, 91u, 13u));
-            float br2 = rand(seed_base + uvec3(i, 19u, 71u));
-            float r   = sqrt(br1) * base_softness * 4.0;
-            float phi = 6.28318530718 * br2;
-            vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
-            vec3 dir = normalize(L + jitter);
-            float t;
-            bool got = is_terrain_pre
-                ? closest_hit_no_terrain(origin, dir, 200.0, t)
-                : closest_hit            (origin, dir, 200.0, t);
-            if (got) { sum_t += t; ++hits; }
+        // Hoist is_terrain_pre out of the ray loop — the per-tap ternary
+        // forced both closest_hit_* function bodies to be inlined into
+        // the kernel and produced divergent control flow inside the ray
+        // query. Two specialised loops are larger source but smaller
+        // compiled shader, and stop the divergent branch on every tap.
+        if (is_terrain_pre) {
+            for (int i = 0; i < kBlockerSearch; ++i) {
+                float br1 = rand(seed_base + uvec3(i, 91u, 13u));
+                float br2 = rand(seed_base + uvec3(i, 19u, 71u));
+                float r   = sqrt(br1) * base_softness * 4.0;
+                float phi = 6.28318530718 * br2;
+                vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
+                vec3 dir = normalize(L + jitter);
+                float t;
+                if (closest_hit_no_terrain(origin, dir, 200.0, t)) { sum_t += t; ++hits; }
+            }
+        } else {
+            for (int i = 0; i < kBlockerSearch; ++i) {
+                float br1 = rand(seed_base + uvec3(i, 91u, 13u));
+                float br2 = rand(seed_base + uvec3(i, 19u, 71u));
+                float r   = sqrt(br1) * base_softness * 4.0;
+                float phi = 6.28318530718 * br2;
+                vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
+                vec3 dir = normalize(L + jitter);
+                float t;
+                if (closest_hit(origin, dir, 200.0, t)) { sum_t += t; ++hits; }
+            }
         }
 
         if (hits == 0) {
@@ -749,26 +764,40 @@ void main() {
             float inv_strata = 1.0 / float(strata);
             float blocked = 0.0;
             int taken = 0;
-            for (int sy = 0; sy < strata && taken < N_s_eff; ++sy) {
-                for (int sx = 0; sx < strata && taken < N_s_eff; ++sx) {
-                    // Offset sample indices by parity so adjacent pixels
-                    // sample DIFFERENT rays in the cone (not just the
-                    // first half each). The full set comes back over
-                    // the 2x2 checkerboard.
-                    int idx = taken * 2 + parity;
-                    float r1 = rand(seed_base + uvec3(idx, 11u, 47u));
-                    float r2 = rand(seed_base + uvec3(idx, 53u, 23u));
-                    float u1 = (float(sx) + r1) * inv_strata;
-                    float u2 = (float(sy) + r2) * inv_strata;
-                    float r   = sqrt(u1) * penumbra;
-                    float phi = 6.28318530718 * u2;
-                    vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
-                    vec3 dir = normalize(L + jitter);
-                    bool blk = is_terrain_pre
-                        ? any_hit_no_terrain(origin, dir, 200.0)
-                        : any_hit            (origin, dir, 200.0);
-                    if (blk) blocked += 1.0;
-                    ++taken;
+            // Same hoist as the blocker loop above — two specialised
+            // PCSS sample loops instead of a per-tap ternary on the
+            // ray-query function.
+            if (is_terrain_pre) {
+                for (int sy = 0; sy < strata && taken < N_s_eff; ++sy) {
+                    for (int sx = 0; sx < strata && taken < N_s_eff; ++sx) {
+                        int idx = taken * 2 + parity;
+                        float r1 = rand(seed_base + uvec3(idx, 11u, 47u));
+                        float r2 = rand(seed_base + uvec3(idx, 53u, 23u));
+                        float u1 = (float(sx) + r1) * inv_strata;
+                        float u2 = (float(sy) + r2) * inv_strata;
+                        float r   = sqrt(u1) * penumbra;
+                        float phi = 6.28318530718 * u2;
+                        vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
+                        vec3 dir = normalize(L + jitter);
+                        if (any_hit_no_terrain(origin, dir, 200.0)) blocked += 1.0;
+                        ++taken;
+                    }
+                }
+            } else {
+                for (int sy = 0; sy < strata && taken < N_s_eff; ++sy) {
+                    for (int sx = 0; sx < strata && taken < N_s_eff; ++sx) {
+                        int idx = taken * 2 + parity;
+                        float r1 = rand(seed_base + uvec3(idx, 11u, 47u));
+                        float r2 = rand(seed_base + uvec3(idx, 53u, 23u));
+                        float u1 = (float(sx) + r1) * inv_strata;
+                        float u2 = (float(sy) + r2) * inv_strata;
+                        float r   = sqrt(u1) * penumbra;
+                        float phi = 6.28318530718 * u2;
+                        vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
+                        vec3 dir = normalize(L + jitter);
+                        if (any_hit(origin, dir, 200.0)) blocked += 1.0;
+                        ++taken;
+                    }
                 }
             }
             shadow = (blocked / float(taken)) * scene.rt_params.w;
