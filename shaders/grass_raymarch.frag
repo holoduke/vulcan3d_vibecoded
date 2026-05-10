@@ -355,10 +355,20 @@ void main() {
                 pow(clamp(1.0 + dot(N, rd), 0.0, 1.0), 3.0);
     col += fres;
 
-    // Distance fade — over the last 30% of kMaxDist the grass blends into
-    // the sky/horizon tint so the cap doesn't read as a hard ring.
-    float fade = smoothstep(kMaxDist * 0.7, kMaxDist, t);
-    col = mix(col, sample_sky_grad(rd), fade);
+    // Distance fade target = the same green tint terrain_raymarch's
+    // getMaterial blends in for grass-eligible cells. Blade colour eases
+    // INTO the underlying ground colour instead of into the sky, so the
+    // cutoff reads as "thinning out" rather than a hard sky-coloured
+    // ring. Dither the last 8% with a per-pixel hash discard so the
+    // very edge thins to bare terrain instead of a uniform tinted band.
+    vec3 fade_target = vec3(0.18, 0.30, 0.09);
+    float fade = smoothstep(kMaxDist * 0.55, kMaxDist, t);
+    col = mix(col, fade_target, fade);
+    if (fade > 0.92) {
+        float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233)))
+                              * 43758.5453);
+        if (dither < (fade - 0.92) * 12.5) { discard; }
+    }
 
     outColor = vec4(col, 1.0);
     // Treat grass as world-static for TAA (per-blade wind sway is sub-
