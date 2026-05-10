@@ -89,7 +89,7 @@ void VulkanEngine::init_rt() {
                 .pQueueFamilyIndices = rt_share_indices,
             };
             VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
             vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                      &out_buffer, &out_alloc, nullptr),
                      "blas buffer");
@@ -116,7 +116,7 @@ void VulkanEngine::init_rt() {
                 .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
             };
             VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
             vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                      &scratch, &scratch_alloc, nullptr),
                      "blas scratch");
@@ -219,7 +219,7 @@ void VulkanEngine::init_rt() {
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                     VMA_ALLOCATION_CREATE_MAPPED_BIT;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
@@ -251,7 +251,7 @@ void VulkanEngine::init_rt() {
         // Device-local with BAR-mapped host write вЂ” same rationale as
         // materials_buffer_ above (read by every cube.frag fragment).
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                     VMA_ALLOCATION_CREATE_MAPPED_BIT;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
@@ -306,7 +306,7 @@ void VulkanEngine::init_rt() {
             .pQueueFamilyIndices = rt_share_indices,
         };
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                  &tlas_buffer_, &tlas_alloc_, nullptr),
                  "tlas buffer");
@@ -343,7 +343,7 @@ void VulkanEngine::init_rt() {
             .pQueueFamilyIndices = rt_share_indices,
         };
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                  &tlas_scratch_buffer_, &tlas_scratch_alloc_, nullptr),
                  "tlas scratch");
@@ -525,7 +525,7 @@ void VulkanEngine::bake_merged_static_blas() {
             .pQueueFamilyIndices = rt_share_indices,
         };
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                  &merged_static_blas_buffer_,
                                  &merged_static_blas_alloc_, nullptr),
@@ -553,7 +553,7 @@ void VulkanEngine::bake_merged_static_blas() {
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
         VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                  &scratch, &scratch_alloc, nullptr),
                  "merged static blas scratch");
@@ -622,7 +622,7 @@ void VulkanEngine::bake_merged_static_blas() {
                 .pQueueFamilyIndices = rt_share_indices,
             };
             VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
             vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                      &compact_buf, &compact_alloc, nullptr),
                      "merged static blas compact buffer");
