@@ -50,18 +50,22 @@ void main() {
     // extruded surface too, so depth-EQUAL passes in the color pass).
     // Gated on tex_params.x == 1 (brick) and not emissive (skip lamps),
     // matches the spom_path gate in cube.frag.
-    const float kSpomExtWorld = 0.12;
-    int tex_idx = int(pc.tex_params.x);
-    // Extrude any SPOM-using material so the parallax-displaced surface
-    // has geometric room to live inside (matches height_idx_for_albedo()
-    // in cube.frag). Skip emissive lamps so their geometry stays exact.
-    bool brick_extrude = (tex_idx == 1 || tex_idx == 4 || tex_idx == 5 ||
-                          tex_idx == 6) && pc.emissive.a < 0.5;
-    vec3 world_n_unscaled = mat3(pc.model) * inNormal;
-    float ext_factor = brick_extrude
-        ? kSpomExtWorld / max(length(world_n_unscaled), 0.01)
-        : 0.0;
-    vec3 inPos_ext = inPosition + inNormal * ext_factor;
+    // SPOM extrusion REMOVED. Earlier versions pushed brick brush
+    // vertices outward by ~12cm along the per-vertex world normal so
+    // the parallax-displaced bumps had geometric room to silhouette
+    // outside the original cube edge. That created a triangular gap
+    // at OUTSIDE corners where two walls meet: each wall's vertices
+    // extrude along its own normal, so the +X face's corner vertex
+    // moves +X but stays at z = cz+sz/2, while the +Z face's corner
+    // vertex moves +Z but stays at x = cx+sx/2 — leaving a wedge of
+    // sky visible underneath the corner.
+    //
+    // cube.frag's silhouette test still fires inside the original
+    // cube footprint (visible parallax point past cube extent →
+    // gl_FragDepth=1.0 sentinel → compose paints sky). We lose the
+    // "bricks poking out past the geometric edge" effect, but gain
+    // back continuous wall corners.
+    vec3 inPos_ext = inPosition;
 
     gl_Position = pc.mvp * vec4(inPos_ext, 1.0);
     vec4 wp = pc.model * vec4(inPos_ext, 1.0);
