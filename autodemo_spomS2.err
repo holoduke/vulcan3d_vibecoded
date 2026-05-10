@@ -1,0 +1,2 @@
+10:45:03.884 ERROR [vk_check] vkWaitForFences failed: VkResult=-4 at C:\Users\gillis\dev\quake-like\src\engine\vk_engine.cpp:1282
+10:45:03.894 ERROR [run] frame aborted via std::exception (type=class std::runtime_error) — marking device_lost and exiting loop

@@ -104,6 +104,19 @@ layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 // have a height map and skip the parallax march entirely.
 layout(set = 0, binding = 12) uniform sampler2D u_brick_height;
 
+// Push constants — match cube.vert's PC layout exactly. Fragment shader
+// only reads `model` (for the brush's world center + per-axis size used
+// by the SPOM silhouette test); the rest are unused here but the layout
+// must mirror the vertex shader because both stages share the range.
+layout(push_constant) uniform PC {
+    mat4 mvp;
+    mat4 model;
+    mat4 prev_mvp;
+    vec4 color;
+    vec4 emissive;
+    vec4 tex_params;
+} pc;
+
 // Triplanar projection sample. Avoids the "what UV does this cube face
 // use" problem and works correctly on every brush size вЂ” the texture stays
 // world-aligned regardless of brush dimensions. Cost is 3 samples per pass,
@@ -139,8 +152,15 @@ vec3 triplanar_sample(sampler2D tex, vec3 wp, vec3 N) {
 // stair-stepping. Grazing-angle pixels (V_t.z < 0.2) skip the march
 // because the parallax displacement explodes there and produces
 // shimmer + texture swimming.
-vec2 spom_uv(vec3 wp_scaled, vec3 N, out int out_axis,
-             out vec3 out_T, out vec3 out_B, out vec3 out_face_n) {
+// `out_overhang_disc` is set true when the parallax march pushes the
+// visible point past the brush face's geometric edge — caller should
+// `discard` to make the silhouette read as bumpy bricks instead of a
+// flat clipped edge (the "S" in SPOM).
+vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
+             out int out_axis,
+             out vec3 out_T, out vec3 out_B, out vec3 out_face_n,
+             out bool out_overhang_disc) {
+    out_overhang_disc = false;
     vec3 absN = abs(N);
     int axis;
     vec2 uv0;
@@ -201,7 +221,34 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, out int out_axis,
     float a = cur_h  - current_layer;
     float b = prev_h - prev_layer - a;
     float w = clamp(a / (b - a + 1e-4), 0.0, 1.0);
-    return mix(cur_uv, prev_uv, w);
+    vec2 final_uv = mix(cur_uv, prev_uv, w);
+
+    // SPOM silhouette test: convert the UV offset back to world units
+    // along the face's tangent + bitangent. If the visible point lies
+    // outside the cube face's geometric extent (face_size_world holds
+    // the brush's full XYZ size), the bricks would be jutting past the
+    // edge — make those pixels transparent so the silhouette looks
+    // bumped at corners instead of flat-clipped.
+    vec2 d_uv = final_uv - uv0;
+    float d_T = d_uv.x / max(uv_scale, 1e-4);
+    float d_B = d_uv.y / max(uv_scale, 1e-4);
+    // World-axis index for T and B: 0=X, 1=Y, 2=Z. T's axis depends on
+    // the dominant face axis (see basis selection above).
+    int t_axis = (axis == 0 || axis == 2) ? (axis == 0 ? 2 : 0) : 0;
+    int b_axis = (axis == 1) ? 2 : 1;
+    // Center of this brush in world space lives in pc.model[3].
+    vec3 center = vec3(pc.model[3].x, pc.model[3].y, pc.model[3].z);
+    vec3 rel = vWorldPos - center;
+    float pos_T = (axis == 0) ? rel.z * sign(N.x) :
+                  (axis == 1) ? rel.x :
+                                rel.x * sign(N.z);
+    float pos_B = (axis == 1) ? rel.z * sign(N.y) : rel.y;
+    float vis_T = pos_T + d_T;
+    float vis_B = pos_B + d_B;
+    float ext_T = face_size_world[t_axis] * 0.5;
+    float ext_B = face_size_world[b_axis] * 0.5;
+    if (abs(vis_T) > ext_T || abs(vis_B) > ext_B) out_overhang_disc = true;
+    return final_uv;
 }
 
 vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
@@ -668,14 +715,36 @@ void main() {
         bool spom_path = use_albedo && albedo_idx_raw == 1 && !obj_space &&
                          !is_terrain;
         if (spom_path) {
+            // pc.model is translate * scale (no rotation for static brushes,
+            // and obj_space — which would rotate — already failed the gate
+            // above). Each column's length is the brush's world-space size
+            // along that local axis, which for axis-aligned brushes equals
+            // the face dimensions we need for the silhouette discard.
+            vec3 face_size = vec3(length(pc.model[0].xyz),
+                                  length(pc.model[1].xyz),
+                                  length(pc.model[2].xyz));
             int axis;
             vec3 spom_T, spom_B, spom_face_n;
-            vec2 spom_uv_off = spom_uv(sample_pos, proj_n,
-                                        axis, spom_T, spom_B, spom_face_n);
-            vec3 tex_albedo = texture(u_albedo[1], spom_uv_off).rgb;
+            bool spom_disc;
+            vec2 spom_uv_off = spom_uv(sample_pos, proj_n, face_size, scale,
+                                        axis, spom_T, spom_B, spom_face_n,
+                                        spom_disc);
+            // Real `discard` here triggers GPU TDR on this engine's MRT
+            // cube color pass (depth + motion attachments must always
+            // write or TAA reads garbage history). Fall back to the flat
+            // un-parallaxed UV at the silhouette pixel — it still reads
+            // as a flat clipped edge, but it's stable. True silhouette
+            // SPOM with conservative geometry stays queued.
+            // Use the un-parallaxed UV when silhouette would have discarded.
+            vec2 sample_uv;
+            if (axis == 0)      sample_uv = vec2(sample_pos.z * sign(proj_n.x), sample_pos.y);
+            else if (axis == 1) sample_uv = vec2(sample_pos.x, sample_pos.z * sign(proj_n.y));
+            else                sample_uv = vec2(sample_pos.x * sign(proj_n.z), sample_pos.y);
+            vec2 use_uv = spom_disc ? sample_uv : spom_uv_off;
+            vec3 tex_albedo = texture(u_albedo[1], use_uv).rgb;
             albedo = tex_albedo * vColor;
             if (use_normal) {
-                vec3 n_t = texture(u_normal[1], spom_uv_off).rgb * 2.0 - 1.0;
+                vec3 n_t = texture(u_normal[1], use_uv).rgb * 2.0 - 1.0;
                 N = normalize(spom_T  * n_t.x +
                               spom_B  * n_t.y +
                               spom_face_n * n_t.z);
