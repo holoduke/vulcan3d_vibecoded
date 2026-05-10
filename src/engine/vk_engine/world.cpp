@@ -2268,6 +2268,15 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     if (rt_.grass_enabled && rt_.grass_raymarch_enabled &&
         grass_rm_pipeline_ != VK_NULL_HANDLE) {
         render_grass_raymarch(cmd);
+        // Restore the world cube pipeline + cube mesh — the brush /
+        // dyn-prop loops below assume `pipeline_` is bound and the cube
+        // vertex/index buffers are live. Without this restore the brushes
+        // draw through the raymarch's fullscreen-triangle pipeline (no
+        // vertex buffer expected) and the castle goes flat-colored.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0,
+                              VK_INDEX_TYPE_UINT32);
     } else
     if (rt_.grass_enabled && grass_.instance_count > 0 &&
         grass_pipeline_ != VK_NULL_HANDLE) {
