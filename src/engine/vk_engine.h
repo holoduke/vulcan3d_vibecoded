@@ -762,8 +762,13 @@ private:
     VmaAllocation   sun_shadow_alloc_   = nullptr;
     VkImageView     sun_shadow_view_    = VK_NULL_HANDLE;
     VkSampler       sun_shadow_sampler_ = VK_NULL_HANDLE;
-    VkPipeline      sun_shadow_pipeline_ = VK_NULL_HANDLE;
-    VkShaderModule  sun_shadow_vert_module_ = VK_NULL_HANDLE;
+    VkPipeline       sun_shadow_pipeline_ = VK_NULL_HANDLE;
+    // Dedicated pipeline layout — shadow.vert reads only push constants,
+    // not the scene descriptor set. Using the cube pipeline_layout_ here
+    // forced render_sun_shadow_pass to bind scene_desc_set (TLAS, every
+    // texture array) for nothing.
+    VkPipelineLayout sun_shadow_pipeline_layout_ = VK_NULL_HANDLE;
+    VkShaderModule   sun_shadow_vert_module_ = VK_NULL_HANDLE;
     glm::mat4       sun_shadow_light_vp_ = glm::mat4(1.0f);
     void init_sun_shadow_resources();
     void destroy_sun_shadow_resources();

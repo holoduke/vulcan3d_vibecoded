@@ -842,7 +842,13 @@ void main() {
         // reduction, so close fragments get N×multiplier rays while far
         // ones still drop toward 1.
         float near_mult = max(1.0, scene.terrain_extra.y);
-        int  base_s = int(ceil(float(scene.rt_flags.y) * near_mult));
+        // Cap base sample count: TAA accumulates ~8 frames of jitter, so
+        // anything past ~16 effective samples per pixel falls below the
+        // perceptual noise floor. Ultra preset (slider=40) × near_mult=4
+        // would otherwise hand the shader 160 → ~80 effective rays per
+        // pixel, all but a handful of which are wasted work TAA blurs out.
+        const int kMaxBase = 32;
+        int  base_s = min(int(ceil(float(scene.rt_flags.y) * near_mult)), kMaxBase);
         int  N_s = lod_samples(max(1, base_s), cam_dist);
         // Per-pixel softness вЂ” terrain optionally tightens the cone via
         // the Settings UI to reduce PCSS dither. Tightening trades soft

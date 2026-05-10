@@ -17,10 +17,31 @@ void VulkanEngine::init_sun_shadow_pipeline() {
     std::string sd = QLIKE_SHADER_DIR;
     sun_shadow_vert_module_ = vkpipe::load_shader_module(device_, sd + "/shadow.vert.spv");
 
+    // Dedicated pipeline layout — no descriptor sets. Shadow.vert only
+    // reads `pc.mvp` (light_view_proj × model already baked on the host);
+    // forcing the cube pipeline_layout_ here meant render_sun_shadow_pass
+    // had to vkCmdBindDescriptorSets the entire scene set (TLAS + texture
+    // arrays + materials SSBO) for code that consumes none of it.
+    {
+        VkPushConstantRange pc{};
+        pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pc.offset = 0;
+        pc.size = sizeof(PushConstants);
+        VkPipelineLayoutCreateInfo plci{};
+        plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plci.setLayoutCount = 0;
+        plci.pSetLayouts = nullptr;
+        plci.pushConstantRangeCount = 1;
+        plci.pPushConstantRanges = &pc;
+        vk_check(vkCreatePipelineLayout(device_, &plci, nullptr,
+                                         &sun_shadow_pipeline_layout_),
+                 "sun shadow pipeline layout");
+    }
+
     vkpipe::GraphicsPipelineConfig cfg{};
     cfg.vert = sun_shadow_vert_module_;
     cfg.frag = VK_NULL_HANDLE;          // depth-only
-    cfg.layout = pipeline_layout_;       // shares the cube push-constant layout
+    cfg.layout = sun_shadow_pipeline_layout_;
     cfg.color_attachment_count = 0;
     cfg.depth_format = VK_FORMAT_D32_SFLOAT;
     // CULL_NONE on shadow casters: at a ground-contact line (cube on
@@ -54,6 +75,10 @@ void VulkanEngine::destroy_sun_shadow_pipeline() {
     if (sun_shadow_pipeline_) {
         vkDestroyPipeline(device_, sun_shadow_pipeline_, nullptr);
         sun_shadow_pipeline_ = VK_NULL_HANDLE;
+    }
+    if (sun_shadow_pipeline_layout_) {
+        vkDestroyPipelineLayout(device_, sun_shadow_pipeline_layout_, nullptr);
+        sun_shadow_pipeline_layout_ = VK_NULL_HANDLE;
     }
     if (sun_shadow_vert_module_) {
         vkDestroyShaderModule(device_, sun_shadow_vert_module_, nullptr);
@@ -264,8 +289,7 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sun_shadow_pipeline_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
-                            0, 1, &scene_desc_set_, 0, nullptr);
+    // No descriptor-set bind — shadow.vert consumes only push constants.
 
     // CULL_NONE makes the front (sun-facing) face write the correct
     // caster depth, so there's no need for positive caster bias to
@@ -284,7 +308,7 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
         PushConstants pc{};
         pc.mvp = vp * model;
         pc.model = model;
-        vkCmdPushConstants(cmd, pipeline_layout_,
+        vkCmdPushConstants(cmd, sun_shadow_pipeline_layout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &pc);
     };
