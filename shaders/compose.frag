@@ -98,10 +98,15 @@ vec3 ghost_tint(int idx) {
 vec3 ghost_blob(vec2 uv, vec2 center, vec2 axis_norm,
                 float radius, float aberration) {
     float inv_r2 = 1.0 / max(radius * radius, 1e-6);
+    vec2 d = uv - center;
+    // Squared-distance reject — most pixels are far from any ghost
+    // center; their exp() is below noise (~1e-4). Skip the 3 transcendentals
+    // when the green channel's normalised distance² > 8 (exp(-8) ≈ 3e-4).
+    if (dot(d, d) * inv_r2 > 8.0) return vec3(0.0);
     vec2 ab = axis_norm * aberration;
-    float dr2 = dot(uv - center + ab, uv - center + ab);
-    float dg2 = dot(uv - center,      uv - center);
-    float db2 = dot(uv - center - ab, uv - center - ab);
+    float dr2 = dot(d + ab, d + ab);
+    float dg2 = dot(d,      d);
+    float db2 = dot(d - ab, d - ab);
     return vec3(exp(-dr2 * inv_r2),
                 exp(-dg2 * inv_r2),
                 exp(-db2 * inv_r2));
