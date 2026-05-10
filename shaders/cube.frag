@@ -785,19 +785,22 @@ void main() {
                                         axis, spom_T, spom_B, spom_face_n,
                                         spom_disc);
             if (spom_disc) {
-                // Silhouette overhang — bricks would be jutting past the
-                // cube's geometric edge. Bare `discard` reproduced GPU
-                // device_lost (MRT cube pass needs all attachments to
-                // write or TAA reads garbage history). Instead, emit
-                // sentinel values: color = 0 + motion = 0 so TAA stays
-                // sane, and depth = 1.0 (far plane) so compose.frag's
-                // `depth >= 0.99999` sky check kicks in and paints the
-                // procedural sky behind the brick edge — the visible
-                // result at corners is "see-through to the sky", which
-                // is what a real bumped silhouette would reveal.
-                outColor  = vec4(0.0);
+                // Silhouette overhang — sample the procedural sky directly
+                // and write that. Earlier attempts:
+                //   - bare discard → MRT pass leaves depth/motion unwritten
+                //     → TAA garbage → GPU device_lost
+                //   - gl_FragDepth = 1.0 sentinel + outColor=0 → 1.0 fails
+                //     the depth-EQUAL/LESS_OR_EQUAL test against the
+                //     prepass-written wall depth (0.97), fragment is
+                //     killed entirely, scene_color keeps whatever the
+                //     earlier raymarch wrote at that pixel — which is
+                //     why the user saw a textureless mesh leaking through.
+                // Sampling the sky here writes valid color + motion + the
+                // rasterized depth (gl_FragDepth left unset on this path
+                // → uses gl_FragCoord.z written at the top of main).
+                vec3 sky_dir = normalize(vWorldPos - scene.camera_pos.xyz);
+                outColor  = vec4(sample_sky(sky_dir), 1.0);
                 outMotion = vec2(0.0);
-                gl_FragDepth = 1.0;
                 return;
             }
             int  a_idx = clamp(albedo_idx_raw, 0, kTextureCount - 1);
