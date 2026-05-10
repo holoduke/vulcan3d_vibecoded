@@ -1461,20 +1461,18 @@ void VulkanEngine::init_viewmodel() {
         // earlier 0.30m. The 180° Y-rotation flips the gun's nose to
         // point forward (camera -Z); without it the assets/gun model
         // points back at the player.
-        // New asset (sci_fi_m254). Reset rotation stack to the bare
-        // Y-180 — most glTF guns ship with nose along +Z, so we flip
-        // 180° to align with camera-forward (-Z). The corrective
-        // Z-roll and yaw-trim from the previous asset only get re-
-        // applied when this one's tilt/aim drift is observed.
+        // m254 asset has its barrel along +Y (model "up"); pitch -90°
+        // around X to lay it forward along camera -Z. Adjust if a new
+        // asset uses a different forward axis.
         float scale = 0.55f / max_side;
-        glm::mat4 rot_y180 = glm::rotate(glm::mat4(1.0f),
-                                          glm::radians(180.0f),
-                                          glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::mat4 rot_pitch = glm::rotate(glm::mat4(1.0f),
+                                            glm::radians(-90.0f),
+                                            glm::vec3(1.0f, 0.0f, 0.0f));
 
         viewmodel_root_offset_ =
             glm::translate(glm::mat4(1.0f), glm::vec3(0.16f, -0.20f, -0.35f)) *
             glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
-            rot_y180 *
+            rot_pitch *
             glm::translate(glm::mat4(1.0f), -center);
 
         for (const auto& prim : gltf.primitives) {
