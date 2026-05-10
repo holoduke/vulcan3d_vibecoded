@@ -1457,11 +1457,19 @@ void VulkanEngine::init_viewmodel() {
         glm::vec3 center = (gltf.aabb_min + gltf.aabb_max) * 0.5f;
         glm::vec3 extent = gltf.aabb_max - gltf.aabb_min;
         float max_side = std::max({extent.x, extent.y, extent.z, 1e-3f});
-        float scale = 0.30f / max_side;
+        // 0.55m max side reads better at first-person scale than the
+        // earlier 0.30m. The 180° Y-rotation flips the gun's nose to
+        // point forward (camera -Z); without it the assets/gun model
+        // points back at the player.
+        float scale = 0.55f / max_side;
+        glm::mat4 rot_y180 = glm::rotate(glm::mat4(1.0f),
+                                          glm::radians(180.0f),
+                                          glm::vec3(0.0f, 1.0f, 0.0f));
 
         viewmodel_root_offset_ =
             glm::translate(glm::mat4(1.0f), glm::vec3(0.16f, -0.20f, -0.35f)) *
             glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
+            rot_y180 *
             glm::translate(glm::mat4(1.0f), -center);
 
         for (const auto& prim : gltf.primitives) {
