@@ -404,6 +404,45 @@ float terrainH(vec2 p) {
 // producing the "everything broken at high altitude" symptom.
 float terrainMaxHeight() { return max(TERRAIN_HEIGHT, pc.color.w) + 80.0; }
 
+// Same FBM as terrainH() but propagates the analytic gradient through
+// the per-octave Jacobian: J starts as TERRAIN_SCALE·I (world→local),
+// each octave multiplies J by m2·2 (matching p_new = m2 * p_old * 2).
+// The world-space derivative of the noise value is transpose(J) * n.yz
+// (chain rule on the local-coord gradient noised() returns).
+//
+// Plateau + sculpt-overlay terms contribute to the height only — their
+// gradient is small at the wavelengths normals care about and would
+// just slightly smooth the lit normal. Damp factor's gradient is also
+// dropped: it's a slowly-varying weight, the contribution to dh/dp is
+// noise-floor.
+//
+// Returns vec3(height, dh/dx_world, dh/dz_world). Used by calcNormal
+// to replace 3× terrainH() finite-difference taps with one analytic
+// evaluation — biggest single per-pixel terrain saving.
+vec3 terrainH_grad(vec2 wp) {
+    vec2 p = wp * TERRAIN_SCALE;
+    mat2 J = mat2(TERRAIN_SCALE, 0.0, 0.0, TERRAIN_SCALE);
+    float a = 0.0, b = 1.0;
+    vec2 d = vec2(0.0);
+    vec2 grad = vec2(0.0);
+    int kOct = int(pc.tex_params.w);
+    for (int i = 0; i < kOct; i++) {
+        vec3 n = noised(p);
+        d += n.yz;
+        float damp = 1.0 / (1.0 + dot(d, d));
+        a += b * n.x * damp;
+        grad += b * damp * (transpose(J) * n.yz);
+        b *= 0.5;
+        p = m2 * p * 2.0;
+        J = m2 * J * 2.0;
+    }
+    float h = a * TERRAIN_HEIGHT;
+    float t = plateauWeight(wp);
+    h = mix(h, pc.color.w, t);
+    h += sampleHeightDelta(wp);
+    return vec3(h, grad.x * TERRAIN_HEIGHT, grad.y * TERRAIN_HEIGHT);
+}
+
 // Coarse 3-octave heightfield вЂ” strictly for AO + GI occlusion
 // raymarches where sub-meter detail doesn't matter. Cuts the per-step
 // noise cost vs terrainM() (which runs the full march octave count,
@@ -480,11 +519,11 @@ float raymarch(vec3 ro, vec3 rd) {
 // 80 m. The FBM normal-octave slider (default 18) gives plenty of
 // distance detail without the artefacts.
 vec3 calcNormal(vec3 pos, float t) {
-    float eps = 0.02 + 0.0008 * t;
-    float hC = terrainH(pos.xz);
-    float hR = terrainH(pos.xz + vec2(eps, 0.0));
-    float hU = terrainH(pos.xz + vec2(0.0, eps));
-    vec3 N = normalize(vec3(hC - hR, eps, hC - hU));
+    // Analytic gradient (1× FBM) replaces the previous 3× terrainH()
+    // finite-difference probe. Same N up to the small contribution from
+    // the damp/plateau terms whose gradients we drop.
+    vec3 hg = terrainH_grad(pos.xz);
+    vec3 N = normalize(vec3(-hg.y, 1.0, -hg.z));
 
     // Closeup micro-bump вЂ” two-octave high-frequency noise gradient
     // tilts the surface normal so near-camera ground reads as rocky
