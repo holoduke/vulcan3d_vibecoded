@@ -729,7 +729,22 @@ void main() {
             vec2 spom_uv_off = spom_uv(sample_pos, proj_n, face_size, scale,
                                         axis, spom_T, spom_B, spom_face_n,
                                         spom_disc);
-            if (spom_disc) discard;
+            if (spom_disc) {
+                // Silhouette overhang — bricks would be jutting past the
+                // cube's geometric edge. Bare `discard` reproduced GPU
+                // device_lost (MRT cube pass needs all attachments to
+                // write or TAA reads garbage history). Instead, emit
+                // sentinel values: color = 0 + motion = 0 so TAA stays
+                // sane, and depth = 1.0 (far plane) so compose.frag's
+                // `depth >= 0.99999` sky check kicks in and paints the
+                // procedural sky behind the brick edge — the visible
+                // result at corners is "see-through to the sky", which
+                // is what a real bumped silhouette would reveal.
+                outColor  = vec4(0.0);
+                outMotion = vec2(0.0);
+                gl_FragDepth = 1.0;
+                return;
+            }
             vec3 tex_albedo = texture(u_albedo[1], spom_uv_off).rgb;
             albedo = tex_albedo * vColor;
             if (use_normal) {
