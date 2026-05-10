@@ -291,7 +291,6 @@ void VulkanEngine::init() {
     init_terrain_raymarch_lowres();
     init_sun_shadow_pipeline();
     init_grass_pipeline();
-    init_grass_raymarch_pipeline();
     present_loader_frame("Baking shadows",        0.85f);
     // Heightmap raw-heights texture (binding 8) for the procedural
     // raymarched terrain shader. Uploaded once, after descriptors and
@@ -318,6 +317,9 @@ void VulkanEngine::init() {
     init_taa();
     init_bloom();
     init_compose();
+    // Must run AFTER init_taa() — grass raymarch reuses taa_vert_module_
+    // as its fullscreen-triangle vertex shader.
+    init_grass_raymarch_pipeline();
     init_viewmodel();
     init_spacejet();
     init_imgui();
