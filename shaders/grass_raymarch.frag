@@ -59,22 +59,84 @@ layout(push_constant) uniform PC {
     vec4 grass_params;
 } pc;
 
-// dim=256 cells × cell_size=4m = 1024m world extent (terrain.h defaults).
-// Heightmap texture is (dim+1)² = 257² texels covering this span.
-const float kTerrainExtent = 1024.0;
-const vec2  kHeightTexel   = vec2(1.0 / 257.0);
+// Heightmap texture mapping — matches terrain_raymarch.frag's
+// kHeightmapSide so my grass sits on the same surface the terrain
+// raymarch draws (otherwise grass appears UNDER the terrain and gets
+// occluded by the LESS_OR_EQUAL depth test → no grass visible).
+const float kHeightmapSide = 2048.0;
 
-// Sample the engine's heightmap at world XZ. Returns a sentinel low
-// value outside the heightmap so off-map rays bottom out and exit.
-float sampleHeight(vec2 wp_xz) {
-    vec2 uv = wp_xz / kTerrainExtent + 0.5;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        return -1000.0;
-    }
+float sampleHeightDelta(vec2 worldXZ) {
+    vec2 uv = (worldXZ / kHeightmapSide) + vec2(0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
     return textureLod(u_heightmap, uv, 0.0).r;
 }
 
-// Hash helpers from the original shadertoy.
+// === Procedural FBM terrain (ported from terrain_raymarch.frag) ===
+// Match its terrainM() output so grass stands on the same y the
+// terrain renderer draws. Heightmap texture stores DELTA from baseline
+// (sculpt edits); the absolute height is the procedural FBM + delta.
+
+float hash21(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+vec3 noised(in vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u  = f * f * (3.0 - 2.0 * f);
+    vec2 du = 6.0 * f * (1.0 - f);
+    float a = hash21(i + vec2(0.0, 0.0));
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    float value = a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y;
+    vec2  deriv = du * (vec2(b - a, c - a) + (a - b - c + d) * u.yx);
+    return vec3(value, deriv);
+}
+
+const mat2 m2 = mat2(0.8, -0.6, 0.6, 0.8);
+const float TERRAIN_SCALE  = 0.003;
+const float TERRAIN_HEIGHT = 120.0;
+// Plateau matches the gameplay default (engine init: castle area).
+const vec2  kPlateauCenter = vec2(0.0, 0.0);
+const float kPlateauExtent = 28.0;
+const float kPlateauHeight = 22.0;
+const float kPlateauBlend  = 24.0;
+
+float plateauWeight(vec2 worldXZ) {
+    vec2 d = abs(worldXZ - kPlateauCenter) - vec2(kPlateauExtent);
+    float dout = max(max(d.x, 0.0), max(d.y, 0.0));
+    return 1.0 - smoothstep(0.0, kPlateauBlend, dout);
+}
+
+// Same FBM as terrain_raymarch.frag::terrainM with the per-frame
+// octave count fixed at 8 (middle of the engine's 4..9 quality slider).
+// Returns absolute terrain height = procedural FBM + plateau blend +
+// sculpt delta.
+float terrainH(vec2 wp) {
+    vec2 p = wp * TERRAIN_SCALE;
+    float a = 0.0, b = 1.0;
+    vec2 d = vec2(0.0);
+    const int kOct = 8;
+    for (int i = 0; i < kOct; i++) {
+        vec3 n = noised(p);
+        d += n.yz;
+        a += b * n.x / (1.0 + dot(d, d));
+        b *= 0.5;
+        p = m2 * p * 2.0;
+    }
+    float h = a * TERRAIN_HEIGHT;
+    h = mix(h, kPlateauHeight, plateauWeight(wp));
+    h += sampleHeightDelta(wp);
+    return h;
+}
+
+// Backwards-compat: rest of the shader still calls sampleHeight.
+float sampleHeight(vec2 wp_xz) { return terrainH(wp_xz); }
+
+// Hash helper still used by per-cell blade variation.
 float hash12(vec2 p) {
     vec3 p3 = fract(vec3(p.xyx) * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
