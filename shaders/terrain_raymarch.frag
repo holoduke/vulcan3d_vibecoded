@@ -519,11 +519,17 @@ float raymarch(vec3 ro, vec3 rd) {
 // 80 m. The FBM normal-octave slider (default 18) gives plenty of
 // distance detail without the artefacts.
 vec3 calcNormal(vec3 pos, float t) {
-    // Analytic gradient (1× FBM) replaces the previous 3× terrainH()
-    // finite-difference probe. Same N up to the small contribution from
-    // the damp/plateau terms whose gradients we drop.
-    vec3 hg = terrainH_grad(pos.xz);
-    vec3 N = normalize(vec3(-hg.y, 1.0, -hg.z));
+    // Reverted from a 1× analytic-gradient version: the per-octave
+    // damp term `1/(1+dot(d,d))` and its derivative contribute real
+    // high-frequency variation that drops out of the cheap chain-rule
+    // accumulation. User reported visible detail loss in snow/rock
+    // mid-distance — 3× finite-difference is the safe path until the
+    // proper analytic gradient (with damp + Hessian terms) is written.
+    float eps = 0.02 + 0.0008 * t;
+    float hC = terrainH(pos.xz);
+    float hR = terrainH(pos.xz + vec2(eps, 0.0));
+    float hU = terrainH(pos.xz + vec2(0.0, eps));
+    vec3 N = normalize(vec3(hC - hR, eps, hC - hU));
 
     // Closeup micro-bump вЂ” two-octave high-frequency noise gradient
     // tilts the surface normal so near-camera ground reads as rocky
