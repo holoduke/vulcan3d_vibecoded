@@ -1461,18 +1461,20 @@ void VulkanEngine::init_viewmodel() {
         // earlier 0.30m. The 180° Y-rotation flips the gun's nose to
         // point forward (camera -Z); without it the assets/gun model
         // points back at the player.
-        // m254 asset has its barrel along +Y (model "up"); pitch -90°
-        // around X to lay it forward along camera -Z. Adjust if a new
-        // asset uses a different forward axis.
+        // m254 asset orientation walk-through: bare → pointed UP, pitch
+        // -90°X → pointed LEFT on its side. So the asset's barrel
+        // axis lives along +X (model "right"). Yaw +90° around Y maps
+        // +X → -Z (camera forward), and the asset's "up" axis comes
+        // around to +Y in the process — no separate roll needed.
         float scale = 0.55f / max_side;
-        glm::mat4 rot_pitch = glm::rotate(glm::mat4(1.0f),
-                                            glm::radians(-90.0f),
-                                            glm::vec3(1.0f, 0.0f, 0.0f));
+        glm::mat4 rot_yaw = glm::rotate(glm::mat4(1.0f),
+                                         glm::radians(90.0f),
+                                         glm::vec3(0.0f, 1.0f, 0.0f));
 
         viewmodel_root_offset_ =
             glm::translate(glm::mat4(1.0f), glm::vec3(0.16f, -0.20f, -0.35f)) *
             glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
-            rot_pitch *
+            rot_yaw *
             glm::translate(glm::mat4(1.0f), -center);
 
         for (const auto& prim : gltf.primitives) {
