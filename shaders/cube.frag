@@ -412,6 +412,14 @@ const int kStaticBlasSentinel = 0xFFFFFF;
 const int kCubeTrisPerBox     = 12;
 
 void main() {
+    // gl_FragDepth must be written on EVERY execution path because some
+    // shader paths below override it to 1.0 (SPOM silhouette → sky).
+    // Per the GLSL spec, partial gl_FragDepth assignment makes depth
+    // undefined on the unwritten paths — on this user's driver that
+    // surfaced as "everything classified as sky" (whole castle white,
+    // viewmodel + sparks gone). Default to the rasterized depth here;
+    // silhouette path overrides to 1.0 below.
+    gl_FragDepth = gl_FragCoord.z;
     // Screen-space motion vector вЂ” current_uv в€’ prev_uv. prev_uv comes from
     // perspective-divided prev_clip (smooth-interpolated by the rasterizer).
     // Behind-camera prev pixels (prev_clip.w в‰¤ 0) have no valid prev_uv вЂ”
