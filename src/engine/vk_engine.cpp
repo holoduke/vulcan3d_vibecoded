@@ -276,7 +276,8 @@ void VulkanEngine::init() {
         write_scene_descriptors_once(device_, scene_desc_set_,
                                      scene_ubo_buffer_, tlas_, materials_buffer_,
                                      prev_transforms_buffer_,
-                                     alb, nrm, kTextureCount, texture_sampler_);
+                                     alb, nrm, kTextureCount, texture_sampler_,
+                                     brick_height_.view);
     }
     present_loader_frame("Compiling pipelines",   0.70f);
     init_pipeline();

@@ -99,6 +99,11 @@ layout(set = 0, binding = 6) uniform sampler2D u_terrain_shadow;
 // sharper than the bake's 1m texels.
 layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 
+// Brick (slot 1) parallax-occlusion displacement. Sampled by the SPOM
+// path below for albedo_idx == 1 (castle walls). Other materials don't
+// have a height map and skip the parallax march entirely.
+layout(set = 0, binding = 12) uniform sampler2D u_brick_height;
+
 // Triplanar projection sample. Avoids the "what UV does this cube face
 // use" problem and works correctly on every brush size вЂ” the texture stays
 // world-aligned regardless of brush dimensions. Cost is 3 samples per pass,
@@ -122,6 +127,83 @@ vec3 triplanar_sample(sampler2D tex, vec3 wp, vec3 N) {
 // tangent-space normal and transform into world space using a known basis
 // for that axis. Then blend by face weight, same as the albedo. Cheap,
 // works without explicit per-vertex tangents.
+// Dominant-axis parallax-occlusion mapping for axis-aligned faces.
+// `wp` is world position scaled to texture-UV space (the same scaled
+// position triplanar_sample would consume), `N` is the surface normal.
+// Returns the offset 2D UV inside the dominant axis projection plus
+// (in `out_axis`) which axis won so the caller can reconstruct the
+// tangent-space normal correctly.
+//
+// The march is 16 linear steps + 1 binary refine — enough to look like
+// real depth on castle bricks at typical view angles without showing
+// stair-stepping. Grazing-angle pixels (V_t.z < 0.2) skip the march
+// because the parallax displacement explodes there and produces
+// shimmer + texture swimming.
+vec2 spom_uv(vec3 wp_scaled, vec3 N, out int out_axis,
+             out vec3 out_T, out vec3 out_B, out vec3 out_face_n) {
+    vec3 absN = abs(N);
+    int axis;
+    vec2 uv0;
+    vec3 T, Bb, face_n;
+    if (absN.x >= absN.y && absN.x >= absN.z) {
+        axis = 0;
+        face_n = vec3(sign(N.x), 0.0, 0.0);
+        // sign(N.x) on T flips the texture U handedness so the +X and -X
+        // faces aren't mirrored versions of each other.
+        T  = vec3(0.0, 0.0, sign(N.x));
+        Bb = vec3(0.0, 1.0, 0.0);
+        uv0 = vec2(wp_scaled.z * sign(N.x), wp_scaled.y);
+    } else if (absN.y >= absN.z) {
+        axis = 1;
+        face_n = vec3(0.0, sign(N.y), 0.0);
+        T  = vec3(1.0, 0.0, 0.0);
+        Bb = vec3(0.0, 0.0, sign(N.y));
+        uv0 = vec2(wp_scaled.x, wp_scaled.z * sign(N.y));
+    } else {
+        axis = 2;
+        face_n = vec3(0.0, 0.0, sign(N.z));
+        T  = vec3(sign(N.z), 0.0, 0.0);
+        Bb = vec3(0.0, 1.0, 0.0);
+        uv0 = vec2(wp_scaled.x * sign(N.z), wp_scaled.y);
+    }
+    out_axis = axis;
+    out_T = T; out_B = Bb; out_face_n = face_n;
+
+    vec3 V_w = normalize(scene.camera_pos.xyz - vWorldPos);
+    vec3 V_t = vec3(dot(V_w, T), dot(V_w, Bb), dot(V_w, face_n));
+    if (V_t.z < 0.2) return uv0;   // grazing — skip parallax (shimmer guard)
+
+    // Ramp parallax depth down at distance so far walls stay flat (no
+    // visible texture swimming) and only close-up walls show the bumps.
+    float d = distance(vWorldPos, scene.camera_pos.xyz);
+    float depth_w = 1.0 - smoothstep(8.0, 30.0, d);
+    if (depth_w <= 0.001) return uv0;
+
+    const float kHeightScale = 0.04;       // 4cm peak-to-trough at 1m view
+    vec2  P = (V_t.xy / V_t.z) * (kHeightScale * depth_w);
+
+    const int kSteps = 16;
+    float layer_step = 1.0 / float(kSteps);
+    vec2  uv_step    = -P * layer_step;
+    float current_layer = 0.0;
+    vec2  cur_uv = uv0;
+    float cur_h  = 1.0 - texture(u_brick_height, cur_uv).r;
+    for (int i = 0; i < kSteps; ++i) {
+        if (current_layer >= cur_h) break;
+        cur_uv += uv_step;
+        current_layer += layer_step;
+        cur_h = 1.0 - texture(u_brick_height, cur_uv).r;
+    }
+    // Linear-interp refine between the last two samples for smoother depth.
+    vec2  prev_uv = cur_uv - uv_step;
+    float prev_h  = 1.0 - texture(u_brick_height, prev_uv).r;
+    float prev_layer = current_layer - layer_step;
+    float a = cur_h  - current_layer;
+    float b = prev_h - prev_layer - a;
+    float w = clamp(a / (b - a + 1e-4), 0.0, 1.0);
+    return mix(cur_uv, prev_uv, w);
+}
+
 vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
     // Same pow(abs(N), 4) → squarings trick as triplanar_sample.
     vec3 blend = abs(N); blend *= blend; blend *= blend;
@@ -578,13 +660,36 @@ void main() {
             albedo = base;
         }
     } else {
-        if (use_albedo) {
+        // Brick (slot 1) gets SPOM-style parallax occlusion on the dominant
+        // axis face. Castle walls only — other materials don't have a
+        // height map and would silently parallax to the brick depths if
+        // we weren't gating on the index. Object-space brushes (dyn props)
+        // also stay on triplanar since their normal isn't world-aligned.
+        bool spom_path = use_albedo && albedo_idx_raw == 1 && !obj_space &&
+                         !is_terrain;
+        if (spom_path) {
+            int axis;
+            vec3 spom_T, spom_B, spom_face_n;
+            vec2 spom_uv_off = spom_uv(sample_pos, proj_n,
+                                        axis, spom_T, spom_B, spom_face_n);
+            vec3 tex_albedo = texture(u_albedo[1], spom_uv_off).rgb;
+            albedo = tex_albedo * vColor;
+            if (use_normal) {
+                vec3 n_t = texture(u_normal[1], spom_uv_off).rgb * 2.0 - 1.0;
+                N = normalize(spom_T  * n_t.x +
+                              spom_B  * n_t.y +
+                              spom_face_n * n_t.z);
+            }
+        } else if (use_albedo) {
             int  albedo_idx = clamp(albedo_idx_raw, 0, 4);
             vec3 tex_albedo = triplanar_sample(u_albedo[albedo_idx],
                                                sample_pos, proj_n);
             albedo = tex_albedo * vColor;
-        }
-        if (use_normal) {
+            if (use_normal) {
+                int  normal_idx = clamp(normal_idx_raw, 0, 4);
+                N = triplanar_normal(u_normal[normal_idx], sample_pos, N);
+            }
+        } else if (use_normal) {
             int  normal_idx = clamp(normal_idx_raw, 0, 4);
             N = triplanar_normal(u_normal[normal_idx], sample_pos, N);
         }

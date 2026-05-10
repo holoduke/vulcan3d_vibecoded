@@ -322,6 +322,11 @@ private:
     };
     TextureSlot albedo_textures_[kTextureCount]{};
     TextureSlot normal_textures_[kTextureCount]{};
+    // Single height map for SPOM (parallax occlusion) on the brick slot
+    // (idx 1) — castle walls. Other materials don't need a height map; rather
+    // than burn an N-slot array we keep one image and gate cube.frag on the
+    // texture index. brick_height_view_ is null until init_textures runs.
+    TextureSlot brick_height_{};
     VkSampler   texture_sampler_ = VK_NULL_HANDLE;
     // Texture index assigned to the four spawnable box variants (so dynamic
     // boxes pick from a wood/metal/painted/brick palette at spawn time).

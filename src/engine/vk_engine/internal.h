@@ -216,6 +216,7 @@ void write_scene_descriptors_once(
     VkBuffer ubo, VkAccelerationStructureKHR tlas, VkBuffer materials,
     VkBuffer prev_transforms,
     const VkImageView* albedo_views, const VkImageView* normal_views,
-    uint32_t tex_count, VkSampler tex_sampler);
+    uint32_t tex_count, VkSampler tex_sampler,
+    VkImageView brick_height_view);
 
 } // namespace qlike

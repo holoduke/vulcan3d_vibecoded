@@ -143,7 +143,8 @@ void write_scene_descriptors_once(
     VkBuffer ubo, VkAccelerationStructureKHR tlas, VkBuffer materials,
     VkBuffer prev_transforms,
     const VkImageView* albedo_views, const VkImageView* normal_views,
-    uint32_t tex_count, VkSampler tex_sampler) {
+    uint32_t tex_count, VkSampler tex_sampler,
+    VkImageView brick_height_view) {
 
     VkDescriptorBufferInfo ubo_bi{ ubo, 0, VK_WHOLE_SIZE };
     VkDescriptorBufferInfo mat_bi{ materials, 0, VK_WHOLE_SIZE };
@@ -164,7 +165,16 @@ void write_scene_descriptors_once(
         nrm_infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
-    VkWriteDescriptorSet w[6]{};
+    // Brick SPOM displacement at binding 12. Falls back to the slot-1 albedo
+    // if the displacement view didn't load (so the descriptor is always
+    // valid; cube.frag gates parallax behaviour separately on the texture
+    // index, so a missing view just means no parallax effect, not a crash).
+    VkDescriptorImageInfo height_bi{};
+    height_bi.sampler = tex_sampler;
+    height_bi.imageView = brick_height_view ? brick_height_view : albedo_views[1];
+    height_bi.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet w[7]{};
     w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     w[0].dstSet = set; w[0].dstBinding = 0; w[0].descriptorCount = 1;
     w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -195,7 +205,12 @@ void write_scene_descriptors_once(
     w[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[5].pBufferInfo = &prev_bi;
 
-    vkUpdateDescriptorSets(device, 6, w, 0, nullptr);
+    w[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w[6].dstSet = set; w[6].dstBinding = 12; w[6].descriptorCount = 1;
+    w[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[6].pImageInfo = &height_bi;
+
+    vkUpdateDescriptorSets(device, 7, w, 0, nullptr);
 }
 
 } // namespace qlike

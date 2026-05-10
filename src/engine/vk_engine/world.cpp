@@ -1390,8 +1390,8 @@ void VulkanEngine::init_textures() {
     const Spec specs[kTextureCount] = {
         { "Ground054",         "Ground054/Ground054_2K-JPG_Color.jpg",
                                "Ground054/Ground054_2K-JPG_NormalGL.jpg" },
-        { "Bricks067",         "Bricks067/Bricks067_2K-JPG_Color.jpg",
-                               "Bricks067/Bricks067_2K-JPG_NormalGL.jpg" },
+        { "Bricks076A",        "Bricks076A/Bricks076A_2K-JPG_Color.jpg",
+                               "Bricks076A/Bricks076A_2K-JPG_NormalGL.jpg" },
         { "Wood048",           "Wood048/Wood048_2K-JPG_Color.jpg",
                                "Wood048/Wood048_2K-JPG_NormalGL.jpg" },
         { "Metal042A",         "Metal042A/Metal042A_2K-JPG_Color.jpg",
@@ -1406,6 +1406,13 @@ void VulkanEngine::init_textures() {
         albedo_textures_[i] = probe(specs[i].color_jpg,  VK_FORMAT_R8G8B8A8_SRGB);
         normal_textures_[i] = probe(specs[i].normal_jpg, VK_FORMAT_R8G8B8A8_UNORM);
     }
+
+    // SPOM displacement (height map) — used by cube.frag's parallax march
+    // for the brick slot only (castle walls). UNORM so the .r channel
+    // gives a 0..1 height value the shader steps through. Not in an
+    // array because no other material currently needs it.
+    brick_height_ = probe("Bricks076A/Bricks076A_2K-JPG_Displacement.jpg",
+                           VK_FORMAT_R8G8B8A8_UNORM);
 }
 
 void VulkanEngine::destroy_textures() {
@@ -1418,6 +1425,7 @@ void VulkanEngine::destroy_textures() {
         kill(albedo_textures_[i]);
         kill(normal_textures_[i]);
     }
+    kill(brick_height_);
     if (texture_sampler_) {
         vkDestroySampler(device_, texture_sampler_, nullptr);
         texture_sampler_ = VK_NULL_HANDLE;
