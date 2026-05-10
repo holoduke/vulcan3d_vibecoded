@@ -859,6 +859,21 @@ private:
     uint64_t prev_dyn_signature_ = 0;
     bool     tlas_first_build_done_ = false;
 
+    // Per-frame camera state shared by render_terrain_raymarch_lr,
+    // render_world_depth_pass and render_world. compute_frame_view() at
+    // the top of draw() captures it once; the three render methods read
+    // from current_frame_view_ instead of each rebuilding aspect/lerp/
+    // view/proj/Halton-jitter independently.
+    struct FrameView {
+        glm::vec3 render_pos{0.0f};
+        glm::mat4 view{1.0f};
+        glm::mat4 proj{1.0f};
+        glm::mat4 vp{1.0f};
+        glm::mat4 inv_vp{1.0f};
+    };
+    FrameView current_frame_view_{};
+    FrameView compute_frame_view();
+
     // Static-brush portion of the TLAS instance + material buffer is baked
     // once per (level, textures_enabled) and memcpy'd into slots
     // [0..static_n) every frame instead of being recomputed. Re-baked when

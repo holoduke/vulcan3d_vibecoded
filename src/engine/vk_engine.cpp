@@ -396,6 +396,11 @@ void VulkanEngine::draw(uint32_t img_index) {
     auto begin = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
     vk_check(vkBeginCommandBuffer(frame.command_buffer, &begin), "vkBeginCommandBuffer");
 
+    // Capture per-frame camera state once for all three render passes
+    // (terrain raymarch LR, depth pre-pass, color pass). Replaces three
+    // identical aspect/lerp/view/proj/Halton-jitter rebuilds per frame.
+    current_frame_view_ = compute_frame_view();
+
     // Sun shadow map pass — runs first so its depth target is in
     // SHADER_READ_ONLY_OPTIMAL by the time the scene color pass samples
     // it via grass.vert (binding 7).

@@ -1876,25 +1876,27 @@ void VulkanEngine::spawn_random_box() {
     }
 }
 
-void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
-    // Re-derive the same per-frame VP that render_world will compute
-    // immediately after this. We want bit-identical matrices so the
-    // compose pass's gl_FragDepth survives the LESS_OR_EQUAL test that
-    // the cube/castle prepass depth wrote.
+// Per-frame camera state shared across the three render passes
+// (terrain_raymarch_lr, world depth pre-pass, world color pass). draw()
+// calls this once before any of them; each pass reads the cached
+// `current_frame_view_`. Bit-identical between passes so the LESS_OR_EQUAL
+// depth test survives.
+VulkanEngine::FrameView VulkanEngine::compute_frame_view() {
+    FrameView fv{};
     float aspect = static_cast<float>(render_extent_.width) /
                    static_cast<float>(render_extent_.height);
     constexpr float kFixedDt = 1.0f / 120.0f;
     float alpha = physics_accumulator_ / kFixedDt;
     if (alpha < 0.0f) alpha = 0.0f;
     if (alpha > 1.0f) alpha = 1.0f;
-    glm::vec3 render_pos = glm::mix(prev_player_position_, player_.position, alpha);
+    fv.render_pos = glm::mix(prev_player_position_, player_.position, alpha);
 
     glm::vec3 saved = player_.position;
-    player_.position = render_pos;
-    glm::mat4 view = player_.view_matrix();
+    player_.position = fv.render_pos;
+    fv.view = player_.view_matrix();
     player_.position = saved;
-    glm::mat4 proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 1500.0f);
-    proj[1][1] *= -1.0f;
+    fv.proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 1500.0f);
+    fv.proj[1][1] *= -1.0f;
     if (rt_.taa_jitter_enabled) {
         auto halton = [](int b, int i) {
             float f = 1.0f, r = 0.0f;
@@ -1906,10 +1908,17 @@ void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
                    static_cast<float>(render_extent_.width);
         float jy = (halton(3, idx) - 0.5f) * 2.0f * rt_.taa_jitter_strength /
                    static_cast<float>(render_extent_.height);
-        proj[2][0] += jx;
-        proj[2][1] += jy;
+        fv.proj[2][0] += jx;
+        fv.proj[2][1] += jy;
     }
-    glm::mat4 vp = proj * view;
+    fv.vp = fv.proj * fv.view;
+    fv.inv_vp = glm::inverse(fv.vp);
+    return fv;
+}
+
+void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
+    const FrameView& fv = current_frame_view_;
+    const glm::mat4& vp = fv.vp;
 
     VkViewport vp_state{};
     vp_state.x = 0.0f; vp_state.y = 0.0f;
@@ -1928,7 +1937,7 @@ void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
 
     PushConstants pc{};
     pc.mvp      = vp;
-    pc.model    = glm::inverse(vp);
+    pc.model    = fv.inv_vp;
     pc.prev_mvp = prev_view_proj_valid_ ? prev_view_proj_ : vp;
     pc.color    = glm::vec4(0.0f, 0.0f, 28.0f, 22.0f);
     pc.emissive = glm::vec4(
@@ -1983,56 +1992,10 @@ void VulkanEngine::render_terrain_raymarch_compose(VkCommandBuffer cmd) {
 }
 
 void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
-    // Mirror render_world()'s view setup. We don't try to share state across
-    // the two passes because that would require threading FrameView through
-    // both, and the saving is in the noise vs cube.frag's inline-RT cost
-    // which the prepass exists to skip.
-    float aspect = static_cast<float>(render_extent_.width) /
-                   static_cast<float>(render_extent_.height);
-
-    constexpr float kFixedDt = 1.0f / 120.0f;
-    float alpha = physics_accumulator_ / kFixedDt;
-    if (alpha < 0.0f) alpha = 0.0f;
-    if (alpha > 1.0f) alpha = 1.0f;
-    glm::vec3 render_pos = glm::mix(prev_player_position_, player_.position, alpha);
-
-    glm::vec3 saved = player_.position;
-    player_.position = render_pos;
-    glm::mat4 view = player_.view_matrix();
-    player_.position = saved;
-    // Far plane: 1500m. Tradeoff between two artefacts:
-    //   - too short (e.g. 500m): visible terrain disc is asymmetric
-    //     because the corner ray at 80Р’В° FOV reaches further world
-    //     distance than the centre, swept across the screen on turn;
-    //   - too long  (e.g. 3000m): float32 depth precision at the
-    //     silhouette of steep distant peaks runs out of bits and
-    //     adjacent triangles z-fight, looking "see-through".
-    // 1500m + atmospheric fog reaching ~95% sky tint by ~1.3km keeps
-    // the asymmetry hidden under fog AND keeps depth precision tight
-    // enough that distant cliffs are stable.
-    glm::mat4 proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 1500.0f);
-    proj[1][1] *= -1.0f;
-
-    // Match the color-pass jitter exactly so depth-prepass and color-pass
-    // depth values are bit-identical (LESS_OR_EQUAL passes the equal-depth
-    // pixel; if jitter mismatched, the color pass would mostly fail the test
-    // and the screen would go black).
-    if (rt_.taa_jitter_enabled) {
-        auto halton = [](int b, int i) {
-            float f = 1.0f, r = 0.0f;
-            while (i > 0) { f /= float(b); r += f * float(i % b); i /= b; }
-            return r;
-        };
-        int idx = static_cast<int>(frame_number_ % 16) + 1;
-        float jx = (halton(2, idx) - 0.5f) * 2.0f * rt_.taa_jitter_strength /
-                   static_cast<float>(render_extent_.width);
-        float jy = (halton(3, idx) - 0.5f) * 2.0f * rt_.taa_jitter_strength /
-                   static_cast<float>(render_extent_.height);
-        proj[2][0] += jx;
-        proj[2][1] += jy;
-    }
-
-    glm::mat4 vp = proj * view;
+    // Cached FrameView built once at top of draw(); bit-identical with
+    // the color pass so depth-EQUAL/LESS_OR_EQUAL stays correct.
+    const FrameView& fv = current_frame_view_;
+    const glm::mat4& vp = fv.vp;
     Frustum frustum = extract_frustum(vp);
 
     VkViewport vp_state{};
@@ -2116,54 +2079,11 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
 }
 
 void VulkanEngine::render_world(VkCommandBuffer cmd) {
-    float aspect = static_cast<float>(render_extent_.width) /
-                   static_cast<float>(render_extent_.height);
-
-    // Render at the interpolated position between the last two physics ticks,
-    // so visuals are smooth even when tick rate != render rate.
-    constexpr float kFixedDt = 1.0f / 120.0f;
-    float alpha = physics_accumulator_ / kFixedDt;
-    if (alpha < 0.0f) alpha = 0.0f;
-    if (alpha > 1.0f) alpha = 1.0f;
-    glm::vec3 render_pos = glm::mix(prev_player_position_, player_.position, alpha);
-
-    glm::vec3 saved = player_.position;
-    player_.position = render_pos;
-    glm::mat4 view = player_.view_matrix();
-    player_.position = saved;
-    // Far plane: 1500m. Tradeoff between two artefacts:
-    //   - too short (e.g. 500m): visible terrain disc is asymmetric
-    //     because the corner ray at 80Р’В° FOV reaches further world
-    //     distance than the centre, swept across the screen on turn;
-    //   - too long  (e.g. 3000m): float32 depth precision at the
-    //     silhouette of steep distant peaks runs out of bits and
-    //     adjacent triangles z-fight, looking "see-through".
-    // 1500m + atmospheric fog reaching ~95% sky tint by ~1.3km keeps
-    // the asymmetry hidden under fog AND keeps depth precision tight
-    // enough that distant cliffs are stable.
-    glm::mat4 proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 1500.0f);
-    proj[1][1] *= -1.0f;
-
-    // Sub-pixel Halton jitter РІР‚вЂќ TAA integrates these offsets into a super-
-    // sampled-looking result across ~16 frames.
-    if (rt_.taa_jitter_enabled) {
-        auto halton = [](int b, int i) {
-            float f = 1.0f, r = 0.0f;
-            while (i > 0) { f /= float(b); r += f * float(i % b); i /= b; }
-            return r;
-        };
-        int idx = static_cast<int>(frame_number_ % 16) + 1;
-        float jx = (halton(2, idx) - 0.5f) * 2.0f * rt_.taa_jitter_strength /
-                   static_cast<float>(render_extent_.width);
-        float jy = (halton(3, idx) - 0.5f) * 2.0f * rt_.taa_jitter_strength /
-                   static_cast<float>(render_extent_.height);
-        proj[2][0] += jx;
-        proj[2][1] += jy;
-    }
-
-    last_view_proj_ = proj * view;
-    last_inv_view_proj_ = glm::inverse(last_view_proj_);
-    glm::mat4 vp = last_view_proj_;
+    // Cached FrameView built once at top of draw().
+    const FrameView& fv = current_frame_view_;
+    last_view_proj_ = fv.vp;
+    last_inv_view_proj_ = fv.inv_vp;
+    const glm::mat4& vp = last_view_proj_;
     Frustum frustum = extract_frustum(vp);
 
     VkViewport vp_state{};
@@ -2485,7 +2405,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // Viewmodel: rendered last so it overdraws world geometry only when its
     // depth wins. Its depth values are tiny (close to camera), so it sits in
     // front of everything in practice.
-    draw_viewmodel(cmd, vp, glm::inverse(view));
+    draw_viewmodel(cmd, vp, glm::inverse(fv.view));
 
     last_draw_static_ = drawn_static;
     last_draw_dyn_    = drawn_dyn;
