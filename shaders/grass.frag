@@ -36,25 +36,9 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     mat4  light_vp;      // unused in frag, keeps UBO layout identical
 } scene;
 
-layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
-
-// Single any-hit shadow ray. cull-mask 0x01 matches cube.frag.
-// t_min stays near zero — the spatial offset on the origin (caller
-// adds 0.5m straight up) is what clears the heightmap BLAS so the
-// ray can't self-intersect the ground we're standing on. Earlier
-// fix used t_min=1m which skipped PAST close-by occluders (a small
-// crate just above the grass would already be behind the ray's
-// start point), so castle/crate shadows weren't casting on grass.
-bool sun_blocked(vec3 origin, vec3 dir) {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS,
-                          gl_RayFlagsTerminateOnFirstHitEXT |
-                          gl_RayFlagsOpaqueEXT,
-                          0x01, origin, 0.001, dir, 200.0);
-    while (rayQueryProceedEXT(rq)) {}
-    return rayQueryGetIntersectionTypeEXT(rq, true) ==
-           gl_RayQueryCommittedIntersectionTriangleEXT;
-}
+// (Per-pixel sun_blocked() ray query was removed — the rasterised sun
+// shadow map at binding 7 covers grass shadowing now, sampled in
+// grass.vert. The TLAS binding 1 is no longer needed in this shader.)
 
 void main() {
     if (vCullKill > 0.5) discard;

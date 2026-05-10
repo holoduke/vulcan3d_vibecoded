@@ -409,54 +409,11 @@ float terrainMaxHeight() { return max(TERRAIN_HEIGHT, pc.color.w) + 80.0; }
 // noise cost vs terrainM() (which runs the full march octave count,
 // typically 4-6) while staying conservative-ish for occlusion (the
 // gross terrain shape is what blocks light).
-float terrainCoarse(vec2 p) {
-    vec2 wp = p;
-    p *= TERRAIN_SCALE;
-    float a = 0.0, b = 1.0;
-    vec2 d = vec2(0.0);
-    for (int i = 0; i < 3; ++i) {
-        vec3 n = noised(p);
-        d += n.yz;
-        a += b * n.x / (1.0 + dot(d, d));
-        b *= 0.5;
-        p = m2 * p * 2.0;
-    }
-    float h = a * TERRAIN_HEIGHT;
-    float t = plateauWeight(wp);
-    h = mix(h, pc.color.w, t);
-    h += sampleHeightDelta(wp);
-    return h;
-}
 
-// Terrain self-occlusion test for AO + GI. AO and GI rays use TLAS
-// mask 0x02 (terrain BLAS skipped) to avoid procedural-vs-LOD self-
-// hits, but that means terrain features can never shadow the GI/AO
-// of *other* terrain pixels вЂ” gaps and cavities in the heightfield
-// stay artificially bright. This function adds back terrain self-
-// occlusion via a coarse heightfield raymarch.
-//
-// Two early-outs keep the cost down:
-//   - rd.y > 0.55 (steep upward) в†’ ray escapes to sky in a few m
-//     vertical, never blocked by terrain. Returns false immediately.
-//   - 8 iterations max (was 12) вЂ” the coarse 3-octave heightfield
-//     and 0.2 m initial step rarely need more for AO radius (~1 m)
-//     or first-bounce GI gates.
-//
-// Initial t = 0.2 m skips the immediate-surface band where grazing
-// rays on steep slopes can false-positive against the receiver's own
-// heightfield. Caller biases `ro` along the surface normal too.
-bool terrain_blocks_ray(vec3 ro, vec3 rd, float t_max) {
-    if (rd.y > 0.55) return false;
-    float t = 0.2;
-    for (int i = 0; i < 8; ++i) {
-        vec3 p = ro + t * rd;
-        float h = p.y - terrainCoarse(p.xz);
-        if (h < 0.001) return true;
-        t += clamp(h, 0.3, 12.0);
-        if (t > t_max) return false;
-    }
-    return false;
-}
+// (terrain_blocks_ray + terrainCoarse removed — per-pixel terrain self-
+// occlusion was replaced by mask-0x02 TLAS-only AO once the sun shadow
+// map covered the gross-shadow case. The 3-octave coarse heightfield
+// here was unused and just bloating the shader.)
 
 // === Adaptive-step heightfield ray march ===
 // h = ray.y - terrain(ray.xz) is a conservative step bound for any
