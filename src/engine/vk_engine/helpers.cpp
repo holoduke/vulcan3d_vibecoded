@@ -144,7 +144,7 @@ void write_scene_descriptors_once(
     VkBuffer prev_transforms,
     const VkImageView* albedo_views, const VkImageView* normal_views,
     uint32_t tex_count, VkSampler tex_sampler,
-    VkImageView brick_height_view) {
+    const VkImageView* spom_height_views, uint32_t spom_count) {
 
     VkDescriptorBufferInfo ubo_bi{ ubo, 0, VK_WHOLE_SIZE };
     VkDescriptorBufferInfo mat_bi{ materials, 0, VK_WHOLE_SIZE };
@@ -165,14 +165,18 @@ void write_scene_descriptors_once(
         nrm_infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
-    // Brick SPOM displacement at binding 12. Falls back to the slot-1 albedo
-    // if the displacement view didn't load (so the descriptor is always
-    // valid; cube.frag gates parallax behaviour separately on the texture
-    // index, so a missing view just means no parallax effect, not a crash).
-    VkDescriptorImageInfo height_bi{};
-    height_bi.sampler = tex_sampler;
-    height_bi.imageView = brick_height_view ? brick_height_view : albedo_views[1];
-    height_bi.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    // SPOM displacement-map array at binding 12. Each slot maps to a
+    // material that runs parallax in cube.frag; missing views fall back to
+    // the slot-1 albedo so the descriptor is always valid (cube.frag
+    // gates SPOM separately on texture index, so a fallback is never
+    // sampled in practice — defensive only).
+    std::vector<VkDescriptorImageInfo> spom_infos(spom_count);
+    for (uint32_t i = 0; i < spom_count; ++i) {
+        spom_infos[i].sampler = tex_sampler;
+        spom_infos[i].imageView = spom_height_views[i] ? spom_height_views[i]
+                                                       : albedo_views[1];
+        spom_infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
 
     VkWriteDescriptorSet w[7]{};
     w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -206,9 +210,9 @@ void write_scene_descriptors_once(
     w[5].pBufferInfo = &prev_bi;
 
     w[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w[6].dstSet = set; w[6].dstBinding = 12; w[6].descriptorCount = 1;
+    w[6].dstSet = set; w[6].dstBinding = 12; w[6].descriptorCount = spom_count;
     w[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    w[6].pImageInfo = &height_bi;
+    w[6].pImageInfo = spom_infos.data();
 
     vkUpdateDescriptorSets(device, 7, w, 0, nullptr);
 }

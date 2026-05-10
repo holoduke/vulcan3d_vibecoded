@@ -273,11 +273,15 @@ void VulkanEngine::init() {
             alb[i] = albedo_textures_[i].view;
             nrm[i] = normal_textures_[i].view;
         }
+        VkImageView spom[kSpomMaterialCount]{};
+        for (int i = 0; i < kSpomMaterialCount; ++i) {
+            spom[i] = spom_height_textures_[i].view;
+        }
         write_scene_descriptors_once(device_, scene_desc_set_,
                                      scene_ubo_buffer_, tlas_, materials_buffer_,
                                      prev_transforms_buffer_,
                                      alb, nrm, kTextureCount, texture_sampler_,
-                                     brick_height_.view);
+                                     spom, kSpomMaterialCount);
     }
     present_loader_frame("Compiling pipelines",   0.70f);
     init_pipeline();

@@ -46,8 +46,9 @@ void VulkanEngine::init_descriptors() {
         // +3 for the low-res raymarch upscale targets (bindings 9..11):
         // color, motion vector, depth — sampled by the compose pass
         // when terrain_raymarch_scale < 1.0.
-        // +1 for the brick SPOM displacement map (binding 12).
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTextureCount * 2 + 7 },
+        // +kSpomMaterialCount for the SPOM height-map array (binding 12).
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            kTextureCount * 2 + 6 + kSpomMaterialCount },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -134,12 +135,13 @@ void VulkanEngine::init_descriptors() {
         bindings[b].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
 
-    // Binding 12: brick SPOM displacement map. cube.frag samples it only
-    // for the brick material slot (idx 1, castle walls); other materials
-    // skip the parallax march.
+    // Binding 12: SPOM displacement map array. cube.frag samples one entry
+    // per parallax-using material (currently 4: castle walls, keep walls,
+    // courtyard floor, keep interior floor). Array index = SPOM material
+    // ID returned by cube.frag::height_idx_for_albedo().
     bindings[12].binding = 12;
     bindings[12].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[12].descriptorCount = 1;
+    bindings[12].descriptorCount = kSpomMaterialCount;
     bindings[12].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo lci{

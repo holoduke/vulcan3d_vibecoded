@@ -51,7 +51,12 @@ void main() {
     // Gated on tex_params.x == 1 (brick) and not emissive (skip lamps),
     // matches the spom_path gate in cube.frag.
     const float kSpomExtWorld = 0.12;
-    bool brick_extrude = int(pc.tex_params.x) == 1 && pc.emissive.a < 0.5;
+    int tex_idx = int(pc.tex_params.x);
+    // Extrude any SPOM-using material so the parallax-displaced surface
+    // has geometric room to live inside (matches height_idx_for_albedo()
+    // in cube.frag). Skip emissive lamps so their geometry stays exact.
+    bool brick_extrude = (tex_idx == 1 || tex_idx == 4 || tex_idx == 5 ||
+                          tex_idx == 6) && pc.emissive.a < 0.5;
     vec3 world_n_unscaled = mat3(pc.model) * inNormal;
     float ext_factor = brick_extrude
         ? kSpomExtWorld / max(length(world_n_unscaled), 0.01)

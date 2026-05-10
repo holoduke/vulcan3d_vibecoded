@@ -314,7 +314,7 @@ private:
 
     // PBR-ish material textures. kTextureCount must match the size of the
     // sampler arrays in cube.frag.
-    static constexpr int kTextureCount = 5;
+    static constexpr int kTextureCount = 7;
     struct TextureSlot {
         VkImage image = VK_NULL_HANDLE;
         VmaAllocation alloc = nullptr;
@@ -322,11 +322,16 @@ private:
     };
     TextureSlot albedo_textures_[kTextureCount]{};
     TextureSlot normal_textures_[kTextureCount]{};
-    // Single height map for SPOM (parallax occlusion) on the brick slot
-    // (idx 1) — castle walls. Other materials don't need a height map; rather
-    // than burn an N-slot array we keep one image and gate cube.frag on the
-    // texture index. brick_height_view_ is null until init_textures runs.
-    TextureSlot brick_height_{};
+    // Height-map array for SPOM (parallax occlusion). Only the materials
+    // that actually need parallax depth get a slot here; cube.frag picks
+    // the right entry by albedo index. Order MUST match cube.frag's
+    // height_idx_for_albedo() switch:
+    //   [0] Bricks078         (albedo idx 1) — castle outer walls
+    //   [1] PaintedBricks001  (albedo idx 4) — keep walls
+    //   [2] Tiles130          (albedo idx 5) — courtyard floor
+    //   [3] Tiles074          (albedo idx 6) — keep interior floor
+    static constexpr int kSpomMaterialCount = 4;
+    TextureSlot spom_height_textures_[kSpomMaterialCount]{};
     VkSampler   texture_sampler_ = VK_NULL_HANDLE;
     // Texture index assigned to the four spawnable box variants (so dynamic
     // boxes pick from a wood/metal/painted/brick palette at spawn time).

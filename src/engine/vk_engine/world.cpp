@@ -1390,14 +1390,18 @@ void VulkanEngine::init_textures() {
     const Spec specs[kTextureCount] = {
         { "Ground054",         "Ground054/Ground054_2K-JPG_Color.jpg",
                                "Ground054/Ground054_2K-JPG_NormalGL.jpg" },
-        { "Bricks076A",        "Bricks076A/Bricks076A_2K-JPG_Color.jpg",
-                               "Bricks076A/Bricks076A_2K-JPG_NormalGL.jpg" },
+        { "Bricks078",         "Bricks078/Bricks078_8K-JPG_Color.jpg",
+                               "Bricks078/Bricks078_8K-JPG_NormalGL.jpg" },
         { "Wood048",           "Wood048/Wood048_2K-JPG_Color.jpg",
                                "Wood048/Wood048_2K-JPG_NormalGL.jpg" },
         { "Metal042A",         "Metal042A/Metal042A_2K-JPG_Color.jpg",
                                "Metal042A/Metal042A_2K-JPG_NormalGL.jpg" },
-        { "PaintedPlaster017", "PaintedPlaster017/PaintedPlaster017_2K-JPG_Color.jpg",
-                               "PaintedPlaster017/PaintedPlaster017_2K-JPG_NormalGL.jpg" },
+        { "PaintedBricks001",  "PaintedBricks001/PaintedBricks001_8K-JPG_Color.jpg",
+                               "PaintedBricks001/PaintedBricks001_8K-JPG_NormalGL.jpg" },
+        { "Tiles130",          "Tiles130/Tiles130_8K-JPG_Color.jpg",
+                               "Tiles130/Tiles130_8K-JPG_NormalGL.jpg" },
+        { "Tiles074",          "Tiles074/Tiles074_8K-JPG_Color.jpg",
+                               "Tiles074/Tiles074_8K-JPG_NormalGL.jpg" },
     };
 
     for (int i = 0; i < kTextureCount; ++i) {
@@ -1407,12 +1411,20 @@ void VulkanEngine::init_textures() {
         normal_textures_[i] = probe(specs[i].normal_jpg, VK_FORMAT_R8G8B8A8_UNORM);
     }
 
-    // SPOM displacement (height map) — used by cube.frag's parallax march
-    // for the brick slot only (castle walls). UNORM so the .r channel
-    // gives a 0..1 height value the shader steps through. Not in an
-    // array because no other material currently needs it.
-    brick_height_ = probe("Bricks076A/Bricks076A_2K-JPG_Displacement.jpg",
-                           VK_FORMAT_R8G8B8A8_UNORM);
+    // SPOM displacement maps — bound to cube.frag as sampler2D u_height[4].
+    // Order MUST match cube.frag's height_idx_for_albedo() switch:
+    //   [0] Bricks078         (albedo idx 1) — castle outer walls
+    //   [1] PaintedBricks001  (albedo idx 4) — keep walls
+    //   [2] Tiles130          (albedo idx 5) — courtyard floor
+    //   [3] Tiles074          (albedo idx 6) — keep interior floor
+    spom_height_textures_[0] = probe(
+        "Bricks078/Bricks078_8K-JPG_Displacement.jpg",                 VK_FORMAT_R8G8B8A8_UNORM);
+    spom_height_textures_[1] = probe(
+        "PaintedBricks001/PaintedBricks001_8K-JPG_Displacement.jpg",   VK_FORMAT_R8G8B8A8_UNORM);
+    spom_height_textures_[2] = probe(
+        "Tiles130/Tiles130_8K-JPG_Displacement.jpg",                   VK_FORMAT_R8G8B8A8_UNORM);
+    spom_height_textures_[3] = probe(
+        "Tiles074/Tiles074_8K-JPG_Displacement.jpg",                   VK_FORMAT_R8G8B8A8_UNORM);
 }
 
 void VulkanEngine::destroy_textures() {
@@ -1425,7 +1437,9 @@ void VulkanEngine::destroy_textures() {
         kill(albedo_textures_[i]);
         kill(normal_textures_[i]);
     }
-    kill(brick_height_);
+    for (int i = 0; i < kSpomMaterialCount; ++i) {
+        kill(spom_height_textures_[i]);
+    }
     if (texture_sampler_) {
         vkDestroySampler(device_, texture_sampler_, nullptr);
         texture_sampler_ = VK_NULL_HANDLE;

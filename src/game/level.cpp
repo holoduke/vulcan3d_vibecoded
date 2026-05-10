@@ -55,10 +55,13 @@ Level make_arena(float r, float wh) {
 
     // Texture indices match the engine's load order:
     //   0 = Ground054, 1 = Bricks067, 2 = Wood048,
-    //   3 = Metal042A, 4 = PaintedPlaster017
+    //   3 = Metal042A, 4 = PaintedBricks001 (keep walls),
+    //   5 = Tiles130 (courtyard floor), 6 = Tiles074 (keep interior floor)
     constexpr int kGround = 0;
     constexpr int kBrick  = 1;
     constexpr int kPaint  = 4;
+    constexpr int kTile1  = 5;     // courtyard floor
+    constexpr int kTile2  = 6;     // keep interior floor
 
     // For each brush we pass two colors:
     //   `tint`    — multiplies the texture (near-white so the texture's hue
@@ -264,6 +267,31 @@ Level make_arena(float r, float wh) {
         add(lv, glm::vec3(kp_cx, kp_h + 0.05f, kp_cz),
             glm::vec3(kp_sx, 0.1f, kp_sz),
             keep_tint, kPaint, kPaint, 1.0f, keep_proto);
+
+        // Floor slabs — courtyard tile inside the perimeter walls, plus a
+        // separate tile for the keep interior. Top surface lands at Y=0
+        // (matching wall bottoms) via a 0.5m thick slab with center at
+        // Y=-0.25. uv_scale = 0.4 → ~2.5m per tile, large enough to read
+        // as floor tiles instead of mosaic. SPOM extrusion in cube.vert
+        // adds ~12cm of geometric headroom for the parallax depth.
+        const auto floor_tint   = T(0.96f, 0.94f, 0.90f);
+        const auto floor_proto1 = T(0.45f, 0.42f, 0.38f);  // courtyard
+        const auto floor_proto2 = T(0.55f, 0.48f, 0.40f);  // keep interior
+        const float in_ext = (cr - wt) * 2.0f - 0.4f;       // small inset
+        // Courtyard floor (covers everything inside the walls, spans the
+        // keep too — the keep floor below sits at the same Y and uses a
+        // different texture; harmless overlap because depth-test wins
+        // pixel-by-pixel and both surfaces shade identically away from
+        // the keep footprint).
+        add(lv, glm::vec3(0.0f, -0.25f, 0.0f),
+            glm::vec3(in_ext, 0.5f, in_ext),
+            floor_tint, kTile1, kTile1, 0.4f, floor_proto1);
+        // Keep interior floor — slightly raised so it wins the
+        // depth-EQUAL test inside the keep footprint and shows the
+        // dedicated tile texture there.
+        add(lv, glm::vec3(kp_cx, -0.20f, kp_cz),
+            glm::vec3(kp_sx - 0.4f, 0.4f, kp_sz - 0.4f),
+            floor_tint, kTile2, kTile2, 0.5f, floor_proto2);
 
         // Lanterns: pair flanking the entrance + pair near the keep door,
         // and one inside the keep so the interior isn't pitch-black.

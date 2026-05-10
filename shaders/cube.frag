@@ -83,8 +83,9 @@ layout(set = 0, binding = 2, std430) readonly buffer Materials {
 };
 
 // Bound texture arrays (must match kTextureCount on the C++ side).
-layout(set = 0, binding = 3) uniform sampler2D u_albedo[5];
-layout(set = 0, binding = 4) uniform sampler2D u_normal[5];
+const int kTextureCount = 7;
+layout(set = 0, binding = 3) uniform sampler2D u_albedo[kTextureCount];
+layout(set = 0, binding = 4) uniform sampler2D u_normal[kTextureCount];
 // Pre-baked heightmap sun-shadow texture (R8, 0 = lit, 255 = shadowed).
 // Sampled here as a distance fallback for terrain self-shadow вЂ” the
 // BLAS holds the full heightmap detail, so RT shadow rays from a low-
@@ -102,7 +103,22 @@ layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 // Brick (slot 1) parallax-occlusion displacement. Sampled by the SPOM
 // path below for albedo_idx == 1 (castle walls). Other materials don't
 // have a height map and skip the parallax march entirely.
-layout(set = 0, binding = 12) uniform sampler2D u_brick_height;
+// SPOM (parallax-occlusion) displacement map array. cube.frag picks the
+// right entry per fragment via height_idx_for_albedo() below; non-SPOM
+// materials skip the parallax march entirely. Order MUST match the
+// spom_height_textures_ array on the host (vk_engine.h).
+layout(set = 0, binding = 12) uniform sampler2D u_height[4];
+
+// Map an albedo texture index to a SPOM material slot (or -1 for "no
+// parallax"). Keep in sync with vk_engine.h's spom_height_textures_
+// allocation order.
+int height_idx_for_albedo(int a) {
+    if (a == 1) return 0;   // Bricks078         — castle outer walls
+    if (a == 4) return 1;   // PaintedBricks001  — keep walls
+    if (a == 5) return 2;   // Tiles130          — courtyard floor
+    if (a == 6) return 3;   // Tiles074          — keep interior floor
+    return -1;
+}
 
 // Push constants — match cube.vert's PC layout exactly. Fragment shader
 // only reads `model` (for the brush's world center + per-axis size used
@@ -157,6 +173,7 @@ vec3 triplanar_sample(sampler2D tex, vec3 wp, vec3 N) {
 // `discard` to make the silhouette read as bumpy bricks instead of a
 // flat clipped edge (the "S" in SPOM).
 vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
+             int height_idx,
              out int out_axis,
              out vec3 out_T, out vec3 out_B, out vec3 out_face_n,
              out bool out_overhang_disc) {
@@ -207,16 +224,16 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     vec2  uv_step    = -P * layer_step;
     float current_layer = 0.0;
     vec2  cur_uv = uv0;
-    float cur_h  = 1.0 - texture(u_brick_height, cur_uv).r;
+    float cur_h  = 1.0 - texture(u_height[height_idx], cur_uv).r;
     for (int i = 0; i < kSteps; ++i) {
         if (current_layer >= cur_h) break;
         cur_uv += uv_step;
         current_layer += layer_step;
-        cur_h = 1.0 - texture(u_brick_height, cur_uv).r;
+        cur_h = 1.0 - texture(u_height[height_idx], cur_uv).r;
     }
     // Linear-interp refine between the last two samples for smoother depth.
     vec2  prev_uv = cur_uv - uv_step;
-    float prev_h  = 1.0 - texture(u_brick_height, prev_uv).r;
+    float prev_h  = 1.0 - texture(u_height[height_idx], prev_uv).r;
     float prev_layer = current_layer - layer_step;
     float a = cur_h  - current_layer;
     float b = prev_h - prev_layer - a;
@@ -600,8 +617,8 @@ void main() {
     // pick world-space explicitly so the height read uses true world Y.
     vec3  sample_pos     = (obj_space ? vObjectPos : vWorldPos) * scale;
     vec3  proj_n         = obj_space ? normalize(vObjectNormal) : N;
-    bool  use_albedo     = albedo_idx_raw >= 0 && albedo_idx_raw < 5;
-    bool  use_normal     = normal_idx_raw >= 0 && normal_idx_raw < 5 &&
+    bool  use_albedo     = albedo_idx_raw >= 0 && albedo_idx_raw < kTextureCount;
+    bool  use_normal     = normal_idx_raw >= 0 && normal_idx_raw < kTextureCount &&
                            !obj_space && !is_terrain;
     // Texture sampling lives in branches gated on use_albedo / use_normal.
     // Sampler-array indexing on Vulkan requires a known-valid index; clamp
@@ -698,7 +715,7 @@ void main() {
         // (texture index 0). When textures are off (use_albedo=false)
         // we just show the layer-blended colour.
         if (use_albedo) {
-            int  albedo_idx = clamp(albedo_idx_raw, 0, 4);
+            int  albedo_idx = clamp(albedo_idx_raw, 0, kTextureCount - 1);
             vec3 detail = triplanar_sample(u_albedo[albedo_idx],
                                            sample_pos, proj_n);
             // Triplanar blend uses pow(abs(N), 4) weights, so per-pixel
@@ -715,12 +732,14 @@ void main() {
             albedo = base;
         }
     } else {
-        // Brick (slot 1) gets SPOM-style parallax occlusion on the dominant
-        // axis face. Castle walls only — other materials don't have a
-        // height map and would silently parallax to the brick depths if
-        // we weren't gating on the index. Object-space brushes (dyn props)
-        // also stay on triplanar since their normal isn't world-aligned.
-        bool spom_path = use_albedo && albedo_idx_raw == 1 && !obj_space &&
+        // SPOM (parallax-occlusion) — for any material that has a height
+        // map registered in u_height[]. height_idx_for_albedo() returns
+        // -1 for non-SPOM materials so they fall through to the standard
+        // triplanar path. obj_space brushes (dyn props) skip SPOM because
+        // their normal isn't world-aligned; terrain skips because it has
+        // its own raymarched normal path.
+        int spom_h_idx = height_idx_for_albedo(albedo_idx_raw);
+        bool spom_path = use_albedo && spom_h_idx >= 0 && !obj_space &&
                          !is_terrain;
         if (spom_path) {
             // pc.model is translate * scale (no rotation for static brushes,
@@ -735,6 +754,7 @@ void main() {
             vec3 spom_T, spom_B, spom_face_n;
             bool spom_disc;
             vec2 spom_uv_off = spom_uv(sample_pos, proj_n, face_size, scale,
+                                        spom_h_idx,
                                         axis, spom_T, spom_B, spom_face_n,
                                         spom_disc);
             if (spom_disc) {
@@ -753,25 +773,26 @@ void main() {
                 gl_FragDepth = 1.0;
                 return;
             }
-            vec3 tex_albedo = texture(u_albedo[1], spom_uv_off).rgb;
+            int  a_idx = clamp(albedo_idx_raw, 0, kTextureCount - 1);
+            vec3 tex_albedo = texture(u_albedo[a_idx], spom_uv_off).rgb;
             albedo = tex_albedo * vColor;
             if (use_normal) {
-                vec3 n_t = texture(u_normal[1], spom_uv_off).rgb * 2.0 - 1.0;
+                vec3 n_t = texture(u_normal[a_idx], spom_uv_off).rgb * 2.0 - 1.0;
                 N = normalize(spom_T  * n_t.x +
                               spom_B  * n_t.y +
                               spom_face_n * n_t.z);
             }
         } else if (use_albedo) {
-            int  albedo_idx = clamp(albedo_idx_raw, 0, 4);
+            int  albedo_idx = clamp(albedo_idx_raw, 0, kTextureCount - 1);
             vec3 tex_albedo = triplanar_sample(u_albedo[albedo_idx],
                                                sample_pos, proj_n);
             albedo = tex_albedo * vColor;
             if (use_normal) {
-                int  normal_idx = clamp(normal_idx_raw, 0, 4);
+                int  normal_idx = clamp(normal_idx_raw, 0, kTextureCount - 1);
                 N = triplanar_normal(u_normal[normal_idx], sample_pos, N);
             }
         } else if (use_normal) {
-            int  normal_idx = clamp(normal_idx_raw, 0, 4);
+            int  normal_idx = clamp(normal_idx_raw, 0, kTextureCount - 1);
             N = triplanar_normal(u_normal[normal_idx], sample_pos, N);
         }
     }
