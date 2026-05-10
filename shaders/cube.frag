@@ -385,6 +385,33 @@ vec3 sample_sky(vec3 dir) {
     return sky;
 }
 
+// Mask-parameterised variants — let the PCSS loop hoist `is_terrain_pre`
+// out into a single uniform mask instead of branching on a function call
+// every tap (which forced two specialised loop bodies into the kernel).
+bool any_hit_m(vec3 origin, vec3 dir, float t_max, uint mask) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, topLevelAS,
+                          gl_RayFlagsTerminateOnFirstHitEXT |
+                          gl_RayFlagsOpaqueEXT,
+                          mask, origin, 0.001, dir, t_max);
+    while (rayQueryProceedEXT(rq)) {}
+    return rayQueryGetIntersectionTypeEXT(rq, true) ==
+           gl_RayQueryCommittedIntersectionTriangleEXT;
+}
+bool closest_hit_m(vec3 origin, vec3 dir, float t_max, uint mask,
+                   out float out_t) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
+                          mask, origin, 0.001, dir, t_max);
+    while (rayQueryProceedEXT(rq)) {}
+    if (rayQueryGetIntersectionTypeEXT(rq, true) !=
+        gl_RayQueryCommittedIntersectionTriangleEXT) {
+        return false;
+    }
+    out_t = rayQueryGetIntersectionTEXT(rq, true);
+    return true;
+}
+
 // Closest-hit ray cast. Returns true on hit, fills out_t.
 bool closest_hit(vec3 origin, vec3 dir, float t_max,
                  out float out_t) {
@@ -916,33 +943,21 @@ void main() {
         const int kBlockerSearch = 4;
         float sum_t = 0.0;
         int   hits = 0;
-        // Hoist is_terrain_pre out of the ray loop — the per-tap ternary
-        // forced both closest_hit_* function bodies to be inlined into
-        // the kernel and produced divergent control flow inside the ray
-        // query. Two specialised loops are larger source but smaller
-        // compiled shader, and stop the divergent branch on every tap.
-        if (is_terrain_pre) {
-            for (int i = 0; i < kBlockerSearch; ++i) {
-                float br1 = rand(seed_base + uvec3(i, 91u, 13u));
-                float br2 = rand(seed_base + uvec3(i, 19u, 71u));
-                float r   = sqrt(br1) * base_softness * 4.0;
-                float phi = 6.28318530718 * br2;
-                vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
-                vec3 dir = normalize(L + jitter);
-                float t;
-                if (closest_hit_no_terrain(origin, dir, 200.0, t)) { sum_t += t; ++hits; }
-            }
-        } else {
-            for (int i = 0; i < kBlockerSearch; ++i) {
-                float br1 = rand(seed_base + uvec3(i, 91u, 13u));
-                float br2 = rand(seed_base + uvec3(i, 19u, 71u));
-                float r   = sqrt(br1) * base_softness * 4.0;
-                float phi = 6.28318530718 * br2;
-                vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
-                vec3 dir = normalize(L + jitter);
-                float t;
-                if (closest_hit(origin, dir, 200.0, t)) { sum_t += t; ++hits; }
-            }
+        // One loop, mask hoisted to a uniform-per-pixel value. The earlier
+        // two-specialised-loops form was a workaround for a per-tap
+        // ternary on the ray-query function — closest_hit_m takes the mask
+        // as an arg so a single function body inlines and the ray-query
+        // call has no divergent control on it.
+        const uint blocker_mask = is_terrain_pre ? 0x02u : 0xFFu;
+        for (int i = 0; i < kBlockerSearch; ++i) {
+            float br1 = rand(seed_base + uvec3(i, 91u, 13u));
+            float br2 = rand(seed_base + uvec3(i, 19u, 71u));
+            float r   = sqrt(br1) * base_softness * 4.0;
+            float phi = 6.28318530718 * br2;
+            vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
+            vec3 dir = normalize(L + jitter);
+            float t;
+            if (closest_hit_m(origin, dir, 200.0, blocker_mask, t)) { sum_t += t; ++hits; }
         }
 
         if (hits == 0) {
@@ -977,40 +992,21 @@ void main() {
             float inv_strata = 1.0 / float(strata);
             float blocked = 0.0;
             int taken = 0;
-            // Same hoist as the blocker loop above — two specialised
-            // PCSS sample loops instead of a per-tap ternary on the
-            // ray-query function.
-            if (is_terrain_pre) {
-                for (int sy = 0; sy < strata && taken < N_s_eff; ++sy) {
-                    for (int sx = 0; sx < strata && taken < N_s_eff; ++sx) {
-                        int idx = taken * 2 + parity;
-                        float r1 = rand(seed_base + uvec3(idx, 11u, 47u));
-                        float r2 = rand(seed_base + uvec3(idx, 53u, 23u));
-                        float u1 = (float(sx) + r1) * inv_strata;
-                        float u2 = (float(sy) + r2) * inv_strata;
-                        float r   = sqrt(u1) * penumbra;
-                        float phi = 6.28318530718 * u2;
-                        vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
-                        vec3 dir = normalize(L + jitter);
-                        if (any_hit_no_terrain(origin, dir, 200.0)) blocked += 1.0;
-                        ++taken;
-                    }
-                }
-            } else {
-                for (int sy = 0; sy < strata && taken < N_s_eff; ++sy) {
-                    for (int sx = 0; sx < strata && taken < N_s_eff; ++sx) {
-                        int idx = taken * 2 + parity;
-                        float r1 = rand(seed_base + uvec3(idx, 11u, 47u));
-                        float r2 = rand(seed_base + uvec3(idx, 53u, 23u));
-                        float u1 = (float(sx) + r1) * inv_strata;
-                        float u2 = (float(sy) + r2) * inv_strata;
-                        float r   = sqrt(u1) * penumbra;
-                        float phi = 6.28318530718 * u2;
-                        vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
-                        vec3 dir = normalize(L + jitter);
-                        if (any_hit(origin, dir, 200.0)) blocked += 1.0;
-                        ++taken;
-                    }
+            // One loop, mask hoisted (same trick as the blocker loop).
+            const uint shadow_mask = is_terrain_pre ? 0x02u : 0x01u;
+            for (int sy = 0; sy < strata && taken < N_s_eff; ++sy) {
+                for (int sx = 0; sx < strata && taken < N_s_eff; ++sx) {
+                    int idx = taken * 2 + parity;
+                    float r1 = rand(seed_base + uvec3(idx, 11u, 47u));
+                    float r2 = rand(seed_base + uvec3(idx, 53u, 23u));
+                    float u1 = (float(sx) + r1) * inv_strata;
+                    float u2 = (float(sy) + r2) * inv_strata;
+                    float r   = sqrt(u1) * penumbra;
+                    float phi = 6.28318530718 * u2;
+                    vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
+                    vec3 dir = normalize(L + jitter);
+                    if (any_hit_m(origin, dir, 200.0, shadow_mask)) blocked += 1.0;
+                    ++taken;
                 }
             }
             shadow = (blocked / float(taken)) * scene.rt_params.w;
