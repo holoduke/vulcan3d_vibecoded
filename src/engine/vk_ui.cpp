@@ -779,7 +779,7 @@ void VulkanEngine::build_menu_ui() {
             ImGui::Checkbox("RAYMARCH grass (SDF blades, replaces rasterised)",
                              &rt_.grass_raymarch_enabled);
             ImGui::SliderFloat("raymarch distance (m)",
-                                &rt_.grass_raymarch_distance, 5.0f, 80.0f);
+                                &rt_.grass_raymarch_distance, 5.0f, 400.0f);
             ImGui::SliderFloat("density (0..4)", &rt_.grass_density, 0.0f, 4.0f, "%.2f");
             ImGui::SliderFloat("height scale",   &rt_.grass_height_scale, 0.30f, 2.0f);
             ImGui::SliderFloat("distance (m)",   &rt_.grass_distance,   10.0f, 200.0f);

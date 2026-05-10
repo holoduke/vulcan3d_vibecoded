@@ -250,8 +250,10 @@ void main() {
     vec3 ro  = scene.camera_pos.xyz;
     vec3 rd  = normalize(wp4.xyz / wp4.w - ro);
 
-    // Sky-bound rays never hit grass — early discard.
-    if (rd.y > 0.0) { discard; }
+    // (Removed early-out on rd.y > 0. Mountains rise above eye height,
+    // so an upward-pointing ray can still hit terrain on a peak — the
+    // cut-out used to draw a hard horizon line at exactly the screen's
+    // mid-height which read as a cliff in the grass coverage.)
 
     const float kMaxDist = max(pc.color.x, 4.0);
     const int   kMaxSteps = 192;
