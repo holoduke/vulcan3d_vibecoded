@@ -891,10 +891,21 @@ void main() {
         // regardless of N.
         int taken = 0;
         float occluded = 0.0;
+        // TBN hoist (same trick as the GI loop) — N is constant for all
+        // AO rays at this pixel so the per-tap cross+normalize that
+        // cos_hemi() does internally was redundant.
+        vec3 ao_up  = abs(N.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0);
+        vec3 ao_tan = normalize(cross(ao_up, N));
+        vec3 ao_bit = cross(N, ao_tan);
         for (int i = 0; i < N_ao; ++i) {
             float u1 = rand(seed_base + uvec3(i, 7u, 53u));
             float u2 = rand(seed_base + uvec3(i, 41u, 5u));
-            vec3 d = cos_hemi(u1, u2, N);
+            float r_h = sqrt(u1);
+            float phi = 6.28318530718 * u2;
+            vec3 ld = vec3(r_h * cos(phi),
+                           sqrt(max(0.0, 1.0 - u1)),
+                           r_h * sin(phi));
+            vec3 d = ld.x * ao_tan + ld.y * N + ld.z * ao_bit;
             if (any_hit(origin_ao, d, ao_radius)) occluded += 1.0;
             ++taken;
         }
@@ -960,6 +971,15 @@ void main() {
         float inv_strata = 1.0 / float(strata);
         int taken = 0;
         vec3 sum = vec3(0.0);
+        // Hoist the receiver TBN out of the GI sample loop — N is constant
+        // for all samples at this pixel, so the cross+normalize that
+        // cos_hemi() does internally was being repeated N_gi times for
+        // identical inputs. Bounce hemispheres still rebuild because
+        // hit_n changes per bounce.
+        vec3 N_up   = abs(N.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0);
+        vec3 N_tan  = normalize(cross(N_up, N));
+        vec3 N_bit  = cross(N, N_tan);
+        vec3 ray_origin0 = vWorldPos + N * 0.01;
         for (int sy = 0; sy < strata && taken < N_gi; ++sy) {
             for (int sx = 0; sx < strata && taken < N_gi; ++sx) {
                 float r1 = rand(seed_base + uvec3(taken, 73u, 11u));
@@ -967,8 +987,14 @@ void main() {
                 float u1 = (float(sx) + r1) * inv_strata;
                 float u2 = (float(sy) + r2) * inv_strata;
 
-                vec3 ray_dir = cos_hemi(u1, u2, N);
-                vec3 ray_origin = vWorldPos + N * 0.01;
+                // Inline cos_hemi using the hoisted TBN.
+                float r_h = sqrt(u1);
+                float phi = 6.28318530718 * u2;
+                vec3 ld = vec3(r_h * cos(phi),
+                               sqrt(max(0.0, 1.0 - u1)),
+                               r_h * sin(phi));
+                vec3 ray_dir = ld.x * N_tan + ld.y * N + ld.z * N_bit;
+                vec3 ray_origin = ray_origin0;
                 vec3 throughput = vec3(1.0);
                 vec3 path = vec3(0.0);
 
