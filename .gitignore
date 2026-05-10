@@ -51,3 +51,6 @@ shot*.jpg
 
 assets/level1_heights.bin
 qlike_imgui.ini
+autodemo_*.out
+autodemo_*.err
+
