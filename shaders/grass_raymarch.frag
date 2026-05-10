@@ -39,6 +39,8 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  grass_extra;
     vec4  grass_extra2;
     mat4  light_vp;
+    vec4  terrain_extra;
+    vec4  water_params;     // x: enabled, y: water level, z..w: unused here
 } scene;
 
 // Heightmap (R32_SFLOAT) — shared with terrain raymarch + cube shaders.
@@ -206,6 +208,17 @@ float map(vec3 p, out bool out_blade_hit) {
     vec3 lp = p;
     lp.y -= terrainY;                  // ground-relative
     lp.xz = opRepeat(lp.xz, vec2(kPeriod), cellId);
+
+    // Altitude + water gates — match terrain_raymarch.frag's
+    // grassEligibility so the grass shader and the green terrain tint
+    // agree about where grass exists. Snow band fades grass out
+    // 55→75m; below water level kills it outright. Skipping early here
+    // means the inner 9-cell loop never runs above the snow line or
+    // underwater (big savings on mountain peaks).
+    float alt_factor = 1.0 - smoothstep(55.0, 75.0, terrainY);
+    bool underwater  = scene.water_params.x > 0.5 &&
+                       terrainY < scene.water_params.y;
+    if (alt_factor <= 0.001 || underwater) return distToTerrain;
 
     float d = distToTerrain;
     // 3×3 neighbor sweep — blades placed by per-cell hash can lean into

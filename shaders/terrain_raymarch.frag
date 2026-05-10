@@ -583,11 +583,21 @@ float calcShadow(vec3 pos, vec3 sunDir) {
 // 0..1 output so the terrain-tint blend has no visible hard edge at
 // the mask boundary. Keep these thresholds in sync with
 // grass_raymarch.frag's kPresenceThresh / kSlopeMaxGrad.
-float grassEligibility(vec2 worldXZ) {
+//
+// terrainY adds altitude gating: grass fades to zero in the snow band
+// (approx the snowMask in getMaterial below) and is killed entirely
+// below the water plane.
+float grassEligibility(vec2 worldXZ, float terrainY) {
     vec3 cell_n = noised(worldXZ * 0.02);
     float presence = smoothstep(0.40, 0.55, cell_n.x);
     float slope_factor = 1.0 - smoothstep(0.55, 0.80, length(cell_n.yz));
-    return presence * slope_factor;
+    // Snow zone. snowMask in getMaterial smoothsteps in around y=60..90;
+    // grass fades to zero across roughly the same band.
+    float alt_factor = 1.0 - smoothstep(55.0, 75.0, terrainY);
+    // Below water level: hard zero. water_params.x = enabled, .y = level.
+    float underwater = (scene.water_params.x > 0.5 &&
+                         terrainY < scene.water_params.y) ? 0.0 : 1.0;
+    return presence * slope_factor * alt_factor * underwater;
 }
 
 // Layered material: rock base, grass on flats, snow up high (with
@@ -613,7 +623,7 @@ vec3 getMaterial(vec3 pos, vec3 nor) {
     // raymarched grass pass (grass_raymarch.frag) would place blades.
     // Without this, the bare terrain shows through between blades and
     // reads as desaturated rock instead of a meadow surface.
-    float grass_amt = grassEligibility(pos.xz);
+    float grass_amt = grassEligibility(pos.xz, pos.y);
     vec3 grass_top  = mix(vec3(0.18, 0.30, 0.09),
                            vec3(0.13, 0.22, 0.06), nz);
     col = mix(col, grass_top, grass_amt * 0.85);
