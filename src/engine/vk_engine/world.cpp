@@ -1461,33 +1461,20 @@ void VulkanEngine::init_viewmodel() {
         // earlier 0.30m. The 180° Y-rotation flips the gun's nose to
         // point forward (camera -Z); without it the assets/gun model
         // points back at the player.
+        // New asset (sci_fi_m254). Reset rotation stack to the bare
+        // Y-180 — most glTF guns ship with nose along +Z, so we flip
+        // 180° to align with camera-forward (-Z). The corrective
+        // Z-roll and yaw-trim from the previous asset only get re-
+        // applied when this one's tilt/aim drift is observed.
         float scale = 0.55f / max_side;
-        // Y-180: gun points away from camera. Z-roll: glTF asset has its
-        // up axis tilted relative to camera-up; -90° around forward
-        // (camera -Z) puts the magazine on the bottom and the sight on
-        // top. Adjust the angle if the asset is changed.
         glm::mat4 rot_y180 = glm::rotate(glm::mat4(1.0f),
                                           glm::radians(180.0f),
                                           glm::vec3(0.0f, 1.0f, 0.0f));
-        // +90° Z roll un-tilts (asset's local up axis was reversed
-        // relative to camera-up). Yaw-trim corrects the barrel's drift
-        // off the crosshair; the asset's "forward" axis isn't a clean
-        // -Z so even after Y-180 the barrel points slightly off-screen.
-        // Tune yaw_trim (positive = barrel rotates left in screen
-        // space) by single-degree increments if the crosshair shifts
-        // when the asset is replaced.
-        glm::mat4 rot_z = glm::rotate(glm::mat4(1.0f),
-                                       glm::radians(90.0f),
-                                       glm::vec3(0.0f, 0.0f, 1.0f));
-        const float yaw_trim_deg = -6.0f;
-        glm::mat4 rot_y_trim = glm::rotate(glm::mat4(1.0f),
-                                            glm::radians(yaw_trim_deg),
-                                            glm::vec3(0.0f, 1.0f, 0.0f));
 
         viewmodel_root_offset_ =
             glm::translate(glm::mat4(1.0f), glm::vec3(0.16f, -0.20f, -0.35f)) *
             glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
-            rot_y_trim * rot_z * rot_y180 *
+            rot_y180 *
             glm::translate(glm::mat4(1.0f), -center);
 
         for (const auto& prim : gltf.primitives) {
