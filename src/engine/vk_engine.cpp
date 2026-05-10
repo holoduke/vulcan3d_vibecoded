@@ -291,6 +291,7 @@ void VulkanEngine::init() {
     init_terrain_raymarch_lowres();
     init_sun_shadow_pipeline();
     init_grass_pipeline();
+    init_grass_raymarch_pipeline();
     present_loader_frame("Baking shadows",        0.85f);
     // Heightmap raw-heights texture (binding 8) for the procedural
     // raymarched terrain shader. Uploaded once, after descriptors and
@@ -1383,6 +1384,7 @@ void VulkanEngine::shutdown() {
     });
     guarded("destroy_skybox", [&]{ destroy_skybox_resources(); });
     guarded("destroy_textures", [&]{ destroy_textures(); });
+    guarded("destroy_grass_raymarch_pipeline", [&]{ destroy_grass_raymarch_pipeline(); });
     guarded("destroy_grass_pipeline", [&]{ destroy_grass_pipeline(); });
     guarded("destroy_terrain_height_texture", [&]{ destroy_terrain_height_texture(); });
     guarded("destroy_terrain_raymarch_lowres", [&]{ destroy_terrain_raymarch_lowres(); });

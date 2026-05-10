@@ -805,6 +805,42 @@ void VulkanEngine::init_grass_pipeline() {
     log::info("grass pipeline built");
 }
 
+void VulkanEngine::init_grass_raymarch_pipeline() {
+    std::string sd = QLIKE_SHADER_DIR;
+    grass_rm_frag_module_ = vkpipe::load_shader_module(device_,
+                                sd + "/grass_raymarch.frag.spv");
+    vkpipe::GraphicsPipelineConfig cfg{};
+    // Reuse taa.vert (fullscreen triangle from gl_VertexIndex). The
+    // taa shader module was created in init_taa() and stays alive for
+    // the engine's lifetime, so it's safe to reference here.
+    cfg.vert = taa_vert_module_;
+    cfg.frag = grass_rm_frag_module_;
+    cfg.layout = pipeline_layout_;            // shares the cube push-constant layout
+    cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+    cfg.depth_format  = depth_format_;
+    cfg.cull = VK_CULL_MODE_NONE;
+    cfg.depth_test = true;
+    cfg.depth_write = true;
+    // LESS_OR_EQUAL so the fullscreen-tri's gl_FragCoord.z (=1.0) doesn't
+    // immediately fail vs whatever the depth pre-pass wrote — the actual
+    // depth test gate is gl_FragDepth (the marched hit's projected z),
+    // which the shader writes per-pixel.
+    cfg.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+    grass_rm_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    log::info("grass raymarch pipeline built");
+}
+
+void VulkanEngine::destroy_grass_raymarch_pipeline() {
+    if (grass_rm_pipeline_) {
+        vkDestroyPipeline(device_, grass_rm_pipeline_, nullptr);
+        grass_rm_pipeline_ = VK_NULL_HANDLE;
+    }
+    if (grass_rm_frag_module_) {
+        vkDestroyShaderModule(device_, grass_rm_frag_module_, nullptr);
+        grass_rm_frag_module_ = VK_NULL_HANDLE;
+    }
+}
+
 void VulkanEngine::destroy_grass_pipeline() {
     if (grass_pipeline_) vkDestroyPipeline(device_, grass_pipeline_, nullptr);
     if (grass_vert_module_) vkDestroyShaderModule(device_, grass_vert_module_, nullptr);

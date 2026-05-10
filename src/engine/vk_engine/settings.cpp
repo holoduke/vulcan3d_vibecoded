@@ -210,6 +210,8 @@ void VulkanEngine::save_settings() const {
     f << "terrain_h_rock_snow_start = "  << rt_.terrain_h_rock_snow_start  << "\n";
     f << "terrain_h_rock_snow_end = "    << rt_.terrain_h_rock_snow_end    << "\n";
     f << "grass_enabled = "       << (rt_.grass_enabled ? 1 : 0) << "\n";
+    f << "grass_raymarch_enabled = " << (rt_.grass_raymarch_enabled ? 1 : 0) << "\n";
+    f << "grass_raymarch_distance = " << rt_.grass_raymarch_distance << "\n";
     f << "grass_distance = "      << rt_.grass_distance          << "\n";
     f << "grass_wind = "          << rt_.grass_wind              << "\n";
     f << "grass_density = "       << rt_.grass_density           << "\n";
@@ -385,6 +387,8 @@ void VulkanEngine::load_settings() {
             else if (key == "terrain_h_rock_snow_start")  rt_.terrain_h_rock_snow_start  = std::stof(val);
             else if (key == "terrain_h_rock_snow_end")    rt_.terrain_h_rock_snow_end    = std::stof(val);
             else if (key == "grass_enabled")      rt_.grass_enabled       = (std::stoi(val) != 0);
+            else if (key == "grass_raymarch_enabled") rt_.grass_raymarch_enabled = (std::stoi(val) != 0);
+            else if (key == "grass_raymarch_distance") rt_.grass_raymarch_distance = std::stof(val);
             else if (key == "grass_distance")     rt_.grass_distance      = std::stof(val);
             else if (key == "grass_wind")         rt_.grass_wind          = std::stof(val);
             else if (key == "grass_density")      rt_.grass_density       = std::stof(val);

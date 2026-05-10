@@ -661,6 +661,16 @@ private:
     void init_grass_pipeline();
     void destroy_grass_pipeline();
 
+    // Raymarched grass — fullscreen SDF blade field. Drawn into the same
+    // color/motion/depth attachments as cube draws after them, so the
+    // depth pre-pass (cubes/castle/dyn) correctly occludes grass. Reuses
+    // taa.vert as a fullscreen-triangle vertex shader.
+    VkPipeline       grass_rm_pipeline_   = VK_NULL_HANDLE;
+    VkShaderModule   grass_rm_frag_module_ = VK_NULL_HANDLE;
+    void init_grass_raymarch_pipeline();
+    void destroy_grass_raymarch_pipeline();
+    void render_grass_raymarch(VkCommandBuffer cmd);
+
     // Heightmap raw heights as an R32_SFLOAT texture. Used by the
     // procedural raymarched terrain shader (binding 8) so the
     // procedural surface follows the gameplay heightmap shape.
@@ -1075,6 +1085,15 @@ private:
 
         // ---- Grass ----
         bool  grass_enabled        = true;
+        // When true, the rasterised grass pipeline is skipped and the
+        // fullscreen raymarched grass pass takes over. Adapted from
+        // shadertoy.com/view/dd2cWh — SDF blades on a domain-repeated
+        // grid. Heavier per-pixel cost but no instance-buffer rebuild
+        // and looks volumetric/3D rather than flat-billboarded.
+        bool  grass_raymarch_enabled = false;
+        // Max ray distance for the raymarched grass (metres). Cuts the
+        // per-pixel step budget; beyond this, grass fades to sky.
+        float grass_raymarch_distance = 35.0f;
         // Max blade-render distance in metres. Beyond this, blades
         // collapse to NaN clip space (no fragment work).
         float grass_distance       = 80.0f;

@@ -1941,6 +1941,34 @@ void VulkanEngine::render_terrain_raymarch_compose(VkCommandBuffer cmd) {
     vkCmdDraw(cmd, 3, 1, 0, 0);
 }
 
+void VulkanEngine::render_grass_raymarch(VkCommandBuffer cmd) {
+    // Fullscreen-tri pass that walks the SDF blade field. Drawn into the
+    // same color/motion/depth attachments as the cube draws, AFTER them,
+    // so cube/castle/dyn-prop depth (already in depth_image_) correctly
+    // occludes the marched grass.
+    const FrameView& fv = current_frame_view_;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, grass_rm_pipeline_);
+    // descriptor set is already bound by render_world's earlier draws.
+
+    PushConstants pc{};
+    pc.mvp     = fv.vp;
+    pc.model   = fv.inv_vp;          // shader uses model as inv(view_proj)
+    pc.prev_mvp = prev_view_proj_valid_ ? prev_view_proj_ : fv.vp;
+    pc.color   = glm::vec4(rt_.grass_raymarch_distance,
+                            rt_.grass_wind,
+                            static_cast<float>(frame_number_) * 0.016f,
+                            0.0f);
+    pc.emissive = glm::vec4(0.0f);
+    pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
+    pc.grass_params = glm::vec4(rt_.grass_distance, rt_.grass_wind,
+                                 static_cast<float>(frame_number_) * 0.016f,
+                                 0.0f);
+    vkCmdPushConstants(cmd, pipeline_layout_,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(PushConstants), &pc);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+}
+
 void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
     // Cached FrameView built once at top of draw(); bit-identical with
     // the color pass so depth-EQUAL/LESS_OR_EQUAL stays correct.
@@ -2235,6 +2263,12 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // a degenerate triangle (NaN clip space) so no fragment work runs
     // for them. Skipped entirely when disabled in Settings or when
     // build_grass produced an empty set.
+    // Raymarched grass takes over the entire grass slot when enabled —
+    // skip the rasterised draw to avoid double-rendering.
+    if (rt_.grass_enabled && rt_.grass_raymarch_enabled &&
+        grass_rm_pipeline_ != VK_NULL_HANDLE) {
+        render_grass_raymarch(cmd);
+    } else
     if (rt_.grass_enabled && grass_.instance_count > 0 &&
         grass_pipeline_ != VK_NULL_HANDLE) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, grass_pipeline_);
