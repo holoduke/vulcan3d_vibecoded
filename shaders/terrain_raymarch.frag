@@ -52,6 +52,14 @@ layout(push_constant) uniform PC {
 // вЂ” we don't have the heightmap origin/side here, so use the well-
 // known engine layout: terrain centred at origin, side = 2048 m).
 layout(set = 0, binding = 8) uniform sampler2D u_terrain_height;
+// Grass eligibility mask. R8 1024² covering the same 2048 m square as
+// u_terrain_height. CPU-baked once at level load (presence + slope from
+// the same FBM the GLSL terrain uses, then sample_terrain_height for an
+// accurate slope finite-difference). Both this shader and
+// grass_raymarch.frag sample binding 13 — single source of truth for
+// "is there grass here", and avoids the per-step 9-cell noised() storm
+// in the grass map() loop.
+layout(set = 0, binding = 13) uniform sampler2D u_grass_mask;
 const float kHeightmapSide = 2048.0;
 float sampleHeightDelta(vec2 worldXZ) {
     vec2 uv = (worldXZ / kHeightmapSide) + vec2(0.5);
@@ -519,12 +527,12 @@ float raymarch(vec3 ro, vec3 rd) {
 // 80 m. The FBM normal-octave slider (default 18) gives plenty of
 // distance detail without the artefacts.
 vec3 calcNormal(vec3 pos, float t) {
-    // Reverted from a 1× analytic-gradient version: the per-octave
-    // damp term `1/(1+dot(d,d))` and its derivative contribute real
-    // high-frequency variation that drops out of the cheap chain-rule
-    // accumulation. User reported visible detail loss in snow/rock
-    // mid-distance — 3× finite-difference is the safe path until the
-    // proper analytic gradient (with damp + Hessian terms) is written.
+    // Reverted (again) from the 1× analytic-gradient version. The damp
+    // term `1/(1+dot(d,d))` and its derivative carry real high-frequency
+    // detail that the cheap chain-rule loses — the snow/rock mid-
+    // distance band reads as washed-out and "missing rockiness" without
+    // it. 3× finite-difference is the correct path until the analytic
+    // gradient is rewritten with the proper damp + Hessian terms.
     float eps = 0.02 + 0.0008 * t;
     float hC = terrainH(pos.xz);
     float hR = terrainH(pos.xz + vec2(eps, 0.0));
@@ -578,26 +586,27 @@ float calcShadow(vec3 pos, vec3 sunDir) {
     return res * res * (3.0 - 2.0 * res);
 }
 
-// Same per-cell eligibility the raymarched-grass pass uses (low-freq
-// noise value gates presence + gradient magnitude gates slope). Smooth
-// 0..1 output so the terrain-tint blend has no visible hard edge at
-// the mask boundary. Keep these thresholds in sync with
-// grass_raymarch.frag's kPresenceThresh / kSlopeMaxGrad.
-//
-// terrainY adds altitude gating: grass fades to zero in the snow band
-// (approx the snowMask in getMaterial below) and is killed entirely
-// below the water plane.
+// Sample the CPU-baked grass mask (binding 13, RG8). Single source of
+// truth shared with grass_raymarch.frag.
+//   R = presence  (fixed at bake time)
+//   G = slope mag (raw |∇h| / 2, un-normalized here)
+// Slope cutoff is applied per-frame so the slider (grass_slope_n_min)
+// affects both blades and the green underground tint in lock-step.
+// Altitude + water gating stay per-pixel since they need terrainY.
 float grassEligibility(vec2 worldXZ, float terrainY) {
-    vec3 cell_n = noised(worldXZ * 0.02);
-    float presence = smoothstep(0.40, 0.55, cell_n.x);
-    float slope_factor = 1.0 - smoothstep(0.55, 0.80, length(cell_n.yz));
-    // Snow zone. snowMask in getMaterial smoothsteps in around y=60..90;
-    // grass fades to zero across roughly the same band.
+    vec2 mask_uv = (worldXZ / kHeightmapSide) + vec2(0.5);
+    if (mask_uv.x < 0.0 || mask_uv.x > 1.0 ||
+        mask_uv.y < 0.0 || mask_uv.y > 1.0) return 0.0;
+    vec2 mg = textureLod(u_grass_mask, mask_uv, 0.0).rg;
+    float slope_n_min = scene.grass_extra.z;
+    float slope_max = sqrt(max(1e-4, 1.0 / max(slope_n_min * slope_n_min, 1e-4) - 1.0));
+    float slope_mag = mg.g * 2.0;
+    float slope_w   = 1.0 - smoothstep(slope_max * 0.7,
+                                        slope_max * 1.2, slope_mag);
     float alt_factor = 1.0 - smoothstep(55.0, 75.0, terrainY);
-    // Below water level: hard zero. water_params.x = enabled, .y = level.
     float underwater = (scene.water_params.x > 0.5 &&
                          terrainY < scene.water_params.y) ? 0.0 : 1.0;
-    return presence * slope_factor * alt_factor * underwater;
+    return mg.r * slope_w * alt_factor * underwater;
 }
 
 // Layered material: rock base, grass on flats, snow up high (with
@@ -898,24 +907,31 @@ void main() {
             // at a 2 m depth, ~95 % by 6 m.
             float absorp = 0.5;
             float Tw = exp(-depth_m * absorp);
-            // Underwater surface вЂ” terrain material at the under-
-            // water point, lambert-shaded by sun (with shadow), no
-            // shore noise so the look is calm.
-            vec3 u_pos = vec3(wpos.x, terrain_y, wpos.z);
-            vec3 u_nor = calcNormal(u_pos, t_water);
-            vec3 u_mat = getMaterial(u_pos, u_nor);
-            float u_dif = max(dot(u_nor, sunDirW), 0.0) * water_lit;
-            float u_amb = 0.5 + 0.5 * u_nor.y;
-            vec3  u_col = u_mat * (u_dif * scene.sun_color.rgb *
-                                    scene.sun_color.a * 0.8 +
-                                    u_amb * scene.sky_color.rgb * 0.35);
-            // Tint the underwater colour by the water tint so it
-            // reads as "looking through water", not "no water".
-            u_col *= mix(vec3(1.0), shallow * 1.5 + vec3(0.05),
-                          0.5);
-            // Blend: shallow в†’ underwater visible, deep в†’ opaque
-            // water_color. trans_amt scales the maximum showthrough.
-            baseTint = mix(baseTint, u_col, Tw * trans_amt);
+            // Visibility gate: skip the entire underwater shading
+            // (calcNormal = 1× FBM, getMaterial = several `noise2`
+            // taps, lambert + ambient) when the contribution is
+            // below ~5 % of the surface tint. At 6 m depth Tw drops
+            // to 0.05; deep-water pixels read as opaque tint anyway.
+            if (Tw * trans_amt > 0.05) {
+                // Underwater surface вЂ” terrain material at the under-
+                // water point, lambert-shaded by sun (with shadow), no
+                // shore noise so the look is calm.
+                vec3 u_pos = vec3(wpos.x, terrain_y, wpos.z);
+                vec3 u_nor = calcNormal(u_pos, t_water);
+                vec3 u_mat = getMaterial(u_pos, u_nor);
+                float u_dif = max(dot(u_nor, sunDirW), 0.0) * water_lit;
+                float u_amb = 0.5 + 0.5 * u_nor.y;
+                vec3  u_col = u_mat * (u_dif * scene.sun_color.rgb *
+                                        scene.sun_color.a * 0.8 +
+                                        u_amb * scene.sky_color.rgb * 0.35);
+                // Tint the underwater colour by the water tint so it
+                // reads as "looking through water", not "no water".
+                u_col *= mix(vec3(1.0), shallow * 1.5 + vec3(0.05),
+                              0.5);
+                // Blend: shallow в†’ underwater visible, deep в†’ opaque
+                // water_color. trans_amt scales the maximum showthrough.
+                baseTint = mix(baseTint, u_col, Tw * trans_amt);
+            }
         }
 
         vec3 col_w = mix(baseTint, reflCol, fres);
@@ -1378,7 +1394,12 @@ void main() {
         // 16-step fog were the dominant per-pixel cost and the
         // direct cause of the GPU TDR вЂ” far fog can't visibly
         // resolve sub-step density anyway.
-        int kVolSteps = (distance(pos, scene.camera_pos.xyz) < 150.0) ? 12 : 4;
+        // Linear ramp 12→4 across 100..250 m. The previous binary cliff
+        // at 150 m caused wave divergence on neighbouring pixels and
+        // visible TAA shimmer along the cutoff line.
+        float dist_cam = distance(pos, scene.camera_pos.xyz);
+        int kVolSteps = max(4, int(mix(12.0, 4.0,
+                                        smoothstep(100.0, 250.0, dist_cam))));
         const float kVolDensityBase   = 0.030;  // Пѓe at full density inside the band
         const float kVolPhaseG        = 0.65;   // forward-scattering bias
         // Band parameters from settings (fog_band slot in scene UBO).
@@ -1449,20 +1470,25 @@ void main() {
             // density gradient, giving the godray look.
             float lightTrans = sha;
             if (fogGodRays) {
-                const int kFogShadowSteps = 4;
-                float ds = 6.0;          // base step in metres
+                // 2 inner steps × 1-octave wisp. Was 4 steps × 3 octaves
+                // = 12 noise2 calls per fog tap; with ~12 outer taps
+                // that was 144 hash evals per pixel for the godray work
+                // alone. Single-octave wisp is the dominant low-freq
+                // mode; the higher-freq components alias-tolerate at
+                // godray resolution under TAA.
+                const int kFogShadowSteps = 2;
+                float ds = 9.0;          // bigger base to cover same length in fewer steps
                 float ld = ds * 0.5;
                 for (int j = 0; j < kFogShadowSteps; ++j) {
                     vec3 sp = p + sunDir * ld;
                     float prof_s = smoothstep(fog_y_start, fog_y_start + 1.0, sp.y) *
                                     (1.0 - smoothstep(fog_y_top, fog_y_top + 4.0, sp.y));
                     vec2 qs = sp.xz * 0.020 + vec2(scene.water_params.w * 0.05);
-                    float w_s = 0.55 * noise2(qs) + 0.30 * noise2(qs * 2.13)
-                              + 0.15 * noise2(qs * 4.27);
+                    float w_s = noise2(qs);
                     float wisp_s = clamp(mix(1.0, 2.0 * w_s, fog_noise), 0.2, 2.0);
                     float sig_s = kVolDensityBase * prof_s * wisp_s * fogStrength;
                     lightTrans *= exp(-sig_s * ds);
-                    ds *= 1.5;          // exponential growth вЂ” covers far w/o more steps
+                    ds *= 1.7;          // bigger growth so 2 steps still cover far range
                     ld += ds;
                     if (lightTrans < 0.02) break;
                 }

@@ -164,6 +164,8 @@ private:
     void destroy_skybox_resources();
     void init_textures();
     void destroy_textures();
+    void init_grass_mask_texture();
+    void destroy_grass_mask_texture();
     void init_pipeline_cache();
     void destroy_pipeline_cache();
     VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
@@ -332,6 +334,17 @@ private:
     //   [3] Tiles074          (albedo idx 6) — keep interior floor
     static constexpr int kSpomMaterialCount = 4;
     TextureSlot spom_height_textures_[kSpomMaterialCount]{};
+
+    // Grass-density mask. R8 1024² covering 2048m world (≈2 m/texel).
+    // Baked at level load: CPU runs the same presence × slope formula
+    // both shaders previously evaluated per-pixel, packs the result
+    // into a single value the shaders sample once. Replaces the
+    // 9-cell noised() storm in grass_raymarch.frag::map() and the
+    // duplicate computation in terrain_raymarch.frag::grassEligibility,
+    // and is the texture the (forthcoming) drawn-mask editor will paint
+    // into.
+    TextureSlot grass_mask_{};
+    static constexpr int kGrassMaskDim = 1024;
     VkSampler   texture_sampler_ = VK_NULL_HANDLE;
     // Texture index assigned to the four spawnable box variants (so dynamic
     // boxes pick from a wood/metal/painted/brick palette at spawn time).
@@ -1109,6 +1122,14 @@ private:
         // earlier near the edges (more "rounded" silhouette); lower
         // = blades read as fuller/blockier rectangles.
         float grass_alpha_cutoff   = 0.4f;
+        // Distance at which the user's `grass_alpha_cutoff` value
+        // applies in the raymarched grass shader. Inside this radius
+        // the slider value is used as-is (soft-edge dither). Past
+        // this, the cutoff ramps linearly to ~0.85 by the time the
+        // ray reaches `grass_raymarch_distance`, so far blades
+        // discard more aggressively and thin out into the terrain
+        // tint instead of reading as a uniform green far-mat.
+        float grass_cutoff_soft_dist = 30.0f;
         // Slope cutoff: blades whose stored heightmap-normal Y is
         // below this fade their height to 0 (smoothstep window).
         // 1.0 = only perfectly flat ground; 0.55 = up to ~57° slope.

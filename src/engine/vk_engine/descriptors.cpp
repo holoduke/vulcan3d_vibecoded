@@ -47,8 +47,9 @@ void VulkanEngine::init_descriptors() {
         // color, motion vector, depth — sampled by the compose pass
         // when terrain_raymarch_scale < 1.0.
         // +kSpomMaterialCount for the SPOM height-map array (binding 12).
+        // +1 for the grass-density mask R8 texture (binding 13).
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            kTextureCount * 2 + 6 + kSpomMaterialCount },
+            kTextureCount * 2 + 7 + kSpomMaterialCount },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -66,7 +67,7 @@ void VulkanEngine::init_descriptors() {
     //           9=LR raymarch color, 10=LR raymarch motion-vec, 11=LR
     //              raymarch depth — read by the compose pass when
     //              terrain_raymarch_scale < 1.
-    VkDescriptorSetLayoutBinding bindings[13]{};
+    VkDescriptorSetLayoutBinding bindings[14]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -144,10 +145,19 @@ void VulkanEngine::init_descriptors() {
     bindings[12].descriptorCount = kSpomMaterialCount;
     bindings[12].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Binding 13: grass-density mask (R8). Both the raymarched grass
+    // pass and the terrain raymarch's getMaterial sample this for
+    // eligibility — replaces the 9-cell noised() storm and ensures
+    // grass blades and green ground tint always agree.
+    bindings[13].binding = 13;
+    bindings[13].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[13].descriptorCount = 1;
+    bindings[13].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 13, .pBindings = bindings,
+        .bindingCount = 14, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),

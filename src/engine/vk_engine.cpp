@@ -277,11 +277,16 @@ void VulkanEngine::init() {
         for (int i = 0; i < kSpomMaterialCount; ++i) {
             spom[i] = spom_height_textures_[i].view;
         }
+        // Bake grass mask BEFORE descriptor write so the binding-13
+        // image view is real (not the slot-0 albedo fallback). The
+        // bake reads terrain_data_ which init_world already populated.
+        init_grass_mask_texture();
         write_scene_descriptors_once(device_, scene_desc_set_,
                                      scene_ubo_buffer_, tlas_, materials_buffer_,
                                      prev_transforms_buffer_,
                                      alb, nrm, kTextureCount, texture_sampler_,
-                                     spom, kSpomMaterialCount);
+                                     spom, kSpomMaterialCount,
+                                     grass_mask_.view);
     }
     present_loader_frame("Compiling pipelines",   0.70f);
     init_pipeline();
@@ -1385,6 +1390,7 @@ void VulkanEngine::shutdown() {
         destroy_mesh(allocator_, cylinder_mesh_);
     });
     guarded("destroy_skybox", [&]{ destroy_skybox_resources(); });
+    guarded("destroy_grass_mask_texture", [&]{ destroy_grass_mask_texture(); });
     guarded("destroy_textures", [&]{ destroy_textures(); });
     guarded("destroy_grass_raymarch_pipeline", [&]{ destroy_grass_raymarch_pipeline(); });
     guarded("destroy_grass_pipeline", [&]{ destroy_grass_pipeline(); });

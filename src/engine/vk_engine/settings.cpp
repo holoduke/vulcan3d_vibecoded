@@ -217,6 +217,7 @@ void VulkanEngine::save_settings() const {
     f << "grass_density = "       << rt_.grass_density           << "\n";
     f << "grass_height_scale = "  << rt_.grass_height_scale      << "\n";
     f << "grass_alpha_cutoff = "  << rt_.grass_alpha_cutoff      << "\n";
+    f << "grass_cutoff_soft_dist = " << rt_.grass_cutoff_soft_dist << "\n";
     f << "grass_slope_n_min = "   << rt_.grass_slope_n_min       << "\n";
     f << "grass_distance_density = " << rt_.grass_distance_density << "\n";
     f << "grass_alt_min = " << rt_.grass_alt_min << "\n";
@@ -394,6 +395,7 @@ void VulkanEngine::load_settings() {
             else if (key == "grass_density")      rt_.grass_density       = std::stof(val);
             else if (key == "grass_height_scale") rt_.grass_height_scale  = std::stof(val);
             else if (key == "grass_alpha_cutoff") rt_.grass_alpha_cutoff  = std::stof(val);
+            else if (key == "grass_cutoff_soft_dist") rt_.grass_cutoff_soft_dist = std::stof(val);
             else if (key == "grass_slope_n_min")  rt_.grass_slope_n_min   = std::stof(val);
             else if (key == "grass_distance_density") rt_.grass_distance_density = std::stof(val);
             else if (key == "grass_alt_min")  rt_.grass_alt_min  = std::stof(val);

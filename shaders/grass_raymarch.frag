@@ -50,6 +50,14 @@ layout(set = 0, binding = 8) uniform sampler2D u_heightmap;
 // Sun shadow map (binding 7). sampler2DShadow returns 0..1 PCF result.
 layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 
+// Grass eligibility mask. R8 1024² — single source of truth shared
+// with terrain_raymarch.frag. CPU-baked from the same FBM (presence)
+// and a sample_terrain_height finite-difference (slope) the engine
+// already runs at level load. Sampling this once per cell replaces a
+// 9-call noised() storm in the inner loop of map() — that was the
+// dominant cost in this pass per the latest perf review.
+layout(set = 0, binding = 13) uniform sampler2D u_grass_mask;
+
 layout(push_constant) uniform PC {
     mat4 mvp;          // view_proj — for gl_FragDepth at the hit
     mat4 model;        // inverse(view_proj) — for world-ray reconstruction
@@ -116,7 +124,10 @@ float plateauWeight(vec2 worldXZ) {
 // Same FBM as terrain_raymarch.frag::terrainM with the per-frame
 // octave count fixed at 8 (middle of the engine's 4..9 quality slider).
 // Returns absolute terrain height = procedural FBM + plateau blend +
-// sculpt delta.
+// sculpt delta. MUST stay at 8 octaves so grass blades sit on the
+// same surface the terrain raymarch renders — reducing octaves here
+// produced a smoother grass-positioning shape that drifted above /
+// below the actual terrain green tint, leaving visible gaps.
 float terrainH(vec2 wp) {
     vec2 p = wp * TERRAIN_SCALE;
     float a = 0.0, b = 1.0;
@@ -225,23 +236,29 @@ float map(vec3 p, out bool out_blade_hit) {
     // adjacent cells, so we have to query the immediate neighbors for the
     // closest blade.
     const float kPi2 = 6.28318530718;
-    // Presence + slope thresholds. Tuneable; drawn-mask binding will
-    // replace the noise-based presence later.
-    const float kPresenceThresh = 0.45;     // value ≥ thresh → grass cell
-    const float kSlopeMaxGrad   = 0.6;      // |∇noise2| over the cell_n
+    // Per-frame slope cutoff: convert grass_slope_n_min (max normal Y)
+    // into the equivalent max gradient magnitude. n_y = 1/√(1+|∇h|²)
+    // so |∇h|_max = √(1/n²−1).
+    float slope_n_min = scene.grass_extra.z;
+    float slope_max = sqrt(max(1e-4, 1.0 / max(slope_n_min * slope_n_min, 1e-4) - 1.0));
+    const float kEligThresh = 0.10;
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
             vec2 nId = cellId + vec2(float(dx), float(dy));
-            // Per-cell eligibility — one noised() lookup at low frequency
-            // gives both a presence mask (clumps grass into ~50 m cell_nes
-            // with bare gaps) AND a slope proxy (the gradient magnitude
-            // of the same low-freq field correlates with macro terrain
-            // slope; flat zones → low gradient → grass, ridges/cliffs →
-            // high gradient → no grass).
+            // Single-source-of-truth eligibility — sample the RG8 mask
+            // shared with terrain_raymarch.frag's getMaterial.
+            //   .r = presence  (0..1, fixed at bake time)
+            //   .g = slope mag (raw |∇h| / 2, un-normalized in shader)
+            // Combine with the slider-driven slope cutoff. Drawn-mask
+            // editor will paint into .r at runtime.
             vec2 cellW = nId * kPeriod;
-            vec3 cell_n = noised(cellW * 0.02);   // ~50 m feature size
-            if (cell_n.x < kPresenceThresh) continue;
-            if (length(cell_n.yz) > kSlopeMaxGrad) continue;
+            vec2 mask_uv = (cellW / kHeightmapSide) + vec2(0.5);
+            vec2 mg = textureLod(u_grass_mask, mask_uv, 0.0).rg;
+            float slope_mag = mg.g * 2.0;
+            float slope_w = 1.0 - smoothstep(slope_max * 0.7,
+                                              slope_max * 1.2, slope_mag);
+            float elig = mg.r * slope_w;
+            if (elig < kEligThresh) continue;
             vec4 r = hash42(nId);
             vec3 np = lp - vec3(float(dx), 0.0, float(dy)) * kPeriod;
             // Per-blade rotation + sub-cell xy offset.
@@ -266,13 +283,6 @@ float map(vec3 p, out bool out_blade_hit) {
     return d;
 }
 
-vec3 calcTerrainNormalApprox(vec2 p, float yC) {
-    const float e = 0.05;
-    float yR = sampleHeight(p + vec2(e, 0.0));
-    float yU = sampleHeight(p + vec2(0.0, e));
-    return normalize(vec3(yC - yR, e, yC - yU));
-}
-
 vec3 sample_sky_grad(vec3 dir) {
     float up = clamp(dir.y, 0.0, 1.0);
     vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
@@ -294,10 +304,16 @@ void main() {
     // mid-height which read as a cliff in the grass coverage.)
 
     const float kMaxDist = max(pc.color.x, 4.0);
-    const int   kMaxSteps = 192;
+    // Cut the absolute step cap — 192 was overkill for most pixels and
+    // burned the worst-case budget on distant grazing rays that never
+    // converge. With the distance-ramped step factor below the loop
+    // covers the same ground with fewer iterations at distance.
+    const int   kMaxSteps = 128;
     float t = 0.0;
     bool hit = false;
     bool blade_hit = false;
+    float hit_d = 0.0;            // SDF distance at the converged hit
+    float hit_thresh = 0.0;       // hit threshold at that t — alpha denom
     // Pixel size projected at unit distance — used to early-out when the
     // SDF distance is below sub-pixel detail at this t.
     float pixSize = 2.0 * scene.viewport.z;
@@ -309,13 +325,21 @@ void main() {
         // Hit threshold loosens with distance so the loop terminates on
         // sub-pixel features instead of trying to converge on a blade
         // edge from 50 m away.
-        if (d < 0.5 * pixSize * t + 0.0008) {
+        float thresh = 0.5 * pixSize * t + 0.0008;
+        if (d < thresh) {
             hit = true;
             blade_hit = step_blade;
+            hit_d = max(d, 0.0);
+            hit_thresh = thresh;
             break;
         }
-        // 0.7 step factor for cone safety on near-tangent grazing rays.
-        t += d * 0.7;
+        // Distance-ramped step factor. Close-up needs the 0.7 cone-safety
+        // factor for grazing rays through dense blade fields; past ~15 m
+        // blades shrink toward sub-pixel and the conservative step is
+        // pure cost. By 50 m we're at 0.95 — half as many iterations
+        // cover the same metres of ray.
+        float step_f = mix(0.70, 0.95, smoothstep(15.0, 50.0, t));
+        t += d * step_f;
     }
 
     // Discard pure terrain-plane hits (no grass blade closer) so the
@@ -327,9 +351,18 @@ void main() {
     vec3 p = ro + t * rd;
     vec3 L = normalize(scene.sun_direction.xyz);
 
-    // Lighting: terrain normal at hit point + half-Lambert + sky fill.
+    // Lighting: terrain normal at hit point.
+    // Reverted from cross(dFdx(p), dFdy(p)): derivatives across grass
+    // silhouettes (where one pixel of a 2×2 quad discards) are spec-
+    // undefined and produced NaN normals → propagated through bloom +
+    // auto-exposure → fps regression.
+    // Use the cheap finite-difference normal — terrainH already runs at
+    // reduced 4 octaves (down from 8) so the per-pixel cost is bounded.
     float terrainY = sampleHeight(p.xz);
-    vec3 N = calcTerrainNormalApprox(p.xz, terrainY);
+    const float e = 0.05;
+    float yR = sampleHeight(p.xz + vec2(e, 0.0));
+    float yU = sampleHeight(p.xz + vec2(0.0, e));
+    vec3 N = normalize(vec3(terrainY - yR, e, terrainY - yU));
     float n_dot_l = max(0.0, dot(N, L));
 
     // Sun shadow — sample the rasterised shadow map. PCF gives soft edges.
@@ -377,11 +410,31 @@ void main() {
     vec3 fade_target = vec3(0.18, 0.30, 0.09);
     float fade = smoothstep(kMaxDist * 0.55, kMaxDist, t);
     col = mix(col, fade_target, fade);
+    float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233)))
+                          * 43758.5453);
     if (fade > 0.92) {
-        float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233)))
-                              * 43758.5453);
         if (dither < (fade - 0.92) * 12.5) { discard; }
     }
+
+    // Soft-edge alpha test using the converged-hit SDF distance.
+    // hit_d ≈ 0 deep inside a blade, hit_d ≈ hit_thresh right at the
+    // silhouette. Convert to a 0..1 "edge alpha" then dither-discard.
+    //
+    // Distance-driven cutoff: scene.grass_extra.y (slider) is the
+    // NEAR-pixel value (within pc.color.w metres of the camera);
+    // beyond that the cutoff ramps linearly to a near-1 ceiling by
+    // grass_raymarch_distance. Far blades therefore discard much more
+    // aggressively than near ones — they thin into the underlying
+    // terrain green tint instead of reading as a uniform "green
+    // far-mat", while close-up control over softness via the slider
+    // is preserved.
+    float user_cut    = scene.grass_extra.y;
+    float soft_dist   = max(pc.color.w, 1.0);
+    float far_cut     = 0.85;        // hard ceiling at max range
+    float dist_w      = smoothstep(soft_dist, kMaxDist, t);
+    float cutoff      = mix(user_cut, far_cut, dist_w);
+    float edge_alpha  = 1.0 - clamp(hit_d / max(hit_thresh, 1e-5), 0.0, 1.0);
+    if (edge_alpha < cutoff + (dither - 0.5) * 0.30) discard;
 
     outColor = vec4(col, 1.0);
     // Treat grass as world-static for TAA (per-blade wind sway is sub-

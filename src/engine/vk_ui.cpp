@@ -785,6 +785,8 @@ void VulkanEngine::build_menu_ui() {
             ImGui::SliderFloat("distance (m)",   &rt_.grass_distance,   10.0f, 200.0f);
             ImGui::SliderFloat("wind (m)",       &rt_.grass_wind,        0.0f, 0.30f);
             ImGui::SliderFloat("alpha cutoff",   &rt_.grass_alpha_cutoff, 0.0f, 0.6f, "%.2f");
+            ImGui::SliderFloat("cutoff soft-dist (m)",
+                               &rt_.grass_cutoff_soft_dist, 5.0f, 150.0f, "%.0f");
             ImGui::SliderFloat("slope cutoff",   &rt_.grass_slope_n_min, 0.55f, 1.0f, "%.2f");
             ImGui::SliderFloat("distance density falloff",
                                &rt_.grass_distance_density, 0.0f, 1.0f, "%.2f");

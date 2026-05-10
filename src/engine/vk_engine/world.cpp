@@ -1396,6 +1396,126 @@ void VulkanEngine::destroy_textures() {
     }
 }
 
+// Bake grass eligibility into an RG8 texture once at level load.
+//   R = presence  (low-freq FBM, smoothed 0..1)
+//   G = slope mag (raw |∇h| clamped to [0..2] / 2 → [0..1])
+// Storing them separately lets the shaders apply the slope-cutoff
+// slider (`grass_slope_n_min`) at runtime without re-baking. Both
+// raymarched grass + the terrain green-tint sample this same texture
+// for consistent eligibility.
+void VulkanEngine::init_grass_mask_texture() {
+    const int dim = kGrassMaskDim;
+    const float kWorldSide = 2048.0f;     // matches kHeightmapSide
+    // RG8 — 2 bytes per texel.
+    std::vector<uint8_t> data(static_cast<size_t>(dim) * dim * 2);
+
+    auto smoothstep_f = [](float a, float b, float v) {
+        float t = std::clamp((v - a) / (b - a), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+    for (int z = 0; z < dim; ++z) {
+        for (int x = 0; x < dim; ++x) {
+            float wx = (static_cast<float>(x) + 0.5f) / dim * kWorldSide
+                       - kWorldSide * 0.5f;
+            float wz = (static_cast<float>(z) + 0.5f) / dim * kWorldSide
+                       - kWorldSide * 0.5f;
+            // R: presence — low-freq FBM, smoothstep gate.
+            float n = fbm_noise2(wx * 0.02f, wz * 0.02f);
+            float presence = smoothstep_f(0.40f, 0.55f, n);
+            // G: slope mag — finite-diff on real terrain heights, so
+            // cliffs/peaks naturally read as steep. Stored normalized
+            // [0..1] = raw_slope / 2.0; shader un-normalizes.
+            const float kEps = 2.0f;       // metres
+            float h_c = sample_terrain_height(wx, wz);
+            float h_r = sample_terrain_height(wx + kEps, wz);
+            float h_u = sample_terrain_height(wx, wz + kEps);
+            float dx = (h_r - h_c) / kEps;
+            float dz = (h_u - h_c) / kEps;
+            float slope_mag = std::sqrt(dx * dx + dz * dz);
+            float slope_norm = std::clamp(slope_mag * 0.5f, 0.0f, 1.0f);
+            const size_t idx = (static_cast<size_t>(z) * dim + x) * 2;
+            data[idx + 0] =
+                static_cast<uint8_t>(std::clamp(presence, 0.0f, 1.0f) * 255.0f);
+            data[idx + 1] =
+                static_cast<uint8_t>(slope_norm * 255.0f);
+        }
+    }
+
+    // Upload as a sampled RG8 image.
+    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8G8_UNORM;
+    ici.extent = { static_cast<uint32_t>(dim),
+                   static_cast<uint32_t>(dim), 1 };
+    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vk_check(vmaCreateImage(allocator_, &ici, &aci,
+                             &grass_mask_.image, &grass_mask_.alloc, nullptr),
+             "grass mask image");
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = grass_mask_.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_R8G8_UNORM;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vk_check(vkCreateImageView(device_, &vci, nullptr, &grass_mask_.view),
+             "grass mask view");
+
+    // Stage + copy + transition.
+    const VkDeviceSize bytes = data.size();
+    VkBuffer stage = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = nullptr;
+    VkBufferCreateInfo bci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .size = bytes,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+    };
+    VmaAllocationCreateInfo bac{};
+    bac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    bac.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    vmaCreateBuffer(allocator_, &bci, &bac, &stage, &stage_alloc, nullptr);
+    VmaAllocationInfo ai{};
+    vmaGetAllocationInfo(allocator_, stage_alloc, &ai);
+    std::memcpy(ai.pMappedData, data.data(), bytes);
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, grass_mask_.image,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = { static_cast<uint32_t>(dim),
+                                static_cast<uint32_t>(dim), 1 };
+        vkCmdCopyBufferToImage(cb, stage, grass_mask_.image,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                1, &region);
+        vkinit::transition_image(cb, grass_mask_.image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    vmaDestroyBuffer(allocator_, stage, stage_alloc);
+    log::infof("grass mask baked: %dx%d RG8 (%.1f KB)", dim, dim,
+               static_cast<double>(bytes) / 1024.0);
+}
+
+void VulkanEngine::destroy_grass_mask_texture() {
+    if (grass_mask_.view)  vkDestroyImageView(device_, grass_mask_.view, nullptr);
+    if (grass_mask_.image) vmaDestroyImage(allocator_, grass_mask_.image, grass_mask_.alloc);
+    grass_mask_ = {};
+}
+
 void VulkanEngine::init_viewmodel() {
     // Procedural placeholder gun: a barrel (cylinder) + body (box) + grip
     // (box). Camera-space coords: +X right, +Y up, -Z forward.
@@ -1975,7 +2095,7 @@ void VulkanEngine::render_grass_raymarch(VkCommandBuffer cmd) {
     pc.color   = glm::vec4(rt_.grass_raymarch_distance,
                             rt_.grass_wind,
                             static_cast<float>(frame_number_) * 0.016f,
-                            0.0f);
+                            rt_.grass_cutoff_soft_dist);
     pc.emissive = glm::vec4(0.0f);
     pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
     pc.grass_params = glm::vec4(rt_.grass_distance, rt_.grass_wind,

@@ -131,7 +131,13 @@ void main() {
     float spatial_falloff = mix(1.0, 0.25,
                                 smoothstep(0.5, 8.0, motion_pix));
     float strength = clamp(taa.params.w, 0.0, 1.0) * spatial_falloff;
-    vec3 cur = (strength > 0.0)
+    // Below 0.02 the atrous result contributes <2% to the mix — visually
+    // indistinguishable from cur_raw — but the filter still costs 50
+    // texelFetches per pixel (25 color + 25 depth). At full HD that's
+    // ~108 M texture reads per frame. Skip below the visibility threshold;
+    // branch is uniform across the warp (taa.params.w is uniform and
+    // motion_pix only varies smoothly), so divergence cost is negligible.
+    vec3 cur = (strength > 0.02)
         ? mix(cur_raw, atrous_filter(ip), strength)
         : cur_raw;
 

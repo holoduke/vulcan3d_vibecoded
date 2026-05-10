@@ -144,7 +144,8 @@ void write_scene_descriptors_once(
     VkBuffer prev_transforms,
     const VkImageView* albedo_views, const VkImageView* normal_views,
     uint32_t tex_count, VkSampler tex_sampler,
-    const VkImageView* spom_height_views, uint32_t spom_count) {
+    const VkImageView* spom_height_views, uint32_t spom_count,
+    VkImageView grass_mask_view) {
 
     VkDescriptorBufferInfo ubo_bi{ ubo, 0, VK_WHOLE_SIZE };
     VkDescriptorBufferInfo mat_bi{ materials, 0, VK_WHOLE_SIZE };
@@ -214,7 +215,24 @@ void write_scene_descriptors_once(
     w[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[6].pImageInfo = spom_infos.data();
 
-    vkUpdateDescriptorSets(device, 7, w, 0, nullptr);
+    // Binding 13: grass-density mask. Falls back to slot-0 albedo if
+    // the mask hasn't been baked yet (defensive — bake runs at level
+    // load before this descriptor write, but the fallback keeps the
+    // descriptor valid).
+    VkDescriptorImageInfo grass_mask_bi{};
+    grass_mask_bi.sampler = tex_sampler;
+    grass_mask_bi.imageView = grass_mask_view ? grass_mask_view : albedo_views[0];
+    grass_mask_bi.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet w8{};
+    w8.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w8.dstSet = set; w8.dstBinding = 13; w8.descriptorCount = 1;
+    w8.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w8.pImageInfo = &grass_mask_bi;
+
+    VkWriteDescriptorSet writes[8] = { w[0], w[1], w[2], w[3],
+                                        w[4], w[5], w[6], w8 };
+    vkUpdateDescriptorSets(device, 8, writes, 0, nullptr);
 }
 
 } // namespace qlike

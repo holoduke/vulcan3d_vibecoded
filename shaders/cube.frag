@@ -1,5 +1,18 @@
 #version 460
 #extension GL_EXT_ray_query : require
+#extension GL_ARB_conservative_depth : require
+
+// Conservative depth: promise the driver that any gl_FragDepth write here
+// will be ≥ gl_FragCoord.z. The unconditional `gl_FragDepth = gl_FragCoord.z`
+// at the top of main() satisfies "equal", and the SPOM silhouette path
+// writes 1.0 (sky/far) which is also "greater". With this qualifier in
+// place, hardware early-Z stays enabled even though the shader writes
+// depth — the depth pre-pass's z-buffer can reject occluded fragments
+// before the heavy cube.frag body (RT shadow PCSS + GI bounces + AO +
+// SPOM + muzzle flash light) runs. This was the single biggest GPU win
+// found by the latest perf review: cube.frag was running on every
+// fragment that the depth pre-pass should have culled.
+layout(depth_greater) out float gl_FragDepth;
 
 layout(location = 0) in vec3 vNormal;
 // flat вЂ” see cube.vert for the rationale (these are push-constant values
@@ -456,13 +469,9 @@ const int kStaticBlasSentinel = 0xFFFFFF;
 const int kCubeTrisPerBox     = 12;
 
 void main() {
-    // gl_FragDepth must be written on EVERY execution path because some
-    // shader paths below override it to 1.0 (SPOM silhouette → sky).
-    // Per the GLSL spec, partial gl_FragDepth assignment makes depth
-    // undefined on the unwritten paths — on this user's driver that
-    // surfaced as "everything classified as sky" (whole castle white,
-    // viewmodel + sparks gone). Default to the rasterized depth here;
-    // silhouette path overrides to 1.0 below.
+    // Default depth = rasterized depth; SPOM silhouette path may bump
+    // to 1.0 below. The depth_greater qualifier on the gl_FragDepth
+    // declaration keeps early-Z enabled regardless.
     gl_FragDepth = gl_FragCoord.z;
     // Screen-space motion vector вЂ” current_uv в€’ prev_uv. prev_uv comes from
     // perspective-divided prev_clip (smooth-interpolated by the rasterizer).
@@ -487,6 +496,16 @@ void main() {
         outColor = vec4(vColor + vEmissive.rgb, 1.0);
         return;
     }
+
+    // Hoist the two scalar derivatives the shader uses repeatedly:
+    //   * cam_dist appears 13× in branches; with the conditional code
+    //     in between, the compiler often fails to CSE it.
+    //   * L (sun direction unit vector) appears 4×.
+    // Computing once at the top costs nothing extra on the fast paths
+    // (early-out emissive returns above this line) and saves ~12 sqrt
+    // and 3 inversesqrt per pixel on the heavy lit-surface path.
+    float cam_dist = distance(vWorldPos, scene.camera_pos.xyz);
+    vec3  L        = normalize(scene.sun_direction.xyz);
 
     bool is_terrain_pre = vTexParams.w > 1.5;
 
@@ -622,7 +641,8 @@ void main() {
         }
     }
 
-    vec3 L = normalize(scene.sun_direction.xyz);
+    // (L = sun direction unit vector hoisted at top of main — used for
+    // n_dot_l, shadow rays, GI bounces and slope material blends.)
 
     // --- Albedo + bump mapping (triplanar projection) ---
     // Choose object-space (texture glued to the model) for dynamic objects,
@@ -867,8 +887,9 @@ void main() {
                             uint(gl_FragCoord.y),
                             uint(scene.rt_flags.w) & 7u);
 
-    // Distance-from-camera used for sample LOD across all RT effects.
-    float cam_dist = distance(vWorldPos, scene.camera_pos.xyz);
+    // (cam_dist already hoisted at the top of main — single source of
+    // truth for distance-from-camera across LOD, terrain blending, AO
+    // distance fade, GI sampling, etc.)
 
     // --- Sun shadow (RT, contact-hardening / PCSS-style) ---
     // 1. BLOCKER SEARCH: a handful of cheap closest-hit rays in a wide cone
@@ -1061,15 +1082,23 @@ void main() {
     // gated by NВ·L > 0 and within the falloff radius вЂ” keeps the cost
     // negligible when no shot is firing. Inverse-square attenuation with
     // a smooth cutoff at the radius so contributions don't pop.
-    if (scene.muzzle_pos.w > 0.0) {
+    // Tighter intensity gate (1e-3 vs > 0.0): the CPU clears intensity
+    // to exactly 0 between flashes, but FP comparison with > 0.0 still
+    // entered this block on epsilon residuals after physics writes.
+    if (scene.muzzle_pos.w > 1e-3) {
         vec3  m_pos       = scene.muzzle_pos.xyz;
         float m_intensity = scene.muzzle_pos.w;
         vec3  m_color     = scene.muzzle_color.rgb;
         float m_radius    = max(0.5, scene.muzzle_color.w);
 
         vec3  to_light    = m_pos - vWorldPos;
-        float dist        = length(to_light);
-        if (dist < m_radius) {
+        // Squared-distance test first — saves the sqrt when this pixel
+        // is outside the falloff radius (the common case for ground-far
+        // pixels during a flash that lights only the local area).
+        float dist2       = dot(to_light, to_light);
+        float r2          = m_radius * m_radius;
+        if (dist2 < r2) {
+            float dist     = sqrt(dist2);
             vec3 L_m       = to_light / max(dist, 1e-3);
             float n_dot_lm = max(dot(N, L_m), 0.0);
             if (n_dot_lm > 0.0) {
@@ -1197,7 +1226,12 @@ void main() {
     // BLAS detail produce patchy bright/dark faces. The earlier code
     // fired the rays then forced gi_indirect=0 / sky_vis=1; gating here
     // saves all those rays.
-    if (N_gi > 0 && !is_terrain_pre) {
+    //
+    // gi_strength gate: when the slider is at 0 the loop's sole output
+    // (gi_indirect *= rt_params2.x at line 1308) is multiplied by 0 —
+    // every ray is pure waste. Skip the loop and keep sky_vis = 1.0
+    // (ambient stays full, matching "GI off" expectation in the UI).
+    if (N_gi > 0 && !is_terrain_pre && scene.rt_params2.x > 1e-4) {
         float gi_radius = scene.rt_params2.y;
 
         // Sky-only ambient term вЂ” used when a GI bounce hits a surface

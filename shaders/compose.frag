@@ -345,8 +345,15 @@ void main() {
         bloom = min(bloom, vec3(4.0));
         hdr += bloom * pc.bloom_params.x;
     }
-    vec2 flare_uv = gl_FragCoord.xy * pc.viewport.zw;
-    hdr += lens_flare(flare_uv);
+    // Lens flare is gated at call-site too: even though lens_flare's
+    // first line returns early when disabled, hoisting the test out of
+    // the function avoids any driver inlining quirks and makes the
+    // disabled-path absolutely free (no function-call setup, no register
+    // pressure for the unused locals).
+    if (pc.flare_params2.z >= 0.5 && pc.sun_screen.z >= 0.5) {
+        vec2 flare_uv = gl_FragCoord.xy * pc.viewport.zw;
+        hdr += lens_flare(flare_uv);
+    }
 
     // Auto-exposure (eye adaptation). The smallest bloom mip is
     // textureLod-sampled at uv=(0.5, 0.5) — that pixel is roughly the
@@ -362,9 +369,12 @@ void main() {
     // into sun and squint" effect without flattening contrast.
     if (pc.sharpen_params.y > 0.0) {
         // Sample the smallest mip for a coarse scene-luminance estimate.
-        // 6.0 = mip-6 (with kBloomMips=7 that's the smallest one).
+        // kBloomMips = 5 in the engine, so the smallest mip is index 4.
+        // The previous 6.0 value was stale (from when kBloomMips = 7);
+        // it relied on the sampler's max-LOD clamp, which works but
+        // requires the all-mips view bound at this binding.
         float scene_avg = max(0.005,
-            lum(textureLod(u_bloom, vec2(0.5), 6.0).rgb));
+            lum(textureLod(u_bloom, vec2(0.5), 4.0).rgb));
         const float kTarget = 0.18;        // mid-grey target
         float ratio = kTarget / scene_avg;
         ratio = clamp(ratio, 0.4, 4.0);    // bound the auto-correction
