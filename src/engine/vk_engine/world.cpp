@@ -46,6 +46,71 @@ static float fbm_noise2(float x, float y) {
            (c * (1 - ux) + d * ux) * uy;
 }
 
+// Hash + value-noise with analytical derivatives, matching the
+// `noised()` GLSL helper in terrain_raymarch.frag. The brush's
+// "FBM erosion" mode uses this so a stroke's high-frequency detail
+// matches the procedural raymarched terrain in character.
+namespace {
+inline float fract_f(float v) { return v - std::floor(v); }
+inline float terrain_hash21(float px, float pz) {
+    // Mirrors GLSL hash21(vec2 p) — dot/fract over the (x,y,x) triple.
+    float p3x = fract_f(px * 0.1031f);
+    float p3y = fract_f(pz * 0.1031f);
+    float p3z = fract_f(px * 0.1031f);
+    float dot_p = p3x * (p3y + 19.19f) +
+                  p3y * (p3z + 19.19f) +
+                  p3z * (p3x + 19.19f);
+    p3x += dot_p; p3y += dot_p; p3z += dot_p;
+    return fract_f((p3x + p3y) * p3z);
+}
+struct NoiseDeriv { float v, dx, dz; };
+inline NoiseDeriv terrain_noised(float px, float pz) {
+    float ix = std::floor(px), iz = std::floor(pz);
+    float fx = px - ix,        fz = pz - iz;
+    float ux  = fx * fx * (3.0f - 2.0f * fx);
+    float uz  = fz * fz * (3.0f - 2.0f * fz);
+    float dux = 6.0f * fx * (1.0f - fx);
+    float duz = 6.0f * fz * (1.0f - fz);
+    float a = terrain_hash21(ix,        iz);
+    float b = terrain_hash21(ix + 1.0f, iz);
+    float c = terrain_hash21(ix,        iz + 1.0f);
+    float d = terrain_hash21(ix + 1.0f, iz + 1.0f);
+    float value = a + (b - a) * ux + (c - a) * uz + (a - b - c + d) * ux * uz;
+    float dvx = dux * ((b - a) + (a - b - c + d) * uz);
+    float dvz = duz * ((c - a) + (a - b - c + d) * ux);
+    return { value, dvx, dvz };
+}
+// Same FBM as terrain_raymarch.frag::terrainM — `noised` accumulates
+// the analytical derivative `d`, and `n.x / (1 + dot(d,d))` damps
+// high-frequency octaves on steep slopes, producing the ridge/valley
+// structure the user sees in the raymarched terrain.
+// Per-octave rotation matrix matches the shader's `m2`.
+inline float terrain_fbm_eroded(float wx, float wz, float scale,
+                                  int octaves) {
+    constexpr float kM00 =  0.8f, kM01 = -0.6f;
+    constexpr float kM10 =  0.6f, kM11 =  0.8f;
+    float px = wx * scale, pz = wz * scale;
+    float a = 0.0f, b = 1.0f;
+    float dx_acc = 0.0f, dz_acc = 0.0f;
+    octaves = std::clamp(octaves, 1, 12);
+    for (int i = 0; i < octaves; ++i) {
+        NoiseDeriv n = terrain_noised(px, pz);
+        dx_acc += n.dx;
+        dz_acc += n.dz;
+        a += b * n.v / (1.0f + dx_acc * dx_acc + dz_acc * dz_acc);
+        b *= 0.5f;
+        float npx = kM00 * px + kM01 * pz;
+        float npz = kM10 * px + kM11 * pz;
+        px = npx * 2.0f;
+        pz = npz * 2.0f;
+    }
+    // Re-centre roughly around 0 — fbm with `n.v` in [0,1] sums to ≈
+    // half the harmonic series. The bias is approximate and harmless;
+    // the brush noise scale only needs symmetric variation around 0.
+    return a - 0.5f;
+}
+} // namespace
+
 // Distance-based LOD selector for terrain chunks. Used by all three
 // terrain draw paths (depth pre-pass, color pass, shadow pass) so LOD
 // stays consistent РІР‚вЂќ if the pre-pass picked half-LOD and the color
@@ -74,8 +139,140 @@ static float pick_terrain_morph(const TerrainChunk& c, glm::vec3 cam_xz,
     return t * t * (3.0f - 2.0f * t);
 }
 
+// Paint the R channel of the grass eligibility mask. Add: push toward
+// 1, Remove: push toward 0. Uses the same world hit + radius the height
+// brush uses, but indexes the 1024² mask over a 2048 m world (matches
+// the bake in init_grass_mask_texture). Marks `grass_mask_dirty_` so
+// the next safe frame re-uploads the mask to the GPU. Does NOT touch
+// heights / chunks / BLAS / Jolt — pure mask edit.
+static void paint_grass_mask(std::vector<uint8_t>& mask, int dim,
+                              const glm::vec3& hit, float radius_m,
+                              float strength_per_sec, float dt,
+                              bool add) {
+    if (mask.empty()) return;
+    const float kWorldSide = 2048.0f;   // matches init_grass_mask_texture
+    const float cells_per_metre = static_cast<float>(dim) / kWorldSide;
+    // World → mask cell coords. Mask covers [-1024..+1024] m centred at
+    // origin; cell (0,0) = world (-1024, -1024).
+    float cx = (hit.x + kWorldSide * 0.5f) * cells_per_metre;
+    float cz = (hit.z + kWorldSide * 0.5f) * cells_per_metre;
+    float rcells_f = radius_m * cells_per_metre;
+    int rcells = static_cast<int>(std::ceil(rcells_f)) + 1;
+    int ix0 = std::max(0, static_cast<int>(std::floor(cx)) - rcells);
+    int ix1 = std::min(dim - 1, static_cast<int>(std::ceil(cx))  + rcells);
+    int iz0 = std::max(0, static_cast<int>(std::floor(cz)) - rcells);
+    int iz1 = std::min(dim - 1, static_cast<int>(std::ceil(cz))  + rcells);
+    if (ix0 > ix1 || iz0 > iz1) return;
+    const float dstrength = strength_per_sec * dt;
+    for (int iz = iz0; iz <= iz1; ++iz) {
+        for (int ix = ix0; ix <= ix1; ++ix) {
+            float dx = static_cast<float>(ix) - cx;
+            float dz = static_cast<float>(iz) - cz;
+            float d  = std::sqrt(dx * dx + dz * dz);
+            if (d > rcells_f) continue;
+            float t = 1.0f - (d / rcells_f);
+            float falloff = t * t * (3.0f - 2.0f * t);
+            size_t idx = (static_cast<size_t>(iz) * static_cast<size_t>(dim) +
+                          static_cast<size_t>(ix)) * 2;
+            float v = static_cast<float>(mask[idx]) / 255.0f;
+            float delta = dstrength * falloff;
+            v += add ? delta : -delta;
+            v = std::clamp(v, 0.0f, 1.0f);
+            mask[idx] = static_cast<uint8_t>(v * 255.0f);
+        }
+    }
+}
+
+void VulkanEngine::reupload_grass_mask() {
+    if (grass_mask_data_.empty() || grass_mask_.image == VK_NULL_HANDLE) return;
+    const VkDeviceSize bytes = grass_mask_data_.size();
+    VkBuffer stage = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = nullptr;
+    VkBufferCreateInfo bci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .size = bytes,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+    };
+    VmaAllocationCreateInfo bac{};
+    bac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    bac.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    vmaCreateBuffer(allocator_, &bci, &bac, &stage, &stage_alloc, nullptr);
+    VmaAllocationInfo ai{};
+    vmaGetAllocationInfo(allocator_, stage_alloc, &ai);
+    std::memcpy(ai.pMappedData, grass_mask_data_.data(), bytes);
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, grass_mask_.image,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = { static_cast<uint32_t>(kGrassMaskDim),
+                                static_cast<uint32_t>(kGrassMaskDim), 1 };
+        vkCmdCopyBufferToImage(cb, stage, grass_mask_.image,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                1, &region);
+        vkinit::transition_image(cb, grass_mask_.image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    vmaDestroyBuffer(allocator_, stage, stage_alloc);
+    grass_mask_dirty_ = false;
+}
+
+bool VulkanEngine::save_grass_mask() {
+    if (grass_mask_data_.empty()) return false;
+    std::ofstream f("assets/level1_grass_mask.bin", std::ios::binary);
+    if (!f.is_open()) {
+        log::error("save_grass_mask: failed to open assets/level1_grass_mask.bin");
+        return false;
+    }
+    int32_t dim = kGrassMaskDim;
+    f.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
+    f.write(reinterpret_cast<const char*>(grass_mask_data_.data()),
+            grass_mask_data_.size());
+    log::infof("[grass] saved mask to assets/level1_grass_mask.bin (%zu bytes)",
+               grass_mask_data_.size());
+    return true;
+}
+
+bool VulkanEngine::load_grass_mask() {
+    std::ifstream f("assets/level1_grass_mask.bin", std::ios::binary);
+    if (!f.is_open()) return false;
+    int32_t fdim = 0;
+    f.read(reinterpret_cast<char*>(&fdim), sizeof(fdim));
+    if (fdim != kGrassMaskDim) {
+        log::warnf("[grass] saved mask dim mismatch (saved %d, want %d) — ignoring",
+                   fdim, kGrassMaskDim);
+        return false;
+    }
+    const size_t want = static_cast<size_t>(kGrassMaskDim) * kGrassMaskDim * 2;
+    grass_mask_data_.resize(want);
+    f.read(reinterpret_cast<char*>(grass_mask_data_.data()), want);
+    log::infof("[grass] loaded mask from assets/level1_grass_mask.bin (%zu bytes)",
+               want);
+    return true;
+}
+
 void VulkanEngine::apply_terrain_brush(float dt) {
-    if (!terrain_brush_has_hit_ || terrain_chunks_.chunks.empty()) return;
+    if (!terrain_brush_has_hit_) return;
+    // Grass-paint modes only touch the eligibility mask — bail before
+    // the height-array path so they work even when chunks / heights
+    // happen to be empty (defensive — Phase 4 always populates both).
+    if (brush_mode_is_grass(terrain_brush_mode_)) {
+        paint_grass_mask(grass_mask_data_, kGrassMaskDim,
+                          terrain_brush_world_pos_,
+                          terrain_brush_radius_,
+                          terrain_brush_strength_, dt,
+                          terrain_brush_mode_ == TerrainBrushMode::GrassAdd);
+        grass_mask_dirty_ = true;
+        return;
+    }
+    if (terrain_chunks_.chunks.empty()) return;
     if (terrain_data_.heights.empty()) return;
     const float r = terrain_brush_radius_;
     const float w = terrain_data_.cell;
@@ -101,7 +298,24 @@ void VulkanEngine::apply_terrain_brush(float dt) {
     // squares. Cheap (3 hashes per cell during sculpt only).
     const float n_str  = std::clamp(terrain_brush_noise_strength_, 0.0f, 1.0f);
     const float n_freq = std::max(0.02f, terrain_brush_noise_freq_);
-    auto fbm_var = [n_freq](float wx, float wz) {
+    const bool  use_fbm_eroded = terrain_brush_use_fbm_erosion_;
+    const int   fbm_octaves    = terrain_brush_fbm_octaves_;
+    auto fbm_var = [n_freq, use_fbm_eroded, fbm_octaves](float wx, float wz) {
+        if (use_fbm_eroded) {
+            // Mesh has 1 m cells. The raymarcher's macro-mountain
+            // scale (0.003 ≈ 333 m base wavelength) means adjacent
+            // cells sample nearly identical noise — the brush ends up
+            // applying a smooth blob with no per-cell variation, and
+            // the surface reads as faceted because the geometry has
+            // no high-freq detail to break up the triangles. Higher
+            // base scale (0.05) puts ~20 m at octave 0 and ≤ 0.5 m
+            // at 6 octaves — every 1 m cell gets a distinct sample,
+            // so brushed areas inherit cell-level ridge variation
+            // similar to the procedural FBM heights.
+            const float kBrushScale = 0.05f;
+            return terrain_fbm_eroded(wx, wz, kBrushScale * n_freq * 4.0f,
+                                       fbm_octaves);
+        }
         float v = 0.5f  * fbm_noise2(wx * n_freq,         wz * n_freq) +
                   0.25f * fbm_noise2(wx * n_freq * 2.07f, wz * n_freq * 2.07f) +
                   0.125f* fbm_noise2(wx * n_freq * 4.13f, wz * n_freq * 4.13f);
@@ -153,6 +367,58 @@ void VulkanEngine::apply_terrain_brush(float dt) {
                     h += (target - h) * std::min(1.0f, strength * 0.5f * falloff);
                     break;
                 }
+                case TerrainBrushMode::Erode: {
+                    // Add FBM-eroded detail (same n.v/(1+|∇d|²) recipe
+                    // as the raymarched terrain), scaled by brush
+                    // falloff. The base FBM scale here is much higher
+                    // than the raymarcher's 0.003 — at typical brush
+                    // radii (≤ 10 m) the raymarcher's macro-mountain
+                    // wavelength means the WHOLE brush samples nearly
+                    // the same noise value, which feels like a smooth
+                    // uniform bump (the "smoothing" symptom). Pumping
+                    // the base scale to 0.05 gives ~20 m at octave 0
+                    // and ~30 cm at 6 octaves — actual ridges and
+                    // valleys appear inside the brush footprint.
+                    const float kErodeScale = 0.05f;
+                    float n = terrain_fbm_eroded(
+                        wx, wz, kErodeScale * n_freq * 4.0f,
+                        terrain_brush_fbm_octaves_);
+                    // Erosion amplitude scales with brush radius so a
+                    // larger brush makes proportionally taller ridges
+                    // (a 1 m brush shouldn't punch a 4 m peak). Per-
+                    // frame accumulation = noise·radius·dt · falloff;
+                    // a 1-sec hold on a 6 m brush gives ~±1.5 m peak
+                    // displacement — visible without obliterating the
+                    // surrounding terrain.
+                    float amp = terrain_brush_radius_ * 0.6f;
+                    h += n * amp * dt * falloff;
+                    break;
+                }
+                case TerrainBrushMode::ErodeSmooth: {
+                    // Inverse: pull detail back toward the 4-neighbour
+                    // mean. Same kernel as Smooth but applied with the
+                    // erosion-strength scaling so the brush feels like
+                    // the inverse of Erode rather than a duplicate of
+                    // the existing Smooth mode.
+                    int xm = std::max(0, ix - 1);
+                    int xp = std::min(W - 1, ix + 1);
+                    int zm = std::max(0, iz - 1);
+                    int zp = std::min(W - 1, iz + 1);
+                    auto at = [&](int x, int z) {
+                        return terrain_data_.heights[
+                            static_cast<size_t>(z) * static_cast<size_t>(W) +
+                            static_cast<size_t>(x)];
+                    };
+                    float mean = 0.25f * (at(xm, iz) + at(xp, iz) +
+                                          at(ix, zm) + at(ix, zp));
+                    h += (mean - h) * std::min(1.0f, strength * 2.0f * falloff);
+                    break;
+                }
+                case TerrainBrushMode::GrassAdd:
+                case TerrainBrushMode::GrassRemove:
+                    // Grass-paint modes branched out at the top of
+                    // apply_terrain_brush — the height loop never sees them.
+                    break;
             }
         }
     }
@@ -1406,8 +1672,12 @@ void VulkanEngine::destroy_textures() {
 void VulkanEngine::init_grass_mask_texture() {
     const int dim = kGrassMaskDim;
     const float kWorldSide = 2048.0f;     // matches kHeightmapSide
-    // RG8 — 2 bytes per texel.
-    std::vector<uint8_t> data(static_cast<size_t>(dim) * dim * 2);
+    // RG8 — 2 bytes per texel. The vector lives on the engine so the
+    // GrassAdd/GrassRemove brush can paint into it without rebaking the
+    // noise. We populate it here, upload from it once, and reupload via
+    // reupload_grass_mask() after every paint stroke.
+    grass_mask_data_.assign(static_cast<size_t>(dim) * dim * 2, 0);
+    std::vector<uint8_t>& data = grass_mask_data_;
 
     auto smoothstep_f = [](float a, float b, float v) {
         float t = std::clamp((v - a) / (b - a), 0.0f, 1.0f);
@@ -1423,15 +1693,15 @@ void VulkanEngine::init_grass_mask_texture() {
             float n = fbm_noise2(wx * 0.02f, wz * 0.02f);
             float presence = smoothstep_f(0.40f, 0.55f, n);
             // Castle keep-out. The raymarched grass shader plants
-            // blades at terrain Y (= plateau height inside the castle
-            // footprint), so without this guard blade tips poke
-            // ~75 cm above the castle floor brushes — visible as a
-            // greenish-gray wash on the floor (alpha-blended through
-            // close-camera grass distance fade). The rasterised grass
-            // path already excludes the keep via grass.cpp's
-            // keep_out_xz; mirror it here for the raymarch path
-            // covering the FULL outer wall extent.
-            const float kCastleHalf = 12.0f;   // outer wall at ±11 + 1 m margin
+            // blades at terrain Y (= plateau height inside castle), so
+            // without this guard blade tips poke through the castle
+            // floor brushes. The mask is 1024² over a 2048 m world
+            // (≈2 m / texel) and the shader samples it with LINEAR
+            // filtering — bilinear can leak presence ~2-4 m inward
+            // from a hard boundary, so we use a wider keep-out band
+            // (18 m vs the 11 m outer wall) to keep ALL bilinear
+            // samples inside the floor's extent at exactly zero.
+            const float kCastleHalf = 18.0f;
             if (std::abs(wx) < kCastleHalf && std::abs(wz) < kCastleHalf) {
                 presence = 0.0f;
             }
@@ -1453,6 +1723,12 @@ void VulkanEngine::init_grass_mask_texture() {
                 static_cast<uint8_t>(slope_norm * 255.0f);
         }
     }
+
+    // Overlay any persisted user paint on top of the freshly baked
+    // presence/slope field. Mirrors the height-load path: bake the
+    // procedural baseline first so a missing save file is a no-op,
+    // then replace bytes if the file is present.
+    load_grass_mask();
 
     // Upload as a sampled RG8 image.
     VkImageCreateInfo ici{};
@@ -1639,9 +1915,12 @@ void VulkanEngine::init_viewmodel() {
     auto T = [](glm::vec3 t) { return glm::translate(glm::mat4(1.0f), t); };
     auto S = [](glm::vec3 s) { return glm::scale(glm::mat4(1.0f), s); };
 
-    const glm::vec4 metal(0.32f, 0.34f, 0.40f, 1.0f);
-    const glm::vec4 dark (0.16f, 0.17f, 0.20f, 1.0f);
-    const glm::vec4 grip (0.18f, 0.13f, 0.10f, 1.0f);
+    // Dark-grey palette — gunmetal body, near-black sights/barrel,
+    // very dark grip. Cooler than the previous bluish metal so the
+    // gun reads as black-grey in the lower-right of the screen.
+    const glm::vec4 metal(0.18f, 0.18f, 0.18f, 1.0f);
+    const glm::vec4 dark (0.08f, 0.08f, 0.08f, 1.0f);
+    const glm::vec4 grip (0.11f, 0.11f, 0.11f, 1.0f);
 
     constexpr float gx = 0.18f;
     constexpr float gy = -0.18f;

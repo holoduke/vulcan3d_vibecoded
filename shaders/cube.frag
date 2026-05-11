@@ -128,8 +128,14 @@ layout(set = 0, binding = 12) uniform sampler2D u_height[4];
 int height_idx_for_albedo(int a) {
     if (a == 1) return 0;   // Bricks078         — castle outer walls
     if (a == 4) return 1;   // PaintedBricks001  — keep walls
-    if (a == 5) return 2;   // Tiles130          — courtyard floor
-    if (a == 6) return 3;   // Tiles074          — keep interior floor
+    // Floor tile materials (5 / 6) intentionally omitted: floor brushes are
+    // 0.5 m thin slabs, so their side faces are axis 0/2 and bypass the
+    // axis==1 silhouette gate. SPOM raymarches off the slab thickness and
+    // triggers spom_disc → gl_FragDepth = 1.0 → compose substitutes
+    // procedural sky → grey flicker on the floor when the camera sees the
+    // slab edge at grazing angles (walking backwards / falling). Floors
+    // keep their normal maps and triplanar shading; they just lose the
+    // parallax displacement effect.
     return -1;
 }
 
@@ -376,6 +382,59 @@ vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
 // frequency вЂ” looks like a smooth gradient rather than a dotted dither.
 float ign(vec2 p) {
     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+}
+
+// === Hash + value-noise with analytical derivatives ===
+// Identical recipe to terrain_raymarch.frag::noised — the terrain
+// micro-detail pass below uses these so the rasterised mesh inherits
+// the same FBM-eroded look as the per-pixel raymarched terrain
+// (otherwise sub-cell detail snaps to the 1 m vertex spacing).
+float t_hash21(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.x + p3.y) * p3.z);
+}
+vec3 t_noised(in vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u  = f * f * (3.0 - 2.0 * f);
+    vec2 du = 6.0 * f * (1.0 - f);
+    float a = t_hash21(i + vec2(0.0, 0.0));
+    float b = t_hash21(i + vec2(1.0, 0.0));
+    float c = t_hash21(i + vec2(0.0, 1.0));
+    float d = t_hash21(i + vec2(1.0, 1.0));
+    float v = a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y;
+    vec2  dv = du * (vec2(b - a, c - a) + (a - b - c + d) * u.yx);
+    return vec3(v, dv);
+}
+const mat2 t_m2 = mat2(0.8, -0.6, 0.6, 0.8);
+
+// FBM with derivative erosion — `n.x / (1 + |∇d|²)` damps high-freq
+// octaves on steep slopes, producing the ridge/valley structure
+// instead of fractal mush. Returns (value, ∂/∂x, ∂/∂z) where the
+// derivatives are with respect to `world_xz` (Jacobian-corrected
+// per octave so they stay in world space).
+vec3 terrain_detail_fbm(vec2 wp, float scale, int octaves) {
+    vec2 p = wp * scale;
+    mat2 J = mat2(scale, 0.0, 0.0, scale);
+    float a = 0.0, b = 1.0;
+    vec2 dacc = vec2(0.0);
+    for (int i = 0; i < 9; ++i) {
+        if (i >= octaves) break;
+        vec3 n = t_noised(p);
+        // World-space derivative: J^T · local_deriv
+        vec2 wd = J * n.yz;
+        dacc += wd;
+        float damp = 1.0 / (1.0 + dot(dacc, dacc));
+        a += b * n.x * damp;
+        b *= 0.5;
+        // Per-octave 2× scale + rotation
+        p = t_m2 * p * 2.0;
+        J = t_m2 * J * 2.0;
+    }
+    // Approx-centred value (FBM tends toward ~0.5 mean) and
+    // accumulated world-space gradient
+    return vec3(a - 0.5, dacc.x, dacc.y);
 }
 
 // Per-sample IGN: shift the input position by the sample index along a known
@@ -878,6 +937,39 @@ void main() {
         float cav_w     = 1.0 - smoothstep(80.0, 200.0, cav_dist);
         float cavity    = clamp(0.5 - curvature * 0.4, 0.45, 1.0);
         base *= mix(1.0, cavity, cav_w);
+
+        // ---- Per-pixel FBM-eroded micro-detail ----
+        // The rasterised mesh has 1 m vertex spacing, so anything
+        // finer than that gets flattened between vertices — sculpted
+        // / brushed terrain reads as "faceted" compared with the
+        // raymarched terrain (which evaluates noise per pixel). This
+        // pass evaluates the same FBM-with-derivative-erosion in the
+        // fragment shader and pushes its analytical gradient into N,
+        // adding sub-cell ridges/valleys at any zoom level. Geometry
+        // stays at mesh resolution; only the SHADING normal moves.
+        // Faded with camera distance so distant chunks (where 1-pixel
+        // surfaces span many noise cycles) don't shimmer.
+        {
+            float det_dist = distance(vWorldPos, scene.camera_pos.xyz);
+            float det_w    = 1.0 - smoothstep(40.0, 120.0, det_dist);
+            if (det_w > 0.001) {
+                // Base scale tuned for ~0.3 m features; octaves
+                // capped to 6 to keep cost predictable. Could expose
+                // these via a UBO knob later.
+                vec3 dn = terrain_detail_fbm(vWorldPos.xz, 0.30, 6);
+                // Shading-normal perturbation: surface gradient in
+                // (x,z) tilts the normal. Strength scales with
+                // distance fade so the look stays consistent.
+                float grad_amp = 0.25 * det_w;
+                vec3 N_pert = normalize(N + vec3(-dn.y, 0.0, -dn.z) * grad_amp);
+                N = N_pert;
+                // Subtle ridge/valley darkening — concave parts get
+                // a touch darker, ridges a touch brighter. Reads as
+                // realistic micro-shadowing without needing AO.
+                float ridge = clamp(dn.x * 0.6 + 0.5, 0.0, 1.0);
+                base *= mix(1.0, mix(0.85, 1.10, ridge), det_w);
+            }
+        }
 
         // Optional triplanar detail using the engine's Ground054 albedo
         // (texture index 0). When textures are off (use_albedo=false)

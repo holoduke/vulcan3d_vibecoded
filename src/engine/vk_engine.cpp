@@ -742,6 +742,12 @@ void VulkanEngine::draw(uint32_t img_index) {
             glm::vec4 flare_params2;  // ghost_count, aberration, enabled, _
             glm::vec4 sun_screen;     // xy = sun screen-uv, z = visibility (0/1), w = spare
             glm::vec4 sharpen_params; // x = post-TAA unsharp strength, yzw spare
+            // Brush indicator ring drawn on the terrain in compose.frag.
+            // xy = brush world XZ, z = brush radius (m), w = enabled (0/1).
+            // Reconstructs each pixel's world position from depth +
+            // inv_view_proj so the ring projects onto whatever surface
+            // is under the brush hit (no separate gizmo geometry).
+            glm::vec4 brush_indicator;
             glm::mat4 inv_view_proj;
         } pc_data{};
         float w = static_cast<float>(swapchain_extent_.width);
@@ -796,6 +802,16 @@ void VulkanEngine::draw(uint32_t img_index) {
                                             rt_.auto_exposure_strength,
                                             rt_.image_contrast,
                                             rt_.image_brightness);
+        // Brush ring: enabled whenever the user is in edit mode AND the
+        // crosshair raycast hit the terrain this frame.
+        if (terrain_edit_mode_ && terrain_brush_has_hit_) {
+            pc_data.brush_indicator = glm::vec4(terrain_brush_world_pos_.x,
+                                                 terrain_brush_world_pos_.z,
+                                                 terrain_brush_radius_,
+                                                 1.0f);
+        } else {
+            pc_data.brush_indicator = glm::vec4(0.0f);
+        }
         pc_data.inv_view_proj = last_inv_view_proj_;   // cached
         vkCmdPushConstants(frame.command_buffer, compose_pipeline_layout_,
                            VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -1059,23 +1075,43 @@ void VulkanEngine::run(const RunOptions& opts) {
                 bool sculpt_active = (in.fire_held || in.alt_fire_held) &&
                                       terrain_brush_has_hit_;
                 if (sculpt_active) {
-                    // Right-click forces Lower regardless of selected
-                    // mode. Restore the selected mode after the call so
-                    // the UI reflects the user's choice on the next
-                    // frame.
+                    // Right-click swaps mode to its inverse for the
+                    // duration of the stroke: Raise↔Lower for the
+                    // height brush, GrassAdd↔GrassRemove for the grass
+                    // brush. Smooth / Flatten stay as-is. Restored
+                    // after the call so the UI shows the user's
+                    // selected mode on the next frame.
                     TerrainBrushMode prev_mode = terrain_brush_mode_;
                     if (in.alt_fire_held && !in.fire_held) {
-                        terrain_brush_mode_ = TerrainBrushMode::Lower;
+                        if (terrain_brush_mode_ == TerrainBrushMode::Raise) {
+                            terrain_brush_mode_ = TerrainBrushMode::Lower;
+                        } else if (terrain_brush_mode_ == TerrainBrushMode::GrassAdd) {
+                            terrain_brush_mode_ = TerrainBrushMode::GrassRemove;
+                        } else if (terrain_brush_mode_ == TerrainBrushMode::Erode) {
+                            terrain_brush_mode_ = TerrainBrushMode::ErodeSmooth;
+                        }
                     }
                     apply_terrain_brush(frame_dt);
                     terrain_brush_mode_ = prev_mode;
-                    rebuild_dirty_terrain_chunks();
+                    // Grass-paint strokes don't dirty terrain chunks /
+                    // BLAS / Jolt — skip the rebuild + collision
+                    // refresh entirely so the brush stays cheap.
+                    const bool grass_stroke =
+                        brush_mode_is_grass(terrain_brush_mode_);
+                    if (!grass_stroke) {
+                        rebuild_dirty_terrain_chunks();
+                    }
                     if (!terrain_stroke_active_) terrain_stroke_active_ = true;
                 } else if (terrain_stroke_active_ && !in.fire_held && !in.alt_fire_held) {
                     // Mouse-up: heavy refresh (BLAS + Jolt) deferred until
-                    // here so the stroke itself stays cheap.
-                    refresh_terrain_blas();
-                    refresh_terrain_collision();
+                    // here so the stroke itself stays cheap. Grass-only
+                    // strokes have no dirty bits to consume — the
+                    // mask reupload already happened the frame the
+                    // stroke modified the CPU mirror.
+                    if (!brush_mode_is_grass(terrain_brush_mode_)) {
+                        refresh_terrain_blas();
+                        refresh_terrain_collision();
+                    }
                     terrain_stroke_active_ = false;
                 }
             } else {
@@ -1278,6 +1314,12 @@ void VulkanEngine::run(const RunOptions& opts) {
         // is set, not every frame the brush is held.
         if (terrain_height_dirty_) {
             refresh_terrain_height_texture();
+        }
+        // Reupload grass eligibility mask if a GrassAdd/GrassRemove
+        // stroke modified the CPU mirror this frame. Same one-shot
+        // upload pattern as the heightmap delta texture above.
+        if (grass_mask_dirty_) {
+            reupload_grass_mask();
         }
         // Audio listener follows the camera. Reaping drained one-shots
         // also runs here so the active-voice list stays small.

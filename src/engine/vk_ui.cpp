@@ -690,69 +690,6 @@ void VulkanEngine::build_menu_ui() {
             ImGui::TreePop();
         }
 
-        ImGui::SeparatorText("Heightmap save / load");
-        if (ImGui::Button("Save heightmap")) {
-            save_terrain_heights();
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("→ assets/level1_heights.bin (auto-loaded next launch)");
-        // Plateau noise — adds gentle relief on the castle pad so it
-        // isn't a perfect flat. Two sliders (amplitude + frequency)
-        // and an Apply button so accidental drag doesn't constantly
-        // edit the heightmap.
-        static float plateau_amp_m = 0.6f;
-        static float plateau_freq  = 0.20f;
-        ImGui::SliderFloat("Plateau noise amp (m)", &plateau_amp_m,
-                           0.0f, 4.0f, "%.2f");
-        ImGui::SliderFloat("Plateau noise freq",    &plateau_freq,
-                           0.05f, 1.0f, "%.2f");
-        if (ImGui::Button("Apply plateau noise")) {
-            add_plateau_noise(plateau_amp_m, plateau_freq);
-            log::info("[ui] plateau noise applied — Save heightmap to persist");
-        }
-
-        ImGui::SeparatorText("Sculpt brush");
-        ImGui::Checkbox("Edit mode (left = brush mode, right = lower)",
-                        &terrain_edit_mode_);
-        if (terrain_edit_mode_) {
-            const char* modes[] = {"Raise", "Lower", "Smooth", "Flatten"};
-            int mode_i = static_cast<int>(terrain_brush_mode_);
-            if (ImGui::Combo("brush mode (left-click)", &mode_i, modes,
-                              IM_ARRAYSIZE(modes))) {
-                terrain_brush_mode_ = static_cast<TerrainBrushMode>(mode_i);
-            }
-            ImGui::TextDisabled("right-click always lowers regardless of mode");
-            ImGui::SliderFloat("brush radius (m)", &terrain_brush_radius_, 1.0f, 60.0f);
-            ImGui::SliderFloat("brush strength (m/s)", &terrain_brush_strength_,
-                               0.5f, 60.0f);
-            ImGui::SliderFloat("brush noise (raise/lower)",
-                                &terrain_brush_noise_strength_, 0.0f, 1.0f, "%.2f");
-            ImGui::SliderFloat("brush noise freq",
-                                &terrain_brush_noise_freq_, 0.05f, 1.0f, "%.2f");
-            if (terrain_brush_mode_ == TerrainBrushMode::Flatten) {
-                ImGui::SliderFloat("flatten target Y",
-                                   &terrain_brush_flatten_target_, 0.0f, 200.0f);
-            }
-            if (terrain_brush_has_hit_) {
-                ImGui::Text("brush at: (%.1f, %.1f, %.1f)",
-                            terrain_brush_world_pos_.x,
-                            terrain_brush_world_pos_.y,
-                            terrain_brush_world_pos_.z);
-            } else {
-                ImGui::TextDisabled("aim at terrain to engage brush");
-            }
-
-            ImGui::Separator();
-            ImGui::TextDisabled("Re-bake FBM erosion onto sculpted cells:");
-            static float fbm_amp_factor = 0.30f;
-            static float fbm_freq       = 0.04f;
-            ImGui::SliderFloat("FBM erosion amplitude", &fbm_amp_factor, 0.05f, 1.0f);
-            ImGui::SliderFloat("FBM erosion freq",       &fbm_freq,        0.005f, 0.5f);
-            if (ImGui::Button("Apply FBM erosion to sculpted area")) {
-                add_fbm_erosion_to_sculpted(fbm_amp_factor, fbm_freq);
-            }
-        }
-
         ImGui::SeparatorText("Debug");
         const char* terrain_debug_labels[] = {
             "off (full shading)",
@@ -815,6 +752,93 @@ void VulkanEngine::build_menu_ui() {
             ImGui::SliderFloat("shadow reach (m)",
                                &rt_.grass_shadow_max_dist,
                                0.2f, 5.0f, "%.1f");
+        }
+
+        ImGui::EndTabItem();
+    }
+
+    // ---------------- Terrain Edit ----------------
+    // Sculpt brush + heightmap save/load + plateau noise + FBM erosion
+    // bake. Lives in its own tab so the rendering knobs in the
+    // "Terrain" tab stay focused on look (renderer / layers / debug)
+    // and the destructive editing tools are one click away from the
+    // tab bar instead of buried inside a CollapsingHeader.
+    if (ImGui::BeginTabItem("Terrain Edit")) {
+        ImGui::SeparatorText("Heightmap save / load");
+        if (ImGui::Button("Save heightmap")) {
+            save_terrain_heights();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("→ assets/level1_heights.bin (auto-loaded next launch)");
+        if (ImGui::Button("Save grass mask")) {
+            save_grass_mask();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("→ assets/level1_grass_mask.bin (auto-loaded next launch)");
+
+        // Plateau noise — adds gentle relief on the castle pad so it
+        // isn't a perfect flat. Two sliders (amplitude + frequency)
+        // and an Apply button so accidental drag doesn't constantly
+        // edit the heightmap.
+        ImGui::SeparatorText("Plateau noise (one-shot)");
+        static float plateau_amp_m = 0.6f;
+        static float plateau_freq  = 0.20f;
+        ImGui::SliderFloat("Plateau noise amp (m)", &plateau_amp_m,
+                           0.0f, 4.0f, "%.2f");
+        ImGui::SliderFloat("Plateau noise freq",    &plateau_freq,
+                           0.05f, 1.0f, "%.2f");
+        if (ImGui::Button("Apply plateau noise")) {
+            add_plateau_noise(plateau_amp_m, plateau_freq);
+            log::info("[ui] plateau noise applied — Save heightmap to persist");
+        }
+
+        ImGui::SeparatorText("Sculpt brush");
+        ImGui::Checkbox("Edit mode (left = brush mode, right = inverse)",
+                        &terrain_edit_mode_);
+        if (terrain_edit_mode_) {
+            const char* modes[] = {"Raise", "Lower", "Smooth", "Flatten",
+                                    "Grass +", "Grass −",
+                                    "Erode +", "Erode smooth"};
+            int mode_i = static_cast<int>(terrain_brush_mode_);
+            if (ImGui::Combo("brush mode (left-click)", &mode_i, modes,
+                              IM_ARRAYSIZE(modes))) {
+                terrain_brush_mode_ = static_cast<TerrainBrushMode>(mode_i);
+            }
+            ImGui::TextDisabled("right-click inverts Raise↔Lower, Grass+↔Grass−, Erode+↔Erode smooth");
+            ImGui::SliderFloat("brush radius (m)", &terrain_brush_radius_, 1.0f, 60.0f);
+            ImGui::SliderFloat("brush strength (m/s)", &terrain_brush_strength_,
+                               0.5f, 60.0f);
+            ImGui::SliderFloat("brush noise (raise/lower)",
+                                &terrain_brush_noise_strength_, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("brush noise freq",
+                                &terrain_brush_noise_freq_, 0.05f, 1.0f, "%.2f");
+            ImGui::Checkbox("Use FBM erosion detail (matches raymarched terrain)",
+                            &terrain_brush_use_fbm_erosion_);
+            if (terrain_brush_use_fbm_erosion_) {
+                ImGui::SliderInt("FBM octaves",
+                                  &terrain_brush_fbm_octaves_, 2, 9);
+            }
+            if (terrain_brush_mode_ == TerrainBrushMode::Flatten) {
+                ImGui::SliderFloat("flatten target Y",
+                                   &terrain_brush_flatten_target_, 0.0f, 200.0f);
+            }
+            if (terrain_brush_has_hit_) {
+                ImGui::Text("brush at: (%.1f, %.1f, %.1f)",
+                            terrain_brush_world_pos_.x,
+                            terrain_brush_world_pos_.y,
+                            terrain_brush_world_pos_.z);
+            } else {
+                ImGui::TextDisabled("aim at terrain to engage brush");
+            }
+        }
+
+        ImGui::SeparatorText("FBM erosion bake (one-shot, sculpted area)");
+        static float fbm_amp_factor = 0.30f;
+        static float fbm_freq       = 0.04f;
+        ImGui::SliderFloat("FBM erosion amplitude", &fbm_amp_factor, 0.05f, 1.0f);
+        ImGui::SliderFloat("FBM erosion freq",       &fbm_freq,        0.005f, 0.5f);
+        if (ImGui::Button("Apply FBM erosion to sculpted area")) {
+            add_fbm_erosion_to_sculpted(fbm_amp_factor, fbm_freq);
         }
 
         ImGui::EndTabItem();

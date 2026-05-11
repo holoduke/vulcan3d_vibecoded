@@ -44,6 +44,11 @@ layout(push_constant) uniform ComposePC {
     // unsharp filter on history_color to recover detail that taa.frag's
     // 5x5 cross-bilateral à-trous blurred away. Cheap (5 extra texelFetches).
     vec4 sharpen_params;
+    // Brush size indicator. xy = brush world XZ, z = radius (m),
+    // w = enabled (>0.5 draws the ring). compose reconstructs the
+    // pixel's world XZ from depth + inv_view_proj and tints near the
+    // ring band so the radius shows on whatever surface the brush hit.
+    vec4 brush_indicator;
     mat4 inv_view_proj;  // for view-ray reconstruction
 } pc;
 
@@ -405,5 +410,35 @@ void main() {
     mapped *= brightness;
     mapped = clamp((mapped - 0.5) * contrast + 0.5, 0.0, 1.0);
     mapped = pow(mapped, vec3(1.0 / gamma_v));
+
+    // Brush size indicator. Drawn in tonemapped LDR (post-aces) so the
+    // ring colour reads the same in any lighting. Reconstruct this
+    // pixel's world position from its depth value, compare its world
+    // XZ distance to the brush radius, and tint pixels within a thin
+    // band on either side of the radius. Skipped for background
+    // pixels (depth ≈ 1) so the ring doesn't draw on the sky.
+    if (pc.brush_indicator.w > 0.5 && depth < 0.99999) {
+        vec2 uv = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
+        // NDC for this pixel. Vulkan: gl_FragCoord.y is top-down, so
+        // ndc.y = 1 - 2*uv.y. ndc.z uses depth directly (Vulkan z range
+        // is [0,1], not [-1,1] like GL).
+        vec4 ndc = vec4(uv.x * 2.0 - 1.0,
+                        1.0 - uv.y * 2.0,
+                        depth, 1.0);
+        vec4 wp_h = pc.inv_view_proj * ndc;
+        vec3 world = wp_h.xyz / wp_h.w;
+        float d = length(world.xz - pc.brush_indicator.xy);
+        float radius   = pc.brush_indicator.z;
+        float ring_w   = max(0.04, radius * 0.025);
+        // Smooth triangular band around the radius — fully tinted at
+        // |d - radius| = 0, falling off to 0 at |d - radius| = ring_w.
+        float band = 1.0 - clamp(abs(d - radius) / ring_w, 0.0, 1.0);
+        // Soft inner fill so the brush footprint reads at a glance —
+        // 8% strength inside the ring; ring itself is the bright edge.
+        float fill = (d < radius) ? 0.08 : 0.0;
+        vec3 ring_color = vec3(0.2, 0.95, 1.0);   // cyan, reads on any terrain
+        mapped = mix(mapped, ring_color, clamp(band * 0.85 + fill, 0.0, 1.0));
+    }
+
     outColor = vec4(to_srgb(mapped), 1.0);
 }

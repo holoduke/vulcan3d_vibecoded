@@ -352,6 +352,16 @@ private:
     // into.
     TextureSlot grass_mask_{};
     static constexpr int kGrassMaskDim = 1024;
+    // CPU mirror of the RG8 grass mask. Populated alongside the GPU
+    // upload in init_grass_mask_texture so the GrassAdd/GrassRemove
+    // brush can paint into it without rebaking the noise field.
+    // `grass_mask_dirty_` triggers a re-upload at the safe point in
+    // the next frame.
+    std::vector<uint8_t> grass_mask_data_;
+    bool grass_mask_dirty_ = false;
+    void reupload_grass_mask();
+    bool save_grass_mask();
+    bool load_grass_mask();
     // Fog wisp pattern, 256² R8. Pre-baked 3-octave noise so the
     // terrain raymarch fog density + godray probe loops sample one
     // textureLod() per tap instead of running 3× noise2() each — the
@@ -826,7 +836,25 @@ private:
     // are rebuilt the next frame; the BLAS + Jolt heightfield are
     // refreshed when the stroke ends (mouse-up) so the per-frame cost
     // stays low.
-    enum class TerrainBrushMode { Raise, Lower, Smooth, Flatten };
+    // GrassAdd / GrassRemove paint the R channel of grass_mask_ (the
+    // eligibility mask sampled by both grass renderers). They reuse the
+    // same brush radius / strength / falloff as the height modes; the
+    // height array is left alone, so a stroke in either mode never
+    // touches collision or geometry.
+    // Erode adds the same FBM-with-derivative-erosion detail the
+    // raymarched terrain uses, scaled by brush falloff. ErodeSmooth
+    // is the inverse: pulls detail back toward the local mean. Both
+    // are heightmap modes; the existing one-shot 'Apply FBM erosion
+    // to sculpted area' button still exists in the UI.
+    enum class TerrainBrushMode {
+        Raise, Lower, Smooth, Flatten,
+        GrassAdd, GrassRemove,
+        Erode, ErodeSmooth
+    };
+    static bool brush_mode_is_grass(TerrainBrushMode m) {
+        return m == TerrainBrushMode::GrassAdd ||
+               m == TerrainBrushMode::GrassRemove;
+    }
     bool  terrain_edit_mode_     = false;
     bool  terrain_stroke_active_ = false;     // mouse held since stroke begin
     bool  terrain_blas_dirty_    = false;     // rebuild BLAS at next safe point
@@ -842,6 +870,14 @@ private:
     // octave (≈ 4 m default = visible bumps without aliasing).
     float terrain_brush_noise_strength_ = 0.6f;
     float terrain_brush_noise_freq_     = 0.25f;
+    // When true, the per-cell noise multiplier on Raise/Lower uses the
+    // same FBM-with-derivative-erosion the raymarched terrain uses
+    // (terrain_raymarch.frag::terrainM), so sculpted hills inherit the
+    // ridge/valley character of the surrounding procedural terrain.
+    // When false, the cheap 3-octave value-noise is used (faster, but
+    // looks like generic bumps that don't match the terrain).
+    bool  terrain_brush_use_fbm_erosion_ = true;
+    int   terrain_brush_fbm_octaves_     = 6;
     glm::vec3 terrain_brush_world_pos_{0.0f}; // last hit point (UI gizmo)
     bool  terrain_brush_has_hit_ = false;
     std::vector<int> terrain_dirty_chunks_;    // indices into terrain_chunks_.chunks

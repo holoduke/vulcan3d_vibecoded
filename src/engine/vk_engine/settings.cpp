@@ -197,6 +197,11 @@ void VulkanEngine::save_settings() const {
     f << "terrain_brush_strength = " << terrain_brush_strength_ << "\n";
     f << "terrain_brush_mode = "     << static_cast<int>(terrain_brush_mode_) << "\n";
     f << "terrain_brush_flatten_target = " << terrain_brush_flatten_target_ << "\n";
+    f << "terrain_brush_noise_strength = " << terrain_brush_noise_strength_ << "\n";
+    f << "terrain_brush_noise_freq = "     << terrain_brush_noise_freq_     << "\n";
+    f << "terrain_brush_use_fbm_erosion = " << (terrain_brush_use_fbm_erosion_ ? 1 : 0) << "\n";
+    f << "terrain_brush_fbm_octaves = "    << terrain_brush_fbm_octaves_    << "\n";
+    f << "terrain_edit_mode = "            << (terrain_edit_mode_ ? 1 : 0)  << "\n";
     f << "terrain_fog_strength = "    << rt_.terrain_fog_strength << "\n";
     f << "terrain_wrap_strength = "   << rt_.terrain_wrap_strength << "\n";
     f << "terrain_detail_strength = " << rt_.terrain_detail_strength << "\n";
@@ -352,6 +357,15 @@ void VulkanEngine::load_settings() {
             if (key == "image_contrast")          { rt_.image_contrast = std::stof(val); ++loaded; continue; }
             if (key == "image_brightness")        { rt_.image_brightness = std::stof(val); ++loaded; continue; }
             if (key == "image_gamma")             { rt_.image_gamma = std::stof(val); ++loaded; continue; }
+            // Brush state — these live up here in the if-continue
+            // section because the giant else-if chain below already
+            // hits MSVC's nested-block-depth limit; adding more
+            // entries to it triggers C1061 "blocks nested too deeply".
+            if (key == "terrain_brush_noise_strength")  { terrain_brush_noise_strength_  = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_brush_noise_freq")      { terrain_brush_noise_freq_      = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_brush_use_fbm_erosion") { terrain_brush_use_fbm_erosion_ = (std::stoi(val) != 0); ++loaded; continue; }
+            if (key == "terrain_brush_fbm_octaves")     { terrain_brush_fbm_octaves_     = std::stoi(val); ++loaded; continue; }
+            if (key == "terrain_edit_mode")             { terrain_edit_mode_             = (std::stoi(val) != 0); ++loaded; continue; }
             if (key == "terrain_rt_lod_distance") { rt_.terrain_rt_lod_distance = std::stof(val); ++loaded; continue; }
             if (key == "terrain_ao_punch")        { rt_.terrain_ao_punch = std::stof(val); ++loaded; continue; }
             if (key == "terrain_pcss_samples_cap")  { rt_.terrain_pcss_samples_cap  = std::stoi(val); ++loaded; continue; }
@@ -421,8 +435,10 @@ void VulkanEngine::load_settings() {
             else if (key == "terrain_brush_radius")   terrain_brush_radius_   = std::stof(val);
             else if (key == "terrain_brush_strength") terrain_brush_strength_ = std::stof(val);
             else if (key == "terrain_brush_mode") {
+                // Enum widened from 4 → 8 (added GrassAdd/Remove + Erode +/Smooth).
+                // Keep the upper bound in sync with TerrainBrushMode::ErodeSmooth.
                 int m = std::stoi(val);
-                if (m >= 0 && m <= 3) terrain_brush_mode_ = static_cast<TerrainBrushMode>(m);
+                if (m >= 0 && m <= 7) terrain_brush_mode_ = static_cast<TerrainBrushMode>(m);
             }
             else if (key == "terrain_brush_flatten_target") terrain_brush_flatten_target_ = std::stof(val);
             else if (key == "terrain_fog_strength")    rt_.terrain_fog_strength    = std::stof(val);

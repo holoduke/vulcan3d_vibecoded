@@ -59,9 +59,10 @@ void VulkanEngine::init_compose() {
     VkPushConstantRange compose_pc{};
     compose_pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     compose_pc.offset = 0;
-    // 9 vec4 (viewport, bloom, sun_dir, sun_color, sky, flare, flare2,
-    //         sun_screen, sharpen_params) + mat4 inv_view_proj.
-    compose_pc.size = sizeof(glm::vec4) * 9 + sizeof(glm::mat4);
+    // 10 vec4 (viewport, bloom, sun_dir, sun_color, sky, flare, flare2,
+    //          sun_screen, sharpen_params, brush_indicator) +
+    //          mat4 inv_view_proj.
+    compose_pc.size = sizeof(glm::vec4) * 10 + sizeof(glm::mat4);
 
     VkPipelineLayoutCreateInfo cplci{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
