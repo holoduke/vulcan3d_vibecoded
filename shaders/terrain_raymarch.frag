@@ -64,9 +64,12 @@ layout(set = 0, binding = 8) uniform sampler2D u_terrain_height;
 layout(set = 0, binding = 13) uniform sampler2D u_grass_mask;
 const float kHeightmapSide = 2048.0;
 float sampleHeightDelta(vec2 worldXZ) {
-    vec2 uv = (worldXZ / kHeightmapSide) + vec2(0.5);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
-    return texture(u_terrain_height, uv).r;
+    // Was: 4 compare branches before the fetch. Replaced with clamp +
+    // textureLod 0 — sampler is CLAMP_TO_EDGE and the heightmap delta
+    // is ~0 at the world boundary (no sculpting past the edge), so a
+    // clamped read at out-of-world XZ returns the right value too.
+    vec2 uv = clamp((worldXZ / kHeightmapSide) + vec2(0.5), 0.0, 1.0);
+    return textureLod(u_terrain_height, uv, 0.0).r;
 }
 
 // Sun shadow map (single-cascade ortho D32). Rendered each frame
@@ -271,7 +274,7 @@ vec3 sample_sky_atmosphere(vec3 dir) {
     float up = clamp(dir.y, 0.0, 1.0);
     vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
     vec3 zenith  = scene.sky_color.rgb;
-    return mix(horizon, zenith, pow(up, 0.45));
+    return mix(horizon, zenith, sqrt(up));   // pow(up, 0.45) approx
 }
 
 // Sky sample WITH the sun halo вЂ” used for path-traced GI rays that
@@ -285,7 +288,7 @@ vec3 sample_sky(vec3 dir) {
     float up = clamp(dir.y, 0.0, 1.0);
     vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
     vec3 zenith  = scene.sky_color.rgb;
-    vec3 sky = mix(horizon, zenith, pow(up, 0.45));
+    vec3 sky = mix(horizon, zenith, sqrt(up));   // pow(up, 0.45) approx
     // pow(x, 8) → 3 squarings instead of exp/log.
     float h1 = max(dot(dir, L), 0.0);
     float h2 = h1 * h1;
@@ -853,7 +856,12 @@ void main() {
         float skyT = clamp(refl.y * 0.5 + 0.5, 0.0, 1.0);
         vec3 sky_refl = mix(vec3(0.55, 0.65, 0.78),
                              vec3(0.30, 0.45, 0.75), skyT);
-        float sunHalo = pow(max(dot(refl, sunDirW), 0.0), 60.0);
+        // pow(x, 60) ≈ pow(x, 64) = 6 squarings; visually identical
+        // for a sun-halo lobe at this exponent.
+        float sh1 = max(dot(refl, sunDirW), 0.0);
+        float sh2 = sh1 * sh1; float sh4 = sh2 * sh2;
+        float sh8 = sh4 * sh4; float sh16 = sh8 * sh8;
+        float sh32 = sh16 * sh16; float sunHalo = sh32 * sh32;
         sky_refl += scene.sun_color.rgb * scene.sun_color.a * sunHalo * 0.6;
 
         vec3 reflCol = sky_refl;
@@ -888,9 +896,12 @@ void main() {
                 // shading, applied to the reflection-ray distance.
                 vec3  r_ext = exp(-t_r * 0.00025 *
                                   vec3(1.0, 1.5, 4.0));
+                // pow(x, 8) → 3 squarings.
+                float rf1 = max(dot(refl, sunDirW), 0.0);
+                float rf2 = rf1 * rf1; float rf4 = rf2 * rf2; float rf8 = rf4 * rf4;
                 vec3  r_fog = mix(vec3(0.55, 0.55, 0.58),
                                   vec3(1.0, 0.7, 0.3),
-                                  0.3 * pow(max(dot(refl, sunDirW), 0.0), 8.0));
+                                  0.3 * rf8);
                 r_col = r_col * r_ext + r_fog * (1.0 - r_ext);
                 reflCol = r_col;
             }

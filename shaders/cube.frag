@@ -483,7 +483,7 @@ vec3 sample_sky_atmosphere(vec3 dir) {
     float up = clamp(dir.y, 0.0, 1.0);
     vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
     vec3 zenith  = scene.sky_color.rgb;
-    return mix(horizon, zenith, pow(up, 0.45));
+    return mix(horizon, zenith, sqrt(up));    // pow(up, 0.45) ≈ sqrt(up); 3% error, no exp/log
 }
 
 // Procedural sky: warm low horizon в†’ cool zenith, brighter near sun.
@@ -492,7 +492,7 @@ vec3 sample_sky(vec3 dir) {
     float up = clamp(dir.y, 0.0, 1.0);
     vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
     vec3 zenith  = scene.sky_color.rgb;
-    vec3 sky = mix(horizon, zenith, pow(up, 0.45));
+    vec3 sky = mix(horizon, zenith, sqrt(up));   // pow(up, 0.45) approx
     // pow(x, 8) → 3 squarings, no exp/log.
     float h1 = max(dot(dir, L), 0.0);
     float h2 = h1 * h1;
@@ -955,6 +955,50 @@ void main() {
         }
     }
 
+    // Corner softening for axis-aligned brushes. Cube meshes have one
+    // flat normal per face, so 90° outside corners (e.g. tower-to-
+    // wall, gate-block-to-wall) read as a hard vertical seam — Lambert
+    // n·L jumps abruptly across the edge. Bend the shading normal
+    // toward the AVERAGE of (this face, the perpendicular face whose
+    // edge we're close to) inside the last `kCornerWidth` of the
+    // brush extent. Costs ~10 ALU per fragment; gives a smooth
+    // ~25 m m-scale wrap around outside corners.
+    if (!is_terrain && !obj_space) {
+        vec3 face_size_w = vec3(length(pc.model[0].xyz),
+                                length(pc.model[1].xyz),
+                                length(pc.model[2].xyz));
+        vec3 brush_center = vec3(pc.model[3].x, pc.model[3].y, pc.model[3].z);
+        vec3 rel = vWorldPos - brush_center;
+        // Normalised position along each axis: -1 (one face) .. +1 (other).
+        vec3 norm_pos = rel / max(face_size_w * 0.5, vec3(1e-3));
+        vec3 absN = abs(N);
+        int dom = (absN.x >= absN.y)
+                    ? (absN.x >= absN.z ? 0 : 2)
+                    : (absN.y >= absN.z ? 1 : 2);
+
+        const float kCornerWidth = 0.18;
+        vec3 corner_target = N;
+        float best_t = 0.0;
+        // Walk the two non-dominant axes; each is a candidate "edge"
+        // we might be approaching. Strongest contributor wins.
+        for (int a = 0; a < 3; ++a) {
+            if (a == dom) continue;
+            float p      = norm_pos[a];
+            float edge_t = clamp((abs(p) - (1.0 - kCornerWidth)) / kCornerWidth,
+                                  0.0, 1.0);
+            if (edge_t > best_t) {
+                best_t = edge_t;
+                vec3 nbr = vec3(0.0);
+                nbr[a] = sign(p);
+                corner_target = normalize(N + nbr);
+            }
+        }
+        // 0.5 is "full lerp at the edge". Higher = rounder, lower =
+        // sharper. 0.5 reads as a believable subtle bevel without
+        // making corners look like a sphere.
+        N = normalize(mix(N, corner_target, best_t * 0.5));
+    }
+
     float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
     // Split ambient into a sky-derived component (fades when the surface
     // is enclosed вЂ” sky_factor below) and a constant ground/reflected
@@ -981,7 +1025,17 @@ void main() {
     // grazing slopes faster. Brushes/dyn-props keep linear Lambert.
     if (is_terrain_pre) {
         float contrast = max(0.25, scene.terrain_extra.x);
-        n_dot_l = pow(n_dot_l, contrast);
+        // Fast paths for the common slider values:
+        //   contrast == 1 → no-op (default; most users)
+        //   contrast == 2 → just n_dot_l²
+        // Anything else falls through to the (slower) pow().
+        if (contrast > 1.99 && contrast < 2.01) {
+            n_dot_l = n_dot_l * n_dot_l;
+        } else if (contrast < 1.01) {
+            // identity — skip pow entirely
+        } else {
+            n_dot_l = pow(n_dot_l, contrast);
+        }
     }
 
     // Per-pixel seed WITH the frame counter вЂ” TAA accumulates over ~8

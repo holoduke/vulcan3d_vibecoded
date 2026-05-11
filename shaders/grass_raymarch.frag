@@ -94,8 +94,8 @@ layout(push_constant) uniform PC {
 const float kHeightmapSide = 2048.0;
 
 float sampleHeightDelta(vec2 worldXZ) {
-    vec2 uv = (worldXZ / kHeightmapSide) + vec2(0.5);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+    // Branchless boundary handling — same trick as terrain_raymarch.frag.
+    vec2 uv = clamp((worldXZ / kHeightmapSide) + vec2(0.5), 0.0, 1.0);
     return textureLod(u_heightmap, uv, 0.0).r;
 }
 
