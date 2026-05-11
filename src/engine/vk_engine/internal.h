@@ -243,6 +243,7 @@ void write_scene_descriptors_once(
     const VkImageView* albedo_views, const VkImageView* normal_views,
     uint32_t tex_count, VkSampler tex_sampler,
     const VkImageView* spom_height_views, uint32_t spom_count,
-    VkImageView grass_mask_view);
+    VkImageView grass_mask_view,
+    VkImageView fog_wisp_view);
 
 } // namespace qlike

@@ -166,6 +166,8 @@ private:
     void destroy_textures();
     void init_grass_mask_texture();
     void destroy_grass_mask_texture();
+    void init_fog_wisp_texture();
+    void destroy_fog_wisp_texture();
     void init_pipeline_cache();
     void destroy_pipeline_cache();
     VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
@@ -350,6 +352,12 @@ private:
     // into.
     TextureSlot grass_mask_{};
     static constexpr int kGrassMaskDim = 1024;
+    // Fog wisp pattern, 256² R8. Pre-baked 3-octave noise so the
+    // terrain raymarch fog density + godray probe loops sample one
+    // textureLod() per tap instead of running 3× noise2() each — the
+    // dominant per-pixel cost on godray-on configs.
+    TextureSlot fog_wisp_{};
+    static constexpr int kFogWispDim = 256;
     VkSampler   texture_sampler_ = VK_NULL_HANDLE;
     // Texture index assigned to the four spawnable box variants (so dynamic
     // boxes pick from a wood/metal/painted/brick palette at spawn time).

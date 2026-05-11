@@ -48,8 +48,9 @@ void VulkanEngine::init_descriptors() {
         // when terrain_raymarch_scale < 1.0.
         // +kSpomMaterialCount for the SPOM height-map array (binding 12).
         // +1 for the grass-density mask R8 texture (binding 13).
+        // +1 for the fog wisp R8 texture (binding 14).
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            kTextureCount * 2 + 7 + kSpomMaterialCount },
+            kTextureCount * 2 + 8 + kSpomMaterialCount },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -67,7 +68,7 @@ void VulkanEngine::init_descriptors() {
     //           9=LR raymarch color, 10=LR raymarch motion-vec, 11=LR
     //              raymarch depth — read by the compose pass when
     //              terrain_raymarch_scale < 1.
-    VkDescriptorSetLayoutBinding bindings[14]{};
+    VkDescriptorSetLayoutBinding bindings[15]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -154,10 +155,18 @@ void VulkanEngine::init_descriptors() {
     bindings[13].descriptorCount = 1;
     bindings[13].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Binding 14: fog wisp pattern (R8 256², REPEAT). One textureLod()
+    // replaces the 3-octave noise2 calls in terrain_raymarch.frag's
+    // fog density + godray probe loops.
+    bindings[14].binding = 14;
+    bindings[14].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[14].descriptorCount = 1;
+    bindings[14].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 14, .pBindings = bindings,
+        .bindingCount = 15, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),

@@ -62,6 +62,11 @@ layout(set = 0, binding = 8) uniform sampler2D u_terrain_height;
 // "is there grass here", and avoids the per-step 9-cell noised() storm
 // in the grass map() loop.
 layout(set = 0, binding = 13) uniform sampler2D u_grass_mask;
+// Fog wisp pattern (R8 256², REPEAT). One textureLod() replaces the
+// 3-octave noise2() weighted sum the fog density + godray probe
+// loops used to compute per-tap. UV maps q→texture as `q / 16.0` so
+// the texture tiles every 16 q-units (≈800 m of world space).
+layout(set = 0, binding = 14) uniform sampler2D u_fog_wisp;
 const float kHeightmapSide = 2048.0;
 float sampleHeightDelta(vec2 worldXZ) {
     // Was: 4 compare branches before the fetch. Replaced with clamp +
@@ -1567,13 +1572,13 @@ void main() {
             // exp falloff.
             float profile = smoothstep(fog_y_start, fog_y_start + 1.0, p.y) *
                             (1.0 - smoothstep(fog_y_top, fog_y_top + 4.0, p.y));
-            // 3-octave FBM-style wisp pattern. Modulates the density
-            // so the layer reads as wispy ground fog instead of a
-            // perfect sheet. Slow-scrolling for animated drift.
+            // 3-octave wisp pattern, pre-baked into the 256² R8 fog
+            // wisp texture (binding 14). One textureLod replaces the
+            // 3 noise2 calls the inline FBM used to do (~12 hashes
+            // per tap). REPEAT addressing handles time scrolling and
+            // large camera moves seamlessly.
             vec2 q = p.xz * 0.020 + vec2(scene.water_params.w * 0.05);
-            float w = 0.55 * noise2(q)
-                    + 0.30 * noise2(q * 2.13)
-                    + 0.15 * noise2(q * 4.27);
+            float w = textureLod(u_fog_wisp, q * (1.0 / 16.0), 0.0).r;
             // Centred around 0.5 so noise = 1.0 в†’ "no modulation" and
             // noise = 0 в†’ density Г—0.2 (thin patch). Strength slider
             // controls how much the noise can carve gaps.
@@ -1604,7 +1609,7 @@ void main() {
                     float prof_s = smoothstep(fog_y_start, fog_y_start + 1.0, sp.y) *
                                     (1.0 - smoothstep(fog_y_top, fog_y_top + 4.0, sp.y));
                     vec2 qs = sp.xz * 0.020 + vec2(scene.water_params.w * 0.05);
-                    float w_s = noise2(qs);
+                    float w_s = textureLod(u_fog_wisp, qs * (1.0 / 16.0), 0.0).r;
                     float wisp_s = clamp(mix(1.0, 2.0 * w_s, fog_noise), 0.2, 2.0);
                     float sig_s = kVolDensityBase * prof_s * wisp_s * fogStrength;
                     lightTrans *= exp(-sig_s * ds);

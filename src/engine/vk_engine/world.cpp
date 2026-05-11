@@ -1516,6 +1516,106 @@ void VulkanEngine::destroy_grass_mask_texture() {
     grass_mask_ = {};
 }
 
+// Bake the 3-octave fog wisp pattern into a 256² R8 texture so the
+// terrain raymarch's volumetric fog density + godray probe can sample
+// it once instead of running 3× noise2 per tap. World-space q is
+// rescaled to UV by 1/16 so the texture tiles every 16 q-units (≈800 m
+// of world); the texture sampler uses REPEAT addressing so time
+// scrolling and large camera moves stay seamless. Wave-pattern doesn't
+// need to bit-match the GLSL noise2 — it just needs to look "wispy".
+void VulkanEngine::init_fog_wisp_texture() {
+    const int dim = kFogWispDim;
+    std::vector<uint8_t> data(static_cast<size_t>(dim) * dim);
+    // 16 q-units of pattern fit in the texture; CLAMP/REPEAT works
+    // because the FBM is statistically self-similar across periods.
+    const float kPeriod = 16.0f;
+    for (int y = 0; y < dim; ++y) {
+        for (int x = 0; x < dim; ++x) {
+            float qx = (static_cast<float>(x) / dim) * kPeriod;
+            float qy = (static_cast<float>(y) / dim) * kPeriod;
+            // Same weights + scales as the shader's runtime expression:
+            //   w = 0.55 noise2(q) + 0.30 noise2(q*2.13) + 0.15 noise2(q*4.27)
+            float w = 0.55f * fbm_noise2(qx,         qy)
+                    + 0.30f * fbm_noise2(qx * 2.13f, qy * 2.13f)
+                    + 0.15f * fbm_noise2(qx * 4.27f, qy * 4.27f);
+            w = std::clamp(w, 0.0f, 1.0f);
+            data[static_cast<size_t>(y) * dim + x] =
+                static_cast<uint8_t>(w * 255.0f);
+        }
+    }
+
+    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8_UNORM;
+    ici.extent = { static_cast<uint32_t>(dim), static_cast<uint32_t>(dim), 1 };
+    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vk_check(vmaCreateImage(allocator_, &ici, &aci,
+                             &fog_wisp_.image, &fog_wisp_.alloc, nullptr),
+             "fog wisp image");
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = fog_wisp_.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_R8_UNORM;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vk_check(vkCreateImageView(device_, &vci, nullptr, &fog_wisp_.view),
+             "fog wisp view");
+
+    // Stage + copy + transition.
+    const VkDeviceSize bytes = data.size();
+    VkBuffer stage = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = nullptr;
+    VkBufferCreateInfo bci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .size = bytes,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+    };
+    VmaAllocationCreateInfo bac{};
+    bac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    bac.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    vmaCreateBuffer(allocator_, &bci, &bac, &stage, &stage_alloc, nullptr);
+    VmaAllocationInfo ai{};
+    vmaGetAllocationInfo(allocator_, stage_alloc, &ai);
+    std::memcpy(ai.pMappedData, data.data(), bytes);
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, fog_wisp_.image,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = { static_cast<uint32_t>(dim),
+                                static_cast<uint32_t>(dim), 1 };
+        vkCmdCopyBufferToImage(cb, stage, fog_wisp_.image,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                1, &region);
+        vkinit::transition_image(cb, fog_wisp_.image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    vmaDestroyBuffer(allocator_, stage, stage_alloc);
+    log::infof("fog wisp baked: %dx%d R8 (%.1f KB)", dim, dim,
+               static_cast<double>(bytes) / 1024.0);
+}
+
+void VulkanEngine::destroy_fog_wisp_texture() {
+    if (fog_wisp_.view)  vkDestroyImageView(device_, fog_wisp_.view, nullptr);
+    if (fog_wisp_.image) vmaDestroyImage(allocator_, fog_wisp_.image, fog_wisp_.alloc);
+    fog_wisp_ = {};
+}
+
 void VulkanEngine::init_viewmodel() {
     // Procedural placeholder gun: a barrel (cylinder) + body (box) + grip
     // (box). Camera-space coords: +X right, +Y up, -Z forward.
