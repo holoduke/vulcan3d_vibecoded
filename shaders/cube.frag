@@ -325,9 +325,19 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     // outside corner with no neighbour brush). Trade-off: bricks now
     // visibly poke a bit past the edge before silhouette kicks in;
     // visually fine for the brick depth scale we use.
+    // Skip silhouette discard for top/bottom-facing surfaces (axis == 1).
+    // Floors don't have visible silhouette edges from above — you're
+    // looking AT them, not along them — but at grazing camera angles
+    // the parallax displacement can still walk past the floor's XZ
+    // extent and trigger the discard. That wrote alpha = 0 + depth =
+    // 1.0 → compose substituted procedural sky for the downward ray
+    // direction → grey patches that flickered with TAA jitter as the
+    // player moved. SPOM displacement still works on floors; only the
+    // alpha-cavity effect is gated to walls.
     float pad = 0.25;
-    if (abs(vis_T) > ext_T * (1.0 + pad) ||
-        abs(vis_B) > ext_B * (1.0 + pad)) out_overhang_disc = true;
+    if (axis != 1 &&
+        (abs(vis_T) > ext_T * (1.0 + pad) ||
+         abs(vis_B) > ext_B * (1.0 + pad))) out_overhang_disc = true;
     // Displaced world position: lateral tangent offset only. The
     // `-face_n * depth` push (toward inside the cube) was tempting
     // for "true" 3D shadow origins but moved the origin INSIDE the
@@ -930,7 +940,15 @@ void main() {
                 gl_FragDepth = 1.0;
                 return;
             }
-            shading_pos = spom_world;     // RT origins now come from the brick crevice
+            // RT origins from the brick crevice — but only on WALLS
+            // (axis 0 / 2). On floors (axis 1) the lateral tangent
+            // offset can push the AO/shadow ray origin past the floor
+            // brush's XZ extent, where rays land in adjacent wall
+            // colliders and produce noise that reads as gray patches
+            // when TAA history is unavailable (camera moving / falling).
+            // Floors keep shading_pos = vWorldPos so AO/shadow rays
+            // trace from the actual rasterised hit point.
+            if (axis != 1) shading_pos = spom_world;
             int  a_idx = clamp(albedo_idx_raw, 0, kTextureCount - 1);
             vec3 tex_albedo = texture(u_albedo[a_idx], spom_uv_off).rgb;
             albedo = tex_albedo * vColor;

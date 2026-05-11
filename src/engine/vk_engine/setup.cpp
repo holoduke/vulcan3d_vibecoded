@@ -396,15 +396,16 @@ void VulkanEngine::init_pipeline() {
     a2.format = VK_FORMAT_R32G32_SFLOAT;
     a2.offset = offsetof(Vertex, uv);
     cfg.vattrs = { a0, a1, a2 };
-    // Alpha blending on color attachment 0 only — used by cube.frag's
-    // SPOM silhouette path: silhouette pixels write alpha = 0 so the
-    // brick-cavity gap shows the underlying scene_color (terrain /
-    // earlier walls) instead of leaking sky. Opaque cube fragments
-    // write alpha = 1 which makes the blend a no-op for them, so
-    // existing geometry rendering is unchanged. Motion vector
-    // attachment (location 1) stays opaque — TAA needs a clean
-    // motion read.
-    cfg.alpha_blend_color0_only = true;
+    // Alpha blending DISABLED for now while diagnosing a "gray floor"
+    // flicker on the castle ground when walking backwards. The blend
+    // existed to let SPOM wall silhouette pixels (alpha = 0) show
+    // terrain through brick cavities, but it appears to also produce
+    // slight color drift on floor pixels under TAA + motion. With
+    // blend off, opaque cube fragments are unchanged; only the
+    // wall-silhouette cavity transparency is lost — visible as the
+    // brick edge clipping at the geometric corner instead of
+    // showing-through.
+    cfg.alpha_blend_color0_only = false;
 
     pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
 
@@ -419,7 +420,15 @@ void VulkanEngine::init_pipeline() {
         depth_vert_module_ = vkpipe::load_shader_module(device_, sd2 + "/cube_depth.vert.spv");
     }
     vkpipe::GraphicsPipelineConfig dcfg = cfg;
-    dcfg.vert = depth_vert_module_;
+    // IMPORTANT: depth pre-pass uses the SAME vert shader as the color
+    // pass. Splitting it into a minimal cube_depth.vert sounds like a
+    // perf win (no varyings, fewer matrix multiplies) but the SPIR-V
+    // optimiser produced gl_Position values that differed from
+    // cube.vert by 1 ULP — enough that the color pass's
+    // LESS_OR_EQUAL test against the prepass depth flipped per-pixel
+    // every frame on the castle floor. Symptom: gray-blue (sky clear
+    // colour) flicker on close-by floor pixels when the camera moves.
+    dcfg.vert = vert_module_;
     dcfg.frag = depth_frag_module_;
     // Depth-only pre-pass: no color attachments at all. Clear the inherited
     // color_formats vector — otherwise build_graphics_pipeline would pick its

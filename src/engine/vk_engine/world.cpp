@@ -1422,6 +1422,19 @@ void VulkanEngine::init_grass_mask_texture() {
             // R: presence — low-freq FBM, smoothstep gate.
             float n = fbm_noise2(wx * 0.02f, wz * 0.02f);
             float presence = smoothstep_f(0.40f, 0.55f, n);
+            // Castle keep-out. The raymarched grass shader plants
+            // blades at terrain Y (= plateau height inside the castle
+            // footprint), so without this guard blade tips poke
+            // ~75 cm above the castle floor brushes — visible as a
+            // greenish-gray wash on the floor (alpha-blended through
+            // close-camera grass distance fade). The rasterised grass
+            // path already excludes the keep via grass.cpp's
+            // keep_out_xz; mirror it here for the raymarch path
+            // covering the FULL outer wall extent.
+            const float kCastleHalf = 12.0f;   // outer wall at ±11 + 1 m margin
+            if (std::abs(wx) < kCastleHalf && std::abs(wz) < kCastleHalf) {
+                presence = 0.0f;
+            }
             // G: slope mag — finite-diff on real terrain heights, so
             // cliffs/peaks naturally read as steep. Stored normalized
             // [0..1] = raw_slope / 2.0; shader un-normalizes.
@@ -2255,8 +2268,15 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
     // looks like a "squared edge" with sky leak). Letting terrain
     // compose win the depth race for those pixels fixes it; we lose
     // early-Z on castle stone walls only.
+    // Only the SPOM WALL brushes (albedo 1, 4) need to skip the depth
+    // pre-pass — that's how their silhouette cavity shows what's
+    // behind. Floors (albedo 5, 6) are SPOM-textured but face UP, so
+    // their silhouette never points at terrain. Skipping them here
+    // caused TAA flicker: cube color pass and terrain compose race
+    // at the 5 cm floor-vs-plateau separation, and sub-pixel jitter
+    // flips the winner every frame → "flashing through the floor".
     auto is_spom_albedo = [](int a) {
-        return a == 1 || a == 4 || a == 5 || a == 6;
+        return a == 1 || a == 4;
     };
     for (size_t i = 0; i < world_.brushes.size(); ++i) {
         const auto& b = world_.brushes[i];
