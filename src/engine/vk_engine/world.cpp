@@ -1587,13 +1587,16 @@ void VulkanEngine::init_viewmodel() {
         // +90° around Y mapped that to +Z (toward the player) and the
         // gun pointed backwards. Yaw -90° flips it the other way so
         // the barrel ends up along -Z (camera forward).
-        float scale = 0.70f / max_side;
+        float scale = 0.85f / max_side;
         glm::mat4 rot_yaw = glm::rotate(glm::mat4(1.0f),
                                          glm::radians(-90.0f),
                                          glm::vec3(0.0f, 1.0f, 0.0f));
 
+        // Z = -0.22 (was -0.35) pulls the gun back toward the camera
+        // a bit so a slightly larger model still fits comfortably in
+        // the lower-right corner of the frame.
         viewmodel_root_offset_ =
-            glm::translate(glm::mat4(1.0f), glm::vec3(0.16f, -0.20f, -0.35f)) *
+            glm::translate(glm::mat4(1.0f), glm::vec3(0.16f, -0.20f, -0.22f)) *
             glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
             rot_yaw *
             glm::translate(glm::mat4(1.0f), -center);
@@ -2142,10 +2145,24 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     };
 
+    // Skip SPOM brushes in the depth pre-pass. Their cube.frag color
+    // path may emit alpha = 0 at silhouette cavities (so terrain /
+    // earlier draws show through the bumpy brick edge); but if the
+    // pre-pass writes the wall's full geometric depth here, the later
+    // terrain compose's gl_FragDepth test fails at silhouette pixels
+    // → terrain pixel discarded → scene_color stays at sky clear
+    // colour → user sees sky through the cavity gap (the symptom that
+    // looks like a "squared edge" with sky leak). Letting terrain
+    // compose win the depth race for those pixels fixes it; we lose
+    // early-Z on castle stone walls only.
+    auto is_spom_albedo = [](int a) {
+        return a == 1 || a == 4 || a == 5 || a == 6;
+    };
     for (size_t i = 0; i < world_.brushes.size(); ++i) {
         const auto& b = world_.brushes[i];
         const auto& a = world_.aabbs[i];
         if (!aabb_visible(frustum, a.min, a.max)) continue;
+        if (is_spom_albedo(b.tex_albedo)) continue;
         glm::mat4 model = glm::translate(glm::mat4(1.0f), b.center) *
                           glm::scale(glm::mat4(1.0f), b.size);
         push_depth(model);

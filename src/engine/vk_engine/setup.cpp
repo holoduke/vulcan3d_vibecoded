@@ -396,6 +396,15 @@ void VulkanEngine::init_pipeline() {
     a2.format = VK_FORMAT_R32G32_SFLOAT;
     a2.offset = offsetof(Vertex, uv);
     cfg.vattrs = { a0, a1, a2 };
+    // Alpha blending on color attachment 0 only — used by cube.frag's
+    // SPOM silhouette path: silhouette pixels write alpha = 0 so the
+    // brick-cavity gap shows the underlying scene_color (terrain /
+    // earlier walls) instead of leaking sky. Opaque cube fragments
+    // write alpha = 1 which makes the blend a no-op for them, so
+    // existing geometry rendering is unchanged. Motion vector
+    // attachment (location 1) stays opaque — TAA needs a clean
+    // motion read.
+    cfg.alpha_blend_color0_only = true;
 
     pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
 

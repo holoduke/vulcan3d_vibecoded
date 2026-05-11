@@ -189,8 +189,10 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
              int height_idx,
              out int out_axis,
              out vec3 out_T, out vec3 out_B, out vec3 out_face_n,
-             out bool out_overhang_disc) {
+             out bool out_overhang_disc,
+             out vec3 out_displaced_pos) {
     out_overhang_disc = false;
+    out_displaced_pos = vWorldPos;
     vec3 absN = abs(N);
     int axis;
     vec2 uv0;
@@ -250,7 +252,13 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
         current_layer += layer_step;
         cur_h = 1.0 - texture(u_height[height_idx], cur_uv).r;
     }
-    // Linear-interp refine between the last two samples for smoother depth.
+    // Refine in two stages so the height steps don't read as visible
+    // "stair lines" on the surface:
+    //   1. Linear-interp between the last two layer samples (cheap).
+    //   2. 4-iter binary search bracketed by (prev_uv, cur_uv) — each
+    //      iteration halves the residual error, so 4 iters takes the
+    //      step seam from ~6 % of one layer down to ~0.4 %. Free
+    //      visually; costs 4 extra texture taps per SPOM-active pixel.
     vec2  prev_uv = cur_uv - uv_step;
     float prev_h  = 1.0 - texture(u_height[height_idx], prev_uv).r;
     float prev_layer = current_layer - layer_step;
@@ -258,6 +266,25 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     float b = prev_h - prev_layer - a;
     float w = clamp(a / (b - a + 1e-4), 0.0, 1.0);
     vec2 final_uv = mix(cur_uv, prev_uv, w);
+    float final_layer = mix(current_layer, prev_layer, w);
+    {
+        vec2 lo_uv = prev_uv;     // shallower (above surface)
+        vec2 hi_uv = cur_uv;      // deeper (below surface)
+        float lo_l = prev_layer;
+        float hi_l = current_layer;
+        for (int j = 0; j < 4; ++j) {
+            vec2  m_uv = (lo_uv + hi_uv) * 0.5;
+            float m_l  = (lo_l  + hi_l)  * 0.5;
+            float m_h  = 1.0 - texture(u_height[height_idx], m_uv).r;
+            if (m_l < m_h) {       // still above the surface
+                lo_uv = m_uv; lo_l = m_l;
+            } else {                // below — bracket the upper half
+                hi_uv = m_uv; hi_l = m_h;
+            }
+        }
+        final_uv    = (lo_uv + hi_uv) * 0.5;
+        final_layer = (lo_l  + hi_l)  * 0.5;
+    }
 
     // SPOM silhouette test: convert the UV offset back to world units
     // along the face's tangent + bitangent. If the visible point lies
@@ -283,7 +310,34 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     float vis_B = pos_B + d_B;
     float ext_T = face_size_world[t_axis] * 0.5;
     float ext_B = face_size_world[b_axis] * 0.5;
-    if (abs(vis_T) > ext_T || abs(vis_B) > ext_B) out_overhang_disc = true;
+    // Silhouette overhang: parallax has walked the visible point past
+    // the geometric face edge. Caller draws this fragment with alpha
+    // = 0 so the underlying scene_color (terrain / other walls drawn
+    // earlier) shows through the brick cavity.
+    // Silhouette test with tolerance. Pure ext_T/ext_B fired at joints
+    // between two abutting brushes (e.g. tower-to-wall, gate-block-to-
+    // wall) — the parallax displacement crossed the face edge but the
+    // neighbour brush is RIGHT THERE filling the gap, so writing
+    // alpha = 0 made the joint show the (often-shadowed) terrain
+    // behind both brushes instead of the neighbour wall. Allowing the
+    // displacement to extend up to 25 % past the geometric edge means
+    // the test only fires when the parallax goes into a REAL gap (an
+    // outside corner with no neighbour brush). Trade-off: bricks now
+    // visibly poke a bit past the edge before silhouette kicks in;
+    // visually fine for the brick depth scale we use.
+    float pad = 0.25;
+    if (abs(vis_T) > ext_T * (1.0 + pad) ||
+        abs(vis_B) > ext_B * (1.0 + pad)) out_overhang_disc = true;
+    // Displaced world position: lateral tangent offset only. The
+    // `-face_n * depth` push (toward inside the cube) was tempting
+    // for "true" 3D shadow origins but moved the origin INSIDE the
+    // brush — every RT shadow ray then hit the cube's own back face,
+    // dark patches everywhere. Keeping just the tangent shift means
+    // shadow rays trace from a laterally-offset point on the cube
+    // surface; that captures the brick-row alignment for falling sun
+    // angles (visible self-shadow at brick edges) without the
+    // self-occlusion bug.
+    out_displaced_pos = vWorldPos + T * d_T + Bb * d_B;
     return final_uv;
 }
 
@@ -556,6 +610,13 @@ void main() {
     // and 3 inversesqrt per pixel on the heavy lit-surface path.
     float cam_dist = distance(vWorldPos, scene.camera_pos.xyz);
     vec3  L        = normalize(scene.sun_direction.xyz);
+    // shading_pos = the effective surface position lighting sees.
+    // For most fragments it equals vWorldPos. The SPOM path below
+    // overrides it with the parallax-displaced point so RT shadow,
+    // AO, and muzzle-flash rays trace from the actual brick crevice
+    // instead of the flat geometric cube face — gives real
+    // self-shadowing inside SPOM bricks at almost no cost.
+    vec3 shading_pos = vWorldPos;
 
     bool is_terrain_pre = vTexParams.w > 1.5;
 
@@ -850,29 +911,26 @@ void main() {
             int axis;
             vec3 spom_T, spom_B, spom_face_n;
             bool spom_disc;
+            vec3 spom_world;
             vec2 spom_uv_off = spom_uv(sample_pos, proj_n, face_size, scale,
                                         spom_h_idx,
                                         axis, spom_T, spom_B, spom_face_n,
-                                        spom_disc);
+                                        spom_disc, spom_world);
             if (spom_disc) {
-                // Silhouette overhang — sample the procedural sky directly
-                // and write that. Earlier attempts:
-                //   - bare discard → MRT pass leaves depth/motion unwritten
-                //     → TAA garbage → GPU device_lost
-                //   - gl_FragDepth = 1.0 sentinel + outColor=0 → 1.0 fails
-                //     the depth-EQUAL/LESS_OR_EQUAL test against the
-                //     prepass-written wall depth (0.97), fragment is
-                //     killed entirely, scene_color keeps whatever the
-                //     earlier raymarch wrote at that pixel — which is
-                //     why the user saw a textureless mesh leaking through.
-                // Sampling the sky here writes valid color + motion + the
-                // rasterized depth (gl_FragDepth left unset on this path
-                // → uses gl_FragCoord.z written at the top of main).
-                vec3 sky_dir = normalize(vWorldPos - scene.camera_pos.xyz);
-                outColor  = vec4(sample_sky(sky_dir), 1.0);
-                outMotion = vec2(0.0);
+                // Silhouette cavity. Two cases:
+                //  * Anything behind (terrain / other castle): depth-test
+                //    fails (1.0 > existing) → fragment killed → dest
+                //    pixel preserved.
+                //  * Pure sky behind: depth_image_ stayed at cleared 1.0;
+                //    test passes; alpha=0 blend preserves sky-clear dest;
+                //    depth stays 1.0 → compose substitutes the proper
+                //    procedural sky.
+                outColor     = vec4(0.0);
+                outMotion    = vec2(0.0);
+                gl_FragDepth = 1.0;
                 return;
             }
+            shading_pos = spom_world;     // RT origins now come from the brick crevice
             int  a_idx = clamp(albedo_idx_raw, 0, kTextureCount - 1);
             vec3 tex_albedo = texture(u_albedo[a_idx], spom_uv_off).rgb;
             albedo = tex_albedo * vColor;
@@ -1007,7 +1065,7 @@ void main() {
         float bias = is_terrain_pre
             ? (0.05 + 0.10 * (1.0 - n_dot_l_raw))
             : (0.005 + 0.02 * (1.0 - n_dot_l_raw));
-        vec3 origin = vWorldPos + N * bias;
+        vec3 origin = shading_pos + N * bias;
 
         // 1. Blocker search вЂ” 4 rays in a wider cone (4Г— base softness) so we
         //    actually catch occluders even when the surface is close to lit.
@@ -1156,7 +1214,7 @@ void main() {
         vec3  m_color     = scene.muzzle_color.rgb;
         float m_radius    = max(0.5, scene.muzzle_color.w);
 
-        vec3  to_light    = m_pos - vWorldPos;
+        vec3  to_light    = m_pos - shading_pos;
         // Squared-distance test first — saves the sqrt when this pixel
         // is outside the falloff radius (the common case for ground-far
         // pixels during a flash that lights only the local area).
@@ -1176,7 +1234,7 @@ void main() {
                 // of the light origin so a triangle exactly at m_pos can't
                 // self-occlude.
                 float bias    = 0.005 + 0.02 * (1.0 - n_dot_lm);
-                vec3  origin  = vWorldPos + N * bias;
+                vec3  origin  = shading_pos + N * bias;
                 bool  in_shadow = any_hit(origin, L_m, dist - 0.01);
                 if (!in_shadow) {
                     // Cap the contribution per-pixel. Surfaces VERY
@@ -1224,7 +1282,7 @@ void main() {
             float t = clamp((cam_dist - 40.0) / 200.0, 0.0, 1.0);
             ao_lift = mix(0.01, 6.0, t);
         }
-        vec3 origin_ao = vWorldPos + N * ao_lift;
+        vec3 origin_ao = shading_pos + N * ao_lift;
         // Unstratified random samples driven by IGN + temporal frame seed.
         // The stratified version (ceil(sqrt(N))ВІ-cell grid) was biased
         // when N wasn't a perfect square вЂ” at N=2 strata=2 picked only
@@ -1333,7 +1391,7 @@ void main() {
         vec3 N_up   = abs(N.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0);
         vec3 N_tan  = normalize(cross(N_up, N));
         vec3 N_bit  = cross(N, N_tan);
-        vec3 ray_origin0 = vWorldPos + N * 0.01;
+        vec3 ray_origin0 = shading_pos + N * 0.01;
         for (int sy = 0; sy < strata && taken < N_gi; ++sy) {
             for (int sx = 0; sx < strata && taken < N_gi; ++sx) {
                 float r1 = rand(seed_base + uvec3(taken, 73u, 11u));
