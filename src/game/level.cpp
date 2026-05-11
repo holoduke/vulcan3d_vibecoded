@@ -269,28 +269,39 @@ Level make_arena(float r, float wh) {
             keep_tint, kPaint, kPaint, 1.0f, keep_proto);
 
         // Floor slabs — courtyard tile inside the perimeter walls, plus a
-        // separate tile for the keep interior. Top surface lands at Y=0
-        // (matching wall bottoms) via a 0.5m thick slab with center at
-        // Y=-0.25. uv_scale = 0.4 → ~2.5m per tile, large enough to read
-        // as floor tiles instead of mosaic. SPOM extrusion in cube.vert
-        // adds ~12cm of geometric headroom for the parallax depth.
+        // separate tile for the keep interior. Top surface raised to
+        // Y=+0.05 (slab is 0.5 m thick, center at Y=-0.20) so it sits
+        // 5 cm above the terrain plateau (at Y=0 in castle-local space,
+        // = Y=22 world after the +plateau_height offset). 5 cm is too
+        // small to feel as a step but enough to win the depth race
+        // against the procedural raymarched terrain — without it,
+        // terrain Z-fights through the floor texture.
+        // Floor extent now reaches the inner wall face exactly (the
+        // earlier `−0.4` inset left a visible 20 cm gap of bare terrain
+        // along all 4 inner walls).
         const auto floor_tint   = T(0.96f, 0.94f, 0.90f);
         const auto floor_proto1 = T(0.45f, 0.42f, 0.38f);  // courtyard
         const auto floor_proto2 = T(0.55f, 0.48f, 0.40f);  // keep interior
-        const float in_ext = (cr - wt) * 2.0f - 0.4f;       // small inset
+        // Wall brushes are added with center at ±cr and thickness wt,
+        // so they span cr−wt/2 to cr+wt/2 — the INNER face sits at
+        // cr−wt/2 = 10.7 (not cr−wt = 10.4 as the previous math
+        // assumed; that's why a 30 cm gap of bare terrain was still
+        // showing along the inner walls). Push the floor a bit
+        // PAST the inner face (into the wall) so any sub-cm
+        // alignment slop hides under the wall geometry.
+        const float in_ext = cr * 2.0f - 0.05f;
         // Courtyard floor (covers everything inside the walls, spans the
-        // keep too — the keep floor below sits at the same Y and uses a
-        // different texture; harmless overlap because depth-test wins
-        // pixel-by-pixel and both surfaces shade identically away from
-        // the keep footprint).
-        add(lv, glm::vec3(0.0f, -0.25f, 0.0f),
+        // keep too — the keep floor below sits slightly higher and wins
+        // pixel-by-pixel inside its own footprint).
+        add(lv, glm::vec3(0.0f, -0.20f, 0.0f),
             glm::vec3(in_ext, 0.5f, in_ext),
             floor_tint, kTile1, kTile1, 0.4f, floor_proto1);
-        // Keep interior floor — slightly raised so it wins the
-        // depth-EQUAL test inside the keep footprint and shows the
-        // dedicated tile texture there.
-        add(lv, glm::vec3(kp_cx, -0.20f, kp_cz),
-            glm::vec3(kp_sx - 0.4f, 0.4f, kp_sz - 0.4f),
+        // Keep interior floor — 8 cm above terrain (3 cm above the
+        // courtyard slab) so it wins the depth race inside the keep
+        // and shows the dedicated tile texture there. Footprint
+        // reaches the keep's inner wall face on each side.
+        add(lv, glm::vec3(kp_cx, -0.17f, kp_cz),
+            glm::vec3(kp_sx, 0.5f, kp_sz),
             floor_tint, kTile2, kTile2, 0.5f, floor_proto2);
 
         // Lanterns: pair flanking the entrance + pair near the keep door,

@@ -177,18 +177,26 @@ MoveResult slide_move(const AABB& player, glm::vec3 position, glm::vec3 velocity
         // per-step jumping.
         //
         // Two guards prevent the "walk through a short box" bug:
-        //   1. The move must be roughly horizontal — falling / jumping
-        //      players shouldn't get a free vertical assist mid-air.
-        //   2. The post-step downward sweep must hit something within
+        //   1. The post-step downward sweep must hit something within
         //      kStepHeight. If drop_t is ~1.0 there is no surface to land
         //      on; accepting the step would teleport the player horizontally
         //      past the obstacle while leaving them in free space, which
         //      reads as "walking through".
-        // Step-up additionally requires that the obstacle we hit is
-        // STATIC. Stepping over a dynamic crate would make pushable
-        // boxes feel walkable / pass-through.
-        const bool is_horiz_move = std::abs(velocity.y) < 1.0f &&
-                                    std::abs(remaining.y) < 0.05f;
+        //   2. Step-up requires that the obstacle we hit is STATIC.
+        //      Stepping over a dynamic crate would make pushable boxes
+        //      feel walkable / pass-through.
+        //
+        // Vertical guard checks ONLY this tick's remaining.y (not the
+        // absolute velocity.y). The previous `|vel.y| < 1.0` rejected
+        // step-up even when the player was clearly walking on the
+        // ground — gravity is applied every frame BEFORE slide_move,
+        // so velocity.y is already at gravity*dt before we get here,
+        // and after a few ticks without ground contact it grows past
+        // 1 m/s. The remaining.y window catches actively-jumping
+        // players (positive y) and fast-falling ones (large negative)
+        // while letting normal walking through.
+        const bool is_horiz_move = remaining.y < 0.05f &&
+                                    remaining.y > -0.30f;
         if (hit_static && is_horiz_move && std::abs(hit_normal.y) < 0.5f) {
             glm::vec3 horiz_disp(remaining.x, 0.0f, remaining.z);
             glm::vec3 lifted_pos = pos + glm::vec3(0.0f, kStepHeight, 0.0f);

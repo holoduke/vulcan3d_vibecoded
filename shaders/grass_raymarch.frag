@@ -221,7 +221,21 @@ float sdGrassBlade(vec3 p, float thickness) {
 // `discard` terrain-plane hits — those would z-fight with the actual
 // rasterised / raymarched terrain renderer's output and read as a
 // flickering green tint over bare ground.
-float map(vec3 p, out bool out_blade_hit) {
+// Per-pixel SDF invariants — slider-driven, identical for every map()
+// call, so the outer raymarch loop hoists them once and passes via
+// this struct. Cuts the per-step setup cost (sqrt + smoothstep + 4
+// scalar muls + several UBO loads) from 128× per pixel to 1× per pixel.
+struct MapCtx {
+    float slope_max;
+    float density_eff_near;   // density at t = soft_d
+    float density_eff_far;    // density at t = kMaxD
+    float soft_d;
+    float kMaxD;
+    bool  underwater;         // global toggle (water_params.x > 0.5)
+    float water_y;
+};
+
+float map(vec3 p, float t_cam, MapCtx ctx, out bool out_blade_hit) {
     out_blade_hit = false;
     float terrainY = sampleHeight(p.xz);
     float distToTerrain = 0.5 * (p.y - terrainY);
@@ -240,63 +254,38 @@ float map(vec3 p, out bool out_blade_hit) {
 
     // Altitude + water gates — match terrain_raymarch.frag's
     // grassEligibility so the grass shader and the green terrain tint
-    // agree about where grass exists. Snow band fades grass out
-    // 55→75m; below water level kills it outright. Skipping early here
-    // means the inner 9-cell loop never runs above the snow line or
-    // underwater (big savings on mountain peaks).
+    // agree about where grass exists.
     float alt_factor = 1.0 - smoothstep(55.0, 75.0, terrainY);
-    bool underwater  = scene.water_params.x > 0.5 &&
-                       terrainY < scene.water_params.y;
+    bool underwater  = ctx.underwater && terrainY < ctx.water_y;
     if (alt_factor <= 0.001 || underwater) return distToTerrain;
 
     float d = distToTerrain;
-    // 3×3 neighbor sweep — blades placed by per-cell hash can lean into
-    // adjacent cells, so we have to query the immediate neighbors for the
-    // closest blade.
     const float kPi2 = 6.28318530718;
-    // Per-frame slope cutoff: convert grass_slope_n_min (max normal Y)
-    // into the equivalent max gradient magnitude. n_y = 1/√(1+|∇h|²)
-    // so |∇h|_max = √(1/n²−1).
-    float slope_n_min = scene.grass_extra.z;
-    float slope_max = sqrt(max(1e-4, 1.0 / max(slope_n_min * slope_n_min, 1e-4) - 1.0));
-    float density   = clamp(scene.grass_color_top.w, 0.0, 1.0);
-    // Distance-density falloff: far cells get extra-thinned on top
-    // of the global density slider. dist_density = 0 → no falloff,
-    // dist_density = 1 → density drops to ~15% at the max raymarch
-    // range. Soft-distance anchor (pc.color.w) and max distance
-    // (pc.color.x) match the alpha-cutoff distance ramp so the two
-    // visual transitions stay aligned.
-    float t_cam       = length(p - scene.camera_pos.xyz);
-    float kMaxD       = max(pc.color.x, 4.0);
-    float soft_d      = max(pc.color.w, 1.0);
-    float dist_w      = smoothstep(soft_d, kMaxD, t_cam);
-    float dist_dens   = clamp(scene.grass_extra.w, 0.0, 1.0);
-    float density_eff = density * mix(1.0, max(1.0 - dist_dens * 0.85, 0.0), dist_w);
+    // Density at this pixel's distance — interp between the two
+    // pre-baked endpoints. Loop-`t` is the distance from camera (ro
+    // is camera_pos and rd is normalised), so length(p - cam) was
+    // wasted sqrt+dot per map() call.
+    float dist_w      = smoothstep(ctx.soft_d, ctx.kMaxD, t_cam);
+    float density_eff = mix(ctx.density_eff_near, ctx.density_eff_far, dist_w);
     const float kEligThresh = 0.10;
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
             vec2 nId = cellId + vec2(float(dx), float(dy));
-            // Density-driven per-cell skip. Each cell gets a stable
-            // hash; cells whose hash exceeds the (distance-modulated)
-            // density are skipped. density_eff = global density ×
-            // distance-density falloff (computed once outside the
-            // sweep above).
-            vec4 r = hash42(nId);
-            if (r.x > density_eff) continue;
-            // Single-source-of-truth eligibility — sample the RG8 mask
-            // shared with terrain_raymarch.frag's getMaterial.
-            //   .r = presence  (0..1, fixed at bake time)
-            //   .g = slope mag (raw |∇h| / 2, un-normalized in shader)
-            // Combine with the slider-driven slope cutoff. Drawn-mask
-            // editor will paint into .r at runtime.
+            // Eligibility mask FIRST (cheaper than hash42). Roughly
+            // half of cells get rejected on real terrain — paying the
+            // hash for them was wasted ALU.
             vec2 cellW = nId * kPeriod;
             vec2 mask_uv = (cellW / kHeightmapSide) + vec2(0.5);
             vec2 mg = textureLod(u_grass_mask, mask_uv, 0.0).rg;
             float slope_mag = mg.g * 2.0;
-            float slope_w = 1.0 - smoothstep(slope_max * 0.7,
-                                              slope_max * 1.2, slope_mag);
+            float slope_w = 1.0 - smoothstep(ctx.slope_max * 0.7,
+                                              ctx.slope_max * 1.2, slope_mag);
             float elig = mg.r * slope_w;
             if (elig < kEligThresh) continue;
+            // Density-driven per-cell skip — only hash the cells we
+            // didn't already reject by mask.
+            vec4 r = hash42(nId);
+            if (r.x > density_eff) continue;
             vec3 np = lp - vec3(float(dx), 0.0, float(dy)) * kPeriod;
             // Per-blade rotation + sub-cell xy offset.
             np.xz = rotate2d(r.z * kPi2) * np.xz;
@@ -354,11 +343,31 @@ void main() {
     // Pixel size projected at unit distance — used to early-out when the
     // SDF distance is below sub-pixel detail at this t.
     float pixSize = 2.0 * scene.viewport.z;
+
+    // Per-pixel map() invariants — slider-driven values that don't
+    // change per step. Computing once here saves the per-step setup
+    // cost (sqrt, smoothstep, several muls + UBO loads) × 128 steps.
+    MapCtx ctx;
+    {
+        float slope_n_min = scene.grass_extra.z;
+        ctx.slope_max = sqrt(max(1e-4,
+                                  1.0 / max(slope_n_min * slope_n_min, 1e-4) - 1.0));
+        float density   = clamp(scene.grass_color_top.w, 0.0, 1.0);
+        float dist_dens = clamp(scene.grass_extra.w, 0.0, 1.0);
+        float far_mul   = max(1.0 - dist_dens * 0.85, 0.0);
+        ctx.density_eff_near = density;
+        ctx.density_eff_far  = density * far_mul;
+        ctx.kMaxD = max(pc.color.x, 4.0);
+        ctx.soft_d = max(pc.color.w, 1.0);
+        ctx.underwater = scene.water_params.x > 0.5;
+        ctx.water_y    = scene.water_params.y;
+    }
+
     for (int i = 0; i < kMaxSteps; ++i) {
         if (t >= kMaxDist) break;
         vec3 p = ro + t * rd;
         bool step_blade;
-        float d = map(p, step_blade);
+        float d = map(p, t, ctx, step_blade);
         // Hit threshold loosens with distance so the loop terminates on
         // sub-pixel features instead of trying to converge on a blade
         // edge from 50 m away.
@@ -442,8 +451,10 @@ void main() {
     vec3 col = grassCol * (sun_term + sky_term) * ao;
 
     // Fresnel-edge highlight (iq's suggestion in the original).
+    // pow(x, 3) → x*x*x (no exp/log).
+    float fr_in = clamp(1.0 + dot(N, rd), 0.0, 1.0);
     vec3 fres = vec3(0.18, 0.18, 0.10) * ao *
-                pow(clamp(1.0 + dot(N, rd), 0.0, 1.0), 3.0);
+                (fr_in * fr_in * fr_in);
     col += fres;
 
     // Distance fade colour target — eases blade colour INTO the

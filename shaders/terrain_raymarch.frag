@@ -188,6 +188,17 @@ vec3 cos_hemi(float u1, float u2, vec3 n) {
     return d.x * t + d.y * n + d.z * b;
 }
 
+// Sample-with-precomputed-basis variant. The tangent frame around `n`
+// only depends on `n`, which is constant across an N-sample GI/AO
+// loop — caller computes the basis once outside the loop and we
+// avoid the cross+normalize+cross per sample.
+vec3 cos_hemi_basis(float u1, float u2, vec3 n, vec3 t, vec3 b) {
+    float r   = sqrt(u1);
+    float phi = 6.28318530718 * u2;
+    vec3  d   = vec3(r * cos(phi), sqrt(max(0.0, 1.0 - u1)), r * sin(phi));
+    return d.x * t + d.y * n + d.z * b;
+}
+
 // Tiny xorshift32 hash вЂ” deterministic per-pixel jitter for the
 // stratified shadow rays.
 // Interleaved Gradient Noise вЂ” same dither pattern cube.frag uses
@@ -499,7 +510,11 @@ vec3 terrainH_grad(vec2 wp) {
 // heightfield. Step factor 0.4 stays safe on sharp ridges; the
 // distance-adaptive precision threshold avoids over-iterating distant
 // pixels where one screen pixel spans many world meters.
-float raymarch(vec3 ro, vec3 rd) {
+// raymarch with optional max-distance cap. Pass `t_max < 0` for
+// unbounded (default 1500 m). Caller can pass a tighter bound — e.g.
+// the water-plane intersection distance — so the loop bails as soon
+// as any terrain hit past the bound is irrelevant.
+float raymarch(vec3 ro, vec3 rd, float t_max) {
     float maxH = terrainMaxHeight();
     float t = 0.0;
     if (ro.y > maxH && rd.y >= 0.0) return -1.0;
@@ -507,6 +522,7 @@ float raymarch(vec3 ro, vec3 rd) {
         // Skip the open-air segment by jumping to the upper bound plane.
         t = (ro.y - maxH) / (-rd.y);
     }
+    float t_limit = (t_max > 0.0) ? min(t_max, 1500.0) : 1500.0;
     // Phase 5 вЂ” blue-noise jittered start offset. Per-pixel hash-based
     // sub-step shift breaks up the per-fragment march alignment, so
     // contour banding from a too-aggressive step factor disperses into
@@ -533,7 +549,7 @@ float raymarch(vec3 ro, vec3 rd) {
         // of metres before hitting.
         float h = pos.y - terrainM_lod(pos.xz, t);
         if (abs(h) < 0.0015 * t) break;
-        if (t > 1500.0) return -1.0;
+        if (t > t_limit) return -1.0;
         // Phase 6 вЂ” relaxation cone-stepping. Step grows with
         // distance so the same ray covers more ground in fewer
         // iterations. 0.7 attenuation on h prevents penetration
@@ -810,21 +826,27 @@ void main() {
     vec3 ro = scene.camera_pos.xyz;
     vec3 rd = normalize(vWFar.xyz / vWFar.w - vWNear.xyz / vWNear.w);
 
-    float t = raymarch(ro, rd);
-
-    // Water plane intersection. The ray hits the water surface if
-    //   - water is enabled AND
-    //   - the ray is travelling downward and starts above water
-    //     (or upward and starts below вЂ” we render that case as
-    //     "underwater" looking up but for now keep it simple)
+    // Water plane intersection FIRST — its `t` gives us a max distance
+    // for the heightfield march: terrain past the water plane can't be
+    // visible above water anyway (water is opaque-ish). Used as the
+    // raymarch's t_max so far rays aren't wasted on terrain hidden
+    // beneath water.
     bool water_on = scene.water_params.x > 0.5;
     float water_y = scene.water_params.y;
-    float t_water = -1.0;
+    float t_water_plane = -1.0;
     if (water_on && abs(rd.y) > 1e-4) {
         float tw = (water_y - ro.y) / rd.y;
-        if (tw > 0.0 && (t < 0.0 || tw < t)) {
-            t_water = tw;
-        }
+        if (tw > 0.0) t_water_plane = tw;
+    }
+
+    // Pass water plane t as max-distance — terrain past the water
+    // surface can't be visible above water anyway.
+    float t = raymarch(ro, rd, t_water_plane);
+
+    // Resolve water vs terrain ordering for the rest of the shader.
+    float t_water = -1.0;
+    if (t_water_plane > 0.0 && (t < 0.0 || t_water_plane < t)) {
+        t_water = t_water_plane;
     }
 
     if (t < 0.0 && t_water < 0.0) {
@@ -939,10 +961,16 @@ void main() {
                 // Atmospheric extinction over reflection distance.
                 vec3 r_ext = exp(-t_tlas * 0.00025 *
                                   vec3(1.0, 1.5, 4.0));
+                // pow(x, 8) → 3 squarings — same trick as the rest
+                // of the file; this water-TLAS-reflection branch was
+                // the last stray pow.
+                float rfL1 = max(dot(refl, sunDirW), 0.0);
+                float rfL2 = rfL1 * rfL1;
+                float rfL4 = rfL2 * rfL2;
+                float rfL8 = rfL4 * rfL4;
                 vec3 r_fog = mix(vec3(0.55, 0.55, 0.58),
                                   vec3(1.0, 0.7, 0.3),
-                                  0.3 * pow(max(dot(refl, sunDirW),
-                                                0.0), 8.0));
+                                  0.3 * rfL8);
                 r_col = r_col * r_ext + r_fog * (1.0 - r_ext);
                 reflCol = r_col;
             }
@@ -1255,7 +1283,11 @@ void main() {
     if (ao_mode > 0 && scene.rt_flags.z > 0 && do_rt) {
         int requested = (ao_mode == 1) ? min(scene.rt_flags.z, 2)
                                        : scene.rt_flags.z;
-        int N_ao = clamp(requested, 1, 32);
+        int N_ao_full = clamp(requested, 1, 32);
+        // Same distance-LOD ramp as GI: distant pixels drop toward
+        // 1 sample as rt_lod_t fades to 0 at the cliff. Smooth instead
+        // of full-or-nothing.
+        int N_ao = max(1, int(ceil(float(N_ao_full) * rt_lod_t)));
         // Don't halve the AO radius in fast mode on the terrain shader
         // — the user's slider is typically dialled for cube.frag's
         // close-quarters AO (~0.7m) and halving puts it under 0.4m
@@ -1271,10 +1303,16 @@ void main() {
         uvec3 ao_seed = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
         int taken = 0;
         float occluded = 0.0;
+        // Tangent basis around `nor` is constant for all AO samples —
+        // hoist outside the loop to skip cross+normalize+cross per sample.
+        vec3 ao_up_a = abs(nor.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
+                                          : vec3(1.0, 0.0, 0.0);
+        vec3 ao_t    = normalize(cross(ao_up_a, nor));
+        vec3 ao_b    = cross(nor, ao_t);
         for (int i = 0; i < N_ao; ++i) {
             float u1 = rmRand(ao_seed + uvec3(i, 7u, 53u));
             float u2 = rmRand(ao_seed + uvec3(i, 41u, 5u));
-            vec3 d = cos_hemi(u1, u2, nor);
+            vec3 d = cos_hemi_basis(u1, u2, nor, ao_t, ao_b);
             // BLAS occluders only (castle / dyn-props). The earlier
             // terrain_blocks_ray addition pushed per-pixel cost over
             // the GPU TDR threshold during long idle frames; analytical
@@ -1321,7 +1359,15 @@ void main() {
     // raymarched terrain path. Cube.frag GI uses the full slider.
     int N_gi_user = scene.rt_flags2.x;
     int N_gi_cap  = max(0, int(scene.terrain_rt_extra.y));
-    int N_gi = (N_gi_user > 0 && do_rt) ? min(N_gi_user, N_gi_cap) : 0;
+    // Distance-LOD on sample count: rt_lod_t goes 1→0 across the
+    // RT-LOD distance band. Scale the GI sample count smoothly so
+    // mid-distance pixels pay 4 rays instead of the full 16, and
+    // pixels just inside the LOD cliff pay 1. Avoids the binary
+    // "full N or skip" cliff that produced visible noise rings.
+    int N_gi_full = (N_gi_user > 0) ? min(N_gi_user, N_gi_cap) : 0;
+    int N_gi = (N_gi_full > 0 && do_rt)
+                ? max(1, int(ceil(float(N_gi_full) * rt_lod_t)))
+                : 0;
     if (N_gi > 0) {
         int N_bounces     = max(1, int(scene.terrain_rt_extra.w));
         int gi_shadow_max = int(scene.rt_lod.z);
@@ -1344,6 +1390,14 @@ void main() {
         vec3 sum   = vec3(0.0);
         uvec3 gi_seed = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
 
+        // Tangent basis around `nor` is constant across all GI samples
+        // — precompute once, pass to cos_hemi_basis() to skip the
+        // per-sample cross+normalize+cross.
+        vec3 gi_up_a = abs(nor.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
+                                          : vec3(1.0, 0.0, 0.0);
+        vec3 gi_t    = normalize(cross(gi_up_a, nor));
+        vec3 gi_b    = cross(nor, gi_t);
+
         for (int sy = 0; sy < strata && taken < N_gi; ++sy) {
             for (int sx = 0; sx < strata && taken < N_gi; ++sx) {
                 float r1 = rmRand(gi_seed + uvec3(taken, 73u, 11u));
@@ -1351,7 +1405,7 @@ void main() {
                 float u1 = (float(sx) + r1) * inv_strata;
                 float u2 = (float(sy) + r2) * inv_strata;
 
-                vec3 ray_dir    = cos_hemi(u1, u2, nor);
+                vec3 ray_dir    = cos_hemi_basis(u1, u2, nor, gi_t, gi_b);
                 vec3 ray_origin = pos + nor * 0.05;
                 vec3 throughput = vec3(1.0);
                 vec3 path       = vec3(0.0);
@@ -1544,7 +1598,11 @@ void main() {
         float gg    = kVolPhaseG * kVolPhaseG;
         float phase = (1.0 - gg) /
                       (4.0 * 3.14159265 *
-                       pow(1.0 + gg - 2.0 * kVolPhaseG * cosTh, 1.5));
+                       // pow(x, 1.5) = x * sqrt(x) — one mul + one
+                       // sqrt, way cheaper than the exp/log path pow
+                       // takes for fractional exponents.
+                       (1.0 + gg - 2.0 * kVolPhaseG * cosTh) *
+                       sqrt(1.0 + gg - 2.0 * kVolPhaseG * cosTh));
         // Hard ceiling matches a typical "sun glow" magnitude.
         phase = min(phase, 4.0);
 
