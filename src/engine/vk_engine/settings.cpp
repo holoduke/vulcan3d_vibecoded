@@ -222,6 +222,23 @@ void VulkanEngine::save_settings() const {
     f << "grass_distance_density = " << rt_.grass_distance_density << "\n";
     f << "grass_alt_min = " << rt_.grass_alt_min << "\n";
     f << "grass_alt_max = " << rt_.grass_alt_max << "\n";
+    f << "grass_color_top = "    << rt_.grass_color_top.x    << " "
+                                  << rt_.grass_color_top.y    << " "
+                                  << rt_.grass_color_top.z    << "\n";
+    f << "grass_color_bottom = " << rt_.grass_color_bottom.x << " "
+                                  << rt_.grass_color_bottom.y << " "
+                                  << rt_.grass_color_bottom.z << "\n";
+    f << "grass_color_ground = " << rt_.grass_color_ground.x << " "
+                                  << rt_.grass_color_ground.y << " "
+                                  << rt_.grass_color_ground.z << "\n";
+    f << "grass_color_ground_far = " << rt_.grass_color_ground_far.x << " "
+                                      << rt_.grass_color_ground_far.y << " "
+                                      << rt_.grass_color_ground_far.z << "\n";
+    f << "grass_base_ao_floor = "       << rt_.grass_base_ao_floor       << "\n";
+    f << "grass_ground_tint_strength = " << rt_.grass_ground_tint_strength << "\n";
+    f << "grass_shadow_strength = " << rt_.grass_shadow_strength << "\n";
+    f << "grass_shadow_samples = "  << rt_.grass_shadow_samples  << "\n";
+    f << "grass_shadow_max_dist = " << rt_.grass_shadow_max_dist << "\n";
     f << "shadow_map_resolution = " << rt_.shadow_map_resolution << "\n";
     f << "shadow_map_world_half = " << rt_.shadow_map_world_half << "\n";
     f << "shadow_debug_overlay = "  << (rt_.shadow_debug_overlay ? 1 : 0) << "\n";
@@ -341,6 +358,39 @@ void VulkanEngine::load_settings() {
             if (key == "terrain_gi_samples_cap")    { rt_.terrain_gi_samples_cap    = std::stoi(val); ++loaded; continue; }
             if (key == "terrain_gi_bounces_cap")    { rt_.terrain_gi_bounces_cap    = std::stoi(val); ++loaded; continue; }
             if (key == "terrain_ao_final_strength") { rt_.terrain_ao_final_strength = std::stof(val); ++loaded; continue; }
+            if (key == "grass_color_top") {
+                std::sscanf(val.c_str(), "%f %f %f",
+                            &rt_.grass_color_top.x,
+                            &rt_.grass_color_top.y,
+                            &rt_.grass_color_top.z);
+                ++loaded; continue;
+            }
+            if (key == "grass_color_bottom") {
+                std::sscanf(val.c_str(), "%f %f %f",
+                            &rt_.grass_color_bottom.x,
+                            &rt_.grass_color_bottom.y,
+                            &rt_.grass_color_bottom.z);
+                ++loaded; continue;
+            }
+            if (key == "grass_color_ground") {
+                std::sscanf(val.c_str(), "%f %f %f",
+                            &rt_.grass_color_ground.x,
+                            &rt_.grass_color_ground.y,
+                            &rt_.grass_color_ground.z);
+                ++loaded; continue;
+            }
+            if (key == "grass_color_ground_far") {
+                std::sscanf(val.c_str(), "%f %f %f",
+                            &rt_.grass_color_ground_far.x,
+                            &rt_.grass_color_ground_far.y,
+                            &rt_.grass_color_ground_far.z);
+                ++loaded; continue;
+            }
+            if (key == "grass_base_ao_floor")        { rt_.grass_base_ao_floor        = std::stof(val); ++loaded; continue; }
+            if (key == "grass_ground_tint_strength") { rt_.grass_ground_tint_strength = std::stof(val); ++loaded; continue; }
+            if (key == "grass_shadow_strength")      { rt_.grass_shadow_strength      = std::stof(val); ++loaded; continue; }
+            if (key == "grass_shadow_samples")       { rt_.grass_shadow_samples       = std::stoi(val); ++loaded; continue; }
+            if (key == "grass_shadow_max_dist")      { rt_.grass_shadow_max_dist      = std::stof(val); ++loaded; continue; }
             if      (key == "sun_pitch_deg")       rt_.sun_pitch_deg = std::stof(val);
             else if (key == "sun_yaw_deg")         rt_.sun_yaw_deg = std::stof(val);
             else if (key == "sun_intensity")       rt_.sun_intensity = std::stof(val);

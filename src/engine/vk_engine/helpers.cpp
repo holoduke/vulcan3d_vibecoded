@@ -17,8 +17,9 @@ namespace qlike {
 static_assert(sizeof(PushConstants) == 256, "push constant layout");
 // 352 → 368 (terrain_extra) → 400 (water_params + water_color)
 //     → 432 (water_color_shallow + water_shore) → 448 (fog_band)
-//     → 464 (terrain_rt_extra).
-static_assert(sizeof(SceneUBO) == 464, "scene ubo layout");
+//     → 464 (terrain_rt_extra) → 512 (grass_color_top + bottom + ground)
+//     → 528 (grass_color_ground_far) → 544 (grass_shadow_params).
+static_assert(sizeof(SceneUBO) == 544, "scene ubo layout");
 
 RtFuncs g_rt;
 

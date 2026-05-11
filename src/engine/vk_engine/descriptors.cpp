@@ -309,6 +309,18 @@ void VulkanEngine::update_scene_ubo() {
         static_cast<float>(rt_.terrain_gi_samples_cap),
         rt_.terrain_ao_final_strength,
         static_cast<float>(rt_.terrain_gi_bounces_cap));
+    data.grass_color_top    = glm::vec4(rt_.grass_color_top,
+                                         rt_.grass_density);
+    data.grass_color_bottom = glm::vec4(rt_.grass_color_bottom,
+                                         rt_.grass_base_ao_floor);
+    data.grass_color_ground = glm::vec4(rt_.grass_color_ground,
+                                         rt_.grass_ground_tint_strength);
+    data.grass_color_ground_far = glm::vec4(rt_.grass_color_ground_far, 0.0f);
+    data.grass_shadow_params = glm::vec4(
+        rt_.grass_shadow_strength,
+        static_cast<float>(rt_.grass_shadow_samples),
+        rt_.grass_shadow_max_dist,
+        0.0f);
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

@@ -154,6 +154,31 @@ struct SceneUBO {
     //                                   (0 = no extra AO darkening; 1 = full)
     //   w: terrain_gi_bounces_cap     — max bounces in terrain GI loop
     glm::vec4  terrain_rt_extra;
+    // Grass appearance — exposed via UI sliders.
+    //   grass_color_top.rgb       = blade tip colour (lit, sunward)
+    //   grass_color_top.w         = raymarched grass density (0..1, per-cell skip)
+    //   grass_color_bottom.rgb    = blade base colour (shadowed, near ground)
+    //   grass_color_bottom.w      = blade-base AO floor (0..1; 0=full dark base,
+    //                               1=no AO darkening between base and tip)
+    //   grass_color_ground.rgb    = CLOSE ground tint where grass is eligible
+    //   grass_color_ground.w      = ground tint strength (0..1; 0=no tint,
+    //                               1=full green-mat replaces rock/sand)
+    //   grass_color_ground_far.rgb = FAR ground tint. Blends 0..1 from
+    //                               grass_color_ground at grass_cutoff_soft_dist
+    //                               to here at grass_raymarch_distance, in both
+    //                               the terrain shader and the grass shader's
+    //                               distance fade target.
+    //   grass_color_ground_far.w  = unused.
+    glm::vec4  grass_color_top;
+    glm::vec4  grass_color_bottom;
+    glm::vec4  grass_color_ground;
+    glm::vec4  grass_color_ground_far;
+    // Fake grass-cast shadows on the raymarched terrain.
+    //   x: strength (0 = off, 1 = full shadow under dense grass cells)
+    //   y: sample count (0..8, more = smoother but slower)
+    //   z: max sample distance (m, controls shadow reach along sun XZ)
+    //   w: unused
+    glm::vec4  grass_shadow_params;
 };
 
 // ---- KHR ray tracing entry points ----

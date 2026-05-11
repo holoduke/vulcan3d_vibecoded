@@ -1582,13 +1582,14 @@ void VulkanEngine::init_viewmodel() {
         // point forward (camera -Z); without it the assets/gun model
         // points back at the player.
         // m254 asset orientation walk-through: bare → pointed UP, pitch
-        // -90°X → pointed LEFT on its side. So the asset's barrel
-        // axis lives along +X (model "right"). Yaw +90° around Y maps
-        // +X → -Z (camera forward), and the asset's "up" axis comes
-        // around to +Y in the process — no separate roll needed.
-        float scale = 0.55f / max_side;
+        // -90°X → pointed LEFT on its side. The asset's barrel axis
+        // turned out to be -X (not +X as previously assumed) — yaw
+        // +90° around Y mapped that to +Z (toward the player) and the
+        // gun pointed backwards. Yaw -90° flips it the other way so
+        // the barrel ends up along -Z (camera forward).
+        float scale = 0.70f / max_side;
         glm::mat4 rot_yaw = glm::rotate(glm::mat4(1.0f),
-                                         glm::radians(90.0f),
+                                         glm::radians(-90.0f),
                                          glm::vec3(0.0f, 1.0f, 0.0f));
 
         viewmodel_root_offset_ =

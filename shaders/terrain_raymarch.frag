@@ -14,6 +14,8 @@
 // compose pass's sky still shows through.
 
 layout(location = 0) in vec2 vNDC;
+layout(location = 1) in vec4 vWNear;
+layout(location = 2) in vec4 vWFar;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
@@ -241,6 +243,24 @@ layout(set = 0, binding = 0) uniform Scene {
     //   z: final-colour AO multiplier strength (0..1)
     //   w: GI bounces cap
     vec4 terrain_rt_extra;
+    // Grass colour palette + extras (UI-driven).
+    //   grass_color_top.rgb    = blade tip colour
+    //   grass_color_top.w      = raymarched grass density (0..1)
+    //   grass_color_bottom.rgb = blade base colour
+    //   grass_color_bottom.w   = blade-base AO floor (0..1)
+    //   grass_color_ground.rgb     = CLOSE terrain tint
+    //   grass_color_ground.w       = ground tint strength (0..1)
+    //   grass_color_ground_far.rgb = FAR terrain tint
+    vec4 grass_color_top;
+    vec4 grass_color_bottom;
+    vec4 grass_color_ground;
+    vec4 grass_color_ground_far;
+    // Fake grass-cast shadows on raymarched terrain.
+    //   x: strength (0..1, 0 = off)
+    //   y: sample count (int 0..8 along sun-XZ direction)
+    //   z: max reach (m)
+    //   w: unused
+    vec4 grass_shadow_params;
 } scene;
 
 // Cheap directional sky model вЂ” horizon -> zenith ramp around the
@@ -266,7 +286,11 @@ vec3 sample_sky(vec3 dir) {
     vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
     vec3 zenith  = scene.sky_color.rgb;
     vec3 sky = mix(horizon, zenith, pow(up, 0.45));
-    float halo = pow(max(dot(dir, L), 0.0), 8.0);
+    // pow(x, 8) → 3 squarings instead of exp/log.
+    float h1 = max(dot(dir, L), 0.0);
+    float h2 = h1 * h1;
+    float h4 = h2 * h2;
+    float halo = h4 * h4;
     sky += scene.sun_color.rgb * scene.sun_color.a * 0.08 * halo;
     return sky;
 }
@@ -599,6 +623,43 @@ float calcShadow(vec3 pos, vec3 sunDir) {
     return res * res * (3.0 - 2.0 * res);
 }
 
+// Fake grass-cast shadow on the raymarched terrain. Walks the grass
+// mask along the sun's XZ direction from the terrain pixel toward
+// the sun; cells with grass presence accumulate a soft shadow.
+// Cheap (≤8 mask taps), and "good enough" because grass blades are
+// sub-pixel at the kind of distance where the player would notice
+// shadow inaccuracy. Returns 0..1 (0 = no grass shadow, 1 = fully
+// in a grass cell's shadow). Caller multiplies the diffuse term by
+// (1 - grass_shadow * strength).
+float grassCastShadow(vec3 pos, vec3 sunDir) {
+    float strength = scene.grass_shadow_params.x;
+    int   N        = int(scene.grass_shadow_params.y);
+    float reach    = max(scene.grass_shadow_params.z, 0.1);
+    if (strength < 1e-3 || N <= 0) return 0.0;
+    // Sun's XZ direction (from terrain toward sun). Skip when the
+    // sun is near vertical (sun_xz_len → 0) — no horizontal shadow
+    // projection then.
+    vec2 sun_xz = sunDir.xz;
+    float sun_xz_len = length(sun_xz);
+    if (sun_xz_len < 0.05) return 0.0;
+    sun_xz /= sun_xz_len;
+    float shadow = 0.0;
+    for (int i = 1; i <= 8; ++i) {
+        if (i > N) break;
+        float dist = reach * (float(i) / float(N));
+        vec2 sample_xz = pos.xz + sun_xz * dist;
+        vec2 uv = (sample_xz / kHeightmapSide) + vec2(0.5);
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) continue;
+        float presence = textureLod(u_grass_mask, uv, 0.0).r;
+        // Falloff with distance: nearer grass casts a stronger
+        // contribution; far samples are smaller blades / lower sun
+        // angle penetration.
+        float falloff = 1.0 - smoothstep(0.0, 1.0, dist / reach);
+        shadow = max(shadow, presence * falloff);
+    }
+    return shadow;
+}
+
 // Sample the CPU-baked grass mask (binding 13, RG8). Single source of
 // truth shared with grass_raymarch.frag.
 //   R = presence  (fixed at bake time)
@@ -643,12 +704,20 @@ vec3 getMaterial(vec3 pos, vec3 nor) {
     col = mix(col, sand, beachMask);
     // Grass-density green tint — drives the ground colour where the
     // raymarched grass pass (grass_raymarch.frag) would place blades.
-    // Without this, the bare terrain shows through between blades and
-    // reads as desaturated rock instead of a meadow surface.
+    // Two colours (close + far) blend with camera distance so meadows
+    // can read as bright lit-green near the player and a darker
+    // muted hue at distance (or whatever the user picks).
     float grass_amt = grassEligibility(pos.xz, pos.y);
-    vec3 grass_top  = mix(vec3(0.18, 0.30, 0.09),
-                           vec3(0.13, 0.22, 0.06), nz);
-    col = mix(col, grass_top, grass_amt * 0.85);
+    float cam_d     = distance(pos, scene.camera_pos.xyz);
+    // Same anchor distances the grass-blade alpha ramp uses, so the
+    // blade-fade and the ground-tint transition stay aligned.
+    float ground_t  = smoothstep(30.0, 200.0, cam_d);
+    vec3 ground_base = mix(scene.grass_color_ground.rgb,
+                            scene.grass_color_ground_far.rgb,
+                            ground_t);
+    vec3 grass_top  = mix(ground_base, ground_base * 0.7, nz);
+    float tint_str  = clamp(scene.grass_color_ground.w, 0.0, 1.0);
+    col = mix(col, grass_top, grass_amt * tint_str);
     return col;
 }
 
@@ -726,13 +795,12 @@ vec3 waterNormal(vec2 worldXZ, float t, float strength, float scale) {
 }
 
 void main() {
-    // Reconstruct the world-space ray from this fragment's NDC.xy.
-    // ndcNear (z=0) and ndcFar (z=1) в†’ world points; their delta is
-    // the unnormalised direction.
-    vec4 wNear = pc.model * vec4(vNDC, 0.0, 1.0);
-    vec4 wFar  = pc.model * vec4(vNDC, 1.0, 1.0);
+    // Ray reconstruction: vWNear / vWFar were computed in the vert
+    // shader (pc.model × ndc-near / ndc-far) and interpolated. Per
+    // pixel we just need the homogeneous divide + subtract + normalize
+    // — the matrix multiplies that used to dominate this stub are gone.
     vec3 ro = scene.camera_pos.xyz;
-    vec3 rd = normalize(wFar.xyz / wFar.w - wNear.xyz / wNear.w);
+    vec3 rd = normalize(vWFar.xyz / vWFar.w - vWNear.xyz / vWNear.w);
 
     float t = raymarch(ro, rd);
 
@@ -770,9 +838,13 @@ void main() {
 
         // Schlick fresnel вЂ” F0 = 0.02 for water. Looking grazing-on
         // means full reflection; looking straight down в‰€ 2 % reflection.
+        // pow(x, 5) → 3 multiplies (x²·x²·x).
         float cosV = clamp(-dot(rd, wnor), 0.0, 1.0);
         const float F0 = 0.02;
-        float fres = F0 + (1.0 - F0) * pow(1.0 - cosV, 5.0);
+        float oneMinusV = 1.0 - cosV;
+        float fv2 = oneMinusV * oneMinusV;
+        float fv5 = fv2 * fv2 * oneMinusV;
+        float fres = F0 + (1.0 - F0) * fv5;
 
         vec3 refl = reflect(rd, wnor);
         // Sky reflection вЂ” horizonв†’zenith gradient + sun halo. Used
@@ -886,7 +958,11 @@ void main() {
         // Specular highlight on the wave crests when the sun is close
         // to the half-vector. Sharp lobe (~64) so it reads as glints.
         vec3 H = normalize(sunDirW - rd);
-        float spec = pow(max(dot(wnor, H), 0.0), 64.0);
+        // pow(x, 64) → 6 successive squarings.
+        float sp1 = max(dot(wnor, H), 0.0);
+        float sp2 = sp1 * sp1; float sp4 = sp2 * sp2;
+        float sp8 = sp4 * sp4; float sp16 = sp8 * sp8;
+        float sp32 = sp16 * sp16; float spec = sp32 * sp32;
 
         // Sun shadow on the water surface вЂ” bound-checked sample of
         // the sun shadow map (binding 7), already populated from
@@ -973,9 +1049,13 @@ void main() {
         // tight we re-do the fog inline here using the same code path.
         float sundotW = clamp(dot(rd, sunDirW), 0.0, 1.0);
         vec3 ext_w = exp(-t_water * 0.00025 * vec3(1.0, 1.5, 4.0));
+        // pow(x, 8) → 3 squarings.
+        float sd2 = sundotW * sundotW;
+        float sd4 = sd2 * sd2;
+        float sd8 = sd4 * sd4;
         vec3 fogColW = mix(vec3(0.55, 0.55, 0.58),
                            vec3(1.0, 0.7, 0.3),
-                           0.3 * pow(sundotW, 8.0));
+                           0.3 * sd8);
         col_w = col_w * ext_w + fogColW * (1.0 - ext_w);
 
         // Write hit depth; rasterised geometry that's actually in
@@ -1009,7 +1089,8 @@ void main() {
 
     float dif = clamp(dot(nor, sunDir), 0.0, 1.0);
     float amb = 0.5 + 0.5 * nor.y;
-    float fre = pow(clamp(1.0 + dot(rd, nor), 0.0, 1.0), 2.0);
+    float fre_in = clamp(1.0 + dot(rd, nor), 0.0, 1.0);
+    float fre    = fre_in * fre_in;   // pow(x, 2) is just a square
 
     // Terrain self-shadow (FBM march). Bias is small (5 cm along
     // the surface normal) вЂ” large biases (the previous 50 cm) made
@@ -1021,6 +1102,17 @@ void main() {
     float self_shadow = (dif > 0.0)
         ? (1.0 - calcShadow(pos + nor * 0.05, sunDir))
         : 1.0;
+
+    // Fake grass-cast shadow: probe the grass mask along the sun's
+    // XZ direction from this terrain pixel; cells with grass darken
+    // the diffuse term. Strength + sample count + reach are all UI
+    // sliders (0 strength = entirely off, no taps).
+    float gcs_strength = scene.grass_shadow_params.x;
+    float grass_shadow = grassCastShadow(pos, sunDir);
+    // Combine multiplicatively with self_shadow. Convert grass shadow
+    // amount to a transmittance and multiply (higher self_shadow
+    // already = more shadow; same convention here).
+    self_shadow = max(self_shadow, grass_shadow * gcs_strength);
 
     // RT PCSS for castle / boxes / dyn-props. Mirrors cube.frag's
     // terrain-receiver shadow path 1:1 вЂ” the cube.frag terrain
@@ -1379,9 +1471,13 @@ void main() {
     // direction so the horizon glows warm where the sun touches it.
     vec3 extinction = exp(-t * 0.00025 * vec3(1.0, 1.5, 4.0));
     float sundot = clamp(dot(rd, sunDir), 0.0, 1.0);
+    // pow(x, 8) → 3 squarings.
+    float sn2 = sundot * sundot;
+    float sn4 = sn2 * sn2;
+    float sn8 = sn4 * sn4;
     vec3 fogCol = mix(vec3(0.55, 0.55, 0.58),
                       vec3(1.0, 0.7, 0.3),
-                      0.3 * pow(sundot, 8.0));
+                      0.3 * sn8);
     col = col * extinction + fogCol * (1.0 - extinction);
 
     // === Volumetric ground fog (real ray-march) =================

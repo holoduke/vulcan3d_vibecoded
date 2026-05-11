@@ -1155,6 +1155,20 @@ private:
         // so the slider can reshape the band live without rebake.
         float grass_alt_min = -2.0f;
         float grass_alt_max = 35.0f;
+        // Grass colour palette (linear RGB). Exposed via UI sliders.
+        glm::vec3 grass_color_top         = { 0.40f, 0.55f, 0.18f };  // blade tip
+        glm::vec3 grass_color_bottom      = { 0.18f, 0.22f, 0.08f };  // blade base
+        glm::vec3 grass_color_ground      = { 0.18f, 0.30f, 0.09f };  // close terrain tint
+        glm::vec3 grass_color_ground_far  = { 0.13f, 0.22f, 0.06f };  // far terrain tint
+        // Fake grass-cast shadows on the raymarched terrain.
+        float grass_shadow_strength = 0.45f;   // 0..1, 0 = off
+        int   grass_shadow_samples  = 4;       // 0..8 sample taps along sun XZ
+        float grass_shadow_max_dist = 1.6f;    // metres of reach along sun direction
+        // Strength of the terrain green tint (0..1).
+        float grass_ground_tint_strength = 0.85f;
+        // Raymarched-grass base AO floor at the blade base. Lower = darker
+        // base / more contrast top-to-bottom; higher = flatter / fuller.
+        float grass_base_ao_floor = 0.35f;
 
         // Sun shadow map (binding 7). Two knobs:
         //   shadow_map_resolution: square texture side. Snapped at apply

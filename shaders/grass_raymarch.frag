@@ -41,6 +41,24 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     mat4  light_vp;
     vec4  terrain_extra;
     vec4  water_params;     // x: enabled, y: water level, z..w: unused here
+    vec4  water_color;
+    vec4  water_color_shallow;
+    vec4  water_shore;
+    vec4  fog_band;
+    vec4  terrain_rt_extra;
+    // Grass colour palette + extras (UI-driven).
+    //   grass_color_top.rgb    = blade tip colour
+    //   grass_color_top.w      = raymarched grass density (0..1, per-cell skip)
+    //   grass_color_bottom.rgb = blade base colour
+    //   grass_color_bottom.w   = blade-base AO floor (0..1)
+    //   grass_color_ground.rgb     = CLOSE ground tint (terrain shader +
+    //                                 grass distance fade target)
+    //   grass_color_ground.w       = ground tint strength (terrain shader only)
+    //   grass_color_ground_far.rgb = FAR ground tint
+    vec4  grass_color_top;
+    vec4  grass_color_bottom;
+    vec4  grass_color_ground;
+    vec4  grass_color_ground_far;
 } scene;
 
 // Heightmap (R32_SFLOAT) — shared with terrain raymarch + cube shaders.
@@ -241,10 +259,30 @@ float map(vec3 p, out bool out_blade_hit) {
     // so |∇h|_max = √(1/n²−1).
     float slope_n_min = scene.grass_extra.z;
     float slope_max = sqrt(max(1e-4, 1.0 / max(slope_n_min * slope_n_min, 1e-4) - 1.0));
+    float density   = clamp(scene.grass_color_top.w, 0.0, 1.0);
+    // Distance-density falloff: far cells get extra-thinned on top
+    // of the global density slider. dist_density = 0 → no falloff,
+    // dist_density = 1 → density drops to ~15% at the max raymarch
+    // range. Soft-distance anchor (pc.color.w) and max distance
+    // (pc.color.x) match the alpha-cutoff distance ramp so the two
+    // visual transitions stay aligned.
+    float t_cam       = length(p - scene.camera_pos.xyz);
+    float kMaxD       = max(pc.color.x, 4.0);
+    float soft_d      = max(pc.color.w, 1.0);
+    float dist_w      = smoothstep(soft_d, kMaxD, t_cam);
+    float dist_dens   = clamp(scene.grass_extra.w, 0.0, 1.0);
+    float density_eff = density * mix(1.0, max(1.0 - dist_dens * 0.85, 0.0), dist_w);
     const float kEligThresh = 0.10;
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
             vec2 nId = cellId + vec2(float(dx), float(dy));
+            // Density-driven per-cell skip. Each cell gets a stable
+            // hash; cells whose hash exceeds the (distance-modulated)
+            // density are skipped. density_eff = global density ×
+            // distance-density falloff (computed once outside the
+            // sweep above).
+            vec4 r = hash42(nId);
+            if (r.x > density_eff) continue;
             // Single-source-of-truth eligibility — sample the RG8 mask
             // shared with terrain_raymarch.frag's getMaterial.
             //   .r = presence  (0..1, fixed at bake time)
@@ -259,7 +297,6 @@ float map(vec3 p, out bool out_blade_hit) {
                                               slope_max * 1.2, slope_mag);
             float elig = mg.r * slope_w;
             if (elig < kEligThresh) continue;
-            vec4 r = hash42(nId);
             vec3 np = lp - vec3(float(dx), 0.0, float(dy)) * kPeriod;
             // Per-blade rotation + sub-cell xy offset.
             np.xz = rotate2d(r.z * kPi2) * np.xz;
@@ -381,15 +418,23 @@ void main() {
         }
     }
 
-    // Per-blade colour variation — low-freq world hash gives clumps.
-    float clump = hash12(floor(p.xz * 0.5));
-    vec3 youngCol = vec3(0.32, 0.42, 0.18);
-    vec3 oldCol   = vec3(0.36, 0.39, 0.16);
-    vec3 grassCol = mix(youngCol, oldCol, clump);
-
-    // Height-from-ground AO: bottom of blade darker, tip lighter.
+    // Per-blade colour: lerp between bottom (base) and top (tip) by
+    // height above ground. Both ends are user-driven via UI sliders
+    // (scene.grass_color_bottom / grass_color_top). Slight low-freq
+    // hash modulation breaks regularity without needing two separate
+    // "young/old" colour vars.
     float h_above = max(0.0, p.y - terrainY);
-    float ao = 0.35 + 0.65 * pow(clamp(h_above / 1.2, 0.0, 1.0), 0.6);
+    float h_t     = clamp(h_above / 1.2, 0.0, 1.0);
+    float clump   = hash12(floor(p.xz * 0.5)) * 0.15;   // ±15% per-clump tint shift
+    vec3 grassCol = mix(scene.grass_color_bottom.rgb,
+                        scene.grass_color_top.rgb, h_t);
+    grassCol *= 1.0 - clump;
+
+    // Height-from-ground AO. Slider-controlled floor (0 = darkest base,
+    // 1 = no AO darkening); the lerp above already shifts colour with
+    // height, so the AO term mostly adds extinction at the very base.
+    float ao_floor = clamp(scene.grass_color_bottom.w, 0.0, 1.0);
+    float ao = ao_floor + (1.0 - ao_floor) * pow(h_t, 0.6);
 
     vec3 sun_term = scene.sun_color.rgb * scene.sun_color.a *
                     (n_dot_l * sun_lit);
@@ -401,11 +446,15 @@ void main() {
                 pow(clamp(1.0 + dot(N, rd), 0.0, 1.0), 3.0);
     col += fres;
 
-    // Distance fade colour target = the same green tint
-    // terrain_raymarch's getMaterial blends in for grass-eligible
-    // cells. Blade colour eases INTO the underlying ground colour at
-    // distance so the colour transition is invisible.
-    vec3 fade_target = vec3(0.18, 0.30, 0.09);
+    // Distance fade colour target — eases blade colour INTO the
+    // underlying ground tint so the silhouette transition is invisible.
+    // Two ground colours blend by camera distance using the same
+    // anchors the terrain shader uses (30..200m), keeping the two
+    // passes in lock-step.
+    float ground_t   = smoothstep(30.0, 200.0, t);
+    vec3 fade_target = mix(scene.grass_color_ground.rgb,
+                            scene.grass_color_ground_far.rgb,
+                            ground_t);
     float fade = smoothstep(kMaxDist * 0.55, kMaxDist, t);
     col = mix(col, fade_target, fade);
 

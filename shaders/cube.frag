@@ -232,13 +232,19 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     const float kHeightScale = 0.04;       // 4cm peak-to-trough at 1m view
     vec2  P = (V_t.xy / V_t.z) * (kHeightScale * depth_w);
 
-    const int kSteps = 16;
+    // Step count ramps with depth_w: full 16 steps for the closest
+    // walls (depth_w → 1), down to 4 steps for walls just inside the
+    // SPOM fade kick-in (depth_w small but > 0.001). Past the fade
+    // we already returned uv0. Each saved step is one texture() in the
+    // hot SPOM pass — meaningful win on the castle's far-back walls.
+    int kSteps = max(4, int(round(depth_w * 16.0)));
     float layer_step = 1.0 / float(kSteps);
     vec2  uv_step    = -P * layer_step;
     float current_layer = 0.0;
     vec2  cur_uv = uv0;
     float cur_h  = 1.0 - texture(u_height[height_idx], cur_uv).r;
-    for (int i = 0; i < kSteps; ++i) {
+    for (int i = 0; i < 16; ++i) {
+        if (i >= kSteps) break;
         if (current_layer >= cur_h) break;
         cur_uv += uv_step;
         current_layer += layer_step;
@@ -1114,7 +1120,15 @@ void main() {
                 vec3  origin  = vWorldPos + N * bias;
                 bool  in_shadow = any_hit(origin, L_m, dist - 0.01);
                 if (!in_shadow) {
-                    direct += albedo * m_color * m_intensity * n_dot_lm * atten;
+                    // Cap the contribution per-pixel. Surfaces VERY
+                    // close to the muzzle (the viewmodel itself, ~0.5
+                    // m from the muzzle origin) hit the inverse-square
+                    // singularity — the gun would self-light into the
+                    // tens of thousands of nits and bloom the entire
+                    // screen during firing. Hard ceiling at 4.0 keeps
+                    // the muzzle-glow look without runaway HDR.
+                    vec3 contrib = albedo * m_color * m_intensity * n_dot_lm * atten;
+                    direct += min(contrib, vec3(4.0));
                 }
             }
         }

@@ -792,6 +792,29 @@ void VulkanEngine::build_menu_ui() {
                                &rt_.grass_distance_density, 0.0f, 1.0f, "%.2f");
             ImGui::SliderFloat("altitude min (m)", &rt_.grass_alt_min, -20.0f, 200.0f);
             ImGui::SliderFloat("altitude max (m)", &rt_.grass_alt_max, -20.0f, 200.0f);
+            ImGui::ColorEdit3("blade tip colour",
+                              &rt_.grass_color_top.x);
+            ImGui::ColorEdit3("blade base colour",
+                              &rt_.grass_color_bottom.x);
+            ImGui::SliderFloat("base AO floor",
+                               &rt_.grass_base_ao_floor, 0.0f, 1.0f, "%.2f");
+            ImGui::ColorEdit3("ground tint close",
+                              &rt_.grass_color_ground.x);
+            ImGui::ColorEdit3("ground tint far",
+                              &rt_.grass_color_ground_far.x);
+            ImGui::SliderFloat("ground tint strength",
+                               &rt_.grass_ground_tint_strength,
+                               0.0f, 1.0f, "%.2f");
+            ImGui::Separator();
+            ImGui::TextUnformatted("Grass shadow on terrain");
+            ImGui::SliderFloat("shadow strength",
+                               &rt_.grass_shadow_strength,
+                               0.0f, 1.0f, "%.2f");
+            ImGui::SliderInt  ("shadow samples",
+                               &rt_.grass_shadow_samples, 0, 8);
+            ImGui::SliderFloat("shadow reach (m)",
+                               &rt_.grass_shadow_max_dist,
+                               0.2f, 5.0f, "%.1f");
         }
 
         ImGui::EndTabItem();
