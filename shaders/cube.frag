@@ -333,6 +333,46 @@ vec3 cos_hemi(float u1, float u2, vec3 n) {
     return d.x * t + d.y * n + d.z * b;
 }
 
+// Vogel disk taps (cos, sin of i × golden-angle). 32 entries; PCSS
+// loops index `i & 31` so any sample count up to 32 maps cleanly. Per-
+// pixel rotation (one sin/cos at the start of the loop) breaks the
+// fixed-pattern aliasing while still saving 2N − 2 trig calls on an
+// N-tap PCSS shadow.
+const vec2 kVogelDisk[32] = vec2[32](
+    vec2( 1.000000,  0.000000),
+    vec2(-0.737369,  0.675490),
+    vec2( 0.087426, -0.996171),
+    vec2( 0.608439,  0.793601),
+    vec2(-0.984713, -0.174182),
+    vec2( 0.843755, -0.536728),
+    vec2(-0.259604,  0.965715),
+    vec2(-0.460907, -0.887448),
+    vec2( 0.939321,  0.343039),
+    vec2(-0.924346,  0.381556),
+    vec2( 0.423846, -0.905734),
+    vec2( 0.299284,  0.954164),
+    vec2(-0.865211, -0.501408),
+    vec2( 0.976676, -0.214719),
+    vec2(-0.575129,  0.818062),
+    vec2(-0.128511, -0.991708),
+    vec2( 0.764649,  0.644447),
+    vec2(-0.999146,  0.041318),
+    vec2( 0.708829, -0.705380),
+    vec2(-0.046191,  0.998933),
+    vec2(-0.640709, -0.767784),
+    vec2( 0.991069,  0.133347),
+    vec2(-0.820858,  0.571132),
+    vec2( 0.219481, -0.975617),
+    vec2( 0.497181,  0.867647),
+    vec2(-0.952693, -0.303935),
+    vec2( 0.907791, -0.419423),
+    vec2(-0.386061,  0.922473),
+    vec2(-0.338452, -0.940984),
+    vec2( 0.885189,  0.465231),
+    vec2(-0.966970,  0.254890),
+    vec2( 0.540838, -0.841127)
+);
+
 // Shadow + AO test. Cull-mask 0x01 picks up only instances marked as
 // shadow-casters (bit 0). Sparks and projectiles are flagged 0xFE on the
 // host вЂ” they're tiny visual effects whose hard shadow streaks looked wrong
@@ -399,7 +439,11 @@ vec3 sample_sky(vec3 dir) {
     vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
     vec3 zenith  = scene.sky_color.rgb;
     vec3 sky = mix(horizon, zenith, pow(up, 0.45));
-    float halo = pow(max(dot(dir, L), 0.0), 8.0);
+    // pow(x, 8) → 3 squarings, no exp/log.
+    float h1 = max(dot(dir, L), 0.0);
+    float h2 = h1 * h1;
+    float h4 = h2 * h2;
+    float halo = h4 * h4;
     sky += scene.sun_color.rgb * scene.sun_color.a * 0.08 * halo;
     return sky;
 }
@@ -979,12 +1023,20 @@ void main() {
         // as an arg so a single function body inlines and the ray-query
         // call has no divergent control on it.
         const uint blocker_mask = is_terrain_pre ? 0x02u : 0xFFu;
+        // Per-pixel rotation: ONE sin/cos covers the disk-rotation
+        // dither for all blocker taps, instead of one sin/cos pair
+        // per tap. Mixed with the Vogel constant table this drops the
+        // per-pixel trig cost from 2·N to 2.
+        float pp_phi_b = rand(seed_base + uvec3(0, 99u, 0u)) * 6.28318530718;
+        float pp_c_b = cos(pp_phi_b);
+        float pp_s_b = sin(pp_phi_b);
         for (int i = 0; i < kBlockerSearch; ++i) {
             float br1 = rand(seed_base + uvec3(i, 91u, 13u));
-            float br2 = rand(seed_base + uvec3(i, 19u, 71u));
             float r   = sqrt(br1) * base_softness * 4.0;
-            float phi = 6.28318530718 * br2;
-            vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
+            vec2  v   = kVogelDisk[i & 31];
+            float vx  = pp_c_b * v.x - pp_s_b * v.y;
+            float vy  = pp_s_b * v.x + pp_c_b * v.y;
+            vec3 jitter = (vx * tan_u + vy * tan_v) * r;
             vec3 dir = normalize(L + jitter);
             float t;
             if (closest_hit_m(origin, dir, 200.0, blocker_mask, t)) { sum_t += t; ++hits; }
@@ -1024,16 +1076,23 @@ void main() {
             int taken = 0;
             // One loop, mask hoisted (same trick as the blocker loop).
             const uint shadow_mask = is_terrain_pre ? 0x02u : 0x01u;
+            // Same Vogel + per-pixel rotation trick as the blocker loop.
+            // Trig drops from 2·N_s_eff to 2 across the whole shadow
+            // pass; on heavy slider settings (32 samples) that's ~60
+            // sin/cos ops removed per shadowed pixel.
+            float pp_phi_s = rand(seed_base + uvec3(1, 99u, 0u)) * 6.28318530718;
+            float pp_c_s = cos(pp_phi_s);
+            float pp_s_s = sin(pp_phi_s);
             for (int sy = 0; sy < strata && taken < N_s_eff; ++sy) {
                 for (int sx = 0; sx < strata && taken < N_s_eff; ++sx) {
                     int idx = taken * 2 + parity;
                     float r1 = rand(seed_base + uvec3(idx, 11u, 47u));
-                    float r2 = rand(seed_base + uvec3(idx, 53u, 23u));
                     float u1 = (float(sx) + r1) * inv_strata;
-                    float u2 = (float(sy) + r2) * inv_strata;
                     float r   = sqrt(u1) * penumbra;
-                    float phi = 6.28318530718 * u2;
-                    vec3 jitter = (cos(phi) * tan_u + sin(phi) * tan_v) * r;
+                    vec2  v   = kVogelDisk[idx & 31];
+                    float vx  = pp_c_s * v.x - pp_s_s * v.y;
+                    float vy  = pp_s_s * v.x + pp_c_s * v.y;
+                    vec3 jitter = (vx * tan_u + vy * tan_v) * r;
                     vec3 dir = normalize(L + jitter);
                     if (any_hit_m(origin, dir, 200.0, shadow_mask)) blocked += 1.0;
                     ++taken;
@@ -1181,15 +1240,21 @@ void main() {
         vec3 ao_up  = abs(N.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0);
         vec3 ao_tan = normalize(cross(ao_up, N));
         vec3 ao_bit = cross(N, ao_tan);
+        // Vogel disk + per-pixel rotation for the hemisphere phi term.
+        // The cosine-hemisphere y is still derived from u1 (sqrt-based);
+        // only the disk-azimuth trig moves to the table. Saves N_ao
+        // sin/cos pairs per pixel.
+        float pp_phi_a = rand(seed_base + uvec3(0, 99u, 1u)) * 6.28318530718;
+        float pp_c_a = cos(pp_phi_a);
+        float pp_s_a = sin(pp_phi_a);
         for (int i = 0; i < N_ao; ++i) {
             float u1 = rand(seed_base + uvec3(i, 7u, 53u));
-            float u2 = rand(seed_base + uvec3(i, 41u, 5u));
             float r_h = sqrt(u1);
-            float phi = 6.28318530718 * u2;
-            vec3 ld = vec3(r_h * cos(phi),
-                           sqrt(max(0.0, 1.0 - u1)),
-                           r_h * sin(phi));
-            vec3 d = ld.x * ao_tan + ld.y * N + ld.z * ao_bit;
+            float y   = sqrt(max(0.0, 1.0 - u1));
+            vec2  v   = kVogelDisk[i & 31];
+            float vx  = pp_c_a * v.x - pp_s_a * v.y;
+            float vy  = pp_s_a * v.x + pp_c_a * v.y;
+            vec3 d = (r_h * vx) * ao_tan + y * N + (r_h * vy) * ao_bit;
             if (any_hit(origin_ao, d, ao_radius)) occluded += 1.0;
             ++taken;
         }
