@@ -78,7 +78,7 @@ inline float rm_noised(glm::vec2 p, glm::vec2& deriv) {
 
 constexpr float kRmTerrainScale  = 0.003f;
 constexpr float kRmTerrainHeight = 120.0f;
-constexpr float kRmPlateauBlend  = 24.0f;
+constexpr float kRmPlateauBlend  = 20.0f;   // matches shader/world plateau_blend
 
 // Mirror of shader m2 = mat2(0.8, -0.6, 0.6, 0.8). GLSL is column-major;
 // applying m * p = (col0*p.x + col1*p.y) gives:

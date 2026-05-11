@@ -129,9 +129,9 @@ const float TERRAIN_SCALE  = 0.003;
 const float TERRAIN_HEIGHT = 120.0;
 // Plateau matches the gameplay default (engine init: castle area).
 const vec2  kPlateauCenter = vec2(0.0, 0.0);
-const float kPlateauExtent = 28.0;
+const float kPlateauExtent = 11.5;   // matches world.cpp HeightmapParams
 const float kPlateauHeight = 22.0;
-const float kPlateauBlend  = 24.0;
+const float kPlateauBlend  = 20.0;
 
 float plateauWeight(vec2 worldXZ) {
     vec2 d = abs(worldXZ - kPlateauCenter) - vec2(kPlateauExtent);

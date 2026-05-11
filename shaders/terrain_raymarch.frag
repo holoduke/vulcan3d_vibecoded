@@ -81,52 +81,7 @@ float sampleHeightDelta(vec2 worldXZ) {
     // is ~0 at the world boundary (no sculpting past the edge), so a
     // clamped read at out-of-world XZ returns the right value too.
     vec2 uv = clamp((worldXZ / kHeightmapSide) + vec2(0.5), 0.0, 1.0);
-    float delta = textureLod(u_terrain_height, uv, 0.0).r;
-    // 3-octave plain-FBM injection (no erosion damper — we WANT the
-    // high frequencies to contribute fully, that's the visible detail).
-    // Breaks the C¹ creases between 1 m heightmap samples that read
-    // as "faces" up close. Cost: 3 noised() calls per sampleHeightDelta
-    // call, only when the brush touched this cell. Per-pixel total
-    // is still bounded — march invokes sampleHeightDelta 30–100 times,
-    // so 90–300 noised evaluations per pixel inside brushed regions
-    // (zero outside via early-out).
-    //
-    // Octave 0 at scale 0.5 → 2 m wavelength (resolved by march step).
-    // Octaves 1, 2 at 1.0, 2.0 → 1 m, 0.5 m. The 0.5 m octave is
-    // approaching the march-step alias limit but the contribution
-    // weight is small enough (b=0.25) that any aliasing reads as
-    // surface texture rather than shimmer.
-    float dabs = abs(delta);
-    // Tiny cutoff just to skip pure-zero unbrushed cells (perf), but
-    // the smoothstep ramp below does the real fade — a HARD cutoff
-    // here (e.g. 0.05 m) snapped the noise contribution from ~1 cm
-    // to 0 right at the brush feather edge and read as a topographic
-    // contour line all around the brushed footprint.
-    if (dabs > 0.002) {
-        // 2 octaves only — the 3rd octave at 0.5 m wavelength was
-        // FINER than the march step (~0.4–0.8 m near camera), so
-        // every march step sampled roughly the same noise phase
-        // and the buffer banded into topographic contour lines.
-        // 2 octaves gives 2 m + 1 m wavelengths, both safely above
-        // the march step. m2 (the per-octave rotation declared
-        // further down) can't be forward-referenced — inlined.
-        float a = 0.0, b = 1.0;
-        vec2 p = worldXZ * 0.5;
-        for (int i = 0; i < 2; ++i) {
-            a += b * (noised(p).x - 0.5);
-            b *= 0.5;
-            vec2 q = vec2( 0.8 * p.x - 0.6 * p.y,
-                           0.6 * p.x + 0.8 * p.y);
-            p = q * 2.0;
-        }
-        // Smooth ramp from 0 (at unbrushed) → 1 (at delta ≥ 25 cm)
-        // so the noise turns ON gradually at the brush feather, no
-        // contour line. Amplitude scales with brush depth so flat
-        // regions stay flat.
-        float ramp = smoothstep(0.0, 0.25, dabs);
-        delta += a * dabs * 0.5 * ramp;
-    }
-    return delta;
+    return textureLod(u_terrain_height, uv, 0.0).r;
 }
 
 // Sun shadow map (single-cascade ortho D32). Rendered each frame
@@ -427,13 +382,48 @@ float terrainDetailNoise(vec2 worldXZ) {
 // surroundings ease into the flat castle pad. Mirrors what
 // generate_heightmap() does in the rasterised path so the visible
 // terrain shape matches what physics / castle assume.
-const float kPlateauBlend = 24.0;
+const float kPlateauBlend = 20.0;  // smooth ramp from castle-flat to FBM mountains
 float plateauWeight(vec2 worldXZ) {
     vec2 c = pc.color.xy;
     float ext = pc.color.z;
     vec2 d = abs(worldXZ - c) - vec2(ext);
     float dout = max(max(d.x, 0.0), max(d.y, 0.0));
     return 1.0 - smoothstep(0.0, kPlateauBlend, dout);
+}
+
+// Plateau ground-detail noise. The macro terrain FBM uses scales
+// 0.003 → 0.096 (333 m → 10 m wavelengths) — its SMALLEST feature is
+// ~10 m, so scaling it down for plateau use gives invisibly-small
+// "detail" (a few cm). What the player perceives as "rocky ground"
+// on the surrounding mountains is those 10 m ridges seen from far
+// away; on the flat plateau they're not there at all.
+//
+// This separate noise fires AT FINER SCALES (2.5 m → 1.25 m
+// wavelengths — safely above the ~0.8 m march-step alias floor)
+// and adds visible "ground texture" to plateau cells without
+// affecting anything outside. 2 octaves of plain noise (no
+// derivative erosion damper — we WANT the high freqs to contribute
+// fully). m2 (per-octave rotation declared further down) can't be
+// forward-referenced — inlined.
+float plateauGroundDetail(vec2 wp) {
+    // 50/50 mix of plain noise (rolling) + soft ridge (1 - |2n-1|)
+    // — gives natural rock character without the glass-flat smoothness
+    // of pure FBM or the spike-needle look of multifractal-weighted
+    // ridges. No squaring, no weight gating. 2 octaves at safe
+    // wavelengths (2.5 m + 1.25 m).
+    float a = 0.0, b = 1.0;
+    vec2 p = wp * 0.4;
+    for (int i = 0; i < 2; ++i) {
+        float n = noised(p).x;
+        float ridge  = 1.0 - abs(2.0 * n - 1.0);     // ∈ [0, 1]
+        float smooth_n = n;                            // ∈ [0, 1]
+        a += b * (mix(smooth_n, ridge, 0.5) - 0.5);  // re-centre on 0
+        b *= 0.5;
+        vec2 q = vec2( 0.8 * p.x - 0.6 * p.y,
+                       0.6 * p.x + 0.8 * p.y);
+        p = q * 2.0;
+    }
+    return a;
 }
 
 // Medium-detail FBM вЂ” used by the ray march. Derivative-erosion term
@@ -455,13 +445,34 @@ float terrainM(vec2 p) {
         b *= 0.5;
         p = m2 * p * 2.0;
     }
+    // Option-2 brush amplifier: the brush's smooth bilinear delta
+    // ALSO scales the local FBM amplitude. Brushed cells get more of
+    // the SAME procedural FBM (per-pixel detail, same character as
+    // the surrounding terrain) instead of a flat smooth bump. The
+    // raise/lower offset is preserved at the end via `+= delta` so
+    // the user can still sculpt arbitrary shapes; the amplifier is
+    // additional, not destructive. AMP = 0.05 → 1 m raise gives +5 %
+    // FBM amplitude; capped so a 60 m raise doesn't 4× the local
+    // mountains. Inside the plateau the FBM is already mixed out, so
+    // the amplifier has no effect there (plateau stays flat under
+    // the brush — only the offset fires).
     float h = a * TERRAIN_HEIGHT;
-    // Blend the FBM toward the gameplay plateau height inside the
-    // castle's footprint so brushes / dyn-props look seated.
+    // Plateau blend — but instead of mixing toward a glass-flat
+    // plateau_h, mix toward `plateau_h + small_detail_FBM` so the
+    // plateau surface inherits the same procedural character as the
+    // surrounding terrain (just smaller amplitude). Uses the SAME
+    // accumulated `a` value so it's free, and reads as a continuous
+    // scale-down of the surrounding mountains. The castle footprint
+    // (|xz| < 11 m) is already discarded for raymarched terrain
+    // earlier in the file, so castle siting isn't affected by this
+    // detail; only the courtyard / plateau-rim area gains texture.
+    // ±~1.5 m of FINE ground texture (2.5 m + 1.25 m wavelengths)
+    // instead of scaled-down macro FBM (whose smallest feature is
+    // 10 m → invisible at plateau scale).
+    // Plateau is now tiny (11.5 m, hidden under castle) — no need
+    // for extra ground-detail noise here.
     float t = plateauWeight(wp);
     h = mix(h, pc.color.w, t);
-    // Add sculpt / plateau-noise / disk-overlay deltas. Texture is
-    // 0 in unsculpted areas so this is a no-op for stock terrain.
     h += sampleHeightDelta(wp);
     return h;
 }
@@ -469,10 +480,10 @@ float terrainM(vec2 p) {
 // Distance-LOD variant: drops octaves smoothly as the ray distance
 // grows. The full octave count is the user's pc.tex_params.z; we
 // fade down to ~2 octaves past 600 m. Same outer wrapping (plateau
-// blend + sculpt delta) so close vs far results stay continuous вЂ”
-// only the inner FBM converges to a coarser sum past the LOD start.
-// Uses a uniform `kMaxOct` cap with an early-break so the loop body
-// stays branch-friendly for the GPU.
+// blend + sculpt delta + amplifier) so close vs far results stay
+// continuous — only the inner FBM converges to a coarser sum past
+// the LOD start. Uses a uniform `kMaxOct` cap with an early-break
+// so the loop body stays branch-friendly for the GPU.
 float terrainM_lod(vec2 p, float ray_t) {
     vec2 wp = p;
     p *= TERRAIN_SCALE;
@@ -492,6 +503,8 @@ float terrainM_lod(vec2 p, float ray_t) {
         p = m2 * p * 2.0;
     }
     float h = a * TERRAIN_HEIGHT;
+    // Plateau is now tiny (11.5 m, hidden under castle) — no need
+    // for extra ground-detail noise here.
     float tpl = plateauWeight(wp);
     h = mix(h, pc.color.w, tpl);
     h += sampleHeightDelta(wp);
@@ -516,6 +529,8 @@ float terrainH(vec2 p) {
         p = m2 * p * 2.0;
     }
     float h = a * TERRAIN_HEIGHT;
+    // Plateau is now tiny (11.5 m, hidden under castle) — no need
+    // for extra ground-detail noise here.
     float t = plateauWeight(wp);
     h = mix(h, pc.color.w, t);
     h += sampleHeightDelta(wp);
@@ -684,34 +699,6 @@ vec3 calcNormal(vec3 pos, float t) {
         N = normalize(N + vec3(-grad.x, 0.0, -grad.y) * 0.45);
     }
 
-    // ---- Brush-area FBM detail (normal-only) ----
-    // The brush writes a smooth bump into the 1 m delta texture; that
-    // bump reads as polygonal next to the per-pixel procedural FBM.
-    // To make brushed regions inherit the same ridge/valley character
-    // we paint a SECOND noise gradient onto the shading normal, gated
-    // by the absolute delta value at this point. The mask uses |delta|
-    // ONLY as a presence weight — no gradient of the delta itself —
-    // so sharp 1 m bilinear edges in the delta texture can't blow up
-    // the perturbation (that's what made the previous attempt blurry).
-    // Same tangent-plane projection pattern + amplitude as the
-    // micro-bump above. Distance fade is independent (longer reach —
-    // brushed areas are usually mid-range structures, not foot-of-
-    // camera detail).
-    float bdelta = sampleHeightDelta(pos.xz);
-    float bmask  = clamp(abs(bdelta) * 4.0, 0.0, 1.0);
-    float bfade  = 1.0 - smoothstep(60.0, 200.0, t);
-    float bw     = bmask * bfade;
-    if (bw > 0.05) {
-        // Two octaves at scales matched to the procedural surface so
-        // brushed-cell ridges look like their surroundings, not like
-        // a separate texture. 0.06 ≈ 17 m base wavelength, 0.20 ≈
-        // 5 m — both visible at typical viewing distance, neither
-        // sub-pixel close to the camera.
-        vec3 b1 = noised(pos.xz * 0.6);
-        vec3 b2 = noised(pos.xz * 2.1);
-        vec2 g  = (b1.yz * 0.40 + b2.yz * 0.22) * bw;
-        N = normalize(N + vec3(-g.x, 0.0, -g.y) * 0.45);
-    }
     return N;
 }
 

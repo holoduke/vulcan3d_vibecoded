@@ -1304,9 +1304,15 @@ void VulkanEngine::init_world() {
         hp.dim = 2048 * hres;
         hp.cell_size = 1.0f / static_cast<float>(hres);
         hp.height_scale = 140.0f;
-        hp.plateau_extent = glm::vec2(28.0f, 28.0f);
+        // Plateau: tight extent (just past castle outer wall) + a
+        // generous blend zone so the FBM ramps in smoothly. Without
+        // the long blend the procedural mountains (±60 m peaks)
+        // popped up immediately past the wall and looked super-spiky
+        // — the blend gives the player a "settled-into-the-hills"
+        // approach instead.
+        hp.plateau_extent = glm::vec2(11.5f, 11.5f);
         hp.plateau_height = 22.0f;
-        hp.plateau_blend  = 24.0f;
+        hp.plateau_blend  = 20.0f;
         hp.frequency      = 0.0014f;
         // When the procedural raymarched terrain is selected, generate
         // the heightmap from the SAME FBM the shader uses so physics,
@@ -2689,9 +2695,10 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         // height. Shader's terrainM blends FBM toward the plateau
         // height inside the castle footprint so brushes / dyn-props
         // visibly sit on the procedural surface. Values mirror the
-        // gameplay heightmap's plateau in init_world (28 m half-ext,
-        // 22 m height, centred at origin).
-        pc.color = glm::vec4(0.0f, 0.0f, 28.0f, 22.0f);
+        // gameplay heightmap's plateau in init_world (11.5 m half-ext,
+        // 22 m height, centred at origin — tight pad just under the
+        // castle so the surrounding terrain stays fully procedural).
+        pc.color = glm::vec4(0.0f, 0.0f, 11.5f, 22.0f);
         pc.emissive = glm::vec4(0.0f);
         // tex_params for the raymarch shader carries quality knobs:
         //   .x = max ray-march steps      (60..300)
