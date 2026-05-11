@@ -413,8 +413,18 @@ void VulkanEngine::draw(uint32_t img_index) {
 
     // Sun shadow map pass — runs first so its depth target is in
     // SHADER_READ_ONLY_OPTIMAL by the time the scene color pass samples
-    // it via grass.vert (binding 7).
-    render_sun_shadow_pass(frame.command_buffer);
+    // it via grass.vert (binding 7). Skip the entire pass when no
+    // consumer wants the result this frame: grass paths off + water-
+    // surface shadows off / water itself off. Image stays in
+    // SHADER_READ_ONLY from the previous pass (the init transition
+    // covers the very first frame), so the descriptor read returns
+    // stale-but-valid depth that nothing samples anyway.
+    bool sun_shadow_needed =
+        rt_.grass_enabled || rt_.grass_raymarch_enabled ||
+        (rt_.water_enabled && rt_.water_shadows_enabled);
+    if (sun_shadow_needed) {
+        render_sun_shadow_pass(frame.command_buffer);
+    }
 
     // Scene-color image: undefined -> color attachment optimal for rendering.
     vkinit::transition_image(frame.command_buffer, scene_color_image_,
