@@ -401,44 +401,38 @@ void main() {
                 pow(clamp(1.0 + dot(N, rd), 0.0, 1.0), 3.0);
     col += fres;
 
-    // Distance fade target = the same green tint terrain_raymarch's
-    // getMaterial blends in for grass-eligible cells. Blade colour eases
-    // INTO the underlying ground colour instead of into the sky, so the
-    // cutoff reads as "thinning out" rather than a hard sky-coloured
-    // ring. Dither the last 8% with a per-pixel hash discard so the
-    // very edge thins to bare terrain instead of a uniform tinted band.
+    // Distance fade colour target = the same green tint
+    // terrain_raymarch's getMaterial blends in for grass-eligible
+    // cells. Blade colour eases INTO the underlying ground colour at
+    // distance so the colour transition is invisible.
     vec3 fade_target = vec3(0.18, 0.30, 0.09);
     float fade = smoothstep(kMaxDist * 0.55, kMaxDist, t);
     col = mix(col, fade_target, fade);
-    float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233)))
-                          * 43758.5453);
-    if (fade > 0.92) {
-        if (dither < (fade - 0.92) * 12.5) { discard; }
-    }
 
-    // Soft-edge alpha test using the converged-hit SDF distance.
-    // hit_d ≈ 0 deep inside a blade, hit_d ≈ hit_thresh right at the
-    // silhouette. Convert to a 0..1 "edge alpha" then dither-discard.
+    // Distance-driven opacity. Close-up blades are fully opaque
+    // (alpha = 1). Past pc.color.w (the soft-distance setting) the
+    // alpha ramps down so far blades become genuinely translucent
+    // and the underlying terrain green tint shows through. The
+    // user-cutoff slider controls HOW MUCH transparency the far end
+    // reaches: cutoff = 0 → far blades stay opaque (alpha = 1);
+    // cutoff = 0.6 → far blades drop to alpha ≈ 0.4 (heavy blend
+    // with terrain).
     //
-    // Distance-driven cutoff: scene.grass_extra.y (slider) is the
-    // NEAR-pixel value (within pc.color.w metres of the camera);
-    // beyond that the cutoff ramps linearly to a near-1 ceiling by
-    // grass_raymarch_distance. Far blades therefore discard much more
-    // aggressively than near ones — they thin into the underlying
-    // terrain green tint instead of reading as a uniform "green
-    // far-mat", while close-up control over softness via the slider
-    // is preserved.
+    // The earlier "edge alpha from SDF distance" approach was wrong:
+    // the raymarch loop converges right AT the blade surface, so the
+    // hit_d sample lands near hit_thresh for every hit (interior or
+    // silhouette), producing uniformly low coverage and the "always
+    // transparent close-up" symptom.
     float user_cut    = scene.grass_extra.y;
     float soft_dist   = max(pc.color.w, 1.0);
-    float far_cut     = 0.85;        // hard ceiling at max range
     float dist_w      = smoothstep(soft_dist, kMaxDist, t);
-    float cutoff      = mix(user_cut, far_cut, dist_w);
-    float edge_alpha  = 1.0 - clamp(hit_d / max(hit_thresh, 1e-5), 0.0, 1.0);
-    if (edge_alpha < cutoff + (dither - 0.5) * 0.30) discard;
+    float final_alpha = mix(1.0, 1.0 - user_cut, dist_w);
 
-    outColor = vec4(col, 1.0);
+    outColor = vec4(col, final_alpha);
     // Treat grass as world-static for TAA (per-blade wind sway is sub-
-    // pixel and TAA's 5x5 spatial filter absorbs it).
+    // pixel and TAA's 5x5 spatial filter absorbs it). Motion attachment
+    // is OPAQUE (no blending) so this writes the static-zero value
+    // verbatim regardless of edge_alpha.
     outMotion = vec2(0.0);
 
     // Honour LESS_OR_EQUAL depth test so a closer wall already in

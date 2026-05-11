@@ -828,6 +828,13 @@ void VulkanEngine::init_grass_raymarch_pipeline() {
     // depth test gate is gl_FragDepth (the marched hit's projected z),
     // which the shader writes per-pixel.
     cfg.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+    // Real alpha blending on attachment 0 (color) only. The shader
+    // outputs a true edge alpha derived from the SDF distance at the
+    // converged hit, so blade silhouettes blend smoothly into the
+    // underlying terrain instead of dither-discarding. Attachment 1
+    // (motion vector) stays opaque — TAA needs a clean motion read
+    // and a blended motion vector would be meaningless.
+    cfg.alpha_blend_color0_only = true;
     grass_rm_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
     log::info("grass raymarch pipeline built");
 }

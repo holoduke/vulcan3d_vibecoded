@@ -1123,9 +1123,13 @@ private:
         float grass_density        = 0.7f;
         // Per-blade Y multiplier (0.3..2.0). 1.0 = built-in 0.55 m blades.
         float grass_height_scale   = 1.0f;
-        // Side-taper alpha-discard threshold. Higher = blades cut off
-        // earlier near the edges (more "rounded" silhouette); lower
-        // = blades read as fuller/blockier rectangles.
+        // Far-distance opacity drop for the raymarched grass.
+        //   0.0 = far blades stay fully opaque (alpha = 1)
+        //   1.0 = far blades go fully transparent (alpha = 0)
+        // Close-up blades (within `grass_cutoff_soft_dist` metres) are
+        // always alpha = 1 regardless. Also affects the rasterized
+        // grass.frag's side-taper threshold (legacy use of the same
+        // slider).
         float grass_alpha_cutoff   = 0.4f;
         // Distance at which the user's `grass_alpha_cutoff` value
         // applies in the raymarched grass shader. Inside this radius

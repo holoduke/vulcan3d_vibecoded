@@ -118,17 +118,27 @@ VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig
             : static_cast<uint32_t>(cfg.color_formats.size());
 
     // One blend state per color attachment. additive_blend applies uniformly
-    // to all attachments — see the GraphicsPipelineConfig comment about the
-    // "mixed blend modes" caveat.
+    // to all attachments. alpha_blend_color0_only enables SRC_ALPHA blending
+    // on attachment 0 only (used by the grass raymarch pipeline so blade
+    // edges blend with terrain while motion-vec attachment 1 stays opaque).
     std::vector<VkPipelineColorBlendAttachmentState> blends(resolved_color_count);
-    for (auto& blend : blends) {
-        blend.blendEnable = cfg.additive_blend ? VK_TRUE : VK_FALSE;
+    for (uint32_t ai = 0; ai < resolved_color_count; ++ai) {
+        VkPipelineColorBlendAttachmentState& blend = blends[ai];
+        bool alpha_blend = cfg.alpha_blend_color0_only && ai == 0;
+        blend.blendEnable = (cfg.additive_blend || alpha_blend) ? VK_TRUE : VK_FALSE;
         if (cfg.additive_blend) {
             blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
             blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
             blend.colorBlendOp        = VK_BLEND_OP_ADD;
             blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend.alphaBlendOp        = VK_BLEND_OP_ADD;
+        } else if (alpha_blend) {
+            blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             blend.alphaBlendOp        = VK_BLEND_OP_ADD;
         }
         blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |

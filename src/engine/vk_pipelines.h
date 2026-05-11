@@ -40,6 +40,13 @@ struct GraphicsPipelineConfig {
     // that today.
     bool additive_blend = false;
 
+    // Standard alpha blending (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) on color
+    // attachment 0 ONLY. Used by the raymarched grass pipeline so blade
+    // edges get real opacity against the underlying terrain while the
+    // motion-vector attachment (location 1) stays opaque (TAA needs an
+    // unblended motion read). Mutually exclusive with additive_blend.
+    bool alpha_blend_color0_only = false;
+
     // Enables VK_DYNAMIC_STATE_DEPTH_BIAS so the caller can drive depth
     // bias per-frame via vkCmdSetDepthBias. Required for the shadow-map
     // depth-only pipeline (slope-scale + constant bias to combat acne).
