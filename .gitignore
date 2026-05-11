@@ -57,3 +57,6 @@ autodemo_*.err
 d*.out
 d*.err
 
+
+# Texture decode cache (auto-generated, ~2.4 GB at 8K)
+*.qtc
