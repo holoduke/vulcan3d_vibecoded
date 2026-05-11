@@ -1274,6 +1274,9 @@ void VulkanEngine::init_world() {
                                           graphics_queue_, graphics_queue_family_);
     world_ = game::make_arena();
     log::infof("world: %u brushes", static_cast<unsigned>(world_.brushes.size()));
+    // Brush model matrices are baked later, AFTER the plateau y-lift
+    // below — building them here would cache un-lifted centers and the
+    // castle would render 22 m under the terrain (invisible).
 
     // Procedural terrain: generated first so the castle can be lifted to
     // sit on the plateau height. Phase 1 is non-streaming РІР‚вЂќ one big mesh
@@ -1385,6 +1388,19 @@ void VulkanEngine::init_world() {
                                           a.max.y += hp.plateau_height; }
         // Lift player's default spawn point above the new ground.
         player_.position.y += hp.plateau_height;
+
+        // Now that brushes are at their final positions, pre-bake the
+        // static model matrices used every frame by the depth pre-pass,
+        // color pass and sun-shadow pass. Static brushes don't move
+        // after this; rebuilding (translate*scale) ~190 × 3 passes per
+        // frame was ~25 µs/frame and a perfect cache target. (Perf P3.)
+        static_brush_models_.resize(world_.brushes.size());
+        for (size_t i = 0; i < world_.brushes.size(); ++i) {
+            const auto& b = world_.brushes[i];
+            static_brush_models_[i] =
+                glm::translate(glm::mat4(1.0f), b.center) *
+                glm::scale    (glm::mat4(1.0f), b.size);
+        }
 
         // Grass: scatter blades on the heightmap. Acceptance band +
         // slope test mean only the grass-coloured layer of the
@@ -2568,9 +2584,7 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         const auto& a = world_.aabbs[i];
         if (!aabb_visible(frustum, a.min, a.max)) continue;
         if (is_spom_albedo(b.tex_albedo)) continue;
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), b.center) *
-                          glm::scale(glm::mat4(1.0f), b.size);
-        push_depth(model);
+        push_depth(static_brush_models_[i]);    // pre-baked, see init_world
     }
     for (size_t i = 0; i < dyn_props_.size(); ++i) {
         const DynRender& dr = i < dyn_render_cache_.size() ? dyn_render_cache_[i]
@@ -2889,8 +2903,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         const auto& b = world_.brushes[i];
         const auto& a = world_.aabbs[i];
         if (!aabb_visible(frustum, a.min, a.max)) { ++culled_static; continue; }
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), b.center) *
-                          glm::scale(glm::mat4(1.0f), b.size);
+        const glm::mat4& model = static_brush_models_[i];   // pre-baked, see init_world
         glm::vec4 brush_base = tex_on ? b.color : b.fallback_color;
         // Static brushes don't move РІР‚вЂќ prev_model = current.
         draw_brush(model, model, brush_base, b.emissive, b.full_emissive,

@@ -374,6 +374,11 @@ private:
     static constexpr int kBoxTextureChoices = 4;
 
     game::Level world_;
+    // Per-static-brush model matrix cache. Built once in init_world from
+    // (translate(b.center) * scale(b.size)). Static brushes never move,
+    // so the depth pre-pass, color pass and sun-shadow pass all reuse
+    // these instead of rebuilding ~190 matrices × 3 passes/frame.
+    std::vector<glm::mat4> static_brush_models_;
     game::Player player_{};
     std::unique_ptr<PhysicsWorld> physics_;
     std::unique_ptr<class AudioEngine> audio_;
@@ -1368,6 +1373,13 @@ private:
         // Noise on the shore band so the line isn't a perfect contour.
         // 0 = clean, 1 = strongly broken.
         float     water_shore_noise    = 0.4f;
+        // Shore-foam highlight band: a thin lighter tint right at the
+        // water/land boundary. Fades exponentially with the noise-FREE
+        // depth so the line follows the shoreline geometry exactly.
+        // strength 0 = disabled.
+        glm::vec3 water_foam_color     = glm::vec3(0.88f, 0.94f, 0.96f);
+        float     water_foam_strength  = 0.55f;
+        float     water_foam_width     = 0.6f;     // metres of depth
         // Shadow casting on water: when true, the water surface
         // dims its specular and base tint where the sun shadow map
         // says it's occluded by terrain / castle / dyn-props.

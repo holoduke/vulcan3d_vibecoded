@@ -1,5 +1,7 @@
 #include "engine/vk_initializers.h"
 
+#include <vector>
+
 namespace qlike::vkinit {
 
 VkCommandPoolCreateInfo command_pool_create_info(uint32_t queue_family,
@@ -253,6 +255,54 @@ void transition_image_mip(VkCommandBuffer cmd, VkImage image,
         .memoryBarrierCount = 0, .pMemoryBarriers = nullptr,
         .bufferMemoryBarrierCount = 0, .pBufferMemoryBarriers = nullptr,
         .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier,
+    };
+    vkCmdPipelineBarrier2(cmd, &dep);
+}
+
+void transition_images_batch(VkCommandBuffer cmd,
+                              const ImageTransition* entries,
+                              uint32_t count) {
+    if (count == 0) return;
+    // Stack-allocate up to 8 barriers (current call sites use 2-3); fall
+    // back to vector if a future caller exceeds. Hot path stays alloc-
+    // free.
+    constexpr uint32_t kStackMax = 8;
+    VkImageMemoryBarrier2 stack_barriers[kStackMax];
+    std::vector<VkImageMemoryBarrier2> heap_barriers;
+    VkImageMemoryBarrier2* barriers = stack_barriers;
+    if (count > kStackMax) {
+        heap_barriers.resize(count);
+        barriers = heap_barriers.data();
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        const ImageTransition& e = entries[i];
+        VkImageAspectFlags aspect = e.aspect;
+        if (aspect == 0) {
+            aspect = (e.to   == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL ||
+                      e.from == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
+                     ? VK_IMAGE_ASPECT_DEPTH_BIT
+                     : VK_IMAGE_ASPECT_COLOR_BIT;
+        }
+        barriers[i] = VkImageMemoryBarrier2{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .pNext = nullptr,
+            .srcStageMask  = stage_for_layout(e.from),
+            .srcAccessMask = access_for_layout(e.from),
+            .dstStageMask  = stage_for_layout(e.to),
+            .dstAccessMask = access_for_layout(e.to),
+            .oldLayout = e.from, .newLayout = e.to,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = e.image,
+            .subresourceRange = image_subresource_range(aspect),
+        };
+    }
+    VkDependencyInfo dep{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .pNext = nullptr, .dependencyFlags = 0,
+        .memoryBarrierCount = 0, .pMemoryBarriers = nullptr,
+        .bufferMemoryBarrierCount = 0, .pBufferMemoryBarriers = nullptr,
+        .imageMemoryBarrierCount = count, .pImageMemoryBarriers = barriers,
     };
     vkCmdPipelineBarrier2(cmd, &dep);
 }

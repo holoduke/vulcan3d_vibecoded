@@ -261,6 +261,11 @@ layout(set = 0, binding = 0) uniform Scene {
     // x: shore blend distance (m), y: shore noise strength,
     // z: TLAS-reflection flag, w: water transparency.
     vec4 water_shore;
+    // Shore-foam highlight band:
+    //   water_foam_color.rgb = tint, .a = strength (0 disables)
+    //   water_foam_params.x  = band width (m of noise-free depth)
+    vec4 water_foam_color;
+    vec4 water_foam_params;
     // Fog band: x = y_start, y = y_top, z = noise strength.
     vec4 fog_band;
     // Per-pixel RT caps for the terrain shader (sliders exposed to UI):
@@ -637,7 +642,12 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
         // detail) but big perf saving for rays that cover hundreds
         // of metres before hitting.
         float h = pos.y - terrainM_lod(pos.xz, t);
-        if (abs(h) < 0.0015 * t) break;
+        // P7: loosen the hit threshold with distance. At grazing angle a
+        // typical pixel covers 0.3-1 m of world space past 200 m, so
+        // demanding sub-millimetre convergence wastes ~30 % of the
+        // march steps on far rays. mix 0.0015 → 0.005 over [150, 600] m.
+        float hit_eps = mix(0.0015, 0.005, smoothstep(150.0, 600.0, t)) * t;
+        if (abs(h) < hit_eps) break;
         if (t > t_limit) return -1.0;
         // Phase 6 вЂ” relaxation cone-stepping. Step grows with
         // distance so the same ray covers more ground in fewer
@@ -958,13 +968,16 @@ void main() {
 
         // Schlick fresnel вЂ” F0 = 0.02 for water. Looking grazing-on
         // means full reflection; looking straight down в‰€ 2 % reflection.
-        // pow(x, 5) → 3 multiplies (x²·x²·x).
+        // pow(x, 5) → 3 multiplies (x²·x²·x). Capped at 0.88 so even
+        // grazing-angle water keeps a sliver of water colour and
+        // doesn't read as a pure-sky-blue line where the surface meets
+        // the shore at distance.
         float cosV = clamp(-dot(rd, wnor), 0.0, 1.0);
         const float F0 = 0.02;
         float oneMinusV = 1.0 - cosV;
         float fv2 = oneMinusV * oneMinusV;
         float fv5 = fv2 * fv2 * oneMinusV;
-        float fres = F0 + (1.0 - F0) * fv5;
+        float fres = min(0.88, F0 + (1.0 - F0) * fv5);
 
         vec3 refl = reflect(rd, wnor);
         // Sky reflection вЂ” horizonв†’zenith gradient + sun halo. Used
@@ -1009,6 +1022,18 @@ void main() {
                                 scene.sun_color.a +
                               r_amb * scene.sky_color.rgb * 0.35;
                 vec3  r_col = r_mat * r_lin;
+                // Grass tint boost in reflections — getMaterial already
+                // includes a grass-eligibility tint, but reflections
+                // see slopes from a low angle where the underlying rock
+                // shading dominates. Re-blend the configured grass
+                // ground colour at full strength when the hit point is
+                // grass-eligible so the user sees their painted grass
+                // mirrored in the water.
+                float r_grass = grassEligibility(r_pos.xz, r_pos.y);
+                if (r_grass > 0.05) {
+                    vec3 g_col = scene.grass_color_ground.rgb * r_lin;
+                    r_col = mix(r_col, g_col, r_grass * 0.7);
+                }
                 // Same atmospheric extinction as the primary
                 // shading, applied to the reflection-ray distance.
                 vec3  r_ext = exp(-t_r * 0.00025 *
@@ -1077,7 +1102,12 @@ void main() {
         float shore_blend = max(0.1, scene.water_shore.x);
         float shore_noise = scene.water_shore.y;
         float terrain_y = terrainM(wpos.xz);
-        float depth_m   = max(0.0, water_y - terrain_y);
+        // Noise-free depth — the foam band uses this so the highlight
+        // follows the actual shoreline geometry instead of wobbling
+        // with the shore-noise. depth_m below adds the noise on top
+        // for the wider shallow→deep tint transition only.
+        float depth_clean = max(0.0, water_y - terrain_y);
+        float depth_m   = depth_clean;
         float dn = noise2(wpos.xz * 0.18) +
                     0.5 * noise2(wpos.xz * 0.42);
         depth_m += (dn - 0.6) * shore_blend * shore_noise;
@@ -1157,7 +1187,27 @@ void main() {
             }
         }
 
-        vec3 col_w = mix(baseTint, reflCol, fres);
+        // Damp Fresnel toward zero in shallow shore water so the
+        // very-grazing-angle band where water meets land doesn't read
+        // as a thin sky-blue line. water_blend is 0 right at the
+        // shore (depth = 0) → 1 once the water is `shore_blend`
+        // metres deep; multiplying fres by water_blend means deep
+        // water keeps its full reflection while shore water shows
+        // its actual tint.
+        float fres_eff = fres * water_blend;
+        vec3 col_w = mix(baseTint, reflCol, fres_eff);
+        // Shore-foam band: a thin lighter highlight at the very edge
+        // of the water/land boundary that fades out within
+        // `water_foam_params.x` metres of noise-free depth. Reads as
+        // the natural foam / surf-line you see at real shorelines.
+        // Tunable via UI: water_foam_color (rgb tint + a strength)
+        // and water_foam_params.x (band width). Strength = 0 disables.
+        if (scene.water_foam_color.a > 0.001) {
+            float foam_w = max(0.05, scene.water_foam_params.x);
+            float band   = exp(-depth_clean * (4.0 / foam_w));
+            col_w = mix(col_w, scene.water_foam_color.rgb,
+                        band * scene.water_foam_color.a);
+        }
         col_w += scene.sun_color.rgb * scene.sun_color.a * spec *
                   0.8 * water_lit;
         // Subtle darkening of the surface tint when in shadow.

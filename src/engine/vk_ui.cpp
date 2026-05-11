@@ -591,6 +591,11 @@ void VulkanEngine::build_menu_ui() {
                            &rt_.water_shore_blend, 0.5f, 20.0f, "%.1f");
         ImGui::SliderFloat("Shore noise",
                            &rt_.water_shore_noise, 0.0f, 1.0f, "%.2f");
+        ImGui::ColorEdit3("Foam color", &rt_.water_foam_color.x);
+        ImGui::SliderFloat("Foam strength",
+                           &rt_.water_foam_strength, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Foam width (m)",
+                           &rt_.water_foam_width, 0.05f, 5.0f, "%.2f");
         ImGui::Checkbox("RT terrain reflections", &rt_.water_rt_reflections);
         ImGui::Checkbox("RT cube/castle reflections (TLAS)",
                          &rt_.water_tlas_reflections);

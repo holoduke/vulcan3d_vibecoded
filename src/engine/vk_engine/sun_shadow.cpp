@@ -323,12 +323,9 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
     vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &cube_off);
     vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     for (size_t i = 0; i < world_.brushes.size(); ++i) {
-        const auto& b = world_.brushes[i];
         const auto& a = world_.aabbs[i];
         if (!aabb_visible(light_frustum, a.min, a.max)) continue;
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), b.center) *
-                          glm::scale(glm::mat4(1.0f), b.size);
-        push_shadow(model);
+        push_shadow(static_brush_models_[i]);   // pre-baked, see init_world
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     }
 

@@ -426,17 +426,24 @@ void VulkanEngine::draw(uint32_t img_index) {
         render_sun_shadow_pass(frame.command_buffer);
     }
 
-    // Scene-color image: undefined -> color attachment optimal for rendering.
-    vkinit::transition_image(frame.command_buffer, scene_color_image_,
-                             VK_IMAGE_LAYOUT_UNDEFINED,
-                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    // Motion-vector image: 2nd color attachment of the world color pass.
-    vkinit::transition_image(frame.command_buffer, motion_vec_image_,
-                             VK_IMAGE_LAYOUT_UNDEFINED,
-                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    vkinit::transition_image(frame.command_buffer, depth_image_,
-                             VK_IMAGE_LAYOUT_UNDEFINED,
-                             VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    // Batch the world-pass attachment transitions into a single
+    // vkCmdPipelineBarrier2 — was 3 separate barrier calls each
+    // forcing a driver cache flush. (Perf P1.)
+    {
+        const vkinit::ImageTransition kWorldStart[] = {
+            { scene_color_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+              VK_IMAGE_LAYOUT_UNDEFINED,
+              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+            { motion_vec_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+              VK_IMAGE_LAYOUT_UNDEFINED,
+              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+            { depth_image_, VK_IMAGE_ASPECT_DEPTH_BIT,
+              VK_IMAGE_LAYOUT_UNDEFINED,
+              VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL },
+        };
+        vkinit::transition_images_batch(frame.command_buffer,
+                                         kWorldStart, 3);
+    }
 
     VkClearValue clear_color{};
     clear_color.color = { { 0.55f, 0.72f, 0.95f, 1.0f } };  // sky color matches UBO
@@ -616,21 +623,26 @@ void VulkanEngine::draw(uint32_t img_index) {
     vkCmdEndRendering(frame.command_buffer);
 
     // ---------- Pass 2: TAA into history_image_[history_write_slot_] ----------
-    // Flip scene_color & motion & depth & history slots into shader-read.
-    vkinit::transition_image(frame.command_buffer, scene_color_image_,
-                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    // Motion-vec image is currently unread; transitioning it to SHADER_READ
-    // anyway means a future TAA/SVGF pass that adds a sampler binding for
-    // motion_vec_image_ doesn't need to also touch this transition site —
-    // the layout is already correct. Cost: one extra (small) barrier per frame.
-    vkinit::transition_image(frame.command_buffer, motion_vec_image_,
-                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    vkinit::transition_image_aspect(frame.command_buffer, depth_image_,
-                                    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                    VK_IMAGE_ASPECT_DEPTH_BIT);
+    // Flip scene_color + depth into shader-read for TAA in one batched
+    // barrier (was 2 calls + a dead motion_vec one). The motion_vec
+    // image isn't sampled by anyone right now — dropping its transition
+    // saves a real cross-pass cache flush on the 16 MB RG16F surface.
+    // Perf P1+P2.
+    {
+        const vkinit::ImageTransition kPostWorld[] = {
+            { scene_color_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+            // Motion vector is read by taa.frag (binding 4); flip it too.
+            { motion_vec_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+            { depth_image_, VK_IMAGE_ASPECT_DEPTH_BIT,
+              VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+        };
+        vkinit::transition_images_batch(frame.command_buffer, kPostWorld, 3);
+    }
     // Both history slots end the previous frame in SHADER_READ_ONLY (write slot
     // exited at frame end; read slot wasn't touched). Read slot needs no
     // transition; write slot moves into COLOR_ATTACHMENT.

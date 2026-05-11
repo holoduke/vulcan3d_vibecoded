@@ -309,6 +309,10 @@ void VulkanEngine::update_scene_ubo() {
                                   rt_.water_shore_noise,
                                   rt_.water_tlas_reflections ? 1.0f : 0.0f,
                                   rt_.water_transparency);
+    data.water_foam_color  = glm::vec4(rt_.water_foam_color,
+                                        rt_.water_foam_strength);
+    data.water_foam_params = glm::vec4(std::max(0.05f, rt_.water_foam_width),
+                                        0.0f, 0.0f, 0.0f);
     data.fog_band = glm::vec4(rt_.terrain_raymarch_fog_y_start,
                                rt_.terrain_raymarch_fog_y_top,
                                rt_.terrain_raymarch_fog_noise,

@@ -44,6 +44,12 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  water_color;
     vec4  water_color_shallow;
     vec4  water_shore;
+    // Layout match — terrain_raymarch.frag (and host SceneUBO) inserts
+    // these two between water_shore and fog_band. Unused in the grass
+    // pass, but the layout MUST stay aligned or every later field reads
+    // the wrong offset.
+    vec4  water_foam_color;
+    vec4  water_foam_params;
     vec4  fog_band;
     vec4  terrain_rt_extra;
     // Grass colour palette + extras (UI-driven).

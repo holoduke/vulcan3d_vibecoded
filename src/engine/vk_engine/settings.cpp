@@ -284,6 +284,11 @@ void VulkanEngine::save_settings() const {
     f << "water_color = " << rt_.water_color.r << " "
                             << rt_.water_color.g << " "
                             << rt_.water_color.b << "\n";
+    f << "water_foam_color = " << rt_.water_foam_color.r << " "
+                                << rt_.water_foam_color.g << " "
+                                << rt_.water_foam_color.b << "\n";
+    f << "water_foam_strength = " << rt_.water_foam_strength << "\n";
+    f << "water_foam_width = "    << rt_.water_foam_width    << "\n";
     f << "shadow_near_mult = " << rt_.shadow_near_mult << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
@@ -366,6 +371,15 @@ void VulkanEngine::load_settings() {
             if (key == "terrain_brush_use_fbm_erosion") { terrain_brush_use_fbm_erosion_ = (std::stoi(val) != 0); ++loaded; continue; }
             if (key == "terrain_brush_fbm_octaves")     { terrain_brush_fbm_octaves_     = std::stoi(val); ++loaded; continue; }
             if (key == "terrain_edit_mode")             { terrain_edit_mode_             = (std::stoi(val) != 0); ++loaded; continue; }
+            if (key == "water_foam_color") {
+                glm::vec3 v(0.88f, 0.94f, 0.96f);
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.water_foam_color = v;
+                }
+                ++loaded; continue;
+            }
+            if (key == "water_foam_strength") { rt_.water_foam_strength = std::stof(val); ++loaded; continue; }
+            if (key == "water_foam_width")    { rt_.water_foam_width    = std::stof(val); ++loaded; continue; }
             if (key == "terrain_rt_lod_distance") { rt_.terrain_rt_lod_distance = std::stof(val); ++loaded; continue; }
             if (key == "terrain_ao_punch")        { rt_.terrain_ao_punch = std::stof(val); ++loaded; continue; }
             if (key == "terrain_pcss_samples_cap")  { rt_.terrain_pcss_samples_cap  = std::stoi(val); ++loaded; continue; }

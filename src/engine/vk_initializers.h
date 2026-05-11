@@ -74,6 +74,21 @@ void transition_image_mip(VkCommandBuffer cmd, VkImage image,
                           VkImageLayout from, VkImageLayout to,
                           uint32_t base_mip, uint32_t mip_count);
 
+// Batch-transition entry: each entry { image, aspect, from, to }. Writes a
+// single vkCmdPipelineBarrier2 covering all of them — driver gets one cache
+// flush instead of N. Use at pass boundaries (multiple targets flipping
+// together). aspect can be 0 to auto-pick (DEPTH if from/to is depth, else
+// COLOR).
+struct ImageTransition {
+    VkImage              image;
+    VkImageAspectFlags   aspect;
+    VkImageLayout        from;
+    VkImageLayout        to;
+};
+void transition_images_batch(VkCommandBuffer cmd,
+                              const ImageTransition* entries,
+                              uint32_t count);
+
 // Run `body(cmd)` in a one-time-submit command buffer, then wait for the
 // queue to idle before returning. Centralizes the transient-pool / allocate /
 // begin / submit / wait / cleanup boilerplate that BLAS builds, texture

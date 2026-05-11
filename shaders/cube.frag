@@ -734,7 +734,7 @@ void main() {
             //   10 = + GI bounce (faded at distance).
             vec3 L = normalize(scene.sun_direction.xyz);
             float ndl = max(dot(N, L), 0.0);
-            float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
+            float dist_to_cam = cam_dist;   // P5: use hoisted distance
 
             // PURE BAKE with PCF вЂ” 5-tap kernel and no threshold so
             // shadow edges blend smoothly across triangles instead of
@@ -917,7 +917,7 @@ void main() {
         // distance, no per-triangle classification noise.
         float slope_jitter = (ign(vWorldPos.xz * 0.09 + vec2(7.0, 19.0)) - 0.5) * 0.10;
         float steep_raw = smoothstep(0.45 + slope_jitter, 0.75 + slope_jitter, slope);
-        float steep_dist = distance(vWorldPos, scene.camera_pos.xyz);
+        float steep_dist = cam_dist;    // P5: use hoisted distance
         float steep_w = 1.0 - smoothstep(80.0, 200.0, steep_dist);
         float steep = steep_raw * steep_w;
         base = mix(base, rock, steep);
@@ -933,7 +933,7 @@ void main() {
         // ~120 m so distant terrain reads as smooth.
         float curvature = -dot(dFdx(N), dFdx(vWorldPos)) -
                           dot(dFdy(N), dFdy(vWorldPos));
-        float cav_dist  = distance(vWorldPos, scene.camera_pos.xyz);
+        float cav_dist  = cam_dist;     // P5: use hoisted distance
         float cav_w     = 1.0 - smoothstep(80.0, 200.0, cav_dist);
         float cavity    = clamp(0.5 - curvature * 0.4, 0.45, 1.0);
         base *= mix(1.0, cavity, cav_w);
@@ -950,7 +950,7 @@ void main() {
         // Faded with camera distance so distant chunks (where 1-pixel
         // surfaces span many noise cycles) don't shimmer.
         {
-            float det_dist = distance(vWorldPos, scene.camera_pos.xyz);
+            float det_dist = cam_dist;     // P5: use hoisted distance
             float det_w    = 1.0 - smoothstep(40.0, 120.0, det_dist);
             if (det_w > 0.001) {
                 // Base scale tuned for ~0.3 m features; octaves
@@ -984,7 +984,7 @@ void main() {
             // different N в†’ different mixes в†’ texture-driven patchy
             // brightness. Fade detail out past 80 m so distant terrain
             // shows just the smooth height-band layer colour.
-            float td = distance(vWorldPos, scene.camera_pos.xyz);
+            float td = cam_dist;           // P5: use hoisted distance
             float det_w = 1.0 - smoothstep(80.0, 200.0, td);
             vec3 with_detail = base * detail * scene.terrain_params.z;
             albedo = mix(base, with_detail, det_w);
@@ -1178,7 +1178,7 @@ void main() {
     // mismatch). The bake handles terrain self-shadow; the RT
     // ray-queries handle castle / dyn-props at every distance, so
     // box / castle shadows on terrain no longer fade out past 80 m.
-    float terrain_dist = distance(vWorldPos, scene.camera_pos.xyz);
+    float terrain_dist = cam_dist;         // P5: use hoisted distance
     if (n_dot_l_raw > 0.0 && scene.rt_flags.x != 0) {
       if (true) {   // (kept block for diff hygiene — always-on now)
         // Base sample count from slider, distance-LOD'd. terrain_extra.y
@@ -1218,7 +1218,7 @@ void main() {
         //   в‰¤ 80 m  : 0.04 m (matches the LOD-0 / BLAS gap)
         //   320 m   : ~6 m  (covers typical LOD-3 peak undershoot)
         //   в‰Ґ 600 m : ~12 m (covers worst-case)
-        float dist_to_cam = distance(vWorldPos, scene.camera_pos.xyz);
+        float dist_to_cam = cam_dist;      // P5: use hoisted distance
         float far_t = clamp((dist_to_cam - 80.0) / 320.0, 0.0, 1.0);
         float terrain_far_bias = far_t * far_t * 8.0;   // 0 в†’ 8 across the ramp
         // Bias along the receiver normal so the ray clears the
@@ -1496,8 +1496,7 @@ void main() {
         // false-hit fix; this just softens any residual mid-distance
         // patchiness without flattening the look entirely.
         if (is_terrain_pre) {
-            float ao_far_t = smoothstep(150.0, 400.0,
-                                         distance(vWorldPos, scene.camera_pos.xyz));
+            float ao_far_t = smoothstep(150.0, 400.0, cam_dist);  // P5
             ao = mix(ao, 1.0, ao_far_t);
         }
     }
@@ -1692,21 +1691,30 @@ void main() {
     // depth. Cheaper than volumetric fog and visually indistinguishable
     // for clear-day weather.
     if (is_terrain_pre) {
-        vec3 view_dir = normalize(vWorldPos - scene.camera_pos.xyz);
-        // sample_sky_atmosphere: no sun halo. The halo is fine for the
-        // actual sky pixels (compose pass / GI rays), but applying it
-        // to FOG made distant terrain near the sun direction look like
-        // glowing white blobs вЂ” sun's halo Г— intensity 2 was multiplied
-        // INTO the fog tint and bled bright-white over the mountains.
-        vec3 fog_color = sample_sky_atmosphere(view_dir);
-        // 95% sky by ~1.3km вЂ” both edges (corner ray reaches ~2km of
-        // world at 80В° FOV / far=1500m) AND centre (clipped at 1500m
-        // hard) are deep into fog before the cut, so the asymmetric
-        // visible disc is invisible.
-        float fog_t = clamp((cam_dist - 250.0) / 1100.0, 0.0, 0.95);
-        fog_t = fog_t * fog_t * (3.0 - 2.0 * fog_t);
-        fog_t *= clamp(scene.terrain_params.x, 0.0, 1.0);
-        final = mix(final, fog_color, fog_t);
+        // P6: early-out before computing view_dir + sky atmospheric
+        // sample (which is ~12 ALU + 1 sqrt + a normalize). For close
+        // terrain (cam_dist < 250 m) or when the user has fog disabled
+        // (terrain_params.x ≈ 0), the fog contribution rounds to zero
+        // and the entire block is wasted. Saves the cost on ~half of
+        // terrain pixels (everything indoors / castle-area / nearby
+        // hills) plus 100% of pixels when the slider is off.
+        float fog_strength = clamp(scene.terrain_params.x, 0.0, 1.0);
+        if (cam_dist > 250.0 && fog_strength > 1e-3) {
+            vec3 view_dir = normalize(vWorldPos - scene.camera_pos.xyz);
+            // sample_sky_atmosphere: no sun halo. The halo is fine for
+            // the actual sky pixels (compose pass / GI rays), but
+            // applying it to FOG made distant terrain near the sun
+            // direction look like glowing white blobs.
+            vec3 fog_color = sample_sky_atmosphere(view_dir);
+            // 95% sky by ~1.3km — both edges (corner ray reaches ~2km
+            // of world at 80° FOV / far=1500m) AND centre (clipped at
+            // 1500m hard) are deep into fog before the cut, so the
+            // asymmetric visible disc is invisible.
+            float fog_t = clamp((cam_dist - 250.0) / 1100.0, 0.0, 0.95);
+            fog_t = fog_t * fog_t * (3.0 - 2.0 * fog_t);
+            fog_t *= fog_strength;
+            final = mix(final, fog_color, fog_t);
+        }
     }
 
     outColor = vec4(final, 1.0);

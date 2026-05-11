@@ -137,6 +137,14 @@ struct SceneUBO {
     //   z: TLAS reflection flag (0/1) — RT cubes / castle into water
     //   w: water transparency (0..1)
     glm::vec4  water_shore;
+    // Shore-foam band overlay (rendered AFTER fresnel mix so it shows
+    // through the reflection too):
+    //   rgb = foam tint (typically pale blue-white)
+    //   a   = strength (0 disables; 1 = full tint at depth=0)
+    glm::vec4  water_foam_color;
+    //   x   = band width in metres of NOISE-FREE depth (0.6 ≈ surf line)
+    //   y/z/w spare
+    glm::vec4  water_foam_params;
     // Volumetric ground-fog band:
     //   x: y_start (world Y where fog density starts)
     //   y: y_top   (world Y where fog density falls to zero)
