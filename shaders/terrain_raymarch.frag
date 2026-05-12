@@ -359,15 +359,21 @@ float terrainM_lod(vec2 p, float ray_t) {
     int oct_full = int(pc.tex_params.z);
     int oct_min  = max(2, min(oct_full, int(pc.emissive.w)));
     float lod_f  = smoothstep(pc.emissive.y, pc.emissive.z, ray_t);
-    int oct      = oct_full - int(lod_f * float(oct_full - oct_min));
+    // Fractional octave count — ceil() to include the partially-faded
+    // top octave; `frac` is the [0..1] weight that octave gets so the
+    // FBM is C0-continuous across the integer threshold.
+    float oct_f  = float(oct_full) - lod_f * float(oct_full - oct_min);
+    int   oct    = int(ceil(oct_f));
+    float frac   = 1.0 - (float(oct) - oct_f);
     float a = 0.0, b = 1.0;
     vec2 d = vec2(0.0);
     const int kMaxOct = 24;
     for (int i = 0; i < kMaxOct; i++) {
         if (i >= oct) break;
         vec3 n = noised(p);
-        d += n.yz;
-        a += b * n.x / (1.0 + dot(d, d));
+        float w = (i == oct - 1) ? frac : 1.0;
+        d += n.yz * w;
+        a += b * n.x * w / (1.0 + dot(d, d));
         b *= 0.5;
         p = m2 * p * 2.0;
     }
@@ -413,15 +419,20 @@ float terrainH_lod(vec2 p, float ray_t) {
     int oct_full = int(pc.tex_params.w);
     int oct_min  = max(2, min(oct_full, int(pc.emissive.w)));
     float lod_f  = smoothstep(pc.emissive.y, pc.emissive.z, ray_t);
-    int oct      = oct_full - int(lod_f * float(oct_full - oct_min));
+    // Fractional-octave fade — same scheme as terrainM_lod so the
+    // marcher and normals agree across the LOD threshold.
+    float oct_f  = float(oct_full) - lod_f * float(oct_full - oct_min);
+    int   oct    = int(ceil(oct_f));
+    float frac   = 1.0 - (float(oct) - oct_f);
     float a = 0.0, b = 1.0;
     vec2 d = vec2(0.0);
     const int kMaxOct = 32;
     for (int i = 0; i < kMaxOct; i++) {
         if (i >= oct) break;
         vec3 n = noised(p);
-        d += n.yz;
-        a += b * n.x / (1.0 + dot(d, d));
+        float w = (i == oct - 1) ? frac : 1.0;
+        d += n.yz * w;
+        a += b * n.x * w / (1.0 + dot(d, d));
         b *= 0.5;
         p = m2 * p * 2.0;
     }
