@@ -269,6 +269,11 @@ private:
     VmaAllocation   tr_lr_depth_alloc_  = nullptr;
     VkImageView     tr_lr_depth_view_   = VK_NULL_HANDLE;
     VkSampler       tr_lr_sampler_      = VK_NULL_HANDLE;
+    // NEAREST sampler dedicated to u_lr_depth (binding 11). Bilinear on
+    // depth values bleeds terrain↔sky across silhouettes — at low
+    // raymarch scales the >=0.9999 sky-discard then either eats valid
+    // terrain (gaps) or writes fake mid-depth halos.
+    VkSampler       tr_lr_depth_sampler_ = VK_NULL_HANDLE;
     VkExtent2D      tr_lr_extent_{};
 
     // Compose pipeline that samples the low-res raymarch and writes

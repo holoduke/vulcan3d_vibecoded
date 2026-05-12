@@ -642,6 +642,19 @@ void VulkanEngine::init_terrain_raymarch_lowres() {
         vk_check(vkCreateSampler(device_, &si, nullptr, &tr_lr_sampler_),
                  "tr_lr_sampler");
     }
+    // Depth-dedicated NEAREST sampler — see vk_engine.h comment.
+    if (!tr_lr_depth_sampler_) {
+        VkSamplerCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = VK_FILTER_NEAREST;
+        si.minFilter = VK_FILTER_NEAREST;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vk_check(vkCreateSampler(device_, &si, nullptr, &tr_lr_depth_sampler_),
+                 "tr_lr_depth_sampler");
+    }
 
     // Write descriptor bindings 9, 10, 11. These are stable across
     // resize for the lifetime of the views (we destroy + rewrite on
@@ -655,7 +668,7 @@ void VulkanEngine::init_terrain_raymarch_lowres() {
     dii_m.imageView   = tr_lr_motion_view_;
     dii_m.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDescriptorImageInfo dii_d{};
-    dii_d.sampler     = tr_lr_sampler_;
+    dii_d.sampler     = tr_lr_depth_sampler_;   // NEAREST — see header comment
     dii_d.imageView   = tr_lr_depth_view_;
     dii_d.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet writes[3] = {};
@@ -701,6 +714,10 @@ void VulkanEngine::destroy_terrain_raymarch_lowres() {
         vmaDestroyImage(allocator_, tr_lr_depth_image_, tr_lr_depth_alloc_);
         tr_lr_depth_image_ = VK_NULL_HANDLE;
         tr_lr_depth_alloc_ = nullptr;
+    }
+    if (tr_lr_depth_sampler_) {
+        vkDestroySampler(device_, tr_lr_depth_sampler_, nullptr);
+        tr_lr_depth_sampler_ = VK_NULL_HANDLE;
     }
     if (tr_lr_sampler_) {
         vkDestroySampler(device_, tr_lr_sampler_, nullptr);
