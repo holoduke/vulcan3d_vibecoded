@@ -1745,6 +1745,11 @@ void main() {
                        sqrt(1.0 + gg - 2.0 * kVolPhaseG * cosTh));
         // Hard ceiling matches a typical "sun glow" magnitude.
         phase = min(phase, 4.0);
+        // P16: hoist sunGlow * phase out of the per-step inner loop.
+        // Both are loop-invariants — the scattering line at the hot
+        // spot below was multiplying them every iteration. ~3 ALU/step
+        // back × kVolSteps + early-out cap.
+        vec3 sunPhaseTerm = sunGlow * phase;
 
         // Cap march length at the surface hit. Sky pixels never reach
         // here (we returned -1 above), so t is always finite.
@@ -1821,8 +1826,11 @@ void main() {
             // scattering, no absorption). Phase function gives the
             // sun-aligned directional component; ambient fogTint
             // keeps back-lit fog from going pitch-black.
-            vec3  Lin   = sunGlow * phase * lightTrans + fogTint * 0.25;
-            float seg  = exp(-sigma_e * dt);
+            vec3  Lin   = sunPhaseTerm * lightTrans + fogTint * 0.25;
+            // P16: exp2(-x * 1.4427) ≈ exp(-x), and exp2 is a single
+            // hardware instruction on most archs vs exp's exp/log
+            // pair. Hoisted constant 1.4427 = 1/ln(2).
+            float seg  = exp2(-sigma_e * dt * 1.44269504);
             vec3  Sint = (Lin - Lin * seg) / max(sigma_e, 1e-4);
             scatter += trans * Sint * sigma_e;   // re-multiply Пѓs because we factored Пѓe out
             trans   *= seg;

@@ -161,6 +161,14 @@ vec3 triplanar_sample(sampler2D tex, vec3 wp, vec3 N) {
     // triplanar call vs the pow() intrinsic, on every textured pixel.
     vec3 blend = abs(N); blend *= blend; blend *= blend;
     blend /= max(blend.x + blend.y + blend.z, 1e-3);
+    // P15: dominant-axis early-out. When one weight ≥ 0.95, the other
+    // two contribute ≤ 5 % blended → invisible. Sampling those two
+    // textures wastes ~2 cache fetches on the very common cube/floor
+    // pixels (axis-aligned brushes, flat terrain). Fall back to the
+    // 3-tap blend when no single axis dominates.
+    if (blend.x >= 0.95) return texture(tex, wp.zy).rgb;
+    if (blend.y >= 0.95) return texture(tex, wp.xz).rgb;
+    if (blend.z >= 0.95) return texture(tex, wp.xy).rgb;
     // Now that mipmaps exist (texture.cpp generates them via blit chain) and
     // vTexParams is `flat` so the sampler-array index is dynamically uniform,
     // standard `texture()` is correct вЂ” derivatives select the right mip and
@@ -361,6 +369,21 @@ vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
     // Same pow(abs(N), 4) → squarings trick as triplanar_sample.
     vec3 blend = abs(N); blend *= blend; blend *= blend;
     blend /= max(blend.x + blend.y + blend.z, 1e-3);
+
+    // P15: dominant-axis early-out (matches triplanar_sample). Skip
+    // 2 of 3 normal-map taps + their TBN math when one axis dominates.
+    if (blend.x >= 0.95) {
+        vec3 nx = texture(ntex, wp.zy).rgb * 2.0 - 1.0;
+        return normalize(vec3(N.x * sign(N.x) + nx.z * sign(N.x), nx.y, nx.x));
+    }
+    if (blend.y >= 0.95) {
+        vec3 ny = texture(ntex, wp.xz).rgb * 2.0 - 1.0;
+        return normalize(vec3(ny.x, N.y * sign(N.y) + ny.z * sign(N.y), ny.y));
+    }
+    if (blend.z >= 0.95) {
+        vec3 nz = texture(ntex, wp.xy).rgb * 2.0 - 1.0;
+        return normalize(vec3(nz.x, nz.y, N.z * sign(N.z) + nz.z * sign(N.z)));
+    }
 
     vec3 nx = texture(ntex, wp.zy).rgb * 2.0 - 1.0;
     vec3 ny = texture(ntex, wp.xz).rgb * 2.0 - 1.0;
@@ -1139,10 +1162,22 @@ void main() {
         //   contrast == 1 → no-op (default; most users)
         //   contrast == 2 → just n_dot_l²
         // Anything else falls through to the (slower) pow().
+        // Common slider stops get cheap dedicated paths (avoids the
+        // exp+log of pow). Anything not covered falls through to pow.
         if (contrast > 1.99 && contrast < 2.01) {
             n_dot_l = n_dot_l * n_dot_l;
         } else if (contrast < 1.01) {
             // identity — skip pow entirely
+        } else if (contrast > 2.99 && contrast < 3.01) {
+            // P11: x³ via two muls
+            n_dot_l = n_dot_l * n_dot_l * n_dot_l;
+        } else if (contrast > 1.49 && contrast < 1.51) {
+            // P11: x^1.5 = x·sqrt(x), one mul + one sqrt vs full pow
+            n_dot_l = n_dot_l * sqrt(n_dot_l);
+        } else if (contrast > 3.99 && contrast < 4.01) {
+            // P11: x⁴ via two squarings
+            float n2 = n_dot_l * n_dot_l;
+            n_dot_l = n2 * n2;
         } else {
             n_dot_l = pow(n_dot_l, contrast);
         }
@@ -1179,7 +1214,12 @@ void main() {
     // ray-queries handle castle / dyn-props at every distance, so
     // box / castle shadows on terrain no longer fade out past 80 m.
     float terrain_dist = cam_dist;         // P5: use hoisted distance
-    if (n_dot_l_raw > 0.0 && scene.rt_flags.x != 0) {
+    // P10: at near-terminator the surface is already at <4% direct
+    // light, so PCSS softness is invisible. Skip the entire 4-blocker
+    // + N_s shadow-ray block. shadow stays at the default 0; the
+    // direct *= (1 - shadow) * n_dot_l math collapses to the Lambert
+    // falloff, which is what dominates here anyway.
+    if (n_dot_l_raw > 0.04 && scene.rt_flags.x != 0) {
       if (true) {   // (kept block for diff hygiene — always-on now)
         // Base sample count from slider, distance-LOD'd. terrain_extra.y
         // is a multiplier on the BASE count that's applied before LOD
@@ -1236,6 +1276,13 @@ void main() {
         // Terrain receivers use the no-terrain variant so we don't get
         // false-hits from the BLAS terrain detail above the rasterised
         // LOD surface (the heightmap bake covers terrain self-shadow).
+        // P9: scale RT distances by view distance. Surfaces at ~10 m
+        // from the camera have visible occluders within ~30 m; firing
+        // 200 m blocker rays into thin air past that just burns BVH
+        // traversal. Cap blocker rays at 4× cam_dist (min 30 m for
+        // close-up); cap shadow rays at 4× avg blocker hit distance
+        // computed below.
+        const float kBlockerTMax = clamp(cam_dist * 4.0, 30.0, 200.0);
         const int kBlockerSearch = 4;
         float sum_t = 0.0;
         int   hits = 0;
@@ -1261,7 +1308,7 @@ void main() {
             vec3 jitter = (vx * tan_u + vy * tan_v) * r;
             vec3 dir = normalize(L + jitter);
             float t;
-            if (closest_hit_m(origin, dir, 200.0, blocker_mask, t)) { sum_t += t; ++hits; }
+            if (closest_hit_m(origin, dir, kBlockerTMax, blocker_mask, t)) { sum_t += t; ++hits; }
         }
 
         if (hits == 0) {
@@ -1274,6 +1321,12 @@ void main() {
             //    very soft far away). The exponent comes from the
             //    shadow_curve slider in the menu.
             float avg_t = sum_t / float(hits);
+            // P9: shadow rays only need to reach occluders that could
+            // contribute to the penumbra estimate — anything past 4×
+            // the average blocker hit can't possibly close the cone
+            // around this surface point. Capped to existing 200 m so
+            // we never extend the budget.
+            float kShadowTMax = clamp(avg_t * 4.0, 20.0, 200.0);
             float t_norm = avg_t * 0.1;
             float curve_exp = mix(1.0, 3.0, clamp(scene.rt_params2.w, 0.0, 1.0));
             float scale = pow(max(t_norm, 0.0), curve_exp);
@@ -1316,7 +1369,7 @@ void main() {
                     float vy  = pp_s_s * v.x + pp_c_s * v.y;
                     vec3 jitter = (vx * tan_u + vy * tan_v) * r;
                     vec3 dir = normalize(L + jitter);
-                    if (any_hit_m(origin, dir, 200.0, shadow_mask)) blocked += 1.0;
+                    if (any_hit_m(origin, dir, kShadowTMax, shadow_mask)) blocked += 1.0;
                     ++taken;
                 }
             }
