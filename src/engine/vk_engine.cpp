@@ -289,6 +289,9 @@ void VulkanEngine::init() {
     init_terrain_raymarch_pipeline();
     init_terrain_raymarch_compose_pipeline();
     init_terrain_raymarch_lowres();
+    // VRS attachment is sized in LR-tile units, so it must come after
+    // init_terrain_raymarch_lowres() has set tr_lr_extent_.
+    init_vrs_attachment();
     init_sun_shadow_pipeline();
     init_grass_pipeline();
     present_loader_frame("Baking shadows",        0.85f);
@@ -502,9 +505,20 @@ void VulkanEngine::draw(uint32_t img_index) {
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .clearValue = lr_clear_d,
         };
+        // Optional attachment-based VRS — chained via pNext. The texel
+        // size + shading-rate combiner are pipeline state; the attachment
+        // image just supplies the per-tile rate.
+        VkRenderingFragmentShadingRateAttachmentInfoKHR vrs_info{};
+        if (vrs_supported_ && vrs_view_) {
+            vrs_info.sType = VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR;
+            vrs_info.imageView = vrs_view_;
+            vrs_info.imageLayout = VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
+            vrs_info.shadingRateAttachmentTexelSize = vrs_texel_size_;
+        }
         VkRenderingInfo lr_ri{
             .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-            .pNext = nullptr, .flags = 0,
+            .pNext = (vrs_supported_ && vrs_view_) ? &vrs_info : nullptr,
+            .flags = 0,
             .renderArea = { {0, 0}, tr_lr_extent_ },
             .layerCount = 1, .viewMask = 0,
             .colorAttachmentCount = 2, .pColorAttachments = lr_color_atts,
@@ -1403,6 +1417,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_grass_raymarch_pipeline", [&]{ destroy_grass_raymarch_pipeline(); });
     guarded("destroy_grass_pipeline", [&]{ destroy_grass_pipeline(); });
     guarded("destroy_terrain_height_texture", [&]{ destroy_terrain_height_texture(); });
+    guarded("destroy_vrs_attachment", [&]{ destroy_vrs_attachment(); });
     guarded("destroy_terrain_raymarch_lowres", [&]{ destroy_terrain_raymarch_lowres(); });
     guarded("destroy_terrain_raymarch_compose_pipeline", [&]{ destroy_terrain_raymarch_compose_pipeline(); });
     guarded("destroy_terrain_raymarch_pipeline", [&]{ destroy_terrain_raymarch_pipeline(); });

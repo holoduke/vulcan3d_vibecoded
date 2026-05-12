@@ -170,6 +170,22 @@ VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig
         .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
     };
 
+    // Optional attachment-based VRS state. Chained AFTER rendering so the
+    // pNext walk hits it; combiner ops force the per-fragment rate to come
+    // from the bound attachment image (REPLACE on op[1] discards the
+    // pipeline/primitive rates from op[0]'s KEEP). fragmentSize is the
+    // pipeline-rate slot we set to 1×1; combinerOps[0] = KEEP just passes
+    // that through. combinerOps[1] = REPLACE overrides with attachment.
+    VkPipelineFragmentShadingRateStateCreateInfoKHR vrs_state{};
+    if (cfg.enable_vrs) {
+        vrs_state.sType = VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR;
+        vrs_state.fragmentSize = { 1, 1 };
+        vrs_state.combinerOps[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+        vrs_state.combinerOps[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR;
+        vrs_state.pNext = rendering.pNext;
+        rendering.pNext = &vrs_state;
+    }
+
     VkGraphicsPipelineCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = &rendering, .flags = 0,

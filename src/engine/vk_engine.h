@@ -282,6 +282,27 @@ private:
     // raymarch scales the >=0.9999 sky-discard then either eats valid
     // terrain (gaps) or writes fake mid-depth halos.
     VkSampler       tr_lr_depth_sampler_ = VK_NULL_HANDLE;
+
+    // --- Attachment-based Variable Rate Shading (VK_KHR_fragment_shading_rate) ---
+    // Small R8_UINT image sized at (render_extent + tile - 1) / tile. Each
+    // texel encodes the shading rate for an N×N pixel block of the
+    // framebuffer via `(width_log2 << 2) | height_log2`: 0 = 1×1 (full),
+    // 5 = 2×2 (quarter cost), 10 = 4×4 (1/16 cost). Populated once with a
+    // center-fine / edge-coarse vignette so distant terrain (which is
+    // already LOD'd in the FBM) pays one shader invocation per 4 or 16
+    // pixels.
+    //
+    // Only applied to the LR raymarch render pass — the FBM-heavy
+    // fullscreen tri. Compose pass + main world pass stay at native rate.
+    bool            vrs_supported_      = false;
+    VkExtent2D      vrs_texel_size_{};   // device-reported tile size
+    VkExtent2D      vrs_extent_{};       // attachment image extent
+    VkImage         vrs_image_          = VK_NULL_HANDLE;
+    VmaAllocation   vrs_alloc_          = nullptr;
+    VkImageView     vrs_view_           = VK_NULL_HANDLE;
+    void init_vrs_attachment();
+    void destroy_vrs_attachment();
+    void recreate_vrs_attachment();
     VkExtent2D      tr_lr_extent_{};
 
     // Compose pipeline that samples the low-res raymarch and writes
