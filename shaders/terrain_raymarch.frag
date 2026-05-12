@@ -565,6 +565,24 @@ float raymarch(vec3 ro, vec3 rd) {
 // 80 m. The FBM normal-octave slider (default 18) gives plenty of
 // distance detail without the artefacts.
 vec3 calcNormal(vec3 pos, float t) {
+    // Far-distance fast path: derive the normal from screen-space
+    // derivatives of the hit position itself (`dFdx(pos)` and
+    // `dFdy(pos)` are the tangents along screen x/y). Zero terrainH
+    // calls vs the 3× finite-difference path. Per-quad-constant — gives
+    // a faceted look up close — but at lod_far_m+ the FBM is LOD'd to
+    // few octaves anyway, so the surface has no per-pixel detail to lose.
+    // Threshold is pc.emissive.z (the existing lod_far_m). Past this we
+    // already snap to lod_min_octaves on the FBM, so swapping the normal
+    // method costs nothing visible.
+    if (t > pc.emissive.z) {
+        vec3 dpdx = dFdx(pos);
+        vec3 dpdy = dFdy(pos);
+        vec3 Nfast = cross(dpdy, dpdx);
+        // Cheap sign-flip in case the quad winding lands us pointing
+        // into the ground.
+        if (Nfast.y < 0.0) Nfast = -Nfast;
+        return normalize(Nfast);
+    }
     // Reverted from a 1× analytic-gradient version: the per-octave
     // damp term `1/(1+dot(d,d))` and its derivative contribute real
     // high-frequency variation that drops out of the cheap chain-rule
