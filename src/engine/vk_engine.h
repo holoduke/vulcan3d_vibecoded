@@ -992,6 +992,31 @@ private:
     VkShaderModule   taa_vert_module_ = VK_NULL_HANDLE;
     VkShaderModule   taa_frag_module_ = VK_NULL_HANDLE;
 
+    // --- TAAU (temporal upsample). Optional pass between TAA and compose.
+    // Reads LR history + LR motion + LR depth + previous-frame NATIVE
+    // upscaled, outputs native upscaled with motion-reproject + variance
+    // clamp. Compose then samples taau_view_ instead of history_view_.
+    // Sized at swapchain_extent_; ping-pong on history_write_slot_.
+    VkImage          taau_image_[kHistorySlots]{ VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VmaAllocation    taau_alloc_[kHistorySlots]{ nullptr, nullptr };
+    VkImageView      taau_view_[kHistorySlots]{ VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkDescriptorPool      taau_desc_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout taau_desc_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSet       taau_desc_sets_[kHistorySlots]{ VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkBuffer              taau_ubo_buffer_ = VK_NULL_HANDLE;
+    VmaAllocation         taau_ubo_alloc_ = nullptr;
+    VkPipelineLayout      taau_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline            taau_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule        taau_frag_module_ = VK_NULL_HANDLE;
+    bool                  taau_history_valid_ = false;
+    // Compose desc set is rewired when this flag toggles — tracks the
+    // currently-bound source so we only re-write on actual change.
+    bool                  compose_uses_taau_ = false;
+    void init_taau();
+    void destroy_taau();
+    void recreate_taau_targets();
+    void rewrite_compose_for_taau();
+
     // --- Compose / tonemap pass ---
     VkDescriptorPool       compose_desc_pool_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout  compose_desc_set_layout_ = VK_NULL_HANDLE;
@@ -1390,6 +1415,12 @@ private:
 
         // Temporal + spatial denoiser.
         float taa_history_blend = 0.95f;  // 0 = no temporal, 1 = full history
+        // Temporal upsample (TAAU). When true, a second temporal pass runs
+        // after TAA: samples LR history bilinearly, reprojects a native-
+        // resolution prev frame, neighborhood-clamps to kill ghosts.
+        // Compose then samples the native upscaled image. Off by default
+        // so the standard render-scale=1 path stays bit-identical.
+        bool  taau_enabled       = false;
         float taa_spatial_strength = 0.7f;  // 0 = no à-trous, 1 = fully filtered
 
         // Bloom (single-pass spiral-tap inside the compose shader).

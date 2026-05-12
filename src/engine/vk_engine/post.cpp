@@ -91,8 +91,13 @@ void VulkanEngine::init_compose() {
 
 void VulkanEngine::rewrite_compose_image_bindings() {
     if (!compose_desc_set_layout_) return;
+    // When TAAU is on, compose reads the native upscaled output instead of
+    // the LR TAA history. taau_view_ ping-pong matches history_view_ slot.
+    const bool use_taau = rt_.taau_enabled && taau_image_[0] != VK_NULL_HANDLE;
+    compose_uses_taau_ = use_taau;
     for (int s = 0; s < kHistorySlots; ++s) {
-        VkDescriptorImageInfo i_hist{ linear_sampler_, history_view_[s],
+        VkImageView hist_src = use_taau ? taau_view_[s] : history_view_[s];
+        VkDescriptorImageInfo i_hist{ linear_sampler_, hist_src,
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo i_depth{ linear_sampler_, depth_view_,
                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };

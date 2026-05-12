@@ -283,6 +283,7 @@ void VulkanEngine::save_settings() const {
     f << "terrain_raymarch_shadow_steps = " << rt_.terrain_raymarch_shadow_steps << "\n";
     f << "terrain_raymarch_octaves = " << rt_.terrain_raymarch_octaves << "\n";
     f << "terrain_raymarch_normal_octaves = " << rt_.terrain_raymarch_normal_octaves << "\n";
+    f << "taau_enabled = "                << (rt_.taau_enabled ? 1 : 0) << "\n";
     f << "terrain_raymarch_step_factor = " << rt_.terrain_raymarch_step_factor << "\n";
     f << "terrain_raymarch_lod_near_m = " << rt_.terrain_raymarch_lod_near_m << "\n";
     f << "terrain_raymarch_lod_far_m = " << rt_.terrain_raymarch_lod_far_m << "\n";
@@ -463,6 +464,7 @@ void VulkanEngine::load_settings() {
             else if (key == "terrain_raymarch_shadow_steps") rt_.terrain_raymarch_shadow_steps = std::stoi(val);
             else if (key == "terrain_raymarch_octaves") rt_.terrain_raymarch_octaves = std::stoi(val);
             else if (key == "terrain_raymarch_normal_octaves") rt_.terrain_raymarch_normal_octaves = std::stoi(val);
+            else if (key == "taau_enabled") rt_.taau_enabled = std::stoi(val) != 0;
             else if (key == "terrain_raymarch_step_factor") rt_.terrain_raymarch_step_factor = std::stof(val);
             else if (key == "terrain_raymarch_lod_near_m") rt_.terrain_raymarch_lod_near_m = std::stof(val);
             else if (key == "terrain_raymarch_lod_far_m") rt_.terrain_raymarch_lod_far_m = std::stof(val);

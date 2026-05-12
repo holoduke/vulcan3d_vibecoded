@@ -294,4 +294,220 @@ void VulkanEngine::destroy_taa() {
     motion_vec_alloc_ = nullptr;
 }
 
+// ============================================================================
+// TAAU — temporal upsample pass. Lives alongside TAA because it shares the
+// linear_sampler + reuses the LR history that TAA produces, but it runs in
+// a separate pipeline at native swapchain_extent_ writing to taau_image_.
+// ============================================================================
+
+void VulkanEngine::init_taau() {
+    // UBO: LR + native viewport sizes + params (history_blend, history_valid).
+    struct TaauUBO { glm::vec4 lr_vp; glm::vec4 full_vp; glm::vec4 params; };
+    VkBufferCreateInfo bci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr, .flags = 0,
+        .size = sizeof(TaauUBO),
+        .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VmaAllocationCreateInfo bac{};
+    bac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    bac.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    vk_check(vmaCreateBuffer(allocator_, &bci, &bac,
+                             &taau_ubo_buffer_, &taau_ubo_alloc_, nullptr),
+             "taau ubo");
+
+    // Descriptor pool: 2 sets, 4 sampled images + 1 UBO each.
+    VkDescriptorPoolSize sizes[] = {
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 },
+    };
+    VkDescriptorPoolCreateInfo pci{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = nullptr, .flags = 0,
+        .maxSets = kHistorySlots, .poolSizeCount = 2, .pPoolSizes = sizes,
+    };
+    vk_check(vkCreateDescriptorPool(device_, &pci, nullptr, &taau_desc_pool_),
+             "taau desc pool");
+
+    // Set layout: 0 cur_lr, 1 prev_full, 2 depth_lr, 3 ubo, 4 motion_lr.
+    VkDescriptorSetLayoutBinding bindings[5]{};
+    for (int i = 0; i < 5; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = (i == 3)
+            ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+            : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo lci{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = nullptr, .flags = 0,
+        .bindingCount = 5, .pBindings = bindings,
+    };
+    vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
+                                          &taau_desc_set_layout_),
+             "taau set layout");
+
+    VkDescriptorSetLayout layouts[kHistorySlots] = {
+        taau_desc_set_layout_, taau_desc_set_layout_
+    };
+    VkDescriptorSetAllocateInfo dai{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .descriptorPool = taau_desc_pool_,
+        .descriptorSetCount = kHistorySlots,
+        .pSetLayouts = layouts,
+    };
+    vk_check(vkAllocateDescriptorSets(device_, &dai, taau_desc_sets_),
+             "taau set alloc");
+
+    VkPipelineLayoutCreateInfo plci{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext = nullptr, .flags = 0,
+        .setLayoutCount = 1, .pSetLayouts = &taau_desc_set_layout_,
+        .pushConstantRangeCount = 0, .pPushConstantRanges = nullptr,
+    };
+    vk_check(vkCreatePipelineLayout(device_, &plci, nullptr,
+                                     &taau_pipeline_layout_),
+             "taau pipeline layout");
+
+    std::string sd = QLIKE_SHADER_DIR;
+    taau_frag_module_ = vkpipe::load_shader_module(device_, sd + "/taau.frag.spv");
+
+    vkpipe::GraphicsPipelineConfig cfg{};
+    cfg.vert = taa_vert_module_;       // reuse fullscreen-tri vert
+    cfg.frag = taau_frag_module_;
+    cfg.layout = taau_pipeline_layout_;
+    cfg.color_format = scene_color_format_;
+    cfg.depth_format = VK_FORMAT_UNDEFINED;
+    cfg.cull = VK_CULL_MODE_NONE;
+    cfg.depth_test = false;
+    cfg.depth_write = false;
+    taau_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+
+    recreate_taau_targets();
+    log::info("TAAU initialized");
+}
+
+void VulkanEngine::recreate_taau_targets() {
+    for (int s = 0; s < kHistorySlots; ++s) {
+        if (taau_view_[s])  vkDestroyImageView(device_, taau_view_[s], nullptr);
+        if (taau_image_[s]) vmaDestroyImage(allocator_, taau_image_[s], taau_alloc_[s]);
+        taau_image_[s] = VK_NULL_HANDLE; taau_view_[s] = VK_NULL_HANDLE;
+        taau_alloc_[s] = nullptr;
+    }
+    for (int s = 0; s < kHistorySlots; ++s) {
+        VkImageCreateInfo ici{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D, .format = scene_color_format_,
+            // Native swapchain extent — this is the upscaled output.
+            .extent = { swapchain_extent_.width, swapchain_extent_.height, 1 },
+            .mipLevels = 1, .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                     VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        vk_check(vmaCreateImage(allocator_, &ici, &aci,
+                                 &taau_image_[s], &taau_alloc_[s], nullptr),
+                 "taau image");
+        VkImageViewCreateInfo vci{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr, .flags = 0, .image = taau_image_[s],
+            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = scene_color_format_,
+            .components = {},
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+        };
+        vk_check(vkCreateImageView(device_, &vci, nullptr, &taau_view_[s]),
+                 "taau view");
+    }
+
+    // Wire descriptor sets. Set [s] is the one whose OUTPUT slot is s; it
+    // samples prev_full from slot 1-s (the slot written last frame). LR
+    // sources come from history_view_ at the same s.
+    for (int s = 0; s < kHistorySlots; ++s) {
+        VkDescriptorImageInfo i_cur   { linear_sampler_, history_view_[s],
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo i_prev  { linear_sampler_, taau_view_[1 - s],
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo i_depth { linear_sampler_, depth_view_,
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo i_motion{ linear_sampler_, motion_vec_view_,
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorBufferInfo i_ubo  { taau_ubo_buffer_, 0, VK_WHOLE_SIZE };
+
+        VkWriteDescriptorSet w[5]{};
+        for (int i = 0; i < 5; ++i) {
+            w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[i].dstSet = taau_desc_sets_[s];
+            w[i].dstBinding = i;
+            w[i].descriptorCount = 1;
+            w[i].descriptorType = (i == 3)
+                ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        }
+        w[0].pImageInfo = &i_cur;
+        w[1].pImageInfo = &i_prev;
+        w[2].pImageInfo = &i_depth;
+        w[3].pBufferInfo = &i_ubo;
+        w[4].pImageInfo = &i_motion;
+        vkUpdateDescriptorSets(device_, 5, w, 0, nullptr);
+    }
+
+    // Transition both ping-pong slots to SHADER_READ_ONLY so the prev-slot
+    // sample on the first frame doesn't hit UNDEFINED.
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        for (int s = 0; s < kHistorySlots; ++s) {
+            vkinit::transition_image(cb, taau_image_[s],
+                                      VK_IMAGE_LAYOUT_UNDEFINED,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+    });
+    taau_history_valid_ = false;
+    compose_uses_taau_ = false;
+}
+
+void VulkanEngine::destroy_taau() {
+    if (taau_pipeline_)        vkDestroyPipeline(device_, taau_pipeline_, nullptr);
+    if (taau_pipeline_layout_) vkDestroyPipelineLayout(device_, taau_pipeline_layout_, nullptr);
+    if (taau_frag_module_)     vkDestroyShaderModule(device_, taau_frag_module_, nullptr);
+    if (taau_desc_set_layout_) vkDestroyDescriptorSetLayout(device_, taau_desc_set_layout_, nullptr);
+    if (taau_desc_pool_)       vkDestroyDescriptorPool(device_, taau_desc_pool_, nullptr);
+    if (taau_ubo_buffer_)      vmaDestroyBuffer(allocator_, taau_ubo_buffer_, taau_ubo_alloc_);
+    for (int s = 0; s < kHistorySlots; ++s) {
+        if (taau_view_[s])  vkDestroyImageView(device_, taau_view_[s], nullptr);
+        if (taau_image_[s]) vmaDestroyImage(allocator_, taau_image_[s], taau_alloc_[s]);
+        taau_image_[s] = VK_NULL_HANDLE; taau_view_[s] = VK_NULL_HANDLE;
+        taau_alloc_[s] = nullptr;
+    }
+    taau_pipeline_ = VK_NULL_HANDLE;
+    taau_pipeline_layout_ = VK_NULL_HANDLE;
+    taau_frag_module_ = VK_NULL_HANDLE;
+    taau_desc_set_layout_ = VK_NULL_HANDLE;
+    taau_desc_pool_ = VK_NULL_HANDLE;
+    taau_ubo_buffer_ = VK_NULL_HANDLE;
+    taau_ubo_alloc_ = nullptr;
+}
+
+// Called from the per-frame settings tick when rt_.taau_enabled flips, or
+// when TAAU targets get recreated (swapchain resize). Rebinds compose's
+// history sampler to either history_view_ (TAAU off) or taau_view_ (on).
+// Idempotent — does nothing when bound state already matches.
+void VulkanEngine::rewrite_compose_for_taau() {
+    const bool want_taau = rt_.taau_enabled && taau_image_[0] != VK_NULL_HANDLE;
+    if (want_taau == compose_uses_taau_) return;
+    vkDeviceWaitIdle(device_);   // safest — compose desc may be in flight
+    rewrite_compose_image_bindings();
+    log::infof("compose source switched to %s", want_taau ? "TAAU" : "TAA");
+}
+
 } // namespace qlike

@@ -459,6 +459,11 @@ void VulkanEngine::build_menu_ui() {
         ImGui::Checkbox("sub-pixel jitter", &rt_.taa_jitter_enabled);
         ImGui::SliderFloat("jitter strength", &rt_.taa_jitter_strength, 0.0f, 2.0f);
         ImGui::SliderFloat("history blend", &rt_.taa_history_blend, 0.0f, 0.98f);
+        ImGui::Checkbox("TAAU (temporal upsample)", &rt_.taau_enabled);
+        ImGui::TextDisabled("Adds a temporal upscale pass after TAA. Best with\n"
+                             "render_scale < 1.0 — renders at LR, reconstructs\n"
+                             "at native via motion-vector reproject + variance\n"
+                             "clamp. ~1.5x perf gain at render_scale=0.67.");
         ImGui::SliderFloat("spatial strength", &rt_.taa_spatial_strength, 0.0f, 1.0f);
         // Compose-pass unsharp mask — runs in compose.frag (5 texelFetches),
         // recovers detail the TAA spatial filter softened. 0 disables; 0.55
