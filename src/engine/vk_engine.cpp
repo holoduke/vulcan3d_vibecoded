@@ -1022,7 +1022,10 @@ void VulkanEngine::run(const RunOptions& opts) {
         if (muzzle_flash_timer_ > 0.0f) muzzle_flash_timer_ -= frame_dt;
         if (recoil_timer_       > 0.0f) recoil_timer_       -= frame_dt;
         if (state_ == State::Playing && window_->cursor_captured()) {
-            if (terrain_edit_mode_) {
+            // Raymarch terrain reads FBM directly in the shader — sculpting
+            // the heightmap has no visual effect and only triggers wasted
+            // chunk rebuilds / BLAS rebuilds / texture uploads.
+            if (terrain_edit_mode_ && !rt_.terrain_raymarch_enabled) {
                 // ---- Phase 4 sculpt path ----
                 // Raycast from the eye along the camera forward against
                 // the heightfield (Jolt's static body) — works because
@@ -1244,7 +1247,10 @@ void VulkanEngine::run(const RunOptions& opts) {
         // catch up over the next handful of frames. Threshold ~1.4°
         // — enough to absorb continuous slider drag without thrashing
         // the queue.
-        if (!terrain_data_.heights.empty()) {
+        // Heightmap-shadow texture is sampled by cube.frag's mesh-terrain
+        // branch and grass.vert (raster grass). When raymarch terrain is on
+        // AND raster grass is off, nothing reads it — skip the rebake.
+        if (!terrain_data_.heights.empty() && needs_heightmap_shadow()) {
             float p_rad = glm::radians(rt_.sun_pitch_deg);
             float y_rad = glm::radians(rt_.sun_yaw_deg);
             glm::vec3 cur_sun(std::sin(y_rad) * std::cos(p_rad),

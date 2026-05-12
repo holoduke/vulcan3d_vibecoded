@@ -1094,16 +1094,26 @@ void VulkanEngine::init_world() {
         terrain_data_.origin_x = hm.origin_x;
         terrain_data_.origin_z = hm.origin_z;
         terrain_data_.heights = hm.heights;
-        terrain_mesh_ = build_terrain_mesh(device_, allocator_,
-                                           graphics_queue_, graphics_queue_family_, hm);
-        // 32Р“вЂ”32 chunks of 64 cells each РІР‚вЂќ 64 is divisible by every LOD
-        // stride (1/2/4/8) so all four LODs cover every cell. РІвЂ°в‚¬64 m per
-        // chunk side at 1 m cells. Skirt strips on each LOD's index
-        // buffer hide LOD-mismatch cracks at chunk seams.
-        const int chunks_per_side = 32;
-        terrain_chunks_ = build_terrain_chunks(device_, allocator_,
-                                               graphics_queue_, graphics_queue_family_,
-                                               hm, chunks_per_side);
+        // Skip the rasterised terrain mesh + chunks + BLAS source when the
+        // procedural raymarch is the active terrain. Saves several hundred
+        // MB of VRAM (chunked LOD buffers, parent_y morph buffers, merged
+        // BLAS source mesh). Caveat: toggling raymarch OFF at runtime will
+        // show no rasterised terrain until the user restarts.
+        if (!rt_.terrain_raymarch_enabled) {
+            terrain_mesh_ = build_terrain_mesh(device_, allocator_,
+                                               graphics_queue_, graphics_queue_family_, hm);
+            // 32×32 chunks of 64 cells each — 64 is divisible by every LOD
+            // stride (1/2/4/8) so all four LODs cover every cell. ≈64 m per
+            // chunk side at 1 m cells. Skirt strips on each LOD's index
+            // buffer hide LOD-mismatch cracks at chunk seams.
+            const int chunks_per_side = 32;
+            terrain_chunks_ = build_terrain_chunks(device_, allocator_,
+                                                   graphics_queue_, graphics_queue_family_,
+                                                   hm, chunks_per_side);
+        } else {
+            log::info("[terrain] raymarch enabled — skipping mesh/chunks/BLAS "
+                      "build at init (restart needed to toggle off)");
+        }
         // Lift every level brush by plateau_height so the castle's y=0
         // baseline lands on the plateau surface. Cheaper than rewriting
         // level.cpp РІР‚вЂќ the brush AABBs / world matrices update through the
@@ -1147,9 +1157,17 @@ void VulkanEngine::init_world() {
         // the 4080 handles comfortably even with the rest of the
         // RT load (terrain shadows, AO, GI).
         gp.max_blades  = 800000;
-        grass_ = build_grass(device_, allocator_,
-                             graphics_queue_, graphics_queue_family_,
-                             hm, gp);
+        // Skip 800k-blade placement when raymarch grass will be drawn —
+        // the rasterised grass buffer would never get sampled. Toggling
+        // raymarch grass OFF at runtime requires a restart.
+        if (!rt_.grass_raymarch_enabled) {
+            grass_ = build_grass(device_, allocator_,
+                                 graphics_queue_, graphics_queue_family_,
+                                 hm, gp);
+        } else {
+            log::info("[grass] raymarch grass enabled — skipping placement "
+                      "build at init (restart needed to toggle off)");
+        }
     }
 
     physics_ = std::make_unique<PhysicsWorld>();

@@ -898,6 +898,25 @@ private:
     std::vector<glm::mat4> static_brush_worlds_;
     bool static_brush_tex_on_ = false;
     bool static_brush_dirty_ = true;
+    // Tracks whether the last bake_static_brushes() included the terrain
+    // BLAS. Flipped when rt_.terrain_raymarch_enabled toggles → forces a
+    // rebake so the TLAS instance set matches the current mode.
+    bool terrain_in_tlas_baked_ = false;
+
+    // True when the chunked terrain BLAS should be in the TLAS. Skipped
+    // while raymarch terrain is active — the mesh BLAS shape doesn't
+    // match the visible FBM surface, so castle/dyn-prop RT shadows would
+    // land on the wrong geometry.
+    inline bool tlas_includes_terrain_blas() const {
+        return terrain_blas_device_address_ != 0 && !rt_.terrain_raymarch_enabled;
+    }
+    // True when something on screen samples the heightmap-shadow texture
+    // (cube.frag's mesh-terrain branch + grass.vert). Raymarch terrain
+    // and raymarch grass don't read it.
+    inline bool needs_heightmap_shadow() const {
+        return !rt_.terrain_raymarch_enabled ||
+               (rt_.grass_enabled && !rt_.grass_raymarch_enabled);
+    }
     // Set whenever bake_static_brushes() reseeds static_brush_materials_
     // / _worlds_ / _instances_; cleared after the per-frame memcpy
     // copies them into the GPU-visible buffers. Avoids re-uploading

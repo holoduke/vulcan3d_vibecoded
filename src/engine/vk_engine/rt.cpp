@@ -739,7 +739,7 @@ void VulkanEngine::bake_static_brushes() {
     // call to bake_static_brushes). cube.frag's GI hit recovers the
     // terrain material via materials[customIndex] just like dynamic
     // instances. customIndex == M (= world_.brushes.size()).
-    if (terrain_blas_device_address_ != 0) {
+    if (tlas_includes_terrain_blas()) {
         VkAccelerationStructureInstanceKHR tinst{};
         tinst.transform.matrix[0][0] = 1.0f;
         tinst.transform.matrix[1][1] = 1.0f;
@@ -767,6 +767,7 @@ void VulkanEngine::bake_static_brushes() {
     }
     static_brush_tex_on_ = tex_on;
     static_brush_dirty_ = false;
+    terrain_in_tlas_baked_ = tlas_includes_terrain_blas();
 }
 
 void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
@@ -845,8 +846,10 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     const bool merged_wanted = rt_.use_merged_static_blas &&
                                merged_static_blas_device_address_ != 0 &&
                                !world_.brushes.empty();
+    const bool terrain_in_tlas_now = tlas_includes_terrain_blas();
     if (static_brush_dirty_ || static_brush_tex_on_ != tex_on ||
-        merged_active != merged_wanted) {
+        merged_active != merged_wanted ||
+        terrain_in_tlas_baked_ != terrain_in_tlas_now) {
         bake_static_brushes();
         // Force a full TLAS rebuild (not UPDATE) on the next frame because
         // the instance count just changed.
@@ -863,7 +866,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     //   slot M           terrain (only if terrain BLAS exists)
     //   slots [M+T..]    dynamic instances (write_instance fills these)
     const uint32_t M = static_cast<uint32_t>(world_.brushes.size());
-    const uint32_t T = (terrain_blas_device_address_ != 0) ? 1u : 0u;
+    const uint32_t T = tlas_includes_terrain_blas() ? 1u : 0u;
     const uint32_t static_mats = M + T;
     // Static brush materials + worlds change rarely (texture toggle,
     // merged-vs-per-brush swap, brush count change). Gate the per-frame
