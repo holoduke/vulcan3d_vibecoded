@@ -53,9 +53,12 @@ else()
     # -ffast-math symmetrically dropped (matches MSVC /fp:fast removal).
     add_compile_options(
         $<$<CONFIG:Release>:-O3>
-        $<$<CONFIG:Release>:-march=x86-64-v3>   # AVX2 baseline
         $<$<CONFIG:Release>:-flto>
     )
+    # AVX2 baseline only on x86_64 — Apple Silicon (arm64) doesn't have it.
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+        add_compile_options($<$<CONFIG:Release>:-march=x86-64-v3>)
+    endif()
     add_link_options($<$<CONFIG:Release>:-flto>)
 endif()
 
@@ -163,6 +166,15 @@ FetchContent_Declare(fastnoiselite
 
 FetchContent_MakeAvailable(glfw glm vk_bootstrap vma Catch2 JoltPhysics imgui tinygltf tinyexr miniaudio fastnoiselite)
 
+# tinyexr enables -Weverything -Werror; clang on Apple Silicon flags
+# /usr/local/include via -Wpoison-system-directories. Disable warnings for it.
+if(TARGET tinyexr)
+    target_compile_options(tinyexr PRIVATE -w)
+endif()
+if(TARGET miniz)
+    target_compile_options(miniz PRIVATE -w)
+endif()
+
 # Dear ImGui ships without CMakeLists; build our own target from its sources.
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -245,9 +257,13 @@ target_link_libraries(qlike_engine PUBLIC
     imgui
     tinyexr
 )
-target_compile_definitions(qlike_engine PUBLIC
-    VK_USE_PLATFORM_WIN32_KHR
-)
+if(WIN32)
+    target_compile_definitions(qlike_engine PUBLIC VK_USE_PLATFORM_WIN32_KHR)
+elseif(APPLE)
+    target_compile_definitions(qlike_engine PUBLIC VK_USE_PLATFORM_METAL_EXT)
+elseif(UNIX)
+    target_compile_definitions(qlike_engine PUBLIC VK_USE_PLATFORM_XLIB_KHR)
+endif()
 
 add_executable(quake_like src/main.cpp)
 target_link_libraries(quake_like PRIVATE qlike_engine)

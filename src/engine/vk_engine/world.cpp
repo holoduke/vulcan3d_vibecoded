@@ -506,6 +506,53 @@ void VulkanEngine::refresh_terrain_collision() {
     terrain_jolt_dirty_ = false;
 }
 
+void VulkanEngine::ensure_terrain_raster_built() {
+    if (terrain_chunks_.chunks.size() > 0) return;     // already built
+    if (terrain_data_.heights.empty()) return;          // no heightmap to build from
+    log::info("[terrain] lazy-building rasterised mesh + chunks");
+    vkDeviceWaitIdle(device_);
+    Heightmap hm{};
+    hm.dim       = terrain_data_.dim;
+    hm.cell      = terrain_data_.cell;
+    hm.origin_x  = terrain_data_.origin_x;
+    hm.origin_z  = terrain_data_.origin_z;
+    hm.heights   = terrain_data_.heights;
+    terrain_mesh_ = build_terrain_mesh(device_, allocator_,
+                                       graphics_queue_, graphics_queue_family_, hm);
+    const int chunks_per_side = 32;
+    terrain_chunks_ = build_terrain_chunks(device_, allocator_,
+                                           graphics_queue_, graphics_queue_family_,
+                                           hm, chunks_per_side);
+    // Note: the terrain BLAS is built once in init_rt and not rebuilt
+    // here. Toggling raymarch off mid-session draws raster terrain
+    // correctly but RT shadow/AO/GI rays from cube.frag will not see
+    // it until restart. tlas_includes_terrain_blas() handles the
+    // address==0 case already, so this is a quality fallback, not a
+    // crash risk.
+}
+
+void VulkanEngine::ensure_grass_raster_built() {
+    if (grass_.instance_count > 0) return;              // already built
+    if (terrain_data_.heights.empty()) return;
+    log::info("[grass] lazy-building rasterised blade placement");
+    vkDeviceWaitIdle(device_);
+    Heightmap hm{};
+    hm.dim       = terrain_data_.dim;
+    hm.cell      = terrain_data_.cell;
+    hm.origin_x  = terrain_data_.origin_x;
+    hm.origin_z  = terrain_data_.origin_z;
+    hm.heights   = terrain_data_.heights;
+    GrassParams gp{};
+    gp.height_min  = -20.0f;
+    gp.height_max  = 200.0f;
+    gp.half_extent = 200.0f;
+    gp.keep_out_xz = glm::vec2(4.0f, 4.0f);
+    gp.max_blades  = 800000;
+    grass_ = build_grass(device_, allocator_,
+                         graphics_queue_, graphics_queue_family_,
+                         hm, gp);
+}
+
 void VulkanEngine::refresh_terrain_blas() {
     if (!terrain_blas_dirty_) return;
     // BLAS rebuild is the heavy part. Defer to mouse-up so per-frame
@@ -1369,16 +1416,26 @@ void VulkanEngine::init_world() {
         terrain_data_.origin_x = hm.origin_x;
         terrain_data_.origin_z = hm.origin_z;
         terrain_data_.heights = hm.heights;
-        terrain_mesh_ = build_terrain_mesh(device_, allocator_,
-                                           graphics_queue_, graphics_queue_family_, hm);
-        // 32Р“вЂ”32 chunks of 64 cells each РІР‚вЂќ 64 is divisible by every LOD
-        // stride (1/2/4/8) so all four LODs cover every cell. РІвЂ°в‚¬64 m per
-        // chunk side at 1 m cells. Skirt strips on each LOD's index
-        // buffer hide LOD-mismatch cracks at chunk seams.
-        const int chunks_per_side = 32;
-        terrain_chunks_ = build_terrain_chunks(device_, allocator_,
-                                               graphics_queue_, graphics_queue_family_,
-                                               hm, chunks_per_side);
+        // Skip the rasterised terrain mesh + chunks + BLAS source when the
+        // procedural raymarch is the active terrain. Saves several hundred
+        // MB of VRAM (chunked LOD buffers, parent_y morph buffers, merged
+        // BLAS source mesh). Caveat: toggling raymarch OFF at runtime will
+        // show no rasterised terrain until the user restarts.
+        if (!rt_.terrain_raymarch_enabled) {
+            terrain_mesh_ = build_terrain_mesh(device_, allocator_,
+                                               graphics_queue_, graphics_queue_family_, hm);
+            // 32×32 chunks of 64 cells each — 64 is divisible by every LOD
+            // stride (1/2/4/8) so all four LODs cover every cell. ≈64 m per
+            // chunk side at 1 m cells. Skirt strips on each LOD's index
+            // buffer hide LOD-mismatch cracks at chunk seams.
+            const int chunks_per_side = 32;
+            terrain_chunks_ = build_terrain_chunks(device_, allocator_,
+                                                   graphics_queue_, graphics_queue_family_,
+                                                   hm, chunks_per_side);
+        } else {
+            log::info("[terrain] raymarch enabled — deferring mesh/chunks "
+                      "build (will lazy-build if raymarch is toggled off)");
+        }
         // Lift every level brush by plateau_height so the castle's y=0
         // baseline lands on the plateau surface. Cheaper than rewriting
         // level.cpp РІР‚вЂќ the brush AABBs / world matrices update through the
@@ -1435,9 +1492,17 @@ void VulkanEngine::init_world() {
         // the 4080 handles comfortably even with the rest of the
         // RT load (terrain shadows, AO, GI).
         gp.max_blades  = 800000;
-        grass_ = build_grass(device_, allocator_,
-                             graphics_queue_, graphics_queue_family_,
-                             hm, gp);
+        // Skip 800k-blade placement when raymarch grass will be drawn —
+        // the rasterised grass buffer would never get sampled. Toggling
+        // raymarch grass OFF at runtime requires a restart.
+        if (!rt_.grass_raymarch_enabled) {
+            grass_ = build_grass(device_, allocator_,
+                                 graphics_queue_, graphics_queue_family_,
+                                 hm, gp);
+        } else {
+            log::info("[grass] raymarch grass enabled — deferring placement "
+                      "build (will lazy-build if raymarch grass is toggled off)");
+        }
     }
 
     physics_ = std::make_unique<PhysicsWorld>();
@@ -2446,9 +2511,17 @@ void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
     pc.model    = fv.inv_vp;
     pc.prev_mvp = prev_view_proj_valid_ ? prev_view_proj_ : vp;
     pc.color    = glm::vec4(0.0f, 0.0f, 28.0f, 22.0f);
+    // emissive layout for the raymarch shader:
+    //   x = step factor (0.4..0.8) — march step relative to SDF gap
+    //   y = lod_near_m  — ray distance at which the FBM LOD ramp starts
+    //   z = lod_far_m   — ray distance at which the FBM LOD ramp ends
+    //   w = lod_min_oct — minimum octave count at far end of ramp
     pc.emissive = glm::vec4(
         std::clamp(rt_.terrain_raymarch_step_factor, 0.4f, 0.8f),
-        0.0f, 0.0f, 0.0f);
+        std::max(1.0f, rt_.terrain_raymarch_lod_near_m),
+        std::max(rt_.terrain_raymarch_lod_near_m + 1.0f,
+                 rt_.terrain_raymarch_lod_far_m),
+        static_cast<float>(std::clamp(rt_.terrain_raymarch_lod_min_octaves, 2, 8)));
     pc.tex_params = glm::vec4(
         static_cast<float>(std::clamp(rt_.terrain_raymarch_max_steps, 60, 300)),
         static_cast<float>(std::clamp(rt_.terrain_raymarch_shadow_steps, 16, 96)),
@@ -2514,7 +2587,14 @@ void VulkanEngine::render_grass_raymarch(VkCommandBuffer cmd) {
                             rt_.grass_wind,
                             static_cast<float>(frame_number_) * 0.016f,
                             rt_.grass_cutoff_soft_dist);
-    pc.emissive = glm::vec4(0.0f);
+    // emissive.{y,z,w} = LOD ramp params (shared with terrain raymarch).
+    // .x stays 0 — the grass shader doesn't read a step factor.
+    pc.emissive = glm::vec4(
+        0.0f,
+        std::max(1.0f, rt_.terrain_raymarch_lod_near_m),
+        std::max(rt_.terrain_raymarch_lod_near_m + 1.0f,
+                 rt_.terrain_raymarch_lod_far_m),
+        static_cast<float>(std::clamp(rt_.terrain_raymarch_lod_min_octaves, 2, 8)));
     pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
     pc.grass_params = glm::vec4(rt_.grass_distance, rt_.grass_wind,
                                  static_cast<float>(frame_number_) * 0.016f,
@@ -2725,11 +2805,17 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             static_cast<float>(std::clamp(rt_.terrain_raymarch_shadow_steps, 16, 96)),
             static_cast<float>(std::clamp(rt_.terrain_raymarch_octaves, 4, 24)),
             static_cast<float>(std::clamp(rt_.terrain_raymarch_normal_octaves, 4, 32)));
-        // emissive.x = step factor (0.4..0.8). 0.4 = safest, 0.8 =
-        // ~half the iterations to converge but may skip thin spikes.
+        // emissive layout — mirrors render_terrain_raymarch_lr:
+        //   x = step factor (0.4..0.8)
+        //   y = lod_near_m  — ray-t at which FBM LOD ramp starts
+        //   z = lod_far_m   — ray-t at which FBM LOD ramp ends
+        //   w = lod_min_oct — minimum octave count at far end
         pc.emissive = glm::vec4(
             std::clamp(rt_.terrain_raymarch_step_factor, 0.4f, 0.8f),
-            0.0f, 0.0f, 0.0f);
+            std::max(1.0f, rt_.terrain_raymarch_lod_near_m),
+            std::max(rt_.terrain_raymarch_lod_near_m + 1.0f,
+                     rt_.terrain_raymarch_lod_far_m),
+            static_cast<float>(std::clamp(rt_.terrain_raymarch_lod_min_octaves, 2, 8)));
         // grass_params slot вЂ” fog strength + flags (mirrors LR pass).
         pc.grass_params = glm::vec4(
             std::max(0.0f, rt_.terrain_raymarch_fog_strength),

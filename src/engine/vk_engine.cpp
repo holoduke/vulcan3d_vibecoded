@@ -296,6 +296,9 @@ void VulkanEngine::init() {
     init_terrain_raymarch_pipeline();
     init_terrain_raymarch_compose_pipeline();
     init_terrain_raymarch_lowres();
+    // VRS attachment is sized in LR-tile units, so it must come after
+    // init_terrain_raymarch_lowres() has set tr_lr_extent_.
+    init_vrs_attachment();
     init_sun_shadow_pipeline();
     init_grass_pipeline();
     present_loader_frame("Baking shadows",        0.85f);
@@ -322,6 +325,7 @@ void VulkanEngine::init() {
     // bloom must run before compose so binding 3's bloom_mip_views_[0] is
     // live when compose's descriptor set is written.
     init_taa();
+    init_taau();
     init_bloom();
     init_compose();
     // Must run AFTER init_taa() — grass raymarch reuses taa_vert_module_
@@ -526,9 +530,20 @@ void VulkanEngine::draw(uint32_t img_index) {
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .clearValue = lr_clear_d,
         };
+        // Optional attachment-based VRS — chained via pNext. The texel
+        // size + shading-rate combiner are pipeline state; the attachment
+        // image just supplies the per-tile rate.
+        VkRenderingFragmentShadingRateAttachmentInfoKHR vrs_info{};
+        if (vrs_supported_ && vrs_view_) {
+            vrs_info.sType = VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR;
+            vrs_info.imageView = vrs_view_;
+            vrs_info.imageLayout = VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
+            vrs_info.shadingRateAttachmentTexelSize = vrs_texel_size_;
+        }
         VkRenderingInfo lr_ri{
             .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-            .pNext = nullptr, .flags = 0,
+            .pNext = (vrs_supported_ && vrs_view_) ? &vrs_info : nullptr,
+            .flags = 0,
             .renderArea = { {0, 0}, tr_lr_extent_ },
             .layerCount = 1, .viewMask = 0,
             .colorAttachmentCount = 2, .pColorAttachments = lr_color_atts,
@@ -704,11 +719,79 @@ void VulkanEngine::draw(uint32_t img_index) {
         vkCmdEndRendering(frame.command_buffer);
     }
 
-    // ---------- Copy denoised history → swapchain ----------
-    // ---------- Pass 2.5: Compose history (HDR) into swapchain (LDR) with ACES tonemap ----------
     vkinit::transition_image(frame.command_buffer, history_image_[history_write_slot_],
                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // ---------- Pass 2.25: TAAU temporal upsample (optional) ----------
+    // Reads LR history (just written) + LR motion + LR depth + previous-
+    // frame native upscaled. Outputs new native upscaled. Compose then
+    // samples taau_view_ instead of history_view_ (set by
+    // rewrite_compose_image_bindings via the toggle handler).
+    if (rt_.taau_enabled && taau_pipeline_ != VK_NULL_HANDLE) {
+        // Update UBO each frame — LR + native viewport sizes, params.
+        struct TaauUBO { glm::vec4 lr_vp; glm::vec4 full_vp; glm::vec4 params; };
+        TaauUBO u{};
+        u.lr_vp = glm::vec4(static_cast<float>(render_extent_.width),
+                            static_cast<float>(render_extent_.height),
+                            1.0f / render_extent_.width,
+                            1.0f / render_extent_.height);
+        u.full_vp = glm::vec4(static_cast<float>(swapchain_extent_.width),
+                              static_cast<float>(swapchain_extent_.height),
+                              1.0f / swapchain_extent_.width,
+                              1.0f / swapchain_extent_.height);
+        u.params = glm::vec4(rt_.taa_history_blend,
+                             taau_history_valid_ ? 1.0f : 0.0f,
+                             0.0f, 0.0f);
+        VmaAllocationInfo ai{};
+        vmaGetAllocationInfo(allocator_, taau_ubo_alloc_, &ai);
+        std::memcpy(ai.pMappedData, &u, sizeof(u));
+
+        vkinit::transition_image(frame.command_buffer,
+                                  taau_image_[history_write_slot_],
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        auto taau_color = vkinit::color_attachment_info(
+            taau_view_[history_write_slot_], nullptr,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingInfo taau_ri{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .pNext = nullptr, .flags = 0,
+            // Output at NATIVE — this is the upscale step.
+            .renderArea = { {0, 0}, swapchain_extent_ },
+            .layerCount = 1, .viewMask = 0,
+            .colorAttachmentCount = 1, .pColorAttachments = &taau_color,
+            .pDepthAttachment = nullptr, .pStencilAttachment = nullptr,
+        };
+        vkCmdBeginRendering(frame.command_buffer, &taau_ri);
+        VkViewport tvp{};
+        tvp.width = static_cast<float>(swapchain_extent_.width);
+        tvp.height = static_cast<float>(swapchain_extent_.height);
+        tvp.minDepth = 0.0f; tvp.maxDepth = 1.0f;
+        vkCmdSetViewport(frame.command_buffer, 0, 1, &tvp);
+        VkRect2D tsc{ {0, 0}, swapchain_extent_ };
+        vkCmdSetScissor(frame.command_buffer, 0, 1, &tsc);
+        vkCmdBindPipeline(frame.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          taau_pipeline_);
+        vkCmdBindDescriptorSets(frame.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                taau_pipeline_layout_, 0, 1,
+                                &taau_desc_sets_[history_write_slot_], 0, nullptr);
+        vkCmdDraw(frame.command_buffer, 3, 1, 0, 0);
+        vkCmdEndRendering(frame.command_buffer);
+
+        vkinit::transition_image(frame.command_buffer,
+                                  taau_image_[history_write_slot_],
+                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        taau_history_valid_ = true;
+    } else {
+        // Mode flipped off — invalidate history so toggling back on
+        // doesn't reproject stale frames.
+        taau_history_valid_ = false;
+    }
+
+    // ---------- Copy denoised history → swapchain ----------
+    // ---------- Pass 2.5: Compose history (HDR) into swapchain (LDR) with ACES tonemap ----------
 
     // Bloom mip chain reads the now-SHADER_READ history image (mip 0 input)
     // and writes mips 0..N down then back up additively. Final state leaves
@@ -1067,7 +1150,10 @@ void VulkanEngine::run(const RunOptions& opts) {
         if (muzzle_flash_timer_ > 0.0f) muzzle_flash_timer_ -= frame_dt;
         if (recoil_timer_       > 0.0f) recoil_timer_       -= frame_dt;
         if (state_ == State::Playing && window_->cursor_captured()) {
-            if (terrain_edit_mode_) {
+            // Raymarch terrain reads FBM directly in the shader — sculpting
+            // the heightmap has no visual effect and only triggers wasted
+            // chunk rebuilds / BLAS rebuilds / texture uploads.
+            if (terrain_edit_mode_ && !rt_.terrain_raymarch_enabled) {
                 // ---- Phase 4 sculpt path ----
                 // Raycast from the eye along the camera forward against
                 // the heightfield (Jolt's static body) — works because
@@ -1309,7 +1395,21 @@ void VulkanEngine::run(const RunOptions& opts) {
         // catch up over the next handful of frames. Threshold ~1.4°
         // — enough to absorb continuous slider drag without thrashing
         // the queue.
-        if (!terrain_data_.heights.empty()) {
+        // Lazy-build for the rasterised mesh/chunks/grass — only fires
+        // the first time the user toggles a raymarch flag off (init
+        // skips the build when raymarch is on to save VRAM).
+        if (!rt_.terrain_raymarch_enabled) ensure_terrain_raster_built();
+        if (rt_.grass_enabled && !rt_.grass_raymarch_enabled) {
+            ensure_grass_raster_built();
+        }
+        // TAAU toggle: re-point compose's history sampler at taau_view_ or
+        // history_view_. Cheap when state matches.
+        rewrite_compose_for_taau();
+
+        // Heightmap-shadow texture is sampled by cube.frag's mesh-terrain
+        // branch and grass.vert (raster grass). When raymarch terrain is on
+        // AND raster grass is off, nothing reads it — skip the rebake.
+        if (!terrain_data_.heights.empty() && needs_heightmap_shadow()) {
             float p_rad = glm::radians(rt_.sun_pitch_deg);
             float y_rad = glm::radians(rt_.sun_yaw_deg);
             glm::vec3 cur_sun(std::sin(y_rad) * std::cos(p_rad),
@@ -1443,6 +1543,7 @@ void VulkanEngine::shutdown() {
     // then bloom (samples scene), then TAA (owns linear_sampler_ + history).
     guarded("destroy_compose", [&]{ destroy_compose(); });
     guarded("destroy_bloom",   [&]{ destroy_bloom(); });
+    guarded("destroy_taau",    [&]{ destroy_taau(); });
     guarded("destroy_taa",     [&]{ destroy_taa(); });
     // Order: tear down the renderer's GPU dependencies on dynamic-prop world
     // matrices (TLAS instance buffer) BEFORE destroying the physics world that
@@ -1462,6 +1563,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_grass_raymarch_pipeline", [&]{ destroy_grass_raymarch_pipeline(); });
     guarded("destroy_grass_pipeline", [&]{ destroy_grass_pipeline(); });
     guarded("destroy_terrain_height_texture", [&]{ destroy_terrain_height_texture(); });
+    guarded("destroy_vrs_attachment", [&]{ destroy_vrs_attachment(); });
     guarded("destroy_terrain_raymarch_lowres", [&]{ destroy_terrain_raymarch_lowres(); });
     guarded("destroy_terrain_raymarch_compose_pipeline", [&]{ destroy_terrain_raymarch_compose_pipeline(); });
     guarded("destroy_terrain_raymarch_pipeline", [&]{ destroy_terrain_raymarch_pipeline(); });

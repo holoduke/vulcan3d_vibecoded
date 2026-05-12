@@ -88,7 +88,46 @@ void VulkanEngine::init_vulkan() {
     physical_device_ = vkb_phys.physical_device;
     log::infof("vk physical device: %s", vkb_phys.properties.deviceName);
 
+    // Attachment-based Variable Rate Shading is optional — enabled only
+    // when the device exposes both the extension and the
+    // attachmentFragmentShadingRate feature. NVIDIA Turing+, AMD RDNA2+
+    // and Intel Arc support it; MoltenVK and older Intel iGPUs don't.
+    VkPhysicalDeviceFragmentShadingRateFeaturesKHR vrs_feat{};
+    vrs_feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR;
+    bool wants_vrs = vkb_phys.is_extension_present(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+    if (wants_vrs) {
+        VkPhysicalDeviceFeatures2 feats2{};
+        feats2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        feats2.pNext = &vrs_feat;
+        vkGetPhysicalDeviceFeatures2(physical_device_, &feats2);
+        if (vrs_feat.attachmentFragmentShadingRate == VK_TRUE) {
+            // Query tile size — needed for the attachment dimensions.
+            VkPhysicalDeviceFragmentShadingRatePropertiesKHR vrs_props{};
+            vrs_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR;
+            VkPhysicalDeviceProperties2 props2{};
+            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            props2.pNext = &vrs_props;
+            vkGetPhysicalDeviceProperties2(physical_device_, &props2);
+            vrs_texel_size_ = vrs_props.minFragmentShadingRateAttachmentTexelSize;
+            // Strip the other VRS features we don't use — leaves the
+            // attachment-only path enabled and avoids opting in to
+            // pipeline/primitive paths the engine doesn't drive.
+            vrs_feat.pipelineFragmentShadingRate  = VK_FALSE;
+            vrs_feat.primitiveFragmentShadingRate = VK_FALSE;
+            vkb_phys.enable_extension_if_present(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+            vrs_supported_ = true;
+            log::infof("VRS supported — tile %ux%u",
+                       vrs_texel_size_.width, vrs_texel_size_.height);
+        } else {
+            log::info("VRS extension present but attachmentFragmentShadingRate "
+                      "feature not exposed — disabling");
+        }
+    } else {
+        log::info("VRS extension not present — full-rate shading everywhere");
+    }
+
     vkb::DeviceBuilder dev_builder{ vkb_phys };
+    if (vrs_supported_) dev_builder.add_pNext(&vrs_feat);
     auto dev_ret = dev_builder.build();
     if (!dev_ret) throw std::runtime_error("vkb device build: " +
                                            dev_ret.error().message());
@@ -255,6 +294,8 @@ void VulkanEngine::recreate_swapchain() {
     init_swapchain();
     init_depth_image();
     if (taa_desc_pool_) recreate_taa_targets();
+    // TAAU targets depend on swapchain_extent_; rebuild after swapchain change.
+    if (taau_desc_pool_) recreate_taau_targets();
     // Bloom mip 0 is sized to render_extent_/2; if we don't recreate it
     // alongside the swapchain, compose samples a stale-sized texture and
     // bloom appears offset against everything else. The compose desc-set's
@@ -267,6 +308,8 @@ void VulkanEngine::recreate_swapchain() {
         destroy_terrain_raymarch_lowres();
         init_terrain_raymarch_lowres();
     }
+    // VRS attachment is sized in LR-tile units — depends on tr_lr_extent_.
+    if (vrs_supported_) recreate_vrs_attachment();
     rewrite_compose_image_bindings();
 
     VkDeviceSize needed = static_cast<VkDeviceSize>(swapchain_extent_.width) *
@@ -524,9 +567,13 @@ void VulkanEngine::init_terrain_raymarch_pipeline() {
     // LESS_OR_EQUAL so gl_FragDepth = far_plane fragments don't get
     // rejected by the cleared depth buffer (which is also 1.0).
     cfg.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+    // Attachment-based VRS — center 1×1, edges 2×2, corners 4×4. Pipeline
+    // takes the per-pixel rate from the attachment bound at draw begin.
+    cfg.enable_vrs = vrs_supported_;
 
     terrain_raymarch_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
-    log::info("terrain raymarch pipeline built");
+    log::infof("terrain raymarch pipeline built (vrs=%s)",
+               vrs_supported_ ? "on" : "off");
 }
 
 void VulkanEngine::destroy_terrain_raymarch_pipeline() {
@@ -662,6 +709,19 @@ void VulkanEngine::init_terrain_raymarch_lowres() {
         vk_check(vkCreateSampler(device_, &si, nullptr, &tr_lr_sampler_),
                  "tr_lr_sampler");
     }
+    // Depth-dedicated NEAREST sampler — see vk_engine.h comment.
+    if (!tr_lr_depth_sampler_) {
+        VkSamplerCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = VK_FILTER_NEAREST;
+        si.minFilter = VK_FILTER_NEAREST;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vk_check(vkCreateSampler(device_, &si, nullptr, &tr_lr_depth_sampler_),
+                 "tr_lr_depth_sampler");
+    }
 
     // Write descriptor bindings 9, 10, 11. These are stable across
     // resize for the lifetime of the views (we destroy + rewrite on
@@ -675,7 +735,7 @@ void VulkanEngine::init_terrain_raymarch_lowres() {
     dii_m.imageView   = tr_lr_motion_view_;
     dii_m.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDescriptorImageInfo dii_d{};
-    dii_d.sampler     = tr_lr_sampler_;
+    dii_d.sampler     = tr_lr_depth_sampler_;   // NEAREST — see header comment
     dii_d.imageView   = tr_lr_depth_view_;
     dii_d.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet writes[3] = {};
@@ -692,6 +752,146 @@ void VulkanEngine::init_terrain_raymarch_lowres() {
     vkUpdateDescriptorSets(device_, 3, writes, 0, nullptr);
     log::infof("terrain raymarch low-res targets: %ux%u (%.0f%%)",
                lw, lh, s * 100.0f);
+}
+
+void VulkanEngine::init_vrs_attachment() {
+    if (!vrs_supported_) return;
+    if (vrs_image_ != VK_NULL_HANDLE) return;
+    // Attachment is sized so each texel covers a (tile.w × tile.h) block
+    // of the LR raymarch render extent. NVIDIA + AMD currently report
+    // 8×8 or 16×16. Round up so the attachment covers every pixel even
+    // if (extent % tile) != 0; the trailing partial-tile texels just
+    // shade slightly extra area, which is harmless.
+    const uint32_t base_w = std::max<uint32_t>(1, tr_lr_extent_.width);
+    const uint32_t base_h = std::max<uint32_t>(1, tr_lr_extent_.height);
+    const uint32_t tw = std::max<uint32_t>(1, vrs_texel_size_.width);
+    const uint32_t th = std::max<uint32_t>(1, vrs_texel_size_.height);
+    vrs_extent_.width  = (base_w + tw - 1) / tw;
+    vrs_extent_.height = (base_h + th - 1) / th;
+
+    VkImageCreateInfo ici{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = nullptr, .flags = 0,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8_UINT,
+        .extent = { vrs_extent_.width, vrs_extent_.height, 1 },
+        .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR |
+                 VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vk_check(vmaCreateImage(allocator_, &ici, &aci, &vrs_image_, &vrs_alloc_,
+                            nullptr), "vrs image");
+
+    VkImageViewCreateInfo vci{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .image = vrs_image_,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8_UINT,
+        .components = {},
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1,
+        },
+    };
+    vk_check(vkCreateImageView(device_, &vci, nullptr, &vrs_view_), "vrs view");
+
+    // Build the per-texel rate pattern on CPU, then upload via a staging
+    // buffer + one-time submit. Pattern is a center→edge vignette:
+    //   - inside 60% radius: rate 0  (1×1, full)
+    //   - 60–85%:             rate 5 (2×2)
+    //   - outside 85%:        rate 10 (4×4)
+    // Encoding: `(width_log2 << 2) | height_log2`. Center-priority makes
+    // sense because the player's attention is mid-screen and the FBM
+    // raymarch detail beyond ~600 m is already LOD'd to a few octaves
+    // (so 2×2 / 4×4 shading is invisible).
+    const size_t n = static_cast<size_t>(vrs_extent_.width) *
+                     static_cast<size_t>(vrs_extent_.height);
+    std::vector<uint8_t> rates(n, 0);
+    const float cx = (vrs_extent_.width  - 1) * 0.5f;
+    const float cy = (vrs_extent_.height - 1) * 0.5f;
+    const float r_max = std::sqrt(cx * cx + cy * cy);
+    for (uint32_t y = 0; y < vrs_extent_.height; ++y) {
+        for (uint32_t x = 0; x < vrs_extent_.width; ++x) {
+            float dx = static_cast<float>(x) - cx;
+            float dy = static_cast<float>(y) - cy;
+            float r = std::sqrt(dx * dx + dy * dy) / std::max(r_max, 1.0f);
+            uint8_t rate;
+            if      (r < 0.60f) rate = 0;            // 1×1
+            else if (r < 0.85f) rate = (1u << 2) | 1u; // 2×2 = 5
+            else                rate = (2u << 2) | 2u; // 4×4 = 10
+            rates[static_cast<size_t>(y) * vrs_extent_.width + x] = rate;
+        }
+    }
+
+    // Stage + copy + final transition to FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL.
+    VkBuffer staging = VK_NULL_HANDLE;
+    VmaAllocation staging_alloc = nullptr;
+    {
+        VkBufferCreateInfo bci{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .size = n,
+            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+        VmaAllocationCreateInfo bac{};
+        bac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        bac.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo bai{};
+        vk_check(vmaCreateBuffer(allocator_, &bci, &bac, &staging, &staging_alloc,
+                                 &bai), "vrs staging");
+        std::memcpy(bai.pMappedData, rates.data(), n);
+    }
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, vrs_image_,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = { vrs_extent_.width, vrs_extent_.height, 1 };
+        vkCmdCopyBufferToImage(cb, staging, vrs_image_,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        vkinit::transition_image(cb, vrs_image_,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR);
+    });
+    vmaDestroyBuffer(allocator_, staging, staging_alloc);
+    log::infof("VRS attachment %ux%u uploaded (tile %ux%u)",
+               vrs_extent_.width, vrs_extent_.height,
+               vrs_texel_size_.width, vrs_texel_size_.height);
+}
+
+void VulkanEngine::destroy_vrs_attachment() {
+    if (vrs_view_) {
+        vkDestroyImageView(device_, vrs_view_, nullptr);
+        vrs_view_ = VK_NULL_HANDLE;
+    }
+    if (vrs_image_) {
+        vmaDestroyImage(allocator_, vrs_image_, vrs_alloc_);
+        vrs_image_ = VK_NULL_HANDLE;
+        vrs_alloc_ = nullptr;
+    }
+    vrs_extent_ = {};
+}
+
+void VulkanEngine::recreate_vrs_attachment() {
+    if (!vrs_supported_) return;
+    vkDeviceWaitIdle(device_);
+    destroy_vrs_attachment();
+    init_vrs_attachment();
 }
 
 void VulkanEngine::destroy_terrain_raymarch_lowres() {
@@ -721,6 +921,10 @@ void VulkanEngine::destroy_terrain_raymarch_lowres() {
         vmaDestroyImage(allocator_, tr_lr_depth_image_, tr_lr_depth_alloc_);
         tr_lr_depth_image_ = VK_NULL_HANDLE;
         tr_lr_depth_alloc_ = nullptr;
+    }
+    if (tr_lr_depth_sampler_) {
+        vkDestroySampler(device_, tr_lr_depth_sampler_, nullptr);
+        tr_lr_depth_sampler_ = VK_NULL_HANDLE;
     }
     if (tr_lr_sampler_) {
         vkDestroySampler(device_, tr_lr_sampler_, nullptr);

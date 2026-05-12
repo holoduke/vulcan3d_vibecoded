@@ -109,6 +109,14 @@ private:
     void init_pipeline();
     void destroy_pipeline();
     void init_world();
+    // Lazy-build paths for the rasterised terrain mesh/chunks and the
+    // 800k-blade grass buffer. init_world skips these when the matching
+    // raymarch flag is on (saves hundreds of MB of VRAM). If the user
+    // toggles the flag OFF at runtime, the per-frame settings tick calls
+    // these to materialise the buffers on demand. Idempotent — no-op
+    // when already built.
+    void ensure_terrain_raster_built();
+    void ensure_grass_raster_built();
     void init_imgui();
     void destroy_imgui();
     void build_menu_ui();
@@ -273,6 +281,32 @@ private:
     VmaAllocation   tr_lr_depth_alloc_  = nullptr;
     VkImageView     tr_lr_depth_view_   = VK_NULL_HANDLE;
     VkSampler       tr_lr_sampler_      = VK_NULL_HANDLE;
+    // NEAREST sampler dedicated to u_lr_depth (binding 11). Bilinear on
+    // depth values bleeds terrain↔sky across silhouettes — at low
+    // raymarch scales the >=0.9999 sky-discard then either eats valid
+    // terrain (gaps) or writes fake mid-depth halos.
+    VkSampler       tr_lr_depth_sampler_ = VK_NULL_HANDLE;
+
+    // --- Attachment-based Variable Rate Shading (VK_KHR_fragment_shading_rate) ---
+    // Small R8_UINT image sized at (render_extent + tile - 1) / tile. Each
+    // texel encodes the shading rate for an N×N pixel block of the
+    // framebuffer via `(width_log2 << 2) | height_log2`: 0 = 1×1 (full),
+    // 5 = 2×2 (quarter cost), 10 = 4×4 (1/16 cost). Populated once with a
+    // center-fine / edge-coarse vignette so distant terrain (which is
+    // already LOD'd in the FBM) pays one shader invocation per 4 or 16
+    // pixels.
+    //
+    // Only applied to the LR raymarch render pass — the FBM-heavy
+    // fullscreen tri. Compose pass + main world pass stay at native rate.
+    bool            vrs_supported_      = false;
+    VkExtent2D      vrs_texel_size_{};   // device-reported tile size
+    VkExtent2D      vrs_extent_{};       // attachment image extent
+    VkImage         vrs_image_          = VK_NULL_HANDLE;
+    VmaAllocation   vrs_alloc_          = nullptr;
+    VkImageView     vrs_view_           = VK_NULL_HANDLE;
+    void init_vrs_attachment();
+    void destroy_vrs_attachment();
+    void recreate_vrs_attachment();
     VkExtent2D      tr_lr_extent_{};
 
     // Compose pipeline that samples the low-res raymarch and writes
@@ -965,6 +999,25 @@ private:
     std::vector<glm::mat4> static_brush_worlds_;
     bool static_brush_tex_on_ = false;
     bool static_brush_dirty_ = true;
+    // Tracks whether the last bake_static_brushes() included the terrain
+    // BLAS. Flipped when rt_.terrain_raymarch_enabled toggles → forces a
+    // rebake so the TLAS instance set matches the current mode.
+    bool terrain_in_tlas_baked_ = false;
+
+    // True when the chunked terrain BLAS should be in the TLAS. Skipped
+    // while raymarch terrain is active — the mesh BLAS shape doesn't
+    // match the visible FBM surface, so castle/dyn-prop RT shadows would
+    // land on the wrong geometry.
+    inline bool tlas_includes_terrain_blas() const {
+        return terrain_blas_device_address_ != 0 && !rt_.terrain_raymarch_enabled;
+    }
+    // True when something on screen samples the heightmap-shadow texture
+    // (cube.frag's mesh-terrain branch + grass.vert). Raymarch terrain
+    // and raymarch grass don't read it.
+    inline bool needs_heightmap_shadow() const {
+        return !rt_.terrain_raymarch_enabled ||
+               (rt_.grass_enabled && !rt_.grass_raymarch_enabled);
+    }
     // Set whenever bake_static_brushes() reseeds static_brush_materials_
     // / _worlds_ / _instances_; cleared after the per-frame memcpy
     // copies them into the GPU-visible buffers. Avoids re-uploading
@@ -1005,6 +1058,31 @@ private:
     VkPipeline       taa_pipeline_ = VK_NULL_HANDLE;
     VkShaderModule   taa_vert_module_ = VK_NULL_HANDLE;
     VkShaderModule   taa_frag_module_ = VK_NULL_HANDLE;
+
+    // --- TAAU (temporal upsample). Optional pass between TAA and compose.
+    // Reads LR history + LR motion + LR depth + previous-frame NATIVE
+    // upscaled, outputs native upscaled with motion-reproject + variance
+    // clamp. Compose then samples taau_view_ instead of history_view_.
+    // Sized at swapchain_extent_; ping-pong on history_write_slot_.
+    VkImage          taau_image_[kHistorySlots]{ VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VmaAllocation    taau_alloc_[kHistorySlots]{ nullptr, nullptr };
+    VkImageView      taau_view_[kHistorySlots]{ VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkDescriptorPool      taau_desc_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout taau_desc_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSet       taau_desc_sets_[kHistorySlots]{ VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkBuffer              taau_ubo_buffer_ = VK_NULL_HANDLE;
+    VmaAllocation         taau_ubo_alloc_ = nullptr;
+    VkPipelineLayout      taau_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline            taau_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule        taau_frag_module_ = VK_NULL_HANDLE;
+    bool                  taau_history_valid_ = false;
+    // Compose desc set is rewired when this flag toggles — tracks the
+    // currently-bound source so we only re-write on actual change.
+    bool                  compose_uses_taau_ = false;
+    void init_taau();
+    void destroy_taau();
+    void recreate_taau_targets();
+    void rewrite_compose_for_taau();
 
     // --- Compose / tonemap pass ---
     VkDescriptorPool       compose_desc_pool_ = VK_NULL_HANDLE;
@@ -1306,6 +1384,15 @@ private:
         // iterations at the cost of a tiny chance of skipping over a
         // thin spike.
         float terrain_raymarch_step_factor   = 0.4f;
+        // Distance-LOD knobs. At ray distance < lod_near_m the FBM uses
+        // the full octave count (terrain_raymarch_octaves for march,
+        // terrain_raymarch_normal_octaves for normals). Past lod_far_m
+        // it falls to lod_min_octaves. Smoothstep ramp in between. Saves
+        // big at typical horizon views — sub-pixel FBM detail past
+        // ~500 m is below Nyquist anyway.
+        float terrain_raymarch_lod_near_m    = 120.0f;  // 20..400
+        float terrain_raymarch_lod_far_m     = 600.0f;  // 200..2000
+        int   terrain_raymarch_lod_min_octaves = 3;     // 2..8
         // Render-scale for the procedural raymarch ONLY. 1.0 = native
         // (current behaviour). 0.5 = half-res raymarch + bilinear
         // upscale composite (~4× fewer FBM evaluations per frame).
@@ -1428,6 +1515,12 @@ private:
 
         // Temporal + spatial denoiser.
         float taa_history_blend = 0.95f;  // 0 = no temporal, 1 = full history
+        // Temporal upsample (TAAU). When true, a second temporal pass runs
+        // after TAA: samples LR history bilinearly, reprojects a native-
+        // resolution prev frame, neighborhood-clamps to kill ghosts.
+        // Compose then samples the native upscaled image. Off by default
+        // so the standard render-scale=1 path stays bit-identical.
+        bool  taau_enabled       = false;
         float taa_spatial_strength = 0.7f;  // 0 = no à-trous, 1 = fully filtered
 
         // Bloom (single-pass spiral-tap inside the compose shader).

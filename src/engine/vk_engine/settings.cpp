@@ -62,6 +62,7 @@ void VulkanEngine::reset_player() {
 // Ultra in this scene's overdraw profile.
 void VulkanEngine::apply_quality_preset(int level) {
     rt_.quality_preset = level;
+    const float prev_tr_scale = rt_.terrain_raymarch_scale;
     switch (level) {
     case 0: // Low
         rt_.render_scale       = 0.65f;
@@ -73,6 +74,18 @@ void VulkanEngine::apply_quality_preset(int level) {
         rt_.gi_bounces         = 1;
         rt_.reflections_enabled = false;
         rt_.bloom_radius       = 16.0f;
+        // Raymarch terrain — aggressive perf knobs. Half-res FBM + low
+        // octaves + steep LOD ramp gets the worst-case horizon view
+        // running on modest hardware.
+        rt_.terrain_raymarch_scale         = 0.5f;
+        rt_.terrain_raymarch_max_steps     = 120;
+        rt_.terrain_raymarch_shadow_steps  = 32;
+        rt_.terrain_raymarch_octaves       = 6;
+        rt_.terrain_raymarch_normal_octaves = 10;
+        rt_.terrain_raymarch_step_factor   = 0.7f;
+        rt_.terrain_raymarch_lod_near_m    = 60.0f;
+        rt_.terrain_raymarch_lod_far_m     = 300.0f;
+        rt_.terrain_raymarch_lod_min_octaves = 2;
         break;
     case 1: // Medium
         rt_.render_scale       = 0.85f;
@@ -84,6 +97,15 @@ void VulkanEngine::apply_quality_preset(int level) {
         rt_.gi_bounces         = 1;
         rt_.reflections_enabled = true;
         rt_.bloom_radius       = 20.0f;
+        rt_.terrain_raymarch_scale         = 0.75f;
+        rt_.terrain_raymarch_max_steps     = 160;
+        rt_.terrain_raymarch_shadow_steps  = 48;
+        rt_.terrain_raymarch_octaves       = 8;
+        rt_.terrain_raymarch_normal_octaves = 14;
+        rt_.terrain_raymarch_step_factor   = 0.5f;
+        rt_.terrain_raymarch_lod_near_m    = 100.0f;
+        rt_.terrain_raymarch_lod_far_m     = 500.0f;
+        rt_.terrain_raymarch_lod_min_octaves = 3;
         break;
     case 2: // High
         rt_.render_scale       = 1.0f;
@@ -95,6 +117,15 @@ void VulkanEngine::apply_quality_preset(int level) {
         rt_.gi_bounces         = 1;
         rt_.reflections_enabled = true;
         rt_.bloom_radius       = 24.0f;
+        rt_.terrain_raymarch_scale         = 1.0f;
+        rt_.terrain_raymarch_max_steps     = 200;
+        rt_.terrain_raymarch_shadow_steps  = 64;
+        rt_.terrain_raymarch_octaves       = 9;
+        rt_.terrain_raymarch_normal_octaves = 18;
+        rt_.terrain_raymarch_step_factor   = 0.4f;
+        rt_.terrain_raymarch_lod_near_m    = 120.0f;
+        rt_.terrain_raymarch_lod_far_m     = 600.0f;
+        rt_.terrain_raymarch_lod_min_octaves = 3;
         break;
     case 3: // Ultra
         rt_.render_scale       = 1.25f;  // 1.5625× pixel count → SSAA-ish
@@ -106,10 +137,26 @@ void VulkanEngine::apply_quality_preset(int level) {
         rt_.gi_bounces         = 2;
         rt_.reflections_enabled = true;
         rt_.bloom_radius       = 28.0f;
+        rt_.terrain_raymarch_scale         = 1.0f;
+        rt_.terrain_raymarch_max_steps     = 250;
+        rt_.terrain_raymarch_shadow_steps  = 80;
+        rt_.terrain_raymarch_octaves       = 12;
+        rt_.terrain_raymarch_normal_octaves = 24;
+        rt_.terrain_raymarch_step_factor   = 0.4f;
+        rt_.terrain_raymarch_lod_near_m    = 200.0f;
+        rt_.terrain_raymarch_lod_far_m     = 1000.0f;
+        rt_.terrain_raymarch_lod_min_octaves = 5;
         break;
     default:
         rt_.quality_preset = -1; // unknown → mark custom
         return;
+    }
+    // Raymarch LR targets are sized at render_extent_ × terrain_raymarch_scale.
+    // The preset change above may have flipped that ratio; recreate the
+    // attachments so the next frame's LR pass writes a valid extent.
+    if (std::abs(rt_.terrain_raymarch_scale - prev_tr_scale) > 0.01f &&
+        tr_lr_color_image_) {
+        recreate_terrain_raymarch_lowres();
     }
     log::infof("quality preset %d applied (render_scale=%.2f shadows=%d ao=%d gi=%d)",
                level, rt_.render_scale, rt_.shadow_samples,
@@ -259,7 +306,11 @@ void VulkanEngine::save_settings() const {
     f << "terrain_raymarch_shadow_steps = " << rt_.terrain_raymarch_shadow_steps << "\n";
     f << "terrain_raymarch_octaves = " << rt_.terrain_raymarch_octaves << "\n";
     f << "terrain_raymarch_normal_octaves = " << rt_.terrain_raymarch_normal_octaves << "\n";
+    f << "taau_enabled = "                << (rt_.taau_enabled ? 1 : 0) << "\n";
     f << "terrain_raymarch_step_factor = " << rt_.terrain_raymarch_step_factor << "\n";
+    f << "terrain_raymarch_lod_near_m = " << rt_.terrain_raymarch_lod_near_m << "\n";
+    f << "terrain_raymarch_lod_far_m = " << rt_.terrain_raymarch_lod_far_m << "\n";
+    f << "terrain_raymarch_lod_min_octaves = " << rt_.terrain_raymarch_lod_min_octaves << "\n";
     f << "terrain_raymarch_scale = " << rt_.terrain_raymarch_scale << "\n";
     f << "terrain_raymarch_sharpen = " << rt_.terrain_raymarch_sharpen << "\n";
     f << "terrain_raymarch_fog_strength = " << rt_.terrain_raymarch_fog_strength << "\n";
@@ -495,7 +546,11 @@ void VulkanEngine::load_settings() {
             else if (key == "terrain_raymarch_shadow_steps") rt_.terrain_raymarch_shadow_steps = std::stoi(val);
             else if (key == "terrain_raymarch_octaves") rt_.terrain_raymarch_octaves = std::stoi(val);
             else if (key == "terrain_raymarch_normal_octaves") rt_.terrain_raymarch_normal_octaves = std::stoi(val);
+            else if (key == "taau_enabled") rt_.taau_enabled = std::stoi(val) != 0;
             else if (key == "terrain_raymarch_step_factor") rt_.terrain_raymarch_step_factor = std::stof(val);
+            else if (key == "terrain_raymarch_lod_near_m") rt_.terrain_raymarch_lod_near_m = std::stof(val);
+            else if (key == "terrain_raymarch_lod_far_m") rt_.terrain_raymarch_lod_far_m = std::stof(val);
+            else if (key == "terrain_raymarch_lod_min_octaves") rt_.terrain_raymarch_lod_min_octaves = std::stoi(val);
             else if (key == "terrain_raymarch_scale") rt_.terrain_raymarch_scale = std::stof(val);
             else if (key == "terrain_raymarch_sharpen") rt_.terrain_raymarch_sharpen = std::stof(val);
             else if (key == "terrain_raymarch_fog_strength") rt_.terrain_raymarch_fog_strength = std::stof(val);

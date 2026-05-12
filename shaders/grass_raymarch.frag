@@ -170,8 +170,42 @@ float terrainH(vec2 wp) {
     return h;
 }
 
+// Distance-LOD variant — fades the per-march octave count from a fixed
+// 8 at ray_t < lod_near_m down to lod_min_octaves past lod_far_m. Same
+// LOD ramp endpoints + fractional-octave morph as terrain_raymarch.frag,
+// so grass blades sit on the same surface the terrain raymarch draws
+// even at distance. Params come from pc.emissive.{y,z,w} (mirrors the
+// terrain shader's push-constant layout).
+float terrainH_lod(vec2 wp, float ray_t) {
+    vec2 p = wp * TERRAIN_SCALE;
+    const int oct_full = 8;
+    int   oct_min = max(2, min(oct_full, int(pc.emissive.w)));
+    float lod_f   = smoothstep(pc.emissive.y, pc.emissive.z, ray_t);
+    float oct_f   = float(oct_full) - lod_f * float(oct_full - oct_min);
+    int   oct     = int(ceil(oct_f));
+    float frac    = 1.0 - (float(oct) - oct_f);
+    float a = 0.0, b = 1.0;
+    vec2 d = vec2(0.0);
+    for (int i = 0; i < oct_full; i++) {
+        if (i >= oct) break;
+        vec3 n = noised(p);
+        float w = (i == oct - 1) ? frac : 1.0;
+        d += n.yz * w;
+        a += b * n.x * w / (1.0 + dot(d, d));
+        b *= 0.5;
+        p = m2 * p * 2.0;
+    }
+    float h = a * TERRAIN_HEIGHT;
+    h = mix(h, kPlateauHeight, plateauWeight(wp));
+    h += sampleHeightDelta(wp);
+    return h;
+}
+
 // Backwards-compat: rest of the shader still calls sampleHeight.
 float sampleHeight(vec2 wp_xz) { return terrainH(wp_xz); }
+float sampleHeight_lod(vec2 wp_xz, float ray_t) {
+    return terrainH_lod(wp_xz, ray_t);
+}
 
 // Hash helper still used by per-cell blade variation.
 float hash12(vec2 p) {
@@ -227,23 +261,9 @@ float sdGrassBlade(vec3 p, float thickness) {
 // `discard` terrain-plane hits — those would z-fight with the actual
 // rasterised / raymarched terrain renderer's output and read as a
 // flickering green tint over bare ground.
-// Per-pixel SDF invariants — slider-driven, identical for every map()
-// call, so the outer raymarch loop hoists them once and passes via
-// this struct. Cuts the per-step setup cost (sqrt + smoothstep + 4
-// scalar muls + several UBO loads) from 128× per pixel to 1× per pixel.
-struct MapCtx {
-    float slope_max;
-    float density_eff_near;   // density at t = soft_d
-    float density_eff_far;    // density at t = kMaxD
-    float soft_d;
-    float kMaxD;
-    bool  underwater;         // global toggle (water_params.x > 0.5)
-    float water_y;
-};
-
-float map(vec3 p, float t_cam, MapCtx ctx, out bool out_blade_hit) {
+float map(vec3 p, float ray_t, out bool out_blade_hit) {
     out_blade_hit = false;
-    float terrainY = sampleHeight(p.xz);
+    float terrainY = sampleHeight_lod(p.xz, ray_t);
     float distToTerrain = 0.5 * (p.y - terrainY);
 
     // Coarse guard: if we're far above terrain, skip the per-cell SDF
@@ -315,6 +335,13 @@ float map(vec3 p, float t_cam, MapCtx ctx, out bool out_blade_hit) {
     return d;
 }
 
+vec3 calcTerrainNormalApprox(vec2 p, float yC, float ray_t) {
+    const float e = 0.05;
+    float yR = sampleHeight_lod(p + vec2(e, 0.0), ray_t);
+    float yU = sampleHeight_lod(p + vec2(0.0, e), ray_t);
+    return normalize(vec3(yC - yR, e, yC - yU));
+}
+
 vec3 sample_sky_grad(vec3 dir) {
     float up = clamp(dir.y, 0.0, 1.0);
     vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
@@ -373,7 +400,7 @@ void main() {
         if (t >= kMaxDist) break;
         vec3 p = ro + t * rd;
         bool step_blade;
-        float d = map(p, t, ctx, step_blade);
+        float d = map(p, t, step_blade);
         // Hit threshold loosens with distance so the loop terminates on
         // sub-pixel features instead of trying to converge on a blade
         // edge from 50 m away.
@@ -403,18 +430,9 @@ void main() {
     vec3 p = ro + t * rd;
     vec3 L = normalize(scene.sun_direction.xyz);
 
-    // Lighting: terrain normal at hit point.
-    // Reverted from cross(dFdx(p), dFdy(p)): derivatives across grass
-    // silhouettes (where one pixel of a 2×2 quad discards) are spec-
-    // undefined and produced NaN normals → propagated through bloom +
-    // auto-exposure → fps regression.
-    // Use the cheap finite-difference normal — terrainH already runs at
-    // reduced 4 octaves (down from 8) so the per-pixel cost is bounded.
-    float terrainY = sampleHeight(p.xz);
-    const float e = 0.05;
-    float yR = sampleHeight(p.xz + vec2(e, 0.0));
-    float yU = sampleHeight(p.xz + vec2(0.0, e));
-    vec3 N = normalize(vec3(terrainY - yR, e, terrainY - yU));
+    // Lighting: terrain normal at hit point + half-Lambert + sky fill.
+    float terrainY = sampleHeight_lod(p.xz, t);
+    vec3 N = calcTerrainNormalApprox(p.xz, terrainY, t);
     float n_dot_l = max(0.0, dot(N, L));
 
     // Sun shadow — sample the rasterised shadow map. PCF gives soft edges.

@@ -459,6 +459,11 @@ void VulkanEngine::build_menu_ui() {
         ImGui::Checkbox("sub-pixel jitter", &rt_.taa_jitter_enabled);
         ImGui::SliderFloat("jitter strength", &rt_.taa_jitter_strength, 0.0f, 2.0f);
         ImGui::SliderFloat("history blend", &rt_.taa_history_blend, 0.0f, 0.98f);
+        ImGui::Checkbox("TAAU (temporal upsample)", &rt_.taau_enabled);
+        ImGui::TextDisabled("Adds a temporal upscale pass after TAA. Best with\n"
+                             "render_scale < 1.0 — renders at LR, reconstructs\n"
+                             "at native via motion-vector reproject + variance\n"
+                             "clamp. ~1.5x perf gain at render_scale=0.67.");
         ImGui::SliderFloat("spatial strength", &rt_.taa_spatial_strength, 0.0f, 1.0f);
         // Compose-pass unsharp mask — runs in compose.frag (5 texelFetches),
         // recovers detail the TAA spatial filter softened. 0 disables; 0.55
@@ -525,8 +530,10 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SeparatorText("Renderer");
         ImGui::Checkbox("Procedural raymarched terrain (FBM)",
                          &rt_.terrain_raymarch_enabled);
-        ImGui::TextDisabled("Restart required — physics, grass and mesh are\n"
-                             "rebuilt from the FBM at level load when this is on.");
+        ImGui::TextDisabled("Toggling lazy-builds raster mesh + grass on demand.\n"
+                             "Terrain BLAS (RT shadows on terrain) is built once at\n"
+                             "load — toggling off mid-session means no RT terrain\n"
+                             "shadow contact until restart.");
         ImGui::SliderInt("Raymarch steps",
                          &rt_.terrain_raymarch_max_steps, 60, 300);
         ImGui::SliderInt("Raymarch shadow steps",
@@ -537,6 +544,16 @@ void VulkanEngine::build_menu_ui() {
                          &rt_.terrain_raymarch_normal_octaves, 4, 32);
         ImGui::SliderFloat("Step factor",
                            &rt_.terrain_raymarch_step_factor, 0.4f, 0.8f, "%.2f");
+        // Distance-LOD ramp — drops FBM octaves with ray distance so the
+        // expensive 3× terrainH() calls in calcNormal collapse to the
+        // floor count past `lod_far_m`. Biggest perf win at horizon
+        // views where most rays travel >500m.
+        ImGui::SliderFloat("LOD near (m)",
+                           &rt_.terrain_raymarch_lod_near_m, 20.0f, 400.0f, "%.0f");
+        ImGui::SliderFloat("LOD far (m)",
+                           &rt_.terrain_raymarch_lod_far_m, 200.0f, 2000.0f, "%.0f");
+        ImGui::SliderInt("LOD min octaves",
+                         &rt_.terrain_raymarch_lod_min_octaves, 2, 8);
         // Render-scale for the raymarch only — biggest single perf
         // knob. 0.5 = quarter the FBM evaluations per frame; bilinear
         // upscale + depth-aware composite hides most of the softness

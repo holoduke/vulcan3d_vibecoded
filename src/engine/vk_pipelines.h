@@ -51,6 +51,14 @@ struct GraphicsPipelineConfig {
     // bias per-frame via vkCmdSetDepthBias. Required for the shadow-map
     // depth-only pipeline (slope-scale + constant bias to combat acne).
     bool depth_bias_enable = false;
+
+    // Enables attachment-based Variable Rate Shading on this pipeline.
+    // Chains a VkPipelineFragmentShadingRateStateCreateInfoKHR with combiner
+    // ops set to KEEP/REPLACE so the per-pixel shading rate is taken from
+    // whatever VRS attachment is bound at draw time. Pipeline-rate and
+    // primitive-rate paths are intentionally inert — engine drives VRS
+    // entirely via the attachment.
+    bool enable_vrs = false;
 };
 
 VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig& cfg);

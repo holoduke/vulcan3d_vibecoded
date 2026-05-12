@@ -485,25 +485,36 @@ float terrainM(vec2 p) {
 // Distance-LOD variant: drops octaves smoothly as the ray distance
 // grows. The full octave count is the user's pc.tex_params.z; we
 // fade down to ~2 octaves past 600 m. Same outer wrapping (plateau
-// blend + sculpt delta + amplifier) so close vs far results stay
-// continuous — only the inner FBM converges to a coarser sum past
-// the LOD start. Uses a uniform `kMaxOct` cap with an early-break
-// so the loop body stays branch-friendly for the GPU.
+// blend + sculpt delta) so close vs far results stay continuous —
+// only the inner FBM converges to a coarser sum past the LOD start.
+// Uses a uniform `kMaxOct` cap with an early-break so the loop body
+// stays branch-friendly for the GPU.
+// LOD ramp endpoints + minimum-octave floor come from push constants:
+//   emissive.y = lod_near_m (full octaves below this distance)
+//   emissive.z = lod_far_m  (lod_min_oct octaves above this distance)
+//   emissive.w = lod_min_oct (floor, typically 2..8)
+// Smoothstep ramp between the two endpoints.
 float terrainM_lod(vec2 p, float ray_t) {
     vec2 wp = p;
     p *= TERRAIN_SCALE;
     int oct_full = int(pc.tex_params.z);
-    int oct_min  = max(2, oct_full - 4);
-    float lod_f  = smoothstep(120.0, 600.0, ray_t);
-    int oct      = oct_full - int(lod_f * float(oct_full - oct_min));
+    int oct_min  = max(2, min(oct_full, int(pc.emissive.w)));
+    float lod_f  = smoothstep(pc.emissive.y, pc.emissive.z, ray_t);
+    // Fractional octave count — ceil() to include the partially-faded
+    // top octave; `frac` is the [0..1] weight that octave gets so the
+    // FBM is C0-continuous across the integer threshold.
+    float oct_f  = float(oct_full) - lod_f * float(oct_full - oct_min);
+    int   oct    = int(ceil(oct_f));
+    float frac   = 1.0 - (float(oct) - oct_f);
     float a = 0.0, b = 1.0;
     vec2 d = vec2(0.0);
-    const int kMaxOct = 16;
+    const int kMaxOct = 24;
     for (int i = 0; i < kMaxOct; i++) {
         if (i >= oct) break;
         vec3 n = noised(p);
-        d += n.yz;
-        a += b * n.x / (1.0 + dot(d, d));
+        float w = (i == oct - 1) ? frac : 1.0;
+        d += n.yz * w;
+        a += b * n.x * w / (1.0 + dot(d, d));
         b *= 0.5;
         p = m2 * p * 2.0;
     }
@@ -536,6 +547,41 @@ float terrainH(vec2 p) {
     float h = a * TERRAIN_HEIGHT;
     // Plateau is now tiny (11.5 m, hidden under castle) — no need
     // for extra ground-detail noise here.
+    float t = plateauWeight(wp);
+    h = mix(h, pc.color.w, t);
+    h += sampleHeightDelta(wp);
+    return h;
+}
+
+// Distance-LOD variant of terrainH. calcNormal calls this 3× per hit
+// pixel — the dominant FBM cost — so dropping octaves at distance is
+// the single biggest win for raymarch perf at typical horizon views.
+// Same LOD ramp as terrainM_lod (pc.emissive.{y,z,w}) so march hits
+// and normal samples stay coherent.
+float terrainH_lod(vec2 p, float ray_t) {
+    vec2 wp = p;
+    p *= TERRAIN_SCALE;
+    int oct_full = int(pc.tex_params.w);
+    int oct_min  = max(2, min(oct_full, int(pc.emissive.w)));
+    float lod_f  = smoothstep(pc.emissive.y, pc.emissive.z, ray_t);
+    // Fractional-octave fade — same scheme as terrainM_lod so the
+    // marcher and normals agree across the LOD threshold.
+    float oct_f  = float(oct_full) - lod_f * float(oct_full - oct_min);
+    int   oct    = int(ceil(oct_f));
+    float frac   = 1.0 - (float(oct) - oct_f);
+    float a = 0.0, b = 1.0;
+    vec2 d = vec2(0.0);
+    const int kMaxOct = 32;
+    for (int i = 0; i < kMaxOct; i++) {
+        if (i >= oct) break;
+        vec3 n = noised(p);
+        float w = (i == oct - 1) ? frac : 1.0;
+        d += n.yz * w;
+        a += b * n.x * w / (1.0 + dot(d, d));
+        b *= 0.5;
+        p = m2 * p * 2.0;
+    }
+    float h = a * TERRAIN_HEIGHT;
     float t = plateauWeight(wp);
     h = mix(h, pc.color.w, t);
     h += sampleHeightDelta(wp);
@@ -680,16 +726,34 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
 // 80 m. The FBM normal-octave slider (default 18) gives plenty of
 // distance detail without the artefacts.
 vec3 calcNormal(vec3 pos, float t) {
-    // Reverted (again) from the 1× analytic-gradient version. The damp
-    // term `1/(1+dot(d,d))` and its derivative carry real high-frequency
-    // detail that the cheap chain-rule loses — the snow/rock mid-
-    // distance band reads as washed-out and "missing rockiness" without
-    // it. 3× finite-difference is the correct path until the analytic
-    // gradient is rewritten with the proper damp + Hessian terms.
+    // Far-distance fast path: derive the normal from screen-space
+    // derivatives of the hit position itself (`dFdx(pos)` and
+    // `dFdy(pos)` are the tangents along screen x/y). Zero terrainH
+    // calls vs the 3× finite-difference path. Per-quad-constant — gives
+    // a faceted look up close — but at lod_far_m+ the FBM is LOD'd to
+    // few octaves anyway, so the surface has no per-pixel detail to lose.
+    // Threshold is pc.emissive.z (the existing lod_far_m). Past this we
+    // already snap to lod_min_octaves on the FBM, so swapping the normal
+    // method costs nothing visible.
+    if (t > pc.emissive.z) {
+        vec3 dpdx = dFdx(pos);
+        vec3 dpdy = dFdy(pos);
+        vec3 Nfast = cross(dpdy, dpdx);
+        // Cheap sign-flip in case the quad winding lands us pointing
+        // into the ground.
+        if (Nfast.y < 0.0) Nfast = -Nfast;
+        return normalize(Nfast);
+    }
+    // Reverted from a 1× analytic-gradient version: the per-octave
+    // damp term `1/(1+dot(d,d))` and its derivative contribute real
+    // high-frequency variation that drops out of the cheap chain-rule
+    // accumulation. User reported visible detail loss in snow/rock
+    // mid-distance — 3× finite-difference is the safe path until the
+    // proper analytic gradient (with damp + Hessian terms) is written.
     float eps = 0.02 + 0.0008 * t;
-    float hC = terrainH(pos.xz);
-    float hR = terrainH(pos.xz + vec2(eps, 0.0));
-    float hU = terrainH(pos.xz + vec2(0.0, eps));
+    float hC = terrainH_lod(pos.xz, t);
+    float hR = terrainH_lod(pos.xz + vec2(eps, 0.0), t);
+    float hU = terrainH_lod(pos.xz + vec2(0.0, eps), t);
     vec3 N = normalize(vec3(hC - hR, eps, hC - hU));
 
     // Closeup micro-bump вЂ” two-octave high-frequency noise gradient
@@ -861,7 +925,7 @@ float raymarchReflect(vec3 ro, vec3 rd) {
     const float kReflStep = 0.5;     // slightly aggressive
     for (int i = 0; i < kReflSteps; ++i) {
         vec3 pos = ro + t * rd;
-        float h = pos.y - terrainM(pos.xz);
+        float h = pos.y - terrainM_lod(pos.xz, t);
         if (abs(h) < 0.005 * t) break;     // looser threshold than primary
         if (t > 800.0) return -1.0;        // shorter range than primary
         t += kReflStep * h;
@@ -1101,7 +1165,7 @@ void main() {
         vec3 shallow_tint = scene.water_color_shallow.rgb;
         float shore_blend = max(0.1, scene.water_shore.x);
         float shore_noise = scene.water_shore.y;
-        float terrain_y = terrainM(wpos.xz);
+        float terrain_y = terrainM_lod(wpos.xz, t_water);
         // Noise-free depth — the foam band uses this so the highlight
         // follows the actual shoreline geometry instead of wobbling
         // with the shore-noise. depth_m below adds the noise on top
