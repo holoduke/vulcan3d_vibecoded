@@ -676,6 +676,12 @@ private:
     int last_physics_ticks_ = 0;
     float last_frame_dt_ = 0.0f;
     float ema_fps_ = 0.0f;
+    // Rolling history for the Three.js-style HUD panels. Each frame
+    // appends to the head; PlotLines reads the whole array.
+    static constexpr int kStatsHistory = 80;
+    float fps_history_[kStatsHistory] = {};
+    float ms_history_[kStatsHistory]  = {};
+    int   stats_history_head_ = 0;
 
     // --- Lighting / scene UBO ---
     VkBuffer scene_ubo_buffer_ = VK_NULL_HANDLE;
@@ -979,6 +985,12 @@ private:
     // view/proj/Halton-jitter independently.
     struct FrameView {
         glm::vec3 render_pos{0.0f};
+        // Smoothed eye position (render_pos + eye_offset) — must mirror
+        // the lerp used for the view matrix, otherwise raymarched passes
+        // (terrain, grass) whose ray origin reads scene.camera_pos drift
+        // out of sync with rasterised geometry whose mvp uses fv.vp,
+        // showing as one-frame "lag" on stop.
+        glm::vec3 eye_pos{0.0f};
         glm::mat4 view{1.0f};
         glm::mat4 proj{1.0f};
         glm::mat4 vp{1.0f};
@@ -1287,10 +1299,21 @@ private:
         glm::vec3 grass_color_bottom      = { 0.18f, 0.22f, 0.08f };  // blade base
         glm::vec3 grass_color_ground      = { 0.18f, 0.30f, 0.09f };  // close terrain tint
         glm::vec3 grass_color_ground_far  = { 0.13f, 0.22f, 0.06f };  // far terrain tint
+        // Distance (m) at which `grass_color_ground_far` fully takes
+        // over from `grass_color_ground`. Near ramp scales as 15 % of
+        // this so the transition stays smooth at any far-anchor.
+        // Used by both grass_raymarch.frag and terrain_raymarch.frag
+        // (delivered via the otherwise-unused grass_color_ground_far.w).
+        float grass_ground_tint_far_distance = 200.0f;
         // Fake grass-cast shadows on the raymarched terrain.
-        float grass_shadow_strength = 0.45f;   // 0..1, 0 = off
-        int   grass_shadow_samples  = 4;       // 0..8 sample taps along sun XZ
-        float grass_shadow_max_dist = 1.6f;    // metres of reach along sun direction
+        // Fake mask-based grass-cast-shadow on raymarched terrain.
+        // Disabled by default: it walks the grass mask along the sun
+        // XZ at the terrain pixel and darkens — looks like a flat
+        // patch tint, not real per-blade shadow. Slider stays so a
+        // user who wants the cheap effect can re-enable it.
+        float grass_shadow_strength = 0.0f;    // 0 = off
+        int   grass_shadow_samples  = 6;       // 0..8 sample taps along sun XZ
+        float grass_shadow_max_dist = 3.0f;    // metres of reach along sun direction
         // Strength of the terrain green tint (0..1).
         float grass_ground_tint_strength = 0.85f;
         // Raymarched-grass base AO floor at the blade base. Lower = darker
@@ -1467,6 +1490,38 @@ private:
         glm::vec3 water_foam_color     = glm::vec3(0.88f, 0.94f, 0.96f);
         float     water_foam_strength  = 0.55f;
         float     water_foam_width     = 0.6f;     // metres of depth
+        // Shoreline grass tint — blades within `grass_shore_distance`
+        // metres above water level fade toward `grass_shore_color`.
+        // Strength 0 disables. Cheap (~13 ALU/pixel in
+        // grass_raymarch.frag, no extra texture taps).
+        glm::vec3 grass_shore_color    = glm::vec3(0.40f, 0.30f, 0.16f);
+        float     grass_shore_strength = 0.65f;
+        float     grass_shore_distance = 3.5f;     // metres above water
+        // Shoreline TERRAIN tint — same shape, applied to bare ground
+        // in terrain_raymarch.frag's getMaterial(). Mixed on top of the
+        // existing snow/sand/grass tint pass so the beach reads as a
+        // user-tunable colour band instead of relying on slope alone.
+        glm::vec3 terrain_shore_color    = glm::vec3(0.55f, 0.46f, 0.30f);
+        float     terrain_shore_strength = 0.55f;
+        float     terrain_shore_distance = 3.0f;
+        // Distance fog — standard exp² atmospheric fog. Disabled by
+        // default (strength = 0). Applied at end of cube.frag /
+        // terrain_raymarch.frag / grass_raymarch.frag shading.
+        glm::vec3 distance_fog_color    = glm::vec3(0.62f, 0.70f, 0.78f);
+        float     distance_fog_strength = 0.0f;     // 0 = off
+        float     distance_fog_density  = 0.005f;   // per metre (exp² falloff)
+        float     distance_fog_start    = 50.0f;    // metres before fog kicks in
+        float     distance_fog_height   = 80.0f;    // height-falloff top (0 = uniform fog)
+        float     distance_fog_max      = 0.95f;    // clamp on mix weight (1.0 = pure fog at infinity)
+        // GENERAL terrain shore tint — applied to BARE terrain near
+        // water (no grass). Companion to terrain_shore_* (grass-area).
+        glm::vec3 terrain_shore_general_color    = glm::vec3(0.50f, 0.42f, 0.30f);
+        float     terrain_shore_general_strength = 0.55f;
+        float     terrain_shore_general_distance = 3.0f;
+        // Bare-shore SAND base colour — the underlying material that
+        // the slope-driven beachMask reveals near water level on the
+        // raymarched terrain. Was hardcoded; now slider-tunable.
+        glm::vec3 terrain_sand_color = glm::vec3(0.50f, 0.45f, 0.35f);
         // Shadow casting on water: when true, the water surface
         // dims its specular and base tint where the sun shadow map
         // says it's occluded by terrain / castle / dyn-props.

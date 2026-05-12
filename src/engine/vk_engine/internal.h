@@ -117,7 +117,7 @@ struct SceneUBO {
     //   x: shading contrast — power exponent on n_dot_l for terrain.
     //      1.0 = pure Lambert (default), 2..6 sharpens the lit/shadow
     //      transition by darkening grazing-angle areas.
-    //   y, z, w: unused.
+    //   y: shadow_near_mult, z: gi_softener, w: gi_debug_viz flag.
     glm::vec4  terrain_extra;
     // Ocean / water plane.
     //   water_params.x = enabled (0/1)
@@ -187,6 +187,52 @@ struct SceneUBO {
     //   z: max sample distance (m, controls shadow reach along sun XZ)
     //   w: unused
     glm::vec4  grass_shadow_params;
+    // Shoreline grass tint. Blades within a few metres of water level
+    // get drier/browner — reads as dry sandy grass at the beach,
+    // fading back to the slider greens further uphill. ~13 ALU/pixel
+    // in grass_raymarch.frag, no texture taps.
+    //   grass_shore_color.rgb = tint colour
+    //   grass_shore_color.w   = strength (0 = disabled, 1 = full mix)
+    //   grass_shore_params.x  = fade distance in metres (height above
+    //                            water level where the tint hits zero)
+    //   grass_shore_params.yzw = unused
+    glm::vec4  grass_shore_color;
+    glm::vec4  grass_shore_params;
+    // Shoreline TERRAIN tint — same shape as grass_shore_*, but
+    // applied to the bare terrain `col` in terrain_raymarch.frag's
+    // getMaterial. Lets the beach read as sand/wet-rock without
+    // depending on slope detection alone.
+    //   terrain_shore_color.rgb = tint colour
+    //   terrain_shore_color.w   = strength (0 = disabled, 1 = full mix)
+    //   terrain_shore_params.x  = fade distance (m above water level)
+    //   terrain_shore_params.yzw = unused
+    glm::vec4  terrain_shore_color;
+    glm::vec4  terrain_shore_params;
+    // Distance fog — standard exponential² atmospheric depth fog,
+    // applied as final-step mix in cube/terrain/grass shaders.
+    //   distance_fog_color.rgb   = fog tint (linear RGB)
+    //   distance_fog_color.w     = master strength (0 = disabled)
+    //   distance_fog_params.x    = density (per metre, exp² falloff)
+    //   distance_fog_params.y    = start distance in metres (no fog before this)
+    //   distance_fog_params.z    = height-falloff top (m); 0 disables height fog
+    //   distance_fog_params.w    = max fog amount (0..1; clamp on the mix weight)
+    glm::vec4  distance_fog_color;
+    glm::vec4  distance_fog_params;
+    // GENERAL terrain shore tint — applied to BARE terrain near water
+    // (where grass eligibility is 0). Companion to terrain_shore_*
+    // which now only tints the GRASS-area ground at shore.
+    //   terrain_shore_general_color.rgb = tint colour
+    //   terrain_shore_general_color.w   = strength (0 disables)
+    //   terrain_shore_general_params.x  = fade distance (m above water)
+    glm::vec4  terrain_shore_general_color;
+    glm::vec4  terrain_shore_general_params;
+    // Bare-shore SAND base colour used by the raymarched terrain's
+    // beach blend. Was hardcoded (0.50, 0.45, 0.35) inside the
+    // shader; now slider-driven so the user can tune the wet-sand /
+    // dry-sand / coral hue without rebuilding shaders.
+    //   terrain_sand_color.rgb = sand colour
+    //   terrain_sand_color.w   = reserved
+    glm::vec4  terrain_sand_color;
 };
 
 // ---- KHR ray tracing entry points ----

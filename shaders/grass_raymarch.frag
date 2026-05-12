@@ -65,6 +65,29 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  grass_color_bottom;
     vec4  grass_color_ground;
     vec4  grass_color_ground_far;
+    // Layout padding: must mirror SceneUBO in internal.h. The terrain
+    // pass uses grass_shadow_params; grass shader doesn't need it but
+    // a missing field would shift grass_shore_color reads off-target.
+    vec4  grass_shadow_params;
+    // Shoreline grass tint — see SceneUBO comment in internal.h.
+    //   grass_shore_color.rgb = tint colour
+    //   grass_shore_color.w   = strength (0..1; 0 disables)
+    //   grass_shore_params.x  = fade distance (m above water level)
+    vec4  grass_shore_color;
+    vec4  grass_shore_params;
+    // Layout padding: terrain_shore_color/params consumed by terrain
+    // raymarch only; declared here so distance_fog lands at the right
+    // offset inside the shared SceneUBO.
+    vec4  terrain_shore_color;
+    vec4  terrain_shore_params;
+    // Distance fog — see SceneUBO comment in internal.h.
+    vec4  distance_fog_color;
+    vec4  distance_fog_params;
+    // Bare-terrain shore tint — consumed by terrain raymarch only;
+    // declared here only to keep the shared UBO offsets aligned.
+    vec4  terrain_shore_general_color;
+    vec4  terrain_shore_general_params;
+    vec4  terrain_sand_color;  // padding only — terrain raymarch uses
 } scene;
 
 // Heightmap (R32_SFLOAT) — shared with terrain raymarch + cube shaders.
@@ -261,7 +284,20 @@ float sdGrassBlade(vec3 p, float thickness) {
 // `discard` terrain-plane hits — those would z-fight with the actual
 // rasterised / raymarched terrain renderer's output and read as a
 // flickering green tint over bare ground.
-float map(vec3 p, float ray_t, out bool out_blade_hit) {
+// Per-pixel SDF invariants — slider-driven, identical for every map()
+// call, so the outer raymarch loop hoists them once and passes via
+// this struct. Cuts the per-step setup cost from 128× per pixel to 1×.
+struct MapCtx {
+    float slope_max;
+    float density_eff_near;   // density at t = soft_d
+    float density_eff_far;    // density at t = kMaxD
+    float soft_d;
+    float kMaxD;
+    bool  underwater;         // global toggle (water_params.x > 0.5)
+    float water_y;
+};
+
+float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
     out_blade_hit = false;
     float terrainY = sampleHeight_lod(p.xz, ray_t);
     float distToTerrain = 0.5 * (p.y - terrainY);
@@ -291,11 +327,25 @@ float map(vec3 p, float ray_t, out bool out_blade_hit) {
     // pre-baked endpoints. Loop-`t` is the distance from camera (ro
     // is camera_pos and rd is normalised), so length(p - cam) was
     // wasted sqrt+dot per map() call.
-    float dist_w      = smoothstep(ctx.soft_d, ctx.kMaxD, t_cam);
+    float dist_w      = smoothstep(ctx.soft_d, ctx.kMaxD, ray_t);
     float density_eff = mix(ctx.density_eff_near, ctx.density_eff_far, dist_w);
+    // Aggressive zero-density early-out. When distance has faded
+    // density to near zero, the inner 9-cell loop almost always finds
+    // every cell rejected by `r.x > density_eff` — cost without
+    // benefit. 0.03 cutoff keeps a few stragglers visible past the
+    // soft fade so it doesn't read as a hard ring.
+    if (density_eff < 0.03) return distToTerrain;
     const float kEligThresh = 0.10;
-    for (int dy = -1; dy <= 1; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
+    // Drop the 8 neighbour cells past ~35 % of kMaxDist — at that
+    // distance blades are sub-pixel and the neighbour offsets
+    // contribute < 1 pixel of silhouette difference. Keeps centre
+    // cell only → 9× cheaper per map() call on long-range pixels.
+    // Scales with kMaxDist (was hardcoded 40 m which capped well
+    // before kMaxDist when the user's grass-distance slider was set
+    // above 100 m).
+    int rad = (ray_t > ctx.kMaxD * 0.35) ? 0 : 1;
+    for (int dy = -rad; dy <= rad; ++dy) {
+        for (int dx = -rad; dx <= rad; ++dx) {
             vec2 nId = cellId + vec2(float(dx), float(dy));
             // Eligibility mask FIRST (cheaper than hash42). Roughly
             // half of cells get rejected on real terrain — paying the
@@ -367,7 +417,14 @@ void main() {
     // burned the worst-case budget on distant grazing rays that never
     // converge. With the distance-ramped step factor below the loop
     // covers the same ground with fewer iterations at distance.
-    const int   kMaxSteps = 128;
+    // GPU-TDR safety cap: when the player stands IN dense grass and
+    // looks horizontally across it, every pixel can burn the worst-
+    // case budget × 9 cells × hash+sin+sqrt per step. Past a certain
+    // budget the cost outruns the Windows TDR (~2 s on most drivers)
+    // and the device is lost. 96 still gives plenty of convergence
+    // headroom for normal play; the distance-aware breaks below
+    // already collapse far rays to 16-32. Was 128.
+    const int   kMaxSteps = 96;
     float t = 0.0;
     bool hit = false;
     bool blade_hit = false;
@@ -396,11 +453,22 @@ void main() {
         ctx.water_y    = scene.water_params.y;
     }
 
+    // Distance-aware step budget. Past ~55 % / ~85 % of the user's
+    // kMaxDist the worst-case grazing rays burn the full 128 budget
+    // converging on sub-pixel blade edges that won't matter — TAA
+    // absorbs the residual noise. Scale with kMaxDist so the user's
+    // grass-distance slider keeps working at any value (was hardcoded
+    // 60 m / 100 m which capped well before kMaxDist when the slider
+    // pushed past 100 m).
+    float step_cap_a = kMaxDist * 0.55;
+    float step_cap_b = kMaxDist * 0.85;
     for (int i = 0; i < kMaxSteps; ++i) {
         if (t >= kMaxDist) break;
+        if (i >= 32 && t > step_cap_a) break;
+        if (i >= 16 && t > step_cap_b) break;
         vec3 p = ro + t * rd;
         bool step_blade;
-        float d = map(p, t, step_blade);
+        float d = map(p, t, ctx, step_blade);
         // Hit threshold loosens with distance so the loop terminates on
         // sub-pixel features instead of trying to converge on a blade
         // edge from 50 m away.
@@ -412,12 +480,13 @@ void main() {
             hit_thresh = thresh;
             break;
         }
-        // Distance-ramped step factor. Close-up needs the 0.7 cone-safety
-        // factor for grazing rays through dense blade fields; past ~15 m
-        // blades shrink toward sub-pixel and the conservative step is
-        // pure cost. By 50 m we're at 0.95 — half as many iterations
-        // cover the same metres of ray.
+        // Distance-ramped step factor. Close-up needs the 0.7 cone-
+        // safety factor for grazing rays through dense blade fields.
+        // Past 50 m blades are sub-pixel and the cone-safety overhead
+        // is pure cost — extend the ramp to 2.0 by 120 m so distant
+        // rays cover 3× the ground per iteration.
         float step_f = mix(0.70, 0.95, smoothstep(15.0, 50.0, t));
+        step_f = mix(step_f, 2.0, smoothstep(50.0, 120.0, t));
         t += d * step_f;
     }
 
@@ -463,18 +532,57 @@ void main() {
                         scene.grass_color_top.rgb, h_t);
     grassCol *= 1.0 - clump;
 
+    // Shoreline tint — UI sliders (rt_.grass_shore_color/strength/
+    // distance). Cheap: 1 sub + 1 smoothstep + 1 mix per visible
+    // grass pixel. Strength 0 disables the entire branch via the
+    // mix weight collapsing to 0. terrainY is already in scope.
+    {
+        float strength = scene.grass_shore_color.a;
+        if (strength > 1e-3) {
+            float fade = max(0.05, scene.grass_shore_params.x);
+            float h_above_water = max(0.0, terrainY - scene.water_params.y);
+            float shore_w = 1.0 - smoothstep(0.0, fade, h_above_water);
+            grassCol = mix(grassCol, scene.grass_shore_color.rgb,
+                            shore_w * strength);
+        }
+    }
+
     // Height-from-ground AO. Slider-controlled floor (0 = darkest base,
     // 1 = no AO darkening); the lerp above already shifts colour with
     // height, so the AO term mostly adds extinction at the very base.
     float ao_floor = clamp(scene.grass_color_bottom.w, 0.0, 1.0);
     float ao = ao_floor + (1.0 - ao_floor) * pow(h_t, 0.6);
 
+    // Per-blade "lean" variation — hash the cell ID and tilt the
+    // effective n_dot_l so adjacent blades on the same flat ground
+    // don't all shade identically. ±0.25 around base, then half-
+    // Lambert wrap so the shadow side isn't pitch-black.
+    float blade_var = hash12(floor(p.xz / 0.20)) - 0.5;  // [-0.5, 0.5]
+    float n_dot_l_var = clamp(n_dot_l + blade_var * 0.5, 0.0, 1.0);
+    float n_dot_l_wrap = n_dot_l_var * 0.7 + 0.3;        // wrap by 0.3
+
     vec3 sun_term = scene.sun_color.rgb * scene.sun_color.a *
-                    (n_dot_l * sun_lit);
+                    (n_dot_l_wrap * sun_lit);
     vec3 sky_term = scene.sky_color.rgb * 0.18;
     vec3 col = grassCol * (sun_term + sky_term) * ao;
 
-    // Fresnel-edge highlight (iq's suggestion in the original).
+    // View-dependent backlit / translucency — sun shining THROUGH the
+    // blade from behind makes the leaves glow warm. Strongest when:
+    //   * looking toward the sun (v_dot_l > 0)
+    //   * the surface isn't already directly lit (1 - n_dot_l)
+    //   * we're on the upper part of the blade (h_t)
+    // Same trick the rasterised grass.frag uses — was missing here so
+    // raymarched grass had no view-dependent tone shift, every blade
+    // read identically from front vs back.
+    float v_dot_l  = max(0.0, dot(rd, L));   // rd points away from camera
+    float v_dot_l2 = v_dot_l * v_dot_l;
+    float v_dot_l4 = v_dot_l2 * v_dot_l2;
+    vec3 backlit = scene.sun_color.rgb * scene.sun_color.a *
+                   (v_dot_l4 * (1.0 - n_dot_l) * h_t) *
+                   vec3(0.65, 0.95, 0.35) * sun_lit;
+    col += backlit * grassCol;
+
+    // Fresnel-edge rim using the (per-blade-jittered) terrain normal.
     // pow(x, 3) → x*x*x (no exp/log).
     float fr_in = clamp(1.0 + dot(N, rd), 0.0, 1.0);
     vec3 fres = vec3(0.18, 0.18, 0.10) * ao *
@@ -486,7 +594,13 @@ void main() {
     // Two ground colours blend by camera distance using the same
     // anchors the terrain shader uses (30..200m), keeping the two
     // passes in lock-step.
-    float ground_t   = smoothstep(30.0, 200.0, t);
+    // Far anchor comes from rt_.grass_ground_tint_far_distance (UI
+    // slider, packed into grass_color_ground_far.w). Near anchor is
+    // 0 so the close→far ramp is one continuous gradient over the
+    // full 0..far range — no inflection band where the smoothstep
+    // slope jumps. Reads as a true merge instead of a visible knee.
+    float tint_far  = max(50.0, scene.grass_color_ground_far.w);
+    float ground_t  = smoothstep(0.0, tint_far, t);
     vec3 fade_target = mix(scene.grass_color_ground.rgb,
                             scene.grass_color_ground_far.rgb,
                             ground_t);
@@ -512,15 +626,57 @@ void main() {
     float dist_w      = smoothstep(soft_dist, kMaxDist, t);
     float final_alpha = mix(1.0, 1.0 - user_cut, dist_w);
 
+    // Distance fog — final atmospheric mix. Same exp² as terrain.
+    {
+        float strength = scene.distance_fog_color.a;
+        if (strength > 1e-3) {
+            float density   = scene.distance_fog_params.x;
+            float start_d   = scene.distance_fog_params.y;
+            float height_top = scene.distance_fog_params.z;
+            float max_alpha  = scene.distance_fog_params.w;
+            float d_raw = max(0.0, length(p - scene.camera_pos.xyz) - start_d);
+            float dx = d_raw * density;
+            float fog = 1.0 - exp(-dx * dx);
+            if (height_top > 0.5) {
+                fog *= 1.0 - smoothstep(0.0, height_top, p.y);
+            }
+            float fa = clamp(fog * strength, 0.0, max_alpha);
+            col = mix(col, scene.distance_fog_color.rgb, fa);
+        }
+    }
     outColor = vec4(col, final_alpha);
-    // Treat grass as world-static for TAA (per-blade wind sway is sub-
-    // pixel and TAA's 5x5 spatial filter absorbs it). Motion attachment
-    // is OPAQUE (no blending) so this writes the static-zero value
-    // verbatim regardless of edge_alpha.
-    outMotion = vec2(0.0);
 
     // Honour LESS_OR_EQUAL depth test so a closer wall already in
     // depth_image_ correctly occludes the marched grass.
     vec4 clip = pc.mvp * vec4(p, 1.0);
     gl_FragDepth = clamp(clip.z / max(clip.w, 1e-4), 0.0001, 0.9998);
+
+    // Real screen-space motion vector for TAA reprojection. Grass is
+    // world-static (per-blade wind sway is sub-pixel), so prev_uv
+    // comes from prev_view_proj applied to the SAME world hit point.
+    // Was hardcoded to vec2(0) — that meant TAA sampled the previous
+    // frame at the SAME screen position, so when the camera strafed
+    // grass blended in stale terrain colour from where it HAD been,
+    // appearing to lag the rest of the scene by ~history-blend frames.
+    // Using clip-space directly (not gl_FragCoord/viewport.zw) makes
+    // it resolution-independent.
+    vec4 prev_clip = pc.prev_mvp * vec4(p, 1.0);
+    if (clip.w > 0.0001 && prev_clip.w > 0.0001) {
+        vec2 cur_uv  = clip.xy      / clip.w      * 0.5 + 0.5;
+        vec2 prev_uv = prev_clip.xy / prev_clip.w * 0.5 + 0.5;
+        vec2 m = cur_uv - prev_uv;
+        // NaN/inf guard + clamp to a sane range. A blade hit very
+        // close to the camera with a glancing prev-frame projection
+        // can produce |motion| > 1.0 which poisons TAA history and
+        // (under enough motion) lands the next frame's reprojection
+        // in undefined memory → device lost. Clamp ±0.5 = ±half-
+        // screen, which is wider than any real per-frame motion.
+        if (!any(isnan(m)) && !any(isinf(m))) {
+            outMotion = clamp(m, vec2(-0.5), vec2(0.5));
+        } else {
+            outMotion = vec2(0.0);
+        }
+    } else {
+        outMotion = vec2(0.0);
+    }
 }

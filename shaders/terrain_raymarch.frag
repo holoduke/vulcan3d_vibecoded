@@ -292,7 +292,52 @@ layout(set = 0, binding = 0) uniform Scene {
     //   z: max reach (m)
     //   w: unused
     vec4 grass_shadow_params;
+    // Layout padding: must mirror SceneUBO in internal.h. Grass shore
+    // tint slot is consumed by grass_raymarch.frag; declared here so
+    // terrain_shore_color (the next field) lands at the right offset.
+    vec4 grass_shore_color;
+    vec4 grass_shore_params;
+    // Shoreline TERRAIN tint — applied to bare ground in getMaterial.
+    //   terrain_shore_color.rgb = tint colour
+    //   terrain_shore_color.w   = strength (0..1; 0 disables)
+    //   terrain_shore_params.x  = fade distance (m above water level)
+    vec4 terrain_shore_color;
+    vec4 terrain_shore_params;
+    // Distance fog — see SceneUBO comment in internal.h.
+    vec4 distance_fog_color;   // rgb + strength a (0 = off)
+    vec4 distance_fog_params;  // x density, y start_dist, z height_top, w max_alpha
+    // GENERAL terrain shore tint — bare-terrain shore band.
+    vec4 terrain_shore_general_color;
+    vec4 terrain_shore_general_params;
+    // Sand base colour for the beach blend — was hardcoded.
+    vec4 terrain_sand_color;
 } scene;
+
+// Standard exponential² distance fog. Returns 0..1 mix weight toward
+// `distance_fog_color.rgb`. Caller does the actual mix so it can
+// run AFTER all atmospheric / specular passes.
+//   p_world: shaded point in world space
+//   cam:     camera position
+float distanceFogAmount(vec3 p_world, vec3 cam) {
+    float strength = scene.distance_fog_color.a;
+    if (strength < 1e-3) return 0.0;
+    float density   = scene.distance_fog_params.x;
+    float start_d   = scene.distance_fog_params.y;
+    float height_top = scene.distance_fog_params.z;
+    float max_alpha  = scene.distance_fog_params.w;
+    float d_raw = max(0.0, length(p_world - cam) - start_d);
+    // Exp² falloff — natural-looking atmospheric fog. Cheaper than
+    // Beer-Lambert with no visible difference at typical density.
+    float dx = d_raw * density;
+    float fog = 1.0 - exp(-dx * dx);
+    if (height_top > 0.5) {
+        // Optional height fog: thin out above height_top so mountain
+        // peaks stay visible above the fog layer.
+        float h_w = 1.0 - smoothstep(0.0, height_top, p_world.y);
+        fog *= h_w;
+    }
+    return clamp(fog * strength, 0.0, max_alpha);
+}
 
 // Cheap directional sky model вЂ” horizon -> zenith ramp around the
 // scene's sky colour, with a small sun-tinted lift near the horizon.
@@ -699,12 +744,18 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
         // distance so the same ray covers more ground in fewer
         // iterations. 0.7 attenuation on h prevents penetration
         // when the relaxation factor over-shoots.
+        // Distance-ramped step factor — past 200 m the FBM is LOD'd
+        // down to lod_min_octaves so the field is much smoother and
+        // big strides won't punch through fine detail. Up to 2.5×
+        // close-up step factor by 600 m → roughly halves the worst-
+        // case grazing-ray iteration count.
+        float kStep_eff = kStep * mix(1.0, 2.5, smoothstep(200.0, 600.0, t));
         float advance;
         if (relax) {
             float rl = max(t * 0.02, 1.0);
-            advance = kStep * h * rl * 0.7;
+            advance = kStep_eff * h * rl * 0.7;
         } else {
-            advance = kStep * h;
+            advance = kStep_eff * h;
         }
         // Once h goes negative we've crossed the surface — the next step
         // would walk us back, and with rl > 1 the back-step grows enough to
@@ -795,6 +846,15 @@ float calcShadow(vec3 pos, vec3 sunDir) {
     float res = 1.0;
     float t   = 0.05;
     int kSteps = int(pc.tex_params.y);
+    // Receiver-distance shadow budget: shadows on far receivers are
+    // sub-pixel at typical FOV — even 4 taps look identical to 96
+    // after TAA absorbs the residual noise. Was already capped to
+    // 10/6 past 200/500 m by P20; tighten further:
+    //   8 past 80 m, 4 past 200 m. ~3× faster on long-shot vistas.
+    float recv_dist = length(pos - scene.camera_pos.xyz);
+    if (recv_dist > 200.0) kSteps = min(kSteps, 4);
+    else if (recv_dist > 80.0)  kSteps = min(kSteps, 8);
+    else if (recv_dist > 40.0)  kSteps = min(kSteps, 16);
     for (int i = 0; i < kSteps; ++i) {
         vec3 p = pos + t * sunDir;
         // Distance-LOD: deep-valley shadow taps don't need full 8-octave
@@ -804,7 +864,12 @@ float calcShadow(vec3 pos, vec3 sunDir) {
         float h = p.y - terrainM_lod(p.xz, t);
         if (h < 0.001) { res = 0.0; break; }
         res = min(res, k * h / t);
-        t += clamp(h, 0.5, 100.0);
+        // Bigger min-step and lower hard-cap at distance — same logic
+        // as the primary march. Combined with the receiver-distance
+        // step budget above, distant shadow contributions converge in
+        // 4 jumps instead of crawling 24+ tiny steps.
+        float min_step = mix(0.5, 4.0, smoothstep(100.0, 500.0, recv_dist));
+        t += clamp(h, min_step, 100.0);
         if (t > 800.0 || res < 0.001) break;
     }
     res = clamp(res, 0.0, 1.0);
@@ -882,7 +947,7 @@ vec3 getMaterial(vec3 pos, vec3 nor) {
     vec3 grass = mix(vec3(0.10, 0.08, 0.04),
                      vec3(0.05, 0.09, 0.02), nz);
     vec3 snow  = vec3(0.62, 0.65, 0.70);
-    vec3 sand  = vec3(0.50, 0.45, 0.35);
+    vec3 sand  = scene.terrain_sand_color.rgb;
     vec3 col = rock;
     col = mix(col, grass, smoothstep(0.5, 0.8, slope));
     float snowMask = smoothstep(80.0 - 20.0 * nz, 90.0, h)
@@ -899,13 +964,43 @@ vec3 getMaterial(vec3 pos, vec3 nor) {
     float cam_d     = distance(pos, scene.camera_pos.xyz);
     // Same anchor distances the grass-blade alpha ramp uses, so the
     // blade-fade and the ground-tint transition stay aligned.
-    float ground_t  = smoothstep(30.0, 200.0, cam_d);
+    // Far anchor from rt_.grass_ground_tint_far_distance (UI slider,
+    // packed into grass_color_ground_far.w). Near anchor is 0 so the
+    // close→far ramp is one continuous gradient — no slope-spike
+    // inflection band that reads as a hard line. Matches grass.
+    float tint_far  = max(50.0, scene.grass_color_ground_far.w);
+    float ground_t  = smoothstep(0.0, tint_far, cam_d);
     vec3 ground_base = mix(scene.grass_color_ground.rgb,
                             scene.grass_color_ground_far.rgb,
                             ground_t);
     vec3 grass_top  = mix(ground_base, ground_base * 0.7, nz);
     float tint_str  = clamp(scene.grass_color_ground.w, 0.0, 1.0);
     col = mix(col, grass_top, grass_amt * tint_str);
+
+    // Two-region shore tint — grass-area gets one colour, bare-
+    // terrain gets another. Both fade smoothly with height above the
+    // water level. Each is gated by grass_amt so they never compete.
+    float h_above_water = max(0.0, pos.y - scene.water_params.y);
+    {
+        // Grass-area shore tint (rt_.terrain_shore_*).
+        float ts_strength = scene.terrain_shore_color.a;
+        if (ts_strength > 1e-3 && grass_amt > 0.001) {
+            float ts_fade = max(0.05, scene.terrain_shore_params.x);
+            float ts_w = 1.0 - smoothstep(0.0, ts_fade, h_above_water);
+            col = mix(col, scene.terrain_shore_color.rgb,
+                      ts_w * ts_strength * grass_amt);
+        }
+    }
+    {
+        // Bare-terrain shore tint (rt_.terrain_shore_general_*).
+        float gt_strength = scene.terrain_shore_general_color.a;
+        if (gt_strength > 1e-3 && grass_amt < 0.999) {
+            float gt_fade = max(0.05, scene.terrain_shore_general_params.x);
+            float gt_w = 1.0 - smoothstep(0.0, gt_fade, h_above_water);
+            col = mix(col, scene.terrain_shore_general_color.rgb,
+                      gt_w * gt_strength * (1.0 - grass_amt));
+        }
+    }
     return col;
 }
 
@@ -1314,17 +1409,21 @@ void main() {
         // horizon (black). Guard against w<=0 (point behind camera) so
         // the depth divide doesn't produce NaN.
         gl_FragDepth = min(clipW.z / max(clipW.w, 1e-4), 0.9998);
+        // Distance fog on the water surface too.
+        {
+            float fa = distanceFogAmount(wpos, scene.camera_pos.xyz);
+            col_w = mix(col_w, scene.distance_fog_color.rgb, fa);
+        }
         outColor = vec4(col_w, 1.0);
-        // Motion vector for TAA reprojection (same pattern as
-        // terrain branch below). Treats the surface as world-static
-        // вЂ” wave-bump animation contributes sub-pixel motion that
-        // TAA's spatial filter absorbs.
-        vec2 current_uv = (gl_FragCoord.xy + 0.5) * scene.viewport.zw;
+        // Motion vector for TAA reprojection. clip-space derivation
+        // (resolution-independent) so the LR raymarch path doesn't
+        // pick up a constant ~0.5 offset from scene.viewport being
+        // full-res — that would kill TAA history every frame.
         vec4 prev_clipW = pc.prev_mvp * vec4(wpos, 1.0);
-        if (prev_clipW.w > 0.0) {
-            vec2 prev_ndc = prev_clipW.xy / prev_clipW.w;
-            vec2 prev_uv  = prev_ndc * 0.5 + 0.5;
-            outMotion = current_uv - prev_uv;
+        if (clipW.w > 0.0 && prev_clipW.w > 0.0) {
+            vec2 cur_uv  = clipW.xy      / clipW.w      * 0.5 + 0.5;
+            vec2 prev_uv = prev_clipW.xy / prev_clipW.w * 0.5 + 0.5;
+            outMotion = cur_uv - prev_uv;
         } else {
             outMotion = vec2(0.0);
         }
@@ -1357,10 +1456,13 @@ void main() {
     // sliders (0 strength = entirely off, no taps).
     float gcs_strength = scene.grass_shadow_params.x;
     float grass_shadow = grassCastShadow(pos, sunDir);
-    // Combine multiplicatively with self_shadow. Convert grass shadow
-    // amount to a transmittance and multiply (higher self_shadow
-    // already = more shadow; same convention here).
-    self_shadow = max(self_shadow, grass_shadow * gcs_strength);
+    // Combine multiplicatively with self_shadow as transmittances.
+    // shadow_amount=1 → light_through=0, so combined-blocked
+    // = 1 - (1-self)*(1-grass) (union of independent occluders).
+    // Was `max(...)` which under-darkens partially-lit slopes that
+    // also have grass nearby — the comment was right, the code wasn't.
+    self_shadow = 1.0 - (1.0 - self_shadow) *
+                        (1.0 - grass_shadow * gcs_strength);
 
     // RT PCSS for castle / boxes / dyn-props. Mirrors cube.frag's
     // terrain-receiver shadow path 1:1 вЂ” the cube.frag terrain
@@ -1936,6 +2038,12 @@ void main() {
     vec4 clip = pc.mvp * vec4(pos, 1.0);
     gl_FragDepth = min(clip.z / max(clip.w, 1e-4), 0.9998);
 
+    // Distance fog — final atmospheric mix, after all the other
+    // shading, GI, water, volumetric fog and grass-shadow work.
+    {
+        float fa = distanceFogAmount(pos, scene.camera_pos.xyz);
+        col = mix(col, scene.distance_fog_color.rgb, fa);
+    }
     outColor = vec4(col, 1.0);
     // Screen-space motion vector for TAA. World position is stationary
     // вЂ” only the camera moves вЂ” so prev_uv comes from prev_view_proj
@@ -1943,12 +2051,13 @@ void main() {
     // reproject and per-frame PCSS / fog jitter shows up as moving
     // square dither artefacts.
     {
-        vec2 current_uv = (gl_FragCoord.xy + 0.5) * scene.viewport.zw;
+        // clip-space derivation (resolution-independent) — see the
+        // matching block in the water branch above.
         vec4 prev_clip = pc.prev_mvp * vec4(pos, 1.0);
-        if (prev_clip.w > 0.0) {
-            vec2 prev_ndc = prev_clip.xy / prev_clip.w;
-            vec2 prev_uv  = prev_ndc * 0.5 + 0.5;
-            outMotion = current_uv - prev_uv;
+        if (clip.w > 0.0 && prev_clip.w > 0.0) {
+            vec2 cur_uv  = clip.xy      / clip.w      * 0.5 + 0.5;
+            vec2 prev_uv = prev_clip.xy / prev_clip.w * 0.5 + 0.5;
+            outMotion = cur_uv - prev_uv;
         } else {
             outMotion = vec2(0.0);
         }

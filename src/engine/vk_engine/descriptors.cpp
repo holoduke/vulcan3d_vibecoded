@@ -225,7 +225,12 @@ void VulkanEngine::update_scene_ubo() {
                                 rt_.gi_radius,
                                 rt_.reflection_strength,
                                 rt_.shadow_curve);
-    glm::vec3 eye = player_.eye_position();
+    // Use the lerped eye captured by compute_frame_view, NOT the raw
+    // physics-tick player_.eye_position(). Mismatch caused raymarched
+    // grass/terrain to render one frame behind rasterised geometry —
+    // their ray origin came from the raw eye while their projection
+    // matrix used the smoothed render_pos.
+    glm::vec3 eye = current_frame_view_.eye_pos;
     data.camera_pos = glm::vec4(eye, 0.0f);
     // Distance LOD: 15 m = full samples (gameplay-relevant range — shadows
     // and AO are most visible up close); past 50 m fades to 1 sample so the
@@ -328,12 +333,35 @@ void VulkanEngine::update_scene_ubo() {
                                          rt_.grass_base_ao_floor);
     data.grass_color_ground = glm::vec4(rt_.grass_color_ground,
                                          rt_.grass_ground_tint_strength);
-    data.grass_color_ground_far = glm::vec4(rt_.grass_color_ground_far, 0.0f);
+    data.grass_color_ground_far = glm::vec4(rt_.grass_color_ground_far,
+                                              std::max(50.0f, rt_.grass_ground_tint_far_distance));
     data.grass_shadow_params = glm::vec4(
         rt_.grass_shadow_strength,
         static_cast<float>(rt_.grass_shadow_samples),
         rt_.grass_shadow_max_dist,
         0.0f);
+    // Shoreline grass tint — see SceneUBO comment in internal.h.
+    data.grass_shore_color = glm::vec4(rt_.grass_shore_color,
+                                        rt_.grass_shore_strength);
+    data.grass_shore_params = glm::vec4(std::max(0.05f, rt_.grass_shore_distance),
+                                         0.0f, 0.0f, 0.0f);
+    // Shoreline TERRAIN tint — same packing.
+    data.terrain_shore_color = glm::vec4(rt_.terrain_shore_color,
+                                          rt_.terrain_shore_strength);
+    data.terrain_shore_params = glm::vec4(std::max(0.05f, rt_.terrain_shore_distance),
+                                           0.0f, 0.0f, 0.0f);
+    // Distance fog — strength=0 disables in-shader.
+    data.distance_fog_color = glm::vec4(rt_.distance_fog_color,
+                                         std::max(0.0f, std::min(1.0f, rt_.distance_fog_strength)));
+    data.distance_fog_params = glm::vec4(std::max(0.0f, rt_.distance_fog_density),
+                                          std::max(0.0f, rt_.distance_fog_start),
+                                          std::max(0.0f, rt_.distance_fog_height),
+                                          std::max(0.0f, std::min(1.0f, rt_.distance_fog_max)));
+    data.terrain_shore_general_color = glm::vec4(rt_.terrain_shore_general_color,
+                                                  rt_.terrain_shore_general_strength);
+    data.terrain_shore_general_params = glm::vec4(std::max(0.05f, rt_.terrain_shore_general_distance),
+                                                   0.0f, 0.0f, 0.0f);
+    data.terrain_sand_color = glm::vec4(rt_.terrain_sand_color, 0.0f);
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

@@ -172,6 +172,81 @@ void VulkanEngine::destroy_imgui() {
 
 void VulkanEngine::build_hud_ui() {
     if (state_ != State::Playing) return;
+
+    // Push current frame samples into the rolling history (Three.js
+    // stats-style ring buffer).
+    {
+        int& head = stats_history_head_;
+        fps_history_[head] = ema_fps_;
+        ms_history_[head]  = last_frame_dt_ * 1000.0f;
+        head = (head + 1) % kStatsHistory;
+    }
+
+    // Helper: render one Three.js-style stats panel — big number on
+    // top, mini histogram below, accent colour bar. ImDrawList for
+    // the custom panel + ImGui for text inside the panel rect.
+    auto draw_panel = [&](ImVec2 origin, const char* label,
+                          float current, float min_v, float max_v,
+                          const float* history, int history_count, int head,
+                          ImU32 accent) {
+        const ImVec2 size(120.0f, 48.0f);
+        const ImU32 bg = IM_COL32(0, 0, 16, 220);
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), bg);
+        // Top accent strip — colour identifies which stat panel.
+        dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + 2.0f), accent);
+        // Big current value, top-left.
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%.0f %s", current, label);
+        dl->AddText(ImVec2(origin.x + 4.0f, origin.y + 4.0f), accent, buf);
+        // Min/Max line below the big number.
+        snprintf(buf, sizeof(buf), "(%.0f-%.0f)", min_v, max_v);
+        dl->AddText(ImVec2(origin.x + 4.0f, origin.y + 18.0f),
+                    IM_COL32(200, 200, 220, 180), buf);
+        // Histogram strip at the bottom of the panel.
+        const float graph_y      = origin.y + 32.0f;
+        const float graph_h      = 14.0f;
+        const float graph_x_left = origin.x + 4.0f;
+        const float graph_w      = size.x - 8.0f;
+        // Span = max-min, padded so a flat history shows a clear baseline.
+        const float span = std::max(1.0f, max_v - min_v);
+        const float bar_w = graph_w / float(history_count);
+        for (int i = 0; i < history_count; ++i) {
+            // Read chronologically: oldest at head, newest at head-1.
+            int idx = (head + i) % history_count;
+            float v = history[idx];
+            float h = std::min(1.0f, std::max(0.0f, (v - min_v) / span)) * graph_h;
+            float bx0 = graph_x_left + float(i) * bar_w;
+            float bx1 = bx0 + bar_w + 0.5f;
+            dl->AddRectFilled(ImVec2(bx0, graph_y + graph_h - h),
+                              ImVec2(bx1, graph_y + graph_h),
+                              accent);
+        }
+    };
+
+    // Stats panels — stacked vertically in the top-left.
+    {
+        // Min/max over the live history.
+        float fps_min = fps_history_[0], fps_max = fps_history_[0];
+        float ms_min  = ms_history_[0],  ms_max  = ms_history_[0];
+        for (int i = 1; i < kStatsHistory; ++i) {
+            fps_min = std::min(fps_min, fps_history_[i]);
+            fps_max = std::max(fps_max, fps_history_[i]);
+            ms_min  = std::min(ms_min,  ms_history_[i]);
+            ms_max  = std::max(ms_max,  ms_history_[i]);
+        }
+        ImVec2 p(8.0f, 8.0f);
+        draw_panel(p, "FPS", ema_fps_, fps_min, fps_max,
+                   fps_history_, kStatsHistory, stats_history_head_,
+                   IM_COL32(180, 220, 70, 255));  // green
+        p.y += 52.0f;
+        draw_panel(p, "MS", last_frame_dt_ * 1000.0f, ms_min, ms_max,
+                   ms_history_, kStatsHistory, stats_history_head_,
+                   IM_COL32(220, 110, 180, 255));  // pink
+    }
+
+    // Compact gameplay info — small ImGui window below the stats
+    // panels. Kept minimal: position, score, draw counts, stance.
     ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoDecoration |
         ImGuiWindowFlags_AlwaysAutoResize |
@@ -180,52 +255,35 @@ void VulkanEngine::build_hud_ui() {
         ImGuiWindowFlags_NoNav |
         ImGuiWindowFlags_NoInputs |
         ImGuiWindowFlags_NoMove;
-    ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(8.0f, 8.0f + 52.0f * 2 + 4.0f), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.55f);
-    ImGui::Begin("##hud", nullptr, flags);
+    ImGui::Begin("##hud_info", nullptr, flags);
     glm::vec2 hv(player_.velocity.x, player_.velocity.z);
     float speed_h = glm::length(hv);
-    ImGui::Text("FPS:        %5.1f", ema_fps_);
-    ImGui::Text("frame dt:   %5.2f ms", last_frame_dt_ * 1000.0f);
-    ImGui::Text("phys ticks: %d", last_physics_ticks_);
-    ImGui::Separator();
-    ImGui::Text("speed:      %5.2f m/s", speed_h);
-    ImGui::Text("vel:  (%5.2f, %5.2f, %5.2f)",
-                player_.velocity.x, player_.velocity.y, player_.velocity.z);
-    ImGui::Text("pos:  (%5.2f, %5.2f, %5.2f)",
+    const char* stance = "walk";
+    if (speed_h > 11.0f)      stance = "SPRINT";
+    else if (speed_h < 4.0f && (player_.velocity.x != 0.0f ||
+                                 player_.velocity.z != 0.0f))
+        stance = "crawl";
+    ImGui::Text("pos %5.1f %5.1f %5.1f",
                 player_.position.x, player_.position.y, player_.position.z);
-    ImGui::Text("grounded:   %s", player_.on_ground ? "yes" : "no");
-    ImGui::Text("focus:      %s", window_->has_focus() ? "yes" : "no");
-    {
-        glm::vec2 hv2(player_.velocity.x, player_.velocity.z);
-        const char* stance = "walk";
-        if (glm::length(hv2) > 11.0f)      stance = "SPRINT";
-        else if (glm::length(hv2) < 4.0f && (player_.velocity.x != 0.0f ||
-                                             player_.velocity.z != 0.0f))
-            stance = "crawl";
-        ImGui::Text("stance:     %s", stance);
-    }
-    ImGui::Separator();
-    ImGui::Text("score:      %d", score_);
-    ImGui::Text("dyn boxes:  %zu / %d", dyn_props_.size(), kMaxDynProps);
-    ImGui::Text("draws:      %d (s) + %d (d)   culled: %d",
-                last_draw_static_, last_draw_dyn_, last_culled_);
-    // Validation-layer regression counter. 0/0 in normal builds (NDEBUG drops
-    // the validation layer entirely); during dev, anything non-zero means a
-    // new warning landed in the log — go look. Errors stand out in red.
+    ImGui::Text("spd %5.1f m/s  %s%s", speed_h, stance,
+                player_.on_ground ? "" : "  (air)");
+    ImGui::Text("score %d  dyn %zu/%d", score_, dyn_props_.size(), kMaxDynProps);
+    ImGui::Text("draws %d+%d  culled %d  phys %d",
+                last_draw_static_, last_draw_dyn_, last_culled_,
+                last_physics_ticks_);
     const uint64_t v_warn = g_validation_warning_count.load(std::memory_order_relaxed);
     const uint64_t v_err  = g_validation_error_count.load(std::memory_order_relaxed);
     if (v_err > 0) {
         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
-                           "vk validation: %llu warn / %llu ERR",
+                           "vk %llu warn / %llu ERR",
                            static_cast<unsigned long long>(v_warn),
                            static_cast<unsigned long long>(v_err));
     } else if (v_warn > 0) {
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
-                           "vk validation: %llu warn",
+                           "vk %llu warn",
                            static_cast<unsigned long long>(v_warn));
-    } else {
-        ImGui::TextDisabled("vk validation: clean");
     }
     ImGui::End();
 
@@ -712,6 +770,55 @@ void VulkanEngine::build_menu_ui() {
             ImGui::TreePop();
         }
 
+        if (ImGui::TreeNodeEx("Shoreline tint", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextDisabled("Grass-area shore (under blades):");
+            ImGui::ColorEdit3("grass shore colour",
+                              &rt_.terrain_shore_color.x);
+            ImGui::SliderFloat("grass shore strength",
+                               &rt_.terrain_shore_strength,
+                               0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("grass shore distance (m)",
+                               &rt_.terrain_shore_distance,
+                               0.1f, 20.0f, "%.1f");
+            ImGui::Separator();
+            ImGui::TextDisabled("Bare-terrain shore (no grass):");
+            ImGui::ColorEdit3("bare shore colour",
+                              &rt_.terrain_shore_general_color.x);
+            ImGui::SliderFloat("bare shore strength",
+                               &rt_.terrain_shore_general_strength,
+                               0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("bare shore distance (m)",
+                               &rt_.terrain_shore_general_distance,
+                               0.1f, 20.0f, "%.1f");
+            ImGui::Separator();
+            ImGui::TextDisabled("Beach base material (slope-driven):");
+            ImGui::ColorEdit3("sand colour",
+                              &rt_.terrain_sand_color.x);
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Distance fog")) {
+            ImGui::ColorEdit3("fog colour",
+                              &rt_.distance_fog_color.x);
+            ImGui::SliderFloat("fog strength",
+                               &rt_.distance_fog_strength,
+                               0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("fog density",
+                               &rt_.distance_fog_density,
+                               0.0f, 0.05f, "%.4f");
+            ImGui::SliderFloat("fog start (m)",
+                               &rt_.distance_fog_start,
+                               0.0f, 500.0f, "%.0f");
+            ImGui::SliderFloat("fog height top (m)",
+                               &rt_.distance_fog_height,
+                               0.0f, 400.0f, "%.0f");
+            ImGui::SliderFloat("fog max",
+                               &rt_.distance_fog_max,
+                               0.0f, 1.0f, "%.2f");
+            ImGui::TextDisabled("strength=0 disables. height_top=0 -> uniform fog.");
+            ImGui::TreePop();
+        }
+
         ImGui::SeparatorText("Debug");
         const char* terrain_debug_labels[] = {
             "off (full shading)",
@@ -764,6 +871,16 @@ void VulkanEngine::build_menu_ui() {
             ImGui::SliderFloat("ground tint strength",
                                &rt_.grass_ground_tint_strength,
                                0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("ground tint far distance (m)",
+                               &rt_.grass_ground_tint_far_distance,
+                               50.0f, 1000.0f, "%.0f");
+            ImGui::Separator();
+            ImGui::TextUnformatted("Shoreline tint (drier near water)");
+            ImGui::ColorEdit3("shore colour", &rt_.grass_shore_color.x);
+            ImGui::SliderFloat("shore strength",
+                               &rt_.grass_shore_strength, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("shore distance (m)",
+                               &rt_.grass_shore_distance, 0.1f, 20.0f, "%.1f");
             ImGui::Separator();
             ImGui::TextUnformatted("Grass shadow on terrain");
             ImGui::SliderFloat("shadow strength",

@@ -286,6 +286,7 @@ void VulkanEngine::save_settings() const {
     f << "grass_color_ground_far = " << rt_.grass_color_ground_far.x << " "
                                       << rt_.grass_color_ground_far.y << " "
                                       << rt_.grass_color_ground_far.z << "\n";
+    f << "grass_ground_tint_far_distance = " << rt_.grass_ground_tint_far_distance << "\n";
     f << "grass_base_ao_floor = "       << rt_.grass_base_ao_floor       << "\n";
     f << "grass_ground_tint_strength = " << rt_.grass_ground_tint_strength << "\n";
     f << "grass_shadow_strength = " << rt_.grass_shadow_strength << "\n";
@@ -340,6 +341,32 @@ void VulkanEngine::save_settings() const {
                                 << rt_.water_foam_color.b << "\n";
     f << "water_foam_strength = " << rt_.water_foam_strength << "\n";
     f << "water_foam_width = "    << rt_.water_foam_width    << "\n";
+    f << "grass_shore_color = " << rt_.grass_shore_color.r << " "
+                                 << rt_.grass_shore_color.g << " "
+                                 << rt_.grass_shore_color.b << "\n";
+    f << "grass_shore_strength = " << rt_.grass_shore_strength << "\n";
+    f << "grass_shore_distance = " << rt_.grass_shore_distance << "\n";
+    f << "terrain_shore_color = " << rt_.terrain_shore_color.r << " "
+                                   << rt_.terrain_shore_color.g << " "
+                                   << rt_.terrain_shore_color.b << "\n";
+    f << "terrain_shore_strength = " << rt_.terrain_shore_strength << "\n";
+    f << "terrain_shore_distance = " << rt_.terrain_shore_distance << "\n";
+    f << "distance_fog_color = " << rt_.distance_fog_color.r << " "
+                                  << rt_.distance_fog_color.g << " "
+                                  << rt_.distance_fog_color.b << "\n";
+    f << "distance_fog_strength = " << rt_.distance_fog_strength << "\n";
+    f << "distance_fog_density = "  << rt_.distance_fog_density  << "\n";
+    f << "distance_fog_start = "    << rt_.distance_fog_start    << "\n";
+    f << "distance_fog_height = "   << rt_.distance_fog_height   << "\n";
+    f << "distance_fog_max = "      << rt_.distance_fog_max      << "\n";
+    f << "terrain_shore_general_color = " << rt_.terrain_shore_general_color.r << " "
+                                           << rt_.terrain_shore_general_color.g << " "
+                                           << rt_.terrain_shore_general_color.b << "\n";
+    f << "terrain_shore_general_strength = " << rt_.terrain_shore_general_strength << "\n";
+    f << "terrain_shore_general_distance = " << rt_.terrain_shore_general_distance << "\n";
+    f << "terrain_sand_color = " << rt_.terrain_sand_color.r << " "
+                                  << rt_.terrain_sand_color.g << " "
+                                  << rt_.terrain_sand_color.b << "\n";
     f << "shadow_near_mult = " << rt_.shadow_near_mult << "\n";
     f << "gi_strength = "        << rt_.gi_strength        << "\n";
     f << "gi_radius = "          << rt_.gi_radius          << "\n";
@@ -422,6 +449,15 @@ void VulkanEngine::load_settings() {
             if (key == "terrain_brush_use_fbm_erosion") { terrain_brush_use_fbm_erosion_ = (std::stoi(val) != 0); ++loaded; continue; }
             if (key == "terrain_brush_fbm_octaves")     { terrain_brush_fbm_octaves_     = std::stoi(val); ++loaded; continue; }
             if (key == "terrain_edit_mode")             { terrain_edit_mode_             = (std::stoi(val) != 0); ++loaded; continue; }
+            // Player pose — peeled out of the else-if chain because
+            // the recent merge added enough new keys (raymarch LOD,
+            // VRS, TAAU) to push past MSVC's nested-block depth limit
+            // (C1061). Restored after init_world resets defaults.
+            if (key == "player_pos_x")                  { player_.position.x = std::stof(val); ++loaded; continue; }
+            if (key == "player_pos_y")                  { player_.position.y = std::stof(val); ++loaded; continue; }
+            if (key == "player_pos_z")                  { player_.position.z = std::stof(val); ++loaded; continue; }
+            if (key == "player_yaw")                    { player_.yaw        = std::stof(val); ++loaded; continue; }
+            if (key == "player_pitch")                  { player_.pitch      = std::stof(val); ++loaded; continue; }
             if (key == "water_foam_color") {
                 glm::vec3 v(0.88f, 0.94f, 0.96f);
                 if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
@@ -431,6 +467,53 @@ void VulkanEngine::load_settings() {
             }
             if (key == "water_foam_strength") { rt_.water_foam_strength = std::stof(val); ++loaded; continue; }
             if (key == "water_foam_width")    { rt_.water_foam_width    = std::stof(val); ++loaded; continue; }
+            if (key == "grass_shore_color") {
+                glm::vec3 v(0.40f, 0.30f, 0.16f);
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.grass_shore_color = v;
+                }
+                ++loaded; continue;
+            }
+            if (key == "grass_shore_strength") { rt_.grass_shore_strength = std::stof(val); ++loaded; continue; }
+            if (key == "grass_shore_distance") { rt_.grass_shore_distance = std::stof(val); ++loaded; continue; }
+            if (key == "grass_ground_tint_far_distance") { rt_.grass_ground_tint_far_distance = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_shore_color") {
+                glm::vec3 v(0.55f, 0.46f, 0.30f);
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.terrain_shore_color = v;
+                }
+                ++loaded; continue;
+            }
+            if (key == "terrain_shore_strength") { rt_.terrain_shore_strength = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_shore_distance") { rt_.terrain_shore_distance = std::stof(val); ++loaded; continue; }
+            if (key == "distance_fog_color") {
+                glm::vec3 v(0.62f, 0.70f, 0.78f);
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.distance_fog_color = v;
+                }
+                ++loaded; continue;
+            }
+            if (key == "distance_fog_strength") { rt_.distance_fog_strength = std::stof(val); ++loaded; continue; }
+            if (key == "distance_fog_density")  { rt_.distance_fog_density  = std::stof(val); ++loaded; continue; }
+            if (key == "distance_fog_start")    { rt_.distance_fog_start    = std::stof(val); ++loaded; continue; }
+            if (key == "distance_fog_height")   { rt_.distance_fog_height   = std::stof(val); ++loaded; continue; }
+            if (key == "distance_fog_max")      { rt_.distance_fog_max      = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_shore_general_color") {
+                glm::vec3 v = rt_.terrain_shore_general_color;
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.terrain_shore_general_color = v;
+                }
+                ++loaded; continue;
+            }
+            if (key == "terrain_shore_general_strength") { rt_.terrain_shore_general_strength = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_shore_general_distance") { rt_.terrain_shore_general_distance = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_sand_color") {
+                glm::vec3 v = rt_.terrain_sand_color;
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.terrain_sand_color = v;
+                }
+                ++loaded; continue;
+            }
             if (key == "terrain_rt_lod_distance") { rt_.terrain_rt_lod_distance = std::stof(val); ++loaded; continue; }
             if (key == "terrain_ao_punch")        { rt_.terrain_ao_punch = std::stof(val); ++loaded; continue; }
             if (key == "terrain_pcss_samples_cap")  { rt_.terrain_pcss_samples_cap  = std::stoi(val); ++loaded; continue; }
@@ -438,31 +521,31 @@ void VulkanEngine::load_settings() {
             if (key == "terrain_gi_bounces_cap")    { rt_.terrain_gi_bounces_cap    = std::stoi(val); ++loaded; continue; }
             if (key == "terrain_ao_final_strength") { rt_.terrain_ao_final_strength = std::stof(val); ++loaded; continue; }
             if (key == "grass_color_top") {
-                std::sscanf(val.c_str(), "%f %f %f",
-                            &rt_.grass_color_top.x,
-                            &rt_.grass_color_top.y,
-                            &rt_.grass_color_top.z);
+                glm::vec3 v = rt_.grass_color_top;
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.grass_color_top = v;
+                }
                 ++loaded; continue;
             }
             if (key == "grass_color_bottom") {
-                std::sscanf(val.c_str(), "%f %f %f",
-                            &rt_.grass_color_bottom.x,
-                            &rt_.grass_color_bottom.y,
-                            &rt_.grass_color_bottom.z);
+                glm::vec3 v = rt_.grass_color_bottom;
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.grass_color_bottom = v;
+                }
                 ++loaded; continue;
             }
             if (key == "grass_color_ground") {
-                std::sscanf(val.c_str(), "%f %f %f",
-                            &rt_.grass_color_ground.x,
-                            &rt_.grass_color_ground.y,
-                            &rt_.grass_color_ground.z);
+                glm::vec3 v = rt_.grass_color_ground;
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.grass_color_ground = v;
+                }
                 ++loaded; continue;
             }
             if (key == "grass_color_ground_far") {
-                std::sscanf(val.c_str(), "%f %f %f",
-                            &rt_.grass_color_ground_far.x,
-                            &rt_.grass_color_ground_far.y,
-                            &rt_.grass_color_ground_far.z);
+                glm::vec3 v = rt_.grass_color_ground_far;
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.grass_color_ground_far = v;
+                }
                 ++loaded; continue;
             }
             if (key == "grass_base_ao_floor")        { rt_.grass_base_ao_floor        = std::stof(val); ++loaded; continue; }
@@ -617,12 +700,6 @@ void VulkanEngine::load_settings() {
             else if (key == "fire_rate_rps")        game_.fire_rate_rps = std::stof(val);
             else if (key == "bullet_speed")         game_.bullet_speed = std::stof(val);
             else if (key == "spark_scale")          game_.spark_scale = std::stof(val);
-            // Player pose — restored after init_world resets defaults.
-            else if (key == "player_pos_x")         player_.position.x = std::stof(val);
-            else if (key == "player_pos_y")         player_.position.y = std::stof(val);
-            else if (key == "player_pos_z")         player_.position.z = std::stof(val);
-            else if (key == "player_yaw")           player_.yaw        = std::stof(val);
-            else if (key == "player_pitch")         player_.pitch      = std::stof(val);
             else {
                 log::warnf("settings: unknown key '%s' (ignored)", key.c_str());
                 continue;
@@ -646,6 +723,13 @@ void VulkanEngine::load_settings() {
     clampf(rt_.shadow_strength,  0.0f,    1.0f);
     clampi(rt_.shadow_samples,   1,      128);
     clampf(rt_.shadow_softness,  0.0f,    0.30f);
+    // Player pose — guard against hand-edited cfg with NaN/over-range
+    // pitch (would break view_matrix and the mouse-look clamp because
+    // update_player only re-clamps if mouse_dx/dy are non-zero).
+    constexpr float kPitchCap = 1.5707963f - 0.01f;
+    if (!std::isfinite(player_.pitch)) player_.pitch = 0.0f;
+    if (!std::isfinite(player_.yaw))   player_.yaw   = 0.0f;
+    clampf(player_.pitch, -kPitchCap, kPitchCap);
     clampf(rt_.shadow_curve,     0.0f,    1.0f);
     clampi(rt_.ao_samples,       0,      128);
     clampf(rt_.ao_radius,        0.05f,  16.0f);

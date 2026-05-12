@@ -2465,6 +2465,11 @@ VulkanEngine::FrameView VulkanEngine::compute_frame_view() {
     glm::vec3 saved = player_.position;
     player_.position = fv.render_pos;
     fv.view = player_.view_matrix();
+    // Capture eye position with the lerped body pos still active so
+    // raymarched passes (camera_pos in scene UBO) match the smoothed
+    // view matrix. Without this the raw physics-tick eye is ahead of
+    // the lerped camera and grass/terrain visibly lag rasterised geo.
+    fv.eye_pos = player_.eye_position();
     player_.position = saved;
     fv.proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 1500.0f);
     fv.proj[1][1] *= -1.0f;
@@ -2510,7 +2515,12 @@ void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
     pc.mvp      = vp;
     pc.model    = fv.inv_vp;
     pc.prev_mvp = prev_view_proj_valid_ ? prev_view_proj_ : vp;
-    pc.color    = glm::vec4(0.0f, 0.0f, 28.0f, 22.0f);
+    // Plateau half-extent must mirror the full-res raymarch path
+    // (line ~2800) — otherwise the LR pass paints a much wider
+    // plateau than the full-res one, and switching scale below 100%
+    // makes the area around the castle visibly jump up to plateau
+    // height. Was 28.0 (pre-shrink default), full-res was already 11.5.
+    pc.color    = glm::vec4(0.0f, 0.0f, 11.5f, 22.0f);
     // emissive layout for the raymarch shader:
     //   x = step factor (0.4..0.8) — march step relative to SDF gap
     //   y = lod_near_m  — ray distance at which the FBM LOD ramp starts
@@ -2927,19 +2937,10 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // build_grass produced an empty set.
     // Raymarched grass takes over the entire grass slot when enabled —
     // skip the rasterised draw to avoid double-rendering.
-    if (rt_.grass_enabled && rt_.grass_raymarch_enabled &&
-        grass_rm_pipeline_ != VK_NULL_HANDLE) {
-        render_grass_raymarch(cmd);
-        // Restore the world cube pipeline + cube mesh — the brush /
-        // dyn-prop loops below assume `pipeline_` is bound and the cube
-        // vertex/index buffers are live. Without this restore the brushes
-        // draw through the raymarch's fullscreen-triangle pipeline (no
-        // vertex buffer expected) and the castle goes flat-colored.
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
-        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
-        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0,
-                              VK_INDEX_TYPE_UINT32);
-    } else
+    // Raymarched grass is now deferred until AFTER static brushes +
+    // dyn-props are drawn, so the alpha blend reads the castle/cube
+    // colours instead of the still-cleared sky. See `render_grass_
+    // raymarch` call further down.
     if (rt_.grass_enabled && grass_.instance_count > 0 &&
         grass_pipeline_ != VK_NULL_HANDLE) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, grass_pipeline_);
@@ -3054,6 +3055,22 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                                0, sizeof(PushConstants), &pc);
             vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
         }
+    }
+
+    // Raymarched grass — deferred to here so the alpha blend reads
+    // the actual castle/cube/dyn-prop colours instead of the still-
+    // cleared sky background. Was running before the brush loops,
+    // which made translucent blades in front of the castle show sky
+    // colour through them.
+    if (rt_.grass_enabled && rt_.grass_raymarch_enabled &&
+        grass_rm_pipeline_ != VK_NULL_HANDLE) {
+        render_grass_raymarch(cmd);
+        // Restore the world cube pipeline + cube mesh for the
+        // viewmodel draw immediately below.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0,
+                              VK_INDEX_TYPE_UINT32);
     }
 
     // Viewmodel: rendered last so it overdraws world geometry only when its
