@@ -348,16 +348,21 @@ float terrainM(vec2 p) {
 // only the inner FBM converges to a coarser sum past the LOD start.
 // Uses a uniform `kMaxOct` cap with an early-break so the loop body
 // stays branch-friendly for the GPU.
+// LOD ramp endpoints + minimum-octave floor come from push constants:
+//   emissive.y = lod_near_m (full octaves below this distance)
+//   emissive.z = lod_far_m  (lod_min_oct octaves above this distance)
+//   emissive.w = lod_min_oct (floor, typically 2..8)
+// Smoothstep ramp between the two endpoints.
 float terrainM_lod(vec2 p, float ray_t) {
     vec2 wp = p;
     p *= TERRAIN_SCALE;
     int oct_full = int(pc.tex_params.z);
-    int oct_min  = max(2, oct_full - 4);
-    float lod_f  = smoothstep(120.0, 600.0, ray_t);
+    int oct_min  = max(2, min(oct_full, int(pc.emissive.w)));
+    float lod_f  = smoothstep(pc.emissive.y, pc.emissive.z, ray_t);
     int oct      = oct_full - int(lod_f * float(oct_full - oct_min));
     float a = 0.0, b = 1.0;
     vec2 d = vec2(0.0);
-    const int kMaxOct = 16;
+    const int kMaxOct = 24;
     for (int i = 0; i < kMaxOct; i++) {
         if (i >= oct) break;
         vec3 n = noised(p);
@@ -384,6 +389,36 @@ float terrainH(vec2 p) {
     vec2 d = vec2(0.0);
     int kOct = int(pc.tex_params.w);
     for (int i = 0; i < kOct; i++) {
+        vec3 n = noised(p);
+        d += n.yz;
+        a += b * n.x / (1.0 + dot(d, d));
+        b *= 0.5;
+        p = m2 * p * 2.0;
+    }
+    float h = a * TERRAIN_HEIGHT;
+    float t = plateauWeight(wp);
+    h = mix(h, pc.color.w, t);
+    h += sampleHeightDelta(wp);
+    return h;
+}
+
+// Distance-LOD variant of terrainH. calcNormal calls this 3× per hit
+// pixel — the dominant FBM cost — so dropping octaves at distance is
+// the single biggest win for raymarch perf at typical horizon views.
+// Same LOD ramp as terrainM_lod (pc.emissive.{y,z,w}) so march hits
+// and normal samples stay coherent.
+float terrainH_lod(vec2 p, float ray_t) {
+    vec2 wp = p;
+    p *= TERRAIN_SCALE;
+    int oct_full = int(pc.tex_params.w);
+    int oct_min  = max(2, min(oct_full, int(pc.emissive.w)));
+    float lod_f  = smoothstep(pc.emissive.y, pc.emissive.z, ray_t);
+    int oct      = oct_full - int(lod_f * float(oct_full - oct_min));
+    float a = 0.0, b = 1.0;
+    vec2 d = vec2(0.0);
+    const int kMaxOct = 32;
+    for (int i = 0; i < kMaxOct; i++) {
+        if (i >= oct) break;
         vec3 n = noised(p);
         d += n.yz;
         a += b * n.x / (1.0 + dot(d, d));
@@ -526,9 +561,9 @@ vec3 calcNormal(vec3 pos, float t) {
     // mid-distance — 3× finite-difference is the safe path until the
     // proper analytic gradient (with damp + Hessian terms) is written.
     float eps = 0.02 + 0.0008 * t;
-    float hC = terrainH(pos.xz);
-    float hR = terrainH(pos.xz + vec2(eps, 0.0));
-    float hU = terrainH(pos.xz + vec2(0.0, eps));
+    float hC = terrainH_lod(pos.xz, t);
+    float hR = terrainH_lod(pos.xz + vec2(eps, 0.0), t);
+    float hU = terrainH_lod(pos.xz + vec2(0.0, eps), t);
     vec3 N = normalize(vec3(hC - hR, eps, hC - hU));
 
     // Closeup micro-bump вЂ” two-octave high-frequency noise gradient
@@ -568,7 +603,7 @@ float calcShadow(vec3 pos, vec3 sunDir) {
     int kSteps = int(pc.tex_params.y);
     for (int i = 0; i < kSteps; ++i) {
         vec3 p = pos + t * sunDir;
-        float h = p.y - terrainM(p.xz);
+        float h = p.y - terrainM_lod(p.xz, t);
         if (h < 0.001) { res = 0.0; break; }
         res = min(res, k * h / t);
         t += clamp(h, 0.5, 100.0);
@@ -646,7 +681,7 @@ float raymarchReflect(vec3 ro, vec3 rd) {
     const float kReflStep = 0.5;     // slightly aggressive
     for (int i = 0; i < kReflSteps; ++i) {
         vec3 pos = ro + t * rd;
-        float h = pos.y - terrainM(pos.xz);
+        float h = pos.y - terrainM_lod(pos.xz, t);
         if (abs(h) < 0.005 * t) break;     // looser threshold than primary
         if (t > 800.0) return -1.0;        // shorter range than primary
         t += kReflStep * h;
@@ -848,7 +883,7 @@ void main() {
         vec3 shallow_tint = scene.water_color_shallow.rgb;
         float shore_blend = max(0.1, scene.water_shore.x);
         float shore_noise = scene.water_shore.y;
-        float terrain_y = terrainM(wpos.xz);
+        float terrain_y = terrainM_lod(wpos.xz, t_water);
         float depth_m   = max(0.0, water_y - terrain_y);
         float dn = noise2(wpos.xz * 0.18) +
                     0.5 * noise2(wpos.xz * 0.42);

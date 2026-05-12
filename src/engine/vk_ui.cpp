@@ -537,6 +537,16 @@ void VulkanEngine::build_menu_ui() {
                          &rt_.terrain_raymarch_normal_octaves, 4, 32);
         ImGui::SliderFloat("Step factor",
                            &rt_.terrain_raymarch_step_factor, 0.4f, 0.8f, "%.2f");
+        // Distance-LOD ramp — drops FBM octaves with ray distance so the
+        // expensive 3× terrainH() calls in calcNormal collapse to the
+        // floor count past `lod_far_m`. Biggest perf win at horizon
+        // views where most rays travel >500m.
+        ImGui::SliderFloat("LOD near (m)",
+                           &rt_.terrain_raymarch_lod_near_m, 20.0f, 400.0f, "%.0f");
+        ImGui::SliderFloat("LOD far (m)",
+                           &rt_.terrain_raymarch_lod_far_m, 200.0f, 2000.0f, "%.0f");
+        ImGui::SliderInt("LOD min octaves",
+                         &rt_.terrain_raymarch_lod_min_octaves, 2, 8);
         // Render-scale for the raymarch only — biggest single perf
         // knob. 0.5 = quarter the FBM evaluations per frame; bilinear
         // upscale + depth-aware composite hides most of the softness

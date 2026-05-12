@@ -1237,6 +1237,15 @@ private:
         // iterations at the cost of a tiny chance of skipping over a
         // thin spike.
         float terrain_raymarch_step_factor   = 0.4f;
+        // Distance-LOD knobs. At ray distance < lod_near_m the FBM uses
+        // the full octave count (terrain_raymarch_octaves for march,
+        // terrain_raymarch_normal_octaves for normals). Past lod_far_m
+        // it falls to lod_min_octaves. Smoothstep ramp in between. Saves
+        // big at typical horizon views — sub-pixel FBM detail past
+        // ~500 m is below Nyquist anyway.
+        float terrain_raymarch_lod_near_m    = 120.0f;  // 20..400
+        float terrain_raymarch_lod_far_m     = 600.0f;  // 200..2000
+        int   terrain_raymarch_lod_min_octaves = 3;     // 2..8
         // Render-scale for the procedural raymarch ONLY. 1.0 = native
         // (current behaviour). 0.5 = half-res raymarch + bilinear
         // upscale composite (~4× fewer FBM evaluations per frame).

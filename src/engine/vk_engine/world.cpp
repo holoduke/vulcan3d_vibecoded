@@ -1926,9 +1926,17 @@ void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
     pc.model    = fv.inv_vp;
     pc.prev_mvp = prev_view_proj_valid_ ? prev_view_proj_ : vp;
     pc.color    = glm::vec4(0.0f, 0.0f, 28.0f, 22.0f);
+    // emissive layout for the raymarch shader:
+    //   x = step factor (0.4..0.8) — march step relative to SDF gap
+    //   y = lod_near_m  — ray distance at which the FBM LOD ramp starts
+    //   z = lod_far_m   — ray distance at which the FBM LOD ramp ends
+    //   w = lod_min_oct — minimum octave count at far end of ramp
     pc.emissive = glm::vec4(
         std::clamp(rt_.terrain_raymarch_step_factor, 0.4f, 0.8f),
-        0.0f, 0.0f, 0.0f);
+        std::max(1.0f, rt_.terrain_raymarch_lod_near_m),
+        std::max(rt_.terrain_raymarch_lod_near_m + 1.0f,
+                 rt_.terrain_raymarch_lod_far_m),
+        static_cast<float>(std::clamp(rt_.terrain_raymarch_lod_min_octaves, 2, 8)));
     pc.tex_params = glm::vec4(
         static_cast<float>(std::clamp(rt_.terrain_raymarch_max_steps, 60, 300)),
         static_cast<float>(std::clamp(rt_.terrain_raymarch_shadow_steps, 16, 96)),
@@ -2185,11 +2193,17 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             static_cast<float>(std::clamp(rt_.terrain_raymarch_shadow_steps, 16, 96)),
             static_cast<float>(std::clamp(rt_.terrain_raymarch_octaves, 4, 24)),
             static_cast<float>(std::clamp(rt_.terrain_raymarch_normal_octaves, 4, 32)));
-        // emissive.x = step factor (0.4..0.8). 0.4 = safest, 0.8 =
-        // ~half the iterations to converge but may skip thin spikes.
+        // emissive layout — mirrors render_terrain_raymarch_lr:
+        //   x = step factor (0.4..0.8)
+        //   y = lod_near_m  — ray-t at which FBM LOD ramp starts
+        //   z = lod_far_m   — ray-t at which FBM LOD ramp ends
+        //   w = lod_min_oct — minimum octave count at far end
         pc.emissive = glm::vec4(
             std::clamp(rt_.terrain_raymarch_step_factor, 0.4f, 0.8f),
-            0.0f, 0.0f, 0.0f);
+            std::max(1.0f, rt_.terrain_raymarch_lod_near_m),
+            std::max(rt_.terrain_raymarch_lod_near_m + 1.0f,
+                     rt_.terrain_raymarch_lod_far_m),
+            static_cast<float>(std::clamp(rt_.terrain_raymarch_lod_min_octaves, 2, 8)));
         // grass_params slot вЂ” fog strength + flags (mirrors LR pass).
         pc.grass_params = glm::vec4(
             std::max(0.0f, rt_.terrain_raymarch_fog_strength),

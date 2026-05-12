@@ -237,6 +237,9 @@ void VulkanEngine::save_settings() const {
     f << "terrain_raymarch_octaves = " << rt_.terrain_raymarch_octaves << "\n";
     f << "terrain_raymarch_normal_octaves = " << rt_.terrain_raymarch_normal_octaves << "\n";
     f << "terrain_raymarch_step_factor = " << rt_.terrain_raymarch_step_factor << "\n";
+    f << "terrain_raymarch_lod_near_m = " << rt_.terrain_raymarch_lod_near_m << "\n";
+    f << "terrain_raymarch_lod_far_m = " << rt_.terrain_raymarch_lod_far_m << "\n";
+    f << "terrain_raymarch_lod_min_octaves = " << rt_.terrain_raymarch_lod_min_octaves << "\n";
     f << "terrain_raymarch_scale = " << rt_.terrain_raymarch_scale << "\n";
     f << "terrain_raymarch_sharpen = " << rt_.terrain_raymarch_sharpen << "\n";
     f << "terrain_raymarch_fog_strength = " << rt_.terrain_raymarch_fog_strength << "\n";
@@ -414,6 +417,9 @@ void VulkanEngine::load_settings() {
             else if (key == "terrain_raymarch_octaves") rt_.terrain_raymarch_octaves = std::stoi(val);
             else if (key == "terrain_raymarch_normal_octaves") rt_.terrain_raymarch_normal_octaves = std::stoi(val);
             else if (key == "terrain_raymarch_step_factor") rt_.terrain_raymarch_step_factor = std::stof(val);
+            else if (key == "terrain_raymarch_lod_near_m") rt_.terrain_raymarch_lod_near_m = std::stof(val);
+            else if (key == "terrain_raymarch_lod_far_m") rt_.terrain_raymarch_lod_far_m = std::stof(val);
+            else if (key == "terrain_raymarch_lod_min_octaves") rt_.terrain_raymarch_lod_min_octaves = std::stoi(val);
             else if (key == "terrain_raymarch_scale") rt_.terrain_raymarch_scale = std::stof(val);
             else if (key == "terrain_raymarch_sharpen") rt_.terrain_raymarch_sharpen = std::stof(val);
             else if (key == "terrain_raymarch_fog_strength") rt_.terrain_raymarch_fog_strength = std::stof(val);
