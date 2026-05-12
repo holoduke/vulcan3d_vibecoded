@@ -2002,7 +2002,14 @@ void VulkanEngine::render_grass_raymarch(VkCommandBuffer cmd) {
                             rt_.grass_wind,
                             static_cast<float>(frame_number_) * 0.016f,
                             0.0f);
-    pc.emissive = glm::vec4(0.0f);
+    // emissive.{y,z,w} = LOD ramp params (shared with terrain raymarch).
+    // .x stays 0 — the grass shader doesn't read a step factor.
+    pc.emissive = glm::vec4(
+        0.0f,
+        std::max(1.0f, rt_.terrain_raymarch_lod_near_m),
+        std::max(rt_.terrain_raymarch_lod_near_m + 1.0f,
+                 rt_.terrain_raymarch_lod_far_m),
+        static_cast<float>(std::clamp(rt_.terrain_raymarch_lod_min_octaves, 2, 8)));
     pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
     pc.grass_params = glm::vec4(rt_.grass_distance, rt_.grass_wind,
                                  static_cast<float>(frame_number_) * 0.016f,
