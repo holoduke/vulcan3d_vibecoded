@@ -109,6 +109,14 @@ private:
     void init_pipeline();
     void destroy_pipeline();
     void init_world();
+    // Lazy-build paths for the rasterised terrain mesh/chunks and the
+    // 800k-blade grass buffer. init_world skips these when the matching
+    // raymarch flag is on (saves hundreds of MB of VRAM). If the user
+    // toggles the flag OFF at runtime, the per-frame settings tick calls
+    // these to materialise the buffers on demand. Idempotent — no-op
+    // when already built.
+    void ensure_terrain_raster_built();
+    void ensure_grass_raster_built();
     void init_imgui();
     void destroy_imgui();
     void build_menu_ui();

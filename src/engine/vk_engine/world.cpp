@@ -240,6 +240,53 @@ void VulkanEngine::refresh_terrain_collision() {
     terrain_jolt_dirty_ = false;
 }
 
+void VulkanEngine::ensure_terrain_raster_built() {
+    if (terrain_chunks_.chunks.size() > 0) return;     // already built
+    if (terrain_data_.heights.empty()) return;          // no heightmap to build from
+    log::info("[terrain] lazy-building rasterised mesh + chunks");
+    vkDeviceWaitIdle(device_);
+    Heightmap hm{};
+    hm.dim       = terrain_data_.dim;
+    hm.cell      = terrain_data_.cell;
+    hm.origin_x  = terrain_data_.origin_x;
+    hm.origin_z  = terrain_data_.origin_z;
+    hm.heights   = terrain_data_.heights;
+    terrain_mesh_ = build_terrain_mesh(device_, allocator_,
+                                       graphics_queue_, graphics_queue_family_, hm);
+    const int chunks_per_side = 32;
+    terrain_chunks_ = build_terrain_chunks(device_, allocator_,
+                                           graphics_queue_, graphics_queue_family_,
+                                           hm, chunks_per_side);
+    // Note: the terrain BLAS is built once in init_rt and not rebuilt
+    // here. Toggling raymarch off mid-session draws raster terrain
+    // correctly but RT shadow/AO/GI rays from cube.frag will not see
+    // it until restart. tlas_includes_terrain_blas() handles the
+    // address==0 case already, so this is a quality fallback, not a
+    // crash risk.
+}
+
+void VulkanEngine::ensure_grass_raster_built() {
+    if (grass_.instance_count > 0) return;              // already built
+    if (terrain_data_.heights.empty()) return;
+    log::info("[grass] lazy-building rasterised blade placement");
+    vkDeviceWaitIdle(device_);
+    Heightmap hm{};
+    hm.dim       = terrain_data_.dim;
+    hm.cell      = terrain_data_.cell;
+    hm.origin_x  = terrain_data_.origin_x;
+    hm.origin_z  = terrain_data_.origin_z;
+    hm.heights   = terrain_data_.heights;
+    GrassParams gp{};
+    gp.height_min  = -20.0f;
+    gp.height_max  = 200.0f;
+    gp.half_extent = 200.0f;
+    gp.keep_out_xz = glm::vec2(4.0f, 4.0f);
+    gp.max_blades  = 800000;
+    grass_ = build_grass(device_, allocator_,
+                         graphics_queue_, graphics_queue_family_,
+                         hm, gp);
+}
+
 void VulkanEngine::refresh_terrain_blas() {
     if (!terrain_blas_dirty_) return;
     // BLAS rebuild is the heavy part. Defer to mouse-up so per-frame
@@ -1111,8 +1158,8 @@ void VulkanEngine::init_world() {
                                                    graphics_queue_, graphics_queue_family_,
                                                    hm, chunks_per_side);
         } else {
-            log::info("[terrain] raymarch enabled — skipping mesh/chunks/BLAS "
-                      "build at init (restart needed to toggle off)");
+            log::info("[terrain] raymarch enabled — deferring mesh/chunks "
+                      "build (will lazy-build if raymarch is toggled off)");
         }
         // Lift every level brush by plateau_height so the castle's y=0
         // baseline lands on the plateau surface. Cheaper than rewriting
@@ -1165,8 +1212,8 @@ void VulkanEngine::init_world() {
                                  graphics_queue_, graphics_queue_family_,
                                  hm, gp);
         } else {
-            log::info("[grass] raymarch grass enabled — skipping placement "
-                      "build at init (restart needed to toggle off)");
+            log::info("[grass] raymarch grass enabled — deferring placement "
+                      "build (will lazy-build if raymarch grass is toggled off)");
         }
     }
 

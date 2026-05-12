@@ -525,8 +525,10 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SeparatorText("Renderer");
         ImGui::Checkbox("Procedural raymarched terrain (FBM)",
                          &rt_.terrain_raymarch_enabled);
-        ImGui::TextDisabled("Restart required — physics, grass and mesh are\n"
-                             "rebuilt from the FBM at level load when this is on.");
+        ImGui::TextDisabled("Toggling lazy-builds raster mesh + grass on demand.\n"
+                             "Terrain BLAS (RT shadows on terrain) is built once at\n"
+                             "load — toggling off mid-session means no RT terrain\n"
+                             "shadow contact until restart.");
         ImGui::SliderInt("Raymarch steps",
                          &rt_.terrain_raymarch_max_steps, 60, 300);
         ImGui::SliderInt("Raymarch shadow steps",

@@ -1247,6 +1247,14 @@ void VulkanEngine::run(const RunOptions& opts) {
         // catch up over the next handful of frames. Threshold ~1.4°
         // — enough to absorb continuous slider drag without thrashing
         // the queue.
+        // Lazy-build for the rasterised mesh/chunks/grass — only fires
+        // the first time the user toggles a raymarch flag off (init
+        // skips the build when raymarch is on to save VRAM).
+        if (!rt_.terrain_raymarch_enabled) ensure_terrain_raster_built();
+        if (rt_.grass_enabled && !rt_.grass_raymarch_enabled) {
+            ensure_grass_raster_built();
+        }
+
         // Heightmap-shadow texture is sampled by cube.frag's mesh-terrain
         // branch and grass.vert (raster grass). When raymarch terrain is on
         // AND raster grass is off, nothing reads it — skip the rebake.
