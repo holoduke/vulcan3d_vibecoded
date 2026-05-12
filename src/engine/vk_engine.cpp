@@ -264,6 +264,14 @@ void VulkanEngine::init() {
     init_textures();
     present_loader_frame("Loading settings",      0.40f);
     load_settings();
+    // load_settings reads rt_.render_scale from disk, but init_swapchain
+    // already ran with the default scale of 1.0 — render_extent_ is wrong
+    // until something forces a recreate. If the saved scale differs from
+    // 1.0, apply it now so the user's preferred scale survives a restart
+    // without a manual Apply click.
+    if (std::abs(rt_.render_scale - 1.0f) > 1e-3f) {
+        apply_render_scale();
+    }
     init_descriptors();
     present_loader_frame("Building ray tracing",  0.50f);
     init_rt();

@@ -316,8 +316,22 @@ void VulkanEngine::update_scene_ubo() {
                                   rt_.water_transparency);
     data.water_foam_color  = glm::vec4(rt_.water_foam_color,
                                         rt_.water_foam_strength);
+    // Water style + river-style knobs packed into water_foam_params.yzw:
+    //   y = water_style (int, 0 = default, 1 = river)
+    //   z = water_river_speed
+    //   w = water_river_normal_str
+    // (water_river_extinct_mix lives in water_color_shallow.w — that slot
+    //  was wave_scale; we keep both by repurposing only when style >= 1.)
+    // foam_params.w is repurposed across styles:
+    //   river: river normal_str
+    //   lake : lake bump_strength
+    float foam_w_slot = (rt_.water_style == 2)
+        ? std::max(0.0f, rt_.water_lake_bump_strength)
+        : std::max(0.0f, rt_.water_river_normal_str);
     data.water_foam_params = glm::vec4(std::max(0.05f, rt_.water_foam_width),
-                                        0.0f, 0.0f, 0.0f);
+                                        static_cast<float>(rt_.water_style),
+                                        std::max(0.0f, rt_.water_river_speed),
+                                        foam_w_slot);
     data.fog_band = glm::vec4(rt_.terrain_raymarch_fog_y_start,
                                rt_.terrain_raymarch_fog_y_top,
                                rt_.terrain_raymarch_fog_noise,
@@ -362,6 +376,33 @@ void VulkanEngine::update_scene_ubo() {
     data.terrain_shore_general_params = glm::vec4(std::max(0.05f, rt_.terrain_shore_general_distance),
                                                    0.0f, 0.0f, 0.0f);
     data.terrain_sand_color = glm::vec4(rt_.terrain_sand_color, 0.0f);
+    {
+        const float deg2rad = 3.14159265358979f / 180.0f;
+        if (rt_.water_style == 2) {
+            // Lake style: pack lake knobs into the same UBO slots.
+            //   .x = unused, .y = lake time speed,
+            //   .z = lake uv scale, .w = unused
+            data.water_river_extra = glm::vec4(
+                0.0f,
+                std::max(0.0f, rt_.water_lake_time_speed),
+                std::max(0.05f, rt_.water_lake_uv_scale),
+                0.0f);
+            // extinct.w holds the lake's bump-fade distance / 100
+            // (shader multiplies by 100 to get metres).
+            data.water_river_extinct = glm::vec4(
+                rt_.water_river_extinct_color,  // unused by lake shader
+                std::max(0.05f, rt_.water_lake_bump_dist) * 0.01f);
+        } else {
+            data.water_river_extra = glm::vec4(
+                rt_.water_river_flow_angle * deg2rad,
+                std::max(0.0f, rt_.water_river_time_speed),
+                std::max(0.05f, rt_.water_river_detail),
+                std::max(0.0f, rt_.water_river_foam_amount));
+            data.water_river_extinct = glm::vec4(
+                rt_.water_river_extinct_color,
+                std::max(0.0f, rt_.water_river_extinct_density));
+        }
+    }
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);

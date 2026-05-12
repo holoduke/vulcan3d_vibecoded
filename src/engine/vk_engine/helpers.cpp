@@ -24,8 +24,9 @@ static_assert(sizeof(PushConstants) == 256, "push constant layout");
 //     → 640 (terrain_shore_color + terrain_shore_params, terrain shore tint)
 //     → 672 (distance_fog_color + distance_fog_params, exp² distance fog)
 //     → 704 (terrain_shore_general_color + params, bare-terrain shore tint)
-//     → 720 (terrain_sand_color, slider for the beach base colour).
-static_assert(sizeof(SceneUBO) == 720, "scene ubo layout");
+//     → 720 (terrain_sand_color, slider for the beach base colour)
+//     → 752 (water_river_extra + water_river_extinct, river-style tuning).
+static_assert(sizeof(SceneUBO) == 752, "scene ubo layout");
 
 RtFuncs g_rt;
 

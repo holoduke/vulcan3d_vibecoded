@@ -341,6 +341,21 @@ void VulkanEngine::save_settings() const {
                                 << rt_.water_foam_color.b << "\n";
     f << "water_foam_strength = " << rt_.water_foam_strength << "\n";
     f << "water_foam_width = "    << rt_.water_foam_width    << "\n";
+    f << "water_style = "             << rt_.water_style             << "\n";
+    f << "water_river_speed = "       << rt_.water_river_speed       << "\n";
+    f << "water_river_normal_str = "  << rt_.water_river_normal_str  << "\n";
+    f << "water_river_flow_angle = "  << rt_.water_river_flow_angle  << "\n";
+    f << "water_river_time_speed = "  << rt_.water_river_time_speed  << "\n";
+    f << "water_river_detail = "      << rt_.water_river_detail      << "\n";
+    f << "water_river_foam_amount = " << rt_.water_river_foam_amount << "\n";
+    f << "water_river_extinct_color = " << rt_.water_river_extinct_color.r << " "
+                                         << rt_.water_river_extinct_color.g << " "
+                                         << rt_.water_river_extinct_color.b << "\n";
+    f << "water_river_extinct_density = " << rt_.water_river_extinct_density << "\n";
+    f << "water_lake_bump_strength = " << rt_.water_lake_bump_strength << "\n";
+    f << "water_lake_time_speed = "    << rt_.water_lake_time_speed    << "\n";
+    f << "water_lake_uv_scale = "      << rt_.water_lake_uv_scale      << "\n";
+    f << "water_lake_bump_dist = "     << rt_.water_lake_bump_dist     << "\n";
     f << "grass_shore_color = " << rt_.grass_shore_color.r << " "
                                  << rt_.grass_shore_color.g << " "
                                  << rt_.grass_shore_color.b << "\n";
@@ -467,6 +482,25 @@ void VulkanEngine::load_settings() {
             }
             if (key == "water_foam_strength") { rt_.water_foam_strength = std::stof(val); ++loaded; continue; }
             if (key == "water_foam_width")    { rt_.water_foam_width    = std::stof(val); ++loaded; continue; }
+            if (key == "water_style")            { rt_.water_style            = std::stoi(val); ++loaded; continue; }
+            if (key == "water_river_speed")      { rt_.water_river_speed      = std::stof(val); ++loaded; continue; }
+            if (key == "water_river_normal_str") { rt_.water_river_normal_str = std::stof(val); ++loaded; continue; }
+            if (key == "water_river_flow_angle") { rt_.water_river_flow_angle = std::stof(val); ++loaded; continue; }
+            if (key == "water_river_time_speed") { rt_.water_river_time_speed = std::stof(val); ++loaded; continue; }
+            if (key == "water_river_detail")     { rt_.water_river_detail     = std::stof(val); ++loaded; continue; }
+            if (key == "water_river_foam_amount"){ rt_.water_river_foam_amount= std::stof(val); ++loaded; continue; }
+            if (key == "water_river_extinct_color") {
+                glm::vec3 v = rt_.water_river_extinct_color;
+                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
+                    rt_.water_river_extinct_color = v;
+                }
+                ++loaded; continue;
+            }
+            if (key == "water_river_extinct_density") { rt_.water_river_extinct_density = std::stof(val); ++loaded; continue; }
+            if (key == "water_lake_bump_strength") { rt_.water_lake_bump_strength = std::stof(val); ++loaded; continue; }
+            if (key == "water_lake_time_speed")    { rt_.water_lake_time_speed    = std::stof(val); ++loaded; continue; }
+            if (key == "water_lake_uv_scale")      { rt_.water_lake_uv_scale      = std::stof(val); ++loaded; continue; }
+            if (key == "water_lake_bump_dist")     { rt_.water_lake_bump_dist     = std::stof(val); ++loaded; continue; }
             if (key == "grass_shore_color") {
                 glm::vec3 v(0.40f, 0.30f, 0.16f);
                 if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {

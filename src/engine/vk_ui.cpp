@@ -409,6 +409,27 @@ void VulkanEngine::build_menu_ui() {
         }
         ImGui::TextDisabled("0.5× = half-res (huge speedup), 1.5×+ = SSAA");
 
+        // Upscale presets — combine render_scale + TAAU + sharpening
+        // into a single click. Each one mirrors the way a vendor
+        // upscaler exposes Quality / Balanced / Performance modes.
+        ImGui::TextUnformatted("Upscale preset:");
+        ImGui::SameLine();
+        auto apply_upscale = [&](float scale, bool taau_on, float sharp) {
+            rt_.render_scale            = scale;
+            rt_.taau_enabled            = taau_on;
+            rt_.compose_sharpen_strength = sharp;
+            rt_.quality_preset           = -1;
+            apply_render_scale();
+        };
+        if (ImGui::Button("Native"))  apply_upscale(1.00f, false, 0.30f);
+        ImGui::SameLine();
+        if (ImGui::Button("Quality")) apply_upscale(0.77f, true,  0.80f);
+        ImGui::SameLine();
+        if (ImGui::Button("Balanced")) apply_upscale(0.67f, true, 1.10f);
+        ImGui::SameLine();
+        if (ImGui::Button("Perf"))    apply_upscale(0.50f, true,  1.40f);
+        ImGui::TextDisabled("Quality/Balanced/Perf use TAAU + extra sharpen.");
+
         // AO mode combo.
         const char* kAoLabels[] = { "off", "GTAO (screen-space, fast)",
                                     "RTAO (true ray-traced, slow)" };
@@ -660,6 +681,45 @@ void VulkanEngine::build_menu_ui() {
                            &rt_.water_wave_strength, 0.0f, 0.6f, "%.3f");
         ImGui::SliderFloat("Wave scale (freq mult)",
                            &rt_.water_wave_scale, 0.1f, 5.0f, "%.2f");
+        // Water style dropdown — picks which normal+foam generator.
+        // Each style brings its own visual character; the engine's
+        // depth / extinction / reflection / shadow stack stays
+        // shared so the user keeps their colour + shore controls.
+        const char* k_water_styles[] = {
+            "Default (sum of sines)",
+            "River (P_Malin — advected FBM)",
+            "Lake (distance-faded bumps)",
+        };
+        ImGui::Combo("Water style", &rt_.water_style,
+                     k_water_styles, IM_ARRAYSIZE(k_water_styles));
+        if (rt_.water_style == 1) {
+            ImGui::SliderFloat("river flow speed",
+                               &rt_.water_river_speed, 0.0f, 4.0f, "%.2f");
+            ImGui::SliderFloat("river normal strength",
+                               &rt_.water_river_normal_str, 0.0f, 3.0f, "%.2f");
+            ImGui::SliderFloat("river flow angle (deg)",
+                               &rt_.water_river_flow_angle, -180.0f, 180.0f, "%.0f");
+            ImGui::SliderFloat("river time speed",
+                               &rt_.water_river_time_speed, 0.0f, 4.0f, "%.2f");
+            ImGui::SliderFloat("river detail scale",
+                               &rt_.water_river_detail, 0.1f, 4.0f, "%.2f");
+            ImGui::SliderFloat("river foam amount",
+                               &rt_.water_river_foam_amount, 0.0f, 3.0f, "%.2f");
+            ImGui::ColorEdit3("river underwater tint",
+                              &rt_.water_river_extinct_color.x);
+            ImGui::SliderFloat("river underwater density",
+                               &rt_.water_river_extinct_density, 0.0f, 4.0f, "%.2f");
+        } else if (rt_.water_style == 2) {
+            ImGui::SliderFloat("lake bump strength",
+                               &rt_.water_lake_bump_strength, 0.0f, 1.5f, "%.2f");
+            ImGui::SliderFloat("lake time speed",
+                               &rt_.water_lake_time_speed, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("lake uv scale",
+                               &rt_.water_lake_uv_scale, 0.1f, 4.0f, "%.2f");
+            ImGui::SliderFloat("lake bump fade dist (m)",
+                               &rt_.water_lake_bump_dist, 5.0f, 500.0f, "%.0f");
+            ImGui::TextDisabled("Far surface goes mirror-flat past fade dist.");
+        }
         ImGui::ColorEdit3("Deep water color", &rt_.water_color.x);
         ImGui::ColorEdit3("Shallow water color", &rt_.water_color_shallow.x);
         ImGui::SliderFloat("Shore band (m)",

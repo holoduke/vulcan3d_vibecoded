@@ -297,8 +297,17 @@ vec3 view_ray(vec2 uv) {
 
 void main() {
     ivec2 ip = ivec2(gl_FragCoord.xy);
-    vec3 hdr = texelFetch(history_color, ip, 0).rgb;
-    float depth = texelFetch(history_depth, ip, 0).r;
+    // texelFetch indexes by integer texel coords, not UVs. When the
+    // history image is at render_extent (LR) and compose runs at
+    // swapchain (HR), texelFetch(history_color, ip) reads beyond the
+    // LR texture for HR pixels past the LR size — producing the
+    // "image is LR-pixel-sized in the top-left of the HR window"
+    // artifact at non-100% render scale. Use bilinear sampling at
+    // the proper HR UV instead — this also upscales the LR data to
+    // fill the full window.
+    vec2 sample_uv = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
+    vec3 hdr   = texture(history_color, sample_uv).rgb;
+    float depth = texture(history_depth, sample_uv).r;
 
     // Background pixel (no geometry hit) — paint procedural sky.
     if (depth >= 0.99999) {

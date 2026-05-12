@@ -311,6 +311,10 @@ layout(set = 0, binding = 0) uniform Scene {
     vec4 terrain_shore_general_params;
     // Sand base colour for the beach blend — was hardcoded.
     vec4 terrain_sand_color;
+    // River water style extras — see SceneUBO comment in internal.h.
+    vec4 water_river_extra;     // x: flow angle (rad), y: time speed,
+                                // z: detail scale, w: foam amount
+    vec4 water_river_extinct;   // rgb: ext colour, w: density
 } scene;
 
 // Standard exponential² distance fog. Returns 0..1 mix weight toward
@@ -761,9 +765,20 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
         // would walk us back, and with rl > 1 the back-step grows enough to
         // ping-pong indefinitely until kSteps caps. Break out instead so
         // the caller gets the closest approach.
-        if (advance < 0.0) break;
+        if (advance < 0.0) return t;
         t += advance;
     }
+    // Loop exhausted without converging. The fall-through is a real
+    // hit when the ray is still close to the surface (just slow to
+    // converge under the LOD'd FBM at distance), but NOT a real hit
+    // when the ray has clearly gone above any possible terrain — that
+    // produces ghost terrain projected into the sky.
+    vec3 final_pos = ro + t * rd;
+    float final_h  = final_pos.y - terrainM_lod(final_pos.xz, t);
+    // Treat as sky if we ended up well above the surface (>5m) AND
+    // we were rising. Below that → accept as a hit (the FBM-LOD just
+    // didn't converge tightly).
+    if (final_h > 5.0 && rd.y > 0.0) return -1.0;
     return t;
 }
 
@@ -1039,6 +1054,200 @@ float raymarchReflect(vec3 ro, vec3 rd) {
 // shape (we use cos for the analytical derivative, equivalent up to
 // a phase shift). The result reads as proper lake water rather than
 // the previous uniform sinusoidal grid.
+// ---- Alternative water style: P_Malin "Where the River Goes" port -----
+// Advected FBM-with-derivative normal, blended over two time slices for
+// stable directional flow. Flow direction is sampled from the terrain
+// gradient at the water plane (water flows downhill). Used when
+// rt_.water_style >= 1.
+//
+// Original Shadertoy: https://www.shadertoy.com/view/4dlGW2 by P_Malin
+float pm_hash(float p) {
+    vec2 p2 = fract(vec2(p) * vec2(4.438975, 3.972973));
+    p2 += dot(p2.yx, p2.xy + 19.19);
+    return fract(p2.x * p2.y);
+}
+vec2 pm_hash2(float p) {
+    vec3 p3 = fract(vec3(p) * vec3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.xx + p3.yz) * p3.zy);
+}
+// Value noise + analytic XY derivative in one call (P_Malin's
+// SmoothNoise_DXY). Returns (dx, dy, val).
+vec3 pm_noise_dxy(vec2 o) {
+    vec2 p = floor(o);
+    vec2 f = fract(o);
+    float n = p.x + p.y * 57.0;
+    float a = pm_hash(n);
+    float b = pm_hash(n + 1.0);
+    float c = pm_hash(n + 57.0);
+    float d = pm_hash(n + 58.0);
+    vec2 f2 = f * f, f3 = f2 * f;
+    vec2 t  = 3.0 * f2 - 2.0 * f3;
+    vec2 dt = 6.0 * f  - 6.0 * f2;
+    float u = t.x, v = t.y;
+    float res = a + (b - a) * u + (c - a) * v + (a - b + d - c) * u * v;
+    float dx  = (b - a) * dt.x + (a - b + d - c) * dt.x * v;
+    float dy  = (c - a) * dt.y + (a - b + d - c) * u * dt.y;
+    return vec3(dx, dy, res);
+}
+// 4-octave FBM with per-octave flow advection (P_Malin's FBM_DXY).
+vec3 pm_fbm_dxy(vec2 p, vec2 flow, float ps, float df) {
+    vec3 f = vec3(0.0);
+    float tot = 0.0;
+    float a = 1.0;
+    for (int i = 0; i < 4; ++i) {
+        p += flow;
+        flow *= -0.75;
+        vec3 v = pm_noise_dxy(p);
+        f += v * a;
+        p += v.xy * df;
+        p *= 2.0;
+        tot += a;
+        a *= ps;
+    }
+    return f / tot;
+}
+// Two-slice time blend of an advected normal (P_Malin's
+// SampleFlowingNormal). Returns vec4(normal_xyz, foam_amount).
+vec4 pm_flowing_normal(vec2 uv, vec2 flow_rate, float foam, float time) {
+    float mag = 2.5 / (1.0 + dot(flow_rate, flow_rate) * 5.0);
+    float t0 = fract(time);
+    float t1 = fract(time + 0.5);
+    float i0 = floor(time);
+    float i1 = floor(time + 0.5);
+    float o0 = t0 - 0.5;
+    float o1 = t1 - 0.5;
+    vec2 uv0 = uv + pm_hash2(i0);
+    vec2 uv1 = uv + pm_hash2(i1);
+    float ga = 0.25 + (foam * -1.5);   // gradient ascent factor
+    vec3 d0 = pm_fbm_dxy(uv0 * 20.0, flow_rate * 20.0 * o0, 0.75 + foam * 0.25, ga);
+    vec3 d1 = pm_fbm_dxy(uv1 * 20.0, flow_rate * 20.0 * o1, 0.75 + foam * 0.25, ga);
+    float fade = max(0.25, 1.0 - foam * 5.0);
+    vec3 n0 = mix(vec3(0.0, 1.0, 0.0),
+                   normalize(vec3(d0.x, mag, d0.y)), fade);
+    vec3 n1 = mix(vec3(0.0, 1.0, 0.0),
+                   normalize(vec3(d1.x, mag, d1.y)), fade);
+    float w = abs(t0 - 0.5) * 2.0;
+    vec3 n = normalize(mix(n0, n1, w));
+    float foam_tex = mix(d0.z, d1.z, w) * fade;
+    return vec4(n, foam_tex);
+}
+// Underwater depth at world XZ (P_Malin's GetFlowDistance, adapted).
+// Returns 0 outside the water plane; positive metres below the surface.
+float pm_flow_depth(vec2 wp, float water_y, float ray_t) {
+    return max(0.0, water_y - terrainM_lod(wp, ray_t));
+}
+// Full P_Malin GetFlowRate port. Returns vec3(flow.x, flow.y, foam).
+// Flow is the local water velocity in XZ; foam is a 0..1 amount that
+// rises in shallow / turbulent zones. The engine's water plane is
+// flat so we treat +X as the nominal downstream and let the terrain
+// gradient distort the flow from there.
+vec3 pm_get_flow_rate(vec2 wp, float water_y, float ray_t) {
+    // Sample depth at centre + 4 taps for the gradient.
+    const float eps_g = 0.5;
+    float d_c  = pm_flow_depth(wp, water_y, ray_t);
+    float d_xp = pm_flow_depth(wp + vec2(eps_g, 0.0), water_y, ray_t);
+    float d_xn = pm_flow_depth(wp - vec2(eps_g, 0.0), water_y, ray_t);
+    float d_zp = pm_flow_depth(wp + vec2(0.0, eps_g), water_y, ray_t);
+    float d_zn = pm_flow_depth(wp - vec2(0.0, eps_g), water_y, ray_t);
+    // P_Malin's GetGradient is the derivative of (-terrainH) so it
+    // points toward deeper water. Use that sign convention.
+    vec2 grad = vec2(d_xp - d_xn, d_zp - d_zn) / (2.0 * eps_g);
+
+    // Nominal downstream + gradient-driven push toward deeper water.
+    // Gradient term falls off where it's already deep so eddies form
+    // in shallow regions, not in the middle of the lake.
+    vec2 base = vec2(1.0, 0.0);
+    vec2 flow = base + grad * 40.0 / (1.0 + d_c * 1.5);
+    // Slow down with depth — surface velocity is highest in shallows.
+    flow *= 1.0 / (1.0 + d_c * 0.5);
+
+    // Slow down BEHIND obstacles. dot(normalised_grad, -normalised_flow)
+    // is +1 when flow runs into a rising bed → big slowdown; -1 when
+    // the bed slopes away ahead → no slowdown. behind ∈ [0..1].
+    float grad_len = length(grad);
+    float flow_len = length(flow);
+    float behind = 0.0;
+    if (grad_len > 1e-3 && flow_len > 1e-3) {
+        behind = 0.5 - dot(grad / grad_len,
+                            -flow / flow_len) * 0.5;
+    }
+    float slow = clamp(d_c * 5.0, 0.0, 1.0);
+    slow = mix(slow * 0.9 + 0.1, 1.0, behind * 0.9);
+    slow = 0.5 + slow * 0.5;
+    flow *= slow;
+
+    // Foam amount — concentrates where flow is fast over shallow
+    // water (rapids/eddies). P_Malin's exact mapping.
+    float foam = abs(length(flow)) * 0.5;
+    foam += clamp(foam - 0.4, 0.0, 1.0);
+    foam = 1.0 - pow(max(0.0, d_c), foam * 0.35);
+
+    return vec3(flow * 0.6, foam);
+}
+// Foam pattern (P_Malin's SampleWaterFoam). Returns 0..1 mask.
+float pm_foam_pattern(vec2 uv, vec2 flow_rate, float time) {
+    float t0 = fract(time);
+    float t1 = fract(time + 0.5);
+    float o0 = t0 - 0.5;
+    float o1 = t1 - 0.5;
+    vec2 uv0 = uv + pm_hash2(floor(time));
+    vec2 uv1 = uv + pm_hash2(floor(time + 0.5));
+    float f0 = pm_fbm_dxy(uv0 * 30.0, flow_rate * 50.0 * 0.25 * o0, 0.8, -0.5).z;
+    float f1 = pm_fbm_dxy(uv1 * 30.0, flow_rate * 50.0 * 0.25 * o1, 0.8, -0.5).z;
+    float w  = abs(t0 - 0.5) * 2.0;
+    return mix(f0, f1, w);
+}
+
+// ---- Alternative water style: misty-lake-style with bump fade -------
+// Inspired by the distance-based bump falloff trick from Reinder
+// Nijhoff's "Misty Lake" (Shadertoy, CC BY-NC-SA 4.0). The defining
+// visual element is that the water surface goes glassy at distance
+// instead of staying chaotic — far water becomes a pure mirror, near
+// water keeps its ripples. Implementation uses the engine's noise2
+// directly; animation comes from time-shifted FBM samples.
+//
+// Returns a world-space normal at world XZ, distance-faded.
+//   uv_scale  scales sample frequency
+//   strength  bump amplitude
+//   t         seconds for animation
+//   cam_dist  distance from camera to the surface point
+//   fade_dist metres at which bumps fade to flat (mirror)
+vec3 lakeWaterNormal(vec2 worldXZ, float uv_scale, float strength,
+                     float t, float cam_dist, float fade_dist) {
+    // Distance falloff: 1 close to camera, 0 past fade_dist.
+    float bump_w = 1.0 - smoothstep(0.0, max(0.5, fade_dist), cam_dist);
+    if (bump_w < 1e-3) return vec3(0.0, 1.0, 0.0);
+
+    vec2 p = worldXZ * uv_scale;
+    // 3-octave FBM with time as a phase offset across octaves so the
+    // surface evolves smoothly over time without UV advection.
+    // Centred-FD normal extraction — sample 4 neighbours of p.
+    float dx_step = 0.05;
+    float n_xp = noise2(p + vec2(dx_step, 0.0) +
+                        vec2(t * 0.07,  t * 0.04));
+    float n_xn = noise2(p - vec2(dx_step, 0.0) +
+                        vec2(t * 0.07,  t * 0.04));
+    float n_zp = noise2(p + vec2(0.0, dx_step) +
+                        vec2(t * 0.07,  t * 0.04));
+    float n_zn = noise2(p - vec2(0.0, dx_step) +
+                        vec2(t * 0.07,  t * 0.04));
+    // Add a second octave (higher freq) for ripple texture.
+    n_xp += 0.5 * noise2(p * 2.7 + vec2(dx_step, 0.0) +
+                         vec2(t * 0.13, -t * 0.09));
+    n_xn += 0.5 * noise2(p * 2.7 - vec2(dx_step, 0.0) +
+                         vec2(t * 0.13, -t * 0.09));
+    n_zp += 0.5 * noise2(p * 2.7 + vec2(0.0, dx_step) +
+                         vec2(t * 0.13, -t * 0.09));
+    n_zn += 0.5 * noise2(p * 2.7 - vec2(0.0, dx_step) +
+                         vec2(t * 0.13, -t * 0.09));
+    float dx = (n_xp - n_xn) * (0.5 / dx_step);
+    float dz = (n_zp - n_zn) * (0.5 / dx_step);
+    return normalize(vec3(-dx * strength * bump_w,
+                           1.0,
+                          -dz * strength * bump_w));
+}
+
 vec3 waterNormal(vec2 worldXZ, float t, float strength, float scale) {
     // Wind axis biased on +X вЂ” most lakes have a dominant direction.
     vec2 wind  = normalize(vec2(1.0, 0.35));
@@ -1122,7 +1331,79 @@ void main() {
         // by update_scene_ubo. Defaults to 1.0; the slider lets the
         // user dial finer ripples or bigger sweeping waves.
         float wave_scale = max(0.05, scene.water_color_shallow.w);
-        vec3 wnor = waterNormal(wpos.xz, wave_t, wave_str, wave_scale);
+        vec3 wnor;
+        float pm_foam_tex = 1.0;  // 1 = no extra foam; <1 darkens
+        // Style 0 = engine default (directional sum-of-sines); 1 = P_Malin
+        // river style (advected FBM + flow-driven foam). Packed in
+        // water_foam_params.y as an int.
+        int water_style = int(scene.water_foam_params.y + 0.5);
+        if (water_style >= 1) {
+            // Full P_Malin GetFlowRate — flow vector + foam amount in
+            // one pass over the local depth field.
+            vec3 flow_and_foam = pm_get_flow_rate(wpos.xz,
+                                                   scene.water_params.y,
+                                                   t_water);
+            vec2 flow_rate = flow_and_foam.xy;
+            float pm_foam_amount = flow_and_foam.z;
+
+            // User knobs:
+            //   water_foam_params.z = river flow speed (legacy slot)
+            //   water_foam_params.w = river normal strength
+            //   water_river_extra.x = flow direction angle (radians)
+            //   water_river_extra.y = animation time speed
+            //   water_river_extra.z = detail scale (UV multiplier)
+            //   water_river_extra.w = foam amount multiplier
+            float user_speed      = max(0.05, scene.water_foam_params.z);
+            float user_normal_str = max(0.05, scene.water_foam_params.w);
+            float flow_angle      = scene.water_river_extra.x;
+            float time_speed      = scene.water_river_extra.y;
+            float detail_scale    = scene.water_river_extra.z;
+            float foam_amount     = scene.water_river_extra.w;
+
+            // Rotate the flow vector by the user's flow_angle so the
+            // user can pick any downstream direction. Default 0 keeps
+            // P_Malin's +X bias.
+            float ca = cos(flow_angle);
+            float sa = sin(flow_angle);
+            flow_rate = mat2(ca, sa, -sa, ca) * flow_rate * user_speed;
+            pm_foam_amount *= foam_amount;
+
+            // Time + UV scale are user-driven so the user can pick the
+            // animation speed and the ripple density independently.
+            float wave_time = wave_t * 0.4 * time_speed;
+            vec2 uv_n = wpos.xz * wave_scale * detail_scale;
+            // Pre-foam scaling for the FBM advection's gradient ascent.
+            float foam_bias = clamp((pm_foam_amount - 0.2) * 1.5, 0.0, 1.0);
+            foam_bias = foam_bias * foam_bias * 0.5;
+            vec4 nf = pm_flowing_normal(uv_n, flow_rate, foam_bias, wave_time);
+            float n_str = wave_str * user_normal_str;
+            wnor = normalize(vec3(nf.x * n_str, 1.0, nf.z * n_str));
+            // P_Malin's foam combines the per-pixel turbulence pattern
+            // with the global foam amount: 1 - pow(foam_tex, foam_amt*5).
+            float foam_tex = pm_foam_pattern(uv_n, flow_rate, wave_time);
+            float foam_t = max(0.0, (foam_tex - 0.2) / 0.2);
+            foam_tex = pow(0.5, foam_t);
+            pm_foam_tex = pow(max(0.001, foam_tex), foam_bias * 5.0);
+        } else if (water_style == 2) {
+            // Lake style — distance-faded bumps, glassy at distance.
+            // water_river_extra reused for tuning when style == 2:
+            //   .x = (unused, kept compatible with river)
+            //   .y = time speed
+            //   .z = uv scale multiplier
+            //   .w = (unused)
+            // water_foam_params.w = bump strength (legacy slot, shared)
+            // water_river_extinct.w * 100 = bump-fade distance (metres)
+            float time_speed   = max(0.0, scene.water_river_extra.y);
+            float uv_scale     = max(0.05, scene.water_river_extra.z);
+            float bump_strength = max(0.0, scene.water_foam_params.w);
+            float fade_dist    = max(5.0, scene.water_river_extinct.w * 100.0);
+            wnor = lakeWaterNormal(wpos.xz, uv_scale * wave_scale,
+                                    bump_strength * wave_str,
+                                    wave_t * time_speed,
+                                    t_water, fade_dist);
+        } else {
+            wnor = waterNormal(wpos.xz, wave_t, wave_str, wave_scale);
+        }
         vec3 sunDirW = scene.sun_direction.xyz;
 
         // Schlick fresnel вЂ” F0 = 0.02 for water. Looking grazing-on
@@ -1272,6 +1553,19 @@ void main() {
         depth_m += (dn - 0.6) * shore_blend * shore_noise;
         depth_m  = max(0.0, depth_m);
         float water_blend = smoothstep(0.0, shore_blend, depth_m);
+        // P_Malin-style underwater extinction when river style is on.
+        // exp2(-depth * ext_col) gives the characteristic green-river
+        // look (red attenuates fastest, then green, blue lasts). Mixed
+        // against the user's deep tint at 60% so the slider still has
+        // colour authority.
+        if (water_style >= 1) {
+            // User-tunable extinction colour + density (defaults to
+            // P_Malin's (0.5, 0.4, 0.1) × 3.0).
+            vec3  ext_col = scene.water_river_extinct.rgb;
+            float ext_den = scene.water_river_extinct.w * 3.0;
+            vec3 ext = exp2(-depth_m * ext_col * ext_den);
+            deep = mix(deep, deep * ext + vec3(0.05, 0.08, 0.06) * (1.0 - ext.r), 0.6);
+        }
         vec3  shallow = mix(shallow_tint, deep, water_blend);
         // Distance fade to the deep tint so far water doesn't read
         // shallower than near water just because of the noise.
@@ -1364,8 +1658,13 @@ void main() {
         if (scene.water_foam_color.a > 0.001) {
             float foam_w = max(0.05, scene.water_foam_params.x);
             float band   = exp(-depth_clean * (4.0 / foam_w));
+            // River style: blend in the flow-driven foam pattern on top
+            // of the shore band. pm_foam_tex was set in the river branch
+            // above (1.0 when river style is off, so no effect).
+            float flow_foam = clamp(1.0 - pm_foam_tex, 0.0, 1.0);
+            float foam_mix = max(band, flow_foam);
             col_w = mix(col_w, scene.water_foam_color.rgb,
-                        band * scene.water_foam_color.a);
+                        foam_mix * scene.water_foam_color.a);
         }
         col_w += scene.sun_color.rgb * scene.sun_color.a * spec *
                   0.8 * water_lit;

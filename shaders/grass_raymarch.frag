@@ -88,6 +88,8 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  terrain_shore_general_color;
     vec4  terrain_shore_general_params;
     vec4  terrain_sand_color;  // padding only — terrain raymarch uses
+    vec4  water_river_extra;   // padding — river-style tuning
+    vec4  water_river_extinct; // padding — river extinction
 } scene;
 
 // Heightmap (R32_SFLOAT) — shared with terrain raymarch + cube shaders.

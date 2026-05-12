@@ -1490,6 +1490,38 @@ private:
         glm::vec3 water_foam_color     = glm::vec3(0.88f, 0.94f, 0.96f);
         float     water_foam_strength  = 0.55f;
         float     water_foam_width     = 0.6f;     // metres of depth
+        // Water shading style — picks which normal+foam generator the
+        // terrain raymarch's water branch uses.
+        //   0 = default (directional sum-of-sines, lake-style)
+        //   1 = river (P_Malin "Where the River Goes" port — advected
+        //       FBM-with-derivative normal, flow-driven foam pattern.
+        //       Flow direction comes from the terrain gradient at the
+        //       water plane so the surface reads as if the water is
+        //       flowing downhill across the level.)
+        int       water_style = 0;
+        // River-style knobs (only consumed when water_style >= 1):
+        //   speed       multiplies the flow vector derived from the
+        //               terrain gradient. 0.3..3.0 typical.
+        //   normal_str  scales the river-style normal's XZ component.
+        //               Higher = more bumpy surface.
+        float     water_river_speed       = 1.0f;
+        float     water_river_normal_str  = 1.2f;
+        // More river-style knobs (see SceneUBO::water_river_extra).
+        float     water_river_flow_angle  = 0.0f;   // degrees; 0 = +X
+        float     water_river_time_speed  = 1.0f;
+        float     water_river_detail      = 1.0f;   // UV-scale multiplier on 20×
+        float     water_river_foam_amount = 1.0f;
+        // Underwater extinction colour & density (river style only).
+        glm::vec3 water_river_extinct_color  = glm::vec3(0.5f, 0.4f, 0.1f);
+        float     water_river_extinct_density = 1.0f;
+        // Lake-style knobs (only consumed when water_style == 2).
+        // The defining trick is bumps fade with distance — near
+        // surface keeps ripples, far surface goes mirror-flat. That's
+        // the visual that reads as "lake".
+        float water_lake_bump_strength = 0.5f;     // 0..1.5
+        float water_lake_time_speed    = 0.4f;     // animation rate
+        float water_lake_uv_scale      = 0.6f;     // UV multiplier
+        float water_lake_bump_dist     = 60.0f;    // metres where bumps fade out
         // Shoreline grass tint — blades within `grass_shore_distance`
         // metres above water level fade toward `grass_shore_color`.
         // Strength 0 disables. Cheap (~13 ALU/pixel in

@@ -233,6 +233,17 @@ struct SceneUBO {
     //   terrain_sand_color.rgb = sand colour
     //   terrain_sand_color.w   = reserved
     glm::vec4  terrain_sand_color;
+    // River water style extras (only consumed when water_style >= 1).
+    //   .x = flow direction angle (radians; 0 = +X)
+    //   .y = animation time speed multiplier (1 = engine default)
+    //   .z = detail scale (multiplier on the 20× UV constant inside
+    //        pm_flowing_normal; >1 = denser ripples, <1 = bigger swells)
+    //   .w = foam contrast (0 = no foam, 1 = engine default, 2 = strong)
+    glm::vec4  water_river_extra;
+    // Underwater extinction colour for the river style. rgb is the
+    // per-channel absorption coefficient (red attenuates fastest by
+    // default), .w is density scale (1 = engine default).
+    glm::vec4  water_river_extinct;
 };
 
 // ---- KHR ray tracing entry points ----
