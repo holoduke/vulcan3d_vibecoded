@@ -2473,19 +2473,39 @@ VulkanEngine::FrameView VulkanEngine::compute_frame_view() {
     player_.position = saved;
     fv.proj = glm::perspective(glm::radians(80.0f), aspect, 0.05f, 1500.0f);
     fv.proj[1][1] *= -1.0f;
-    if (rt_.taa_jitter_enabled) {
+    if (rt_.taa_jitter_enabled || rt_.fsr2_enabled) {
         auto halton = [](int b, int i) {
             float f = 1.0f, r = 0.0f;
             while (i > 0) { f /= float(b); r += f * float(i % b); i /= b; }
             return r;
         };
-        int idx = static_cast<int>(frame_number_ % 16) + 1;
-        float jx = (halton(2, idx) - 0.5f) * 2.0f * rt_.taa_jitter_strength /
+        // FSR2 path: phase length scales with the upscale ratio so the
+        // jitter fully covers each output pixel over `phase_count`
+        // frames. Default formula: ceil(8 * (display / render)^2).
+        // For 1.0x = 8 samples, 0.67x = 18, 0.5x = 32.
+        // TAA path: keeps the original 16-sample loop.
+        int phase_count;
+        float strength;
+        if (rt_.fsr2_enabled) {
+            float ratio = static_cast<float>(swapchain_extent_.width) /
+                          static_cast<float>(std::max(1u, render_extent_.width));
+            phase_count = static_cast<int>(std::ceil(8.0f * ratio * ratio));
+            phase_count = std::max(8, std::min(64, phase_count));
+            strength    = 1.0f;   // full sub-pixel for FSR2
+        } else {
+            phase_count = 16;
+            strength    = rt_.taa_jitter_strength;
+        }
+        int idx = static_cast<int>(frame_number_ % phase_count) + 1;
+        float jx = (halton(2, idx) - 0.5f) * 2.0f * strength /
                    static_cast<float>(render_extent_.width);
-        float jy = (halton(3, idx) - 0.5f) * 2.0f * rt_.taa_jitter_strength /
+        float jy = (halton(3, idx) - 0.5f) * 2.0f * strength /
                    static_cast<float>(render_extent_.height);
         fv.proj[2][0] += jx;
         fv.proj[2][1] += jy;
+        // Stash for fsr2 dispatch (Phase 3 needs it for the
+        // jitter-cancel reproject).
+        fv.jitter = glm::vec2(jx, jy);
     }
     fv.vp = fv.proj * fv.view;
     fv.inv_vp = glm::inverse(fv.vp);

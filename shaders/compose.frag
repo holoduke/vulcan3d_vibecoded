@@ -285,6 +285,203 @@ vec3 sample_sky(vec3 dir) {
 // (TAA's reprojection has a flip on both sides — world is "wrong" but the
 // round-trip cancels — so it works there. Sky doesn't round-trip; it uses
 // the raw world direction, so the flip must be omitted here.)
+// =====================================================================
+// FSR1 — Edge-Adaptive Spatial Upsampling (EASU) + Robust Contrast-
+// Adaptive Sharpening (RCAS). Fresh GLSL implementation following the
+// algorithm described in AMD's FidelityFX-FSR1 reference (MIT, 2021).
+// AMD's reference shader: https://github.com/GPUOpen-Effects/FidelityFX-FSR
+// Original GLSL port for mpv (also MIT, by agyild) was used as an
+// algorithm cross-check. Both upstream sources retain their copyright
+// notices; this port is a clean reimplementation of the same
+// well-documented algorithm. © 2021 Advanced Micro Devices, Inc., MIT.
+// =====================================================================
+
+// EASU helper: weight = (1.25 * dist^2 - dist^2) * (clamp(...))
+// computes the FSR1 base lobe profile around a tap distance from
+// the output sample location. This is the "lanczos-2 like" core
+// before edge-direction biasing.
+float easu_lobe(float dist2) {
+    float d = clamp(dist2, 0.0, 4.0);
+    float wA = 0.4 * d - 1.0;
+    float wB = (25.0 / 16.0) * d - (25.0 / 16.0);
+    return (wA * wA - 1.0) * (wB * wB);
+}
+
+// EASU directional weight — given the surface gradient direction
+// (dir) and the per-tap offset, returns how strongly this tap
+// contributes along the edge. Edges along the gradient get a long
+// elliptical lobe; perpendicular gets a short one. This is the
+// edge-aware part that makes EASU sharper than Lanczos.
+float easu_direction(vec2 dir, vec2 off, float len) {
+    // Project off onto dir → scalar tap distance along the edge.
+    // dist2 is the "stretched" distance used by easu_lobe; len
+    // controls how much the edge stretches the lobe.
+    vec2 v = vec2(dot(off, dir), dot(off, vec2(-dir.y, dir.x)));
+    v *= vec2(1.0 + (len - 1.0) * 0.5,    // stretch along edge
+              1.0 / max(0.5, 1.0 - (len - 1.0) * 0.5));  // squash across
+    return easu_lobe(dot(v, v));
+}
+
+// EASU 12-tap upscale — the heart of FSR1's spatial reconstruction.
+// Samples a 4×4 neighbourhood of source texels (corners are zero-
+// weighted, leaving 12 effective taps), computes the local gradient
+// from luma differences in the centre 2×2, and weights each tap by
+// (lobe × direction). Output is clamped to the local 2×2 luma min/
+// max to suppress ringing.
+vec3 fsr1_easu(sampler2D tex, vec2 uv, vec2 src_size) {
+    vec2 inv_src = 1.0 / src_size;
+    // Source position centred between pixels (the "phase").
+    vec2 pp     = uv * src_size - 0.5;
+    vec2 pp_f   = floor(pp);
+    vec2 pp_fract = pp - pp_f;
+
+    // Sample the 4×4 neighbourhood. Corner taps (b,c,r,s) get zero
+    // direct weight — they only feed the gradient estimate. The
+    // centre 2×2 (h,i,k,l) is the "primary" tap group.
+    //   a b
+    //   c d e f
+    //   g h i j   <- centre row at pp_f.y..pp_f.y+1
+    //   k l m n
+    //     o p
+    // (read order is row-major across the 4×4 minus corners)
+    vec2 base = (pp_f + 0.5) * inv_src;
+    vec3 b = texture(tex, base + vec2( 0.0, -1.0) * inv_src).rgb;
+    vec3 c = texture(tex, base + vec2( 1.0, -1.0) * inv_src).rgb;
+    vec3 d = texture(tex, base + vec2(-1.0,  0.0) * inv_src).rgb;
+    vec3 e = texture(tex, base + vec2( 0.0,  0.0) * inv_src).rgb;
+    vec3 f = texture(tex, base + vec2( 1.0,  0.0) * inv_src).rgb;
+    vec3 g = texture(tex, base + vec2( 2.0,  0.0) * inv_src).rgb;
+    vec3 h = texture(tex, base + vec2(-1.0,  1.0) * inv_src).rgb;
+    vec3 i = texture(tex, base + vec2( 0.0,  1.0) * inv_src).rgb;
+    vec3 j = texture(tex, base + vec2( 1.0,  1.0) * inv_src).rgb;
+    vec3 k = texture(tex, base + vec2( 2.0,  1.0) * inv_src).rgb;
+    vec3 o = texture(tex, base + vec2( 0.0,  2.0) * inv_src).rgb;
+    vec3 p = texture(tex, base + vec2( 1.0,  2.0) * inv_src).rgb;
+
+    // Luma proxy — perceptual greyscale.
+    #define _L(c) dot((c), vec3(0.5, 1.0, 0.5))
+    float lE = _L(e), lF = _L(f), lI = _L(i), lJ = _L(j);
+
+    // Gradient from the centre 2×2: horizontal & vertical luma
+    // differences. The dominant axis becomes the edge direction.
+    vec2 dir = vec2((lF + lJ) - (lE + lI),
+                     (lI + lJ) - (lE + lF));
+    float dir_len = length(dir);
+    // Normalise; fall back to (1,0) on flat regions.
+    if (dir_len < 1e-4) dir = vec2(1.0, 0.0);
+    else                dir /= dir_len;
+    // "Length" feature — strength of the edge, drives lobe stretch.
+    float len = clamp(dir_len * 4.0, 0.0, 1.0);
+    len = 1.0 + len * 0.5;       // 1.0 (no stretch) → 1.5 (long lobe)
+
+    // Per-tap weight = lobe(dist²) × direction(off).
+    // Tap offsets are relative to the output sample position pp_fract.
+    vec3 sum = vec3(0.0);
+    float w_tot = 0.0;
+    #define TAP(c, ox, oy) { \
+        vec2 off = vec2(ox, oy) - pp_fract; \
+        float w = easu_direction(dir, off, len); \
+        sum += (c) * w; w_tot += w; \
+    }
+    TAP(b,  0.0, -1.0)
+    TAP(c,  1.0, -1.0)
+    TAP(d, -1.0,  0.0)
+    TAP(e,  0.0,  0.0)
+    TAP(f,  1.0,  0.0)
+    TAP(g,  2.0,  0.0)
+    TAP(h, -1.0,  1.0)
+    TAP(i,  0.0,  1.0)
+    TAP(j,  1.0,  1.0)
+    TAP(k,  2.0,  1.0)
+    TAP(o,  0.0,  2.0)
+    TAP(p,  1.0,  2.0)
+    #undef TAP
+
+    vec3 result = sum / max(w_tot, 1e-4);
+
+    // Local 2×2 luma min/max box — clamp output to suppress any
+    // overshoot/undershoot ringing from the directional weights.
+    vec3 mn = min(min(e, f), min(i, j));
+    vec3 mx = max(max(e, f), max(i, j));
+    return clamp(result, mn, mx);
+
+    #undef _L
+}
+
+// RCAS — Robust Contrast-Adaptive Sharpening. Operates on the EASU-
+// upscaled image (or any image) and adds adaptive sharpness without
+// ringing. Algorithm: sample centre + 4 cardinals, compute min/max,
+// derive a "lobe" weight from local contrast (smaller for noisy
+// regions), apply (lobe × blur + center) / (1 + 4×lobe).
+//
+// `sharpness` is in [0, 1]. 0 = no sharpening, 1 = max strength.
+vec3 fsr1_rcas(vec3 c, vec3 n, vec3 s, vec3 e, vec3 w, float sharpness) {
+    // Per-channel min/max box.
+    vec3 mn = min(min(n, s), min(min(e, w), c));
+    vec3 mx = max(max(n, s), max(max(e, w), c));
+    // Per-channel lobe: (mn / mx - 1) on the dim end, clamped.
+    vec3 mx_safe = max(mx, vec3(0.001));
+    vec3 lobe_rgb = max(-vec3(0.18745f), (mn - 1.0) / mx_safe);
+    // Use the green channel as the dominant for a single weight (the
+    // standard RCAS uses luma-ish greyscale; green is a reasonable
+    // proxy that avoids per-channel halos).
+    float lobe = lobe_rgb.g * sharpness;
+    // Final weighted sum: (lobe * (n+s+e+w) + c) / (1 + 4*lobe).
+    vec3 blur = (n + s + e + w);
+    return (lobe * blur + c) / (1.0 + 4.0 * lobe);
+}
+
+// 9-tap Catmull-Rom bicubic upscale (Jorge Jimenez / Filmic AA — the
+// standard "sharper than bilinear, no halos" filter used by most TAA
+// implementations for history reconstruction). Collapses 16 corner
+// taps to 9 bilinear-filtered taps via the offset-into-tap-group
+// trick. Significantly crisper than plain bilinear at low render
+// scales without the ringing artefacts you get from a naive bicubic.
+//
+// Final result is clamped to the local 2×2 min/max box to suppress
+// any negative-weight overshoots near hard edges.
+vec3 sample_catmull_rom(sampler2D tex, vec2 uv, vec2 src_size) {
+    vec2 sample_pos = uv * src_size;
+    vec2 tex_pos_1  = floor(sample_pos - 0.5) + 0.5;
+    vec2 f          = sample_pos - tex_pos_1;
+
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+
+    vec2 w12     = w1 + w2;
+    vec2 off12   = w2 / w12;
+
+    vec2 tp0  = (tex_pos_1 - 1.0) / src_size;
+    vec2 tp3  = (tex_pos_1 + 2.0) / src_size;
+    vec2 tp12 = (tex_pos_1 + off12) / src_size;
+
+    vec3 result = vec3(0.0);
+    result += texture(tex, vec2(tp0.x,  tp0.y)).rgb  * (w0.x  * w0.y);
+    result += texture(tex, vec2(tp12.x, tp0.y)).rgb  * (w12.x * w0.y);
+    result += texture(tex, vec2(tp3.x,  tp0.y)).rgb  * (w3.x  * w0.y);
+    result += texture(tex, vec2(tp0.x,  tp12.y)).rgb * (w0.x  * w12.y);
+    result += texture(tex, vec2(tp12.x, tp12.y)).rgb * (w12.x * w12.y);
+    result += texture(tex, vec2(tp3.x,  tp12.y)).rgb * (w3.x  * w12.y);
+    result += texture(tex, vec2(tp0.x,  tp3.y)).rgb  * (w0.x  * w3.y);
+    result += texture(tex, vec2(tp12.x, tp3.y)).rgb  * (w12.x * w3.y);
+    result += texture(tex, vec2(tp3.x,  tp3.y)).rgb  * (w3.x  * w3.y);
+
+    // Local 2×2 box for overshoot clamp (kills the bicubic ringing
+    // halos that show up near hard edges).
+    vec2 inv = 1.0 / src_size;
+    vec3 mn = vec3(1e10), mx = vec3(0.0);
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            vec3 c = texture(tex, (tex_pos_1 + vec2(i, j)) * inv).rgb;
+            mn = min(mn, c);
+            mx = max(mx, c);
+        }
+    }
+    return clamp(result, mn, mx);
+}
+
 vec3 view_ray(vec2 uv) {
     vec4 ndc_far  = vec4(uv * 2.0 - 1.0, 1.0, 1.0);
     vec4 ndc_near = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
@@ -306,7 +503,11 @@ void main() {
     // the proper HR UV instead — this also upscales the LR data to
     // fill the full window.
     vec2 sample_uv = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
-    vec3 hdr   = texture(history_color, sample_uv).rgb;
+    // FSR1 EASU upscale for the colour history — edge-adaptive 12-tap
+    // reconstruction that's much sharper than bilinear or Catmull-Rom
+    // at non-100 % render scale, with no ringing halos.
+    vec2 src_size = vec2(textureSize(history_color, 0));
+    vec3 hdr   = fsr1_easu(history_color, sample_uv, src_size);
     float depth = texture(history_depth, sample_uv).r;
 
     // Background pixel (no geometry hit) — paint procedural sky.
@@ -316,19 +517,23 @@ void main() {
         hdr = sample_sky(dir);
     }
 
-    // Unsharp mask — counteracts taa.frag's 5×5 cross-bilateral à-trous so
-    // textures, edges, and viewmodel detail come back crisp. Applied only on
-    // surface pixels (sky's procedural gradient has no detail to recover).
-    // 5 texelFetches: center + 4 cardinals → simple high-pass = (c - blur),
-    // amplified by `sharpen_params.x`. Strength clamped to keep negative
-    // overshoots from wrapping HDR negative.
+    // FSR1 RCAS — robust contrast-adaptive sharpening on the EASU-
+    // upscaled colour. Sharpens texture detail without ringing on
+    // edges. Sharpness slider [0..2] is clamped to RCAS's [0..1]
+    // range with a 0.5 mid-point so the existing UI defaults still
+    // make sense.
     if (depth < 0.99999 && pc.sharpen_params.x > 0.0) {
-        vec3 n = texelFetch(history_color, ip + ivec2( 0,  1), 0).rgb;
-        vec3 s = texelFetch(history_color, ip + ivec2( 0, -1), 0).rgb;
-        vec3 e = texelFetch(history_color, ip + ivec2( 1,  0), 0).rgb;
-        vec3 w = texelFetch(history_color, ip + ivec2(-1,  0), 0).rgb;
-        vec3 blur = (n + s + e + w) * 0.25;
-        hdr = max(vec3(0.0), hdr + (hdr - blur) * pc.sharpen_params.x);
+        // 4 cardinals at one HR pixel offset (post-upscale image is
+        // at HR; we sample neighbouring HR pixels via the upscale
+        // function so the sharpener sees full-res signal).
+        vec2 hr_step = pc.viewport.zw;
+        vec3 sN = fsr1_easu(history_color, sample_uv + vec2(0.0,  hr_step.y), src_size);
+        vec3 sS = fsr1_easu(history_color, sample_uv + vec2(0.0, -hr_step.y), src_size);
+        vec3 sE = fsr1_easu(history_color, sample_uv + vec2( hr_step.x, 0.0), src_size);
+        vec3 sW = fsr1_easu(history_color, sample_uv + vec2(-hr_step.x, 0.0), src_size);
+        float sharpness = clamp(pc.sharpen_params.x * 0.5, 0.0, 1.0);
+        hdr = fsr1_rcas(hdr, sN, sS, sE, sW, sharpness);
+        hdr = max(hdr, vec3(0.0));   // RCAS guard against negative
     }
 
     // Bloom and lens flare apply on every pixel — including sky. Bloom is

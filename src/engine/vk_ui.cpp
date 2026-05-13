@@ -543,6 +543,16 @@ void VulkanEngine::build_menu_ui() {
                              "render_scale < 1.0 — renders at LR, reconstructs\n"
                              "at native via motion-vector reproject + variance\n"
                              "clamp. ~1.5x perf gain at render_scale=0.67.");
+        // FSR2 — phased rollout. Phase 1 (foundation) is shipped:
+        // Halton(2,3) jitter with sample-count-aware phase, FrameView
+        // jitter capture. Phases 2-5 (compute passes for prepare /
+        // depth-clip / reconstruct-prev-depth / lock / accumulate /
+        // RCAS) are pending. Toggle currently only switches the
+        // jitter sequence; the actual upscale path falls back to
+        // FSR1 EASU+RCAS in compose.frag until Phase 5 lands.
+        ImGui::Checkbox("FSR2 (foundation, WIP)", &rt_.fsr2_enabled);
+        ImGui::TextDisabled("Phase 1/5 — Halton(2,3) jitter active.\n"
+                             "Compute passes pending in future sessions.");
         ImGui::SliderFloat("spatial strength", &rt_.taa_spatial_strength, 0.0f, 1.0f);
         // Compose-pass unsharp mask — runs in compose.frag (5 texelFetches),
         // recovers detail the TAA spatial filter softened. 0 disables; 0.55

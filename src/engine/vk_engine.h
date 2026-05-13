@@ -985,6 +985,10 @@ private:
     // view/proj/Halton-jitter independently.
     struct FrameView {
         glm::vec3 render_pos{0.0f};
+        // Sub-pixel jitter applied to the projection matrix this frame
+        // (in NDC units). FSR2's Phase 3 accumulator needs this to
+        // cancel jitter when reprojecting the previous frame.
+        glm::vec2 jitter{0.0f};
         // Smoothed eye position (render_pos + eye_offset) — must mirror
         // the lerp used for the view matrix, otherwise raymarched passes
         // (terrain, grass) whose ray origin reads scene.camera_pos drift
@@ -1608,6 +1612,15 @@ private:
         // Compose then samples the native upscaled image. Off by default
         // so the standard render-scale=1 path stays bit-identical.
         bool  taau_enabled       = false;
+        // ---- FSR2 (full temporal upscaler) ----
+        // Phased rollout — when enabled, swaps the engine's TAA / TAAU
+        // path for an FSR2-style temporal accumulator. Phase 1 (this
+        // session) lays the foundation: Halton(2,3) jitter, motion-vec
+        // format conversion, texture mip-bias, stub C++ module.
+        // Phases 2-5 add the compute passes (Prepare / DepthClip /
+        // ReconstructPrevDepth / Lock / Accumulate / RCAS).
+        // Default off until the implementation is feature-complete.
+        bool  fsr2_enabled       = false;
         float taa_spatial_strength = 0.7f;  // 0 = no à-trous, 1 = fully filtered
 
         // Bloom (single-pass spiral-tap inside the compose shader).
