@@ -166,6 +166,42 @@ FetchContent_Declare(fastnoiselite
 
 FetchContent_MakeAvailable(glfw glm vk_bootstrap vma Catch2 JoltPhysics imgui tinygltf tinyexr miniaudio fastnoiselite)
 
+# AMD FidelityFX-FSR2 — vendored as a git submodule under
+# external/FidelityFX-FSR2 (MIT license; LICENSE.txt preserved). Use as-is
+# via the SDK's public API; no port, no clean-room reimplementation.
+#
+# Phase 2 (build wiring):
+#   - DX12 backend disabled; we only need Vulkan.
+#   - FSR2's CMakeLists hard-FATAL_ERRORs unless CMAKE_GENERATOR_PLATFORM
+#     or CMAKE_EXE_LINKER_FLAGS picks x64/Win32 — set the linker-flag
+#     hint temporarily to satisfy that check under Ninja, then restore.
+#   - EXCLUDE_FROM_ALL so we only build it when something links to it.
+#   - Auto-shader-compilation calls FidelityFX_SC.exe (bundled at
+#     external/FidelityFX-FSR2/tools/sc/), which then invokes the
+#     glslangValidator next to it — both are in the submodule, no
+#     external DXC dependency required for the Vulkan path.
+if(EXISTS "${CMAKE_SOURCE_DIR}/external/FidelityFX-FSR2/src/ffx-fsr2-api/CMakeLists.txt")
+    set(FFX_FSR2_API_DX12 OFF CACHE BOOL "" FORCE)
+    set(FFX_FSR2_API_VK   ON  CACHE BOOL "" FORCE)
+    set(FSR2_BUILD_AS_DLL OFF CACHE BOOL "" FORCE)
+
+    # Satisfy FSR2's platform check (FATAL_ERROR on non-x64) — we use
+    # Ninja so CMAKE_GENERATOR_PLATFORM is unset; spoof via linker flag.
+    set(_qlike_orig_exe_linker_flags "${CMAKE_EXE_LINKER_FLAGS}")
+    if(NOT CMAKE_GENERATOR_PLATFORM)
+        set(CMAKE_EXE_LINKER_FLAGS "/machine:x64")
+    endif()
+
+    add_subdirectory(external/FidelityFX-FSR2/src/ffx-fsr2-api EXCLUDE_FROM_ALL)
+
+    # Restore — the FSR2 CMake only reads CMAKE_EXE_LINKER_FLAGS at
+    # configure-time inside its top-level if() block.
+    set(CMAKE_EXE_LINKER_FLAGS "${_qlike_orig_exe_linker_flags}")
+else()
+    message(STATUS "FidelityFX-FSR2 submodule not present — run "
+                   "`git submodule update --init --recursive` to enable.")
+endif()
+
 # tinyexr enables -Weverything -Werror; clang on Apple Silicon flags
 # /usr/local/include via -Wpoison-system-directories. Disable warnings for it.
 if(TARGET tinyexr)
@@ -257,6 +293,17 @@ target_link_libraries(qlike_engine PUBLIC
     imgui
     tinyexr
 )
+
+# FSR2 — link only if the submodule was processed above.
+if(TARGET ffx_fsr2_api_x64)
+    target_link_libraries(qlike_engine PUBLIC ffx_fsr2_api_x64)
+    target_include_directories(qlike_engine PRIVATE
+        ${CMAKE_SOURCE_DIR}/external/FidelityFX-FSR2/src/ffx-fsr2-api)
+    target_compile_definitions(qlike_engine PUBLIC QLIKE_HAVE_FSR2=1)
+endif()
+if(TARGET ffx_fsr2_api_vk_x64)
+    target_link_libraries(qlike_engine PUBLIC ffx_fsr2_api_vk_x64)
+endif()
 if(WIN32)
     target_compile_definitions(qlike_engine PUBLIC VK_USE_PLATFORM_WIN32_KHR)
 elseif(APPLE)
