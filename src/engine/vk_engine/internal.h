@@ -18,16 +18,29 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <cstdint>
+#include <cstdlib>
 
 namespace qlike {
 
 // ---- Validation layer toggle ----
-inline constexpr bool kUseValidationLayers =
-#ifdef NDEBUG
-    false;
+// Debug builds: always on. Release builds: OFF by default (validation
+// is far too slow for shipping), but force-enable when the env var
+// QLIKE_VK_VALIDATION is set to a non-empty value. This lets us run
+// the normal Release exe WITH SYNC + GPU-ASSISTED validation to
+// diagnose intermittent device-lost crashes that leave no signal in
+// a plain Release build (validation was previously compiled out, so
+// "vk_err=0" was meaningless — nothing was checking).
+inline bool vk_validation_enabled() {
+#ifndef NDEBUG
+    return true;
 #else
-    true;
+    static const bool v = []{
+        const char* e = std::getenv("QLIKE_VK_VALIDATION");
+        return e != nullptr && e[0] != '\0';
+    }();
+    return v;
 #endif
+}
 
 // Path of the autosaved settings file relative to CWD.
 inline constexpr const char* kSettingsPath = "qlike_settings.cfg";
@@ -244,6 +257,33 @@ struct SceneUBO {
     // per-channel absorption coefficient (red attenuates fastest by
     // default), .w is density scale (1 = engine default).
     glm::vec4  water_river_extinct;
+    // ReSTIR GI runtime knobs (session 3+ in docs/restir_plan.md).
+    //   .x = enabled (0/1) — gates the temporal reservoir read in cube.frag
+    //   .y = M_max (sample-count cap; default 32). Higher = more lag but
+    //        less noise on stable surfaces.
+    //   .z = disocclusion normal-dot threshold (default 0.8 ≈ 36° max angle)
+    //   .w = reserved
+    glm::vec4  restir_params;
+    // SPOM (silhouette parallax occlusion mapping) tuning.
+    //   .x = strength multiplier on the per-pixel height scale.
+    //        1.0 = engine default (~4 cm peak-to-trough), 0 = disabled
+    //        (effectively flat textures). Only affects the active SPOM
+    //        materials (currently castle wall bricks; floors are
+    //        excluded — see #198).
+    //   .yzw = reserved
+    glm::vec4  spom_params;
+    // Reserved (was the unsafe single camera-local max — see
+    // terrainMaxHeight() comment). Kept for layout stability.
+    glm::vec4  terrain_local_info;
+    // Per-cell maximum-height hi-Z grid for the terrain raymarcher.
+    // 32×32 cells over the 2048 m world (64 m per cell), each holding
+    // max(terrain height in cell) + safety margin. Baked once at
+    // level load from terrain_data_.heights. The marcher samples the
+    // cell at its current XZ each step: if a rising ray is above the
+    // cell's max it skips ~1 cell forward and re-checks (never
+    // declares sky — the NEXT cell is re-evaluated, so a distant
+    // taller peak is never missed). 1024 floats packed 4-per-vec4.
+    glm::vec4  terrain_max_grid[256];
 };
 
 // ---- KHR ray tracing entry points ----
@@ -309,6 +349,8 @@ void write_scene_descriptors_once(
     uint32_t tex_count, VkSampler tex_sampler,
     const VkImageView* spom_height_views, uint32_t spom_count,
     VkImageView grass_mask_view,
-    VkImageView fog_wisp_view);
+    VkImageView fog_wisp_view,
+    VkBuffer reservoir_prev,
+    VkBuffer reservoir_cur);
 
 } // namespace qlike

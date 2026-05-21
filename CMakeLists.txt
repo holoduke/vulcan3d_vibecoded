@@ -202,6 +202,30 @@ else()
                    "`git submodule update --init --recursive` to enable.")
 endif()
 
+# AMD FidelityFX SDK (FSR3 + Frame Generation) — vendored at
+# external/FidelityFX-SDK (MIT, LICENSE.txt preserved). The v1.1.4 SDK
+# ships a stable C ABI behind a prebuilt DLL (amd_fidelityfx_vk.dll +
+# amd_fidelityfx_vk.lib in PrebuiltSignedDLL/). We link the import lib,
+# include the ffx-api headers, and copy the DLL alongside the exe at
+# build time. No add_subdirectory needed — the sample-framework CMake
+# in the SDK isn't designed for drop-in use.
+#
+# The DLL is the FIRST runtime dependency in the project; everything
+# else is statically linked. This is the cost of FSR3's chosen ABI.
+set(FFX_SDK_ROOT "${CMAKE_SOURCE_DIR}/external/FidelityFX-SDK")
+if(EXISTS "${FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.lib")
+    add_library(ffx_sdk_vk SHARED IMPORTED)
+    set_target_properties(ffx_sdk_vk PROPERTIES
+        IMPORTED_LOCATION "${FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
+        IMPORTED_IMPLIB   "${FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${FFX_SDK_ROOT}/ffx-api/include")
+    message(STATUS "FidelityFX SDK 1.1.4 prebuilt VK lib + headers found")
+else()
+    message(STATUS "FidelityFX SDK not present at external/FidelityFX-SDK — "
+                   "FSR3 disabled. Run `git submodule update --init --recursive` "
+                   "and check out v1.1.4 in the submodule.")
+endif()
+
 # tinyexr enables -Weverything -Werror; clang on Apple Silicon flags
 # /usr/local/include via -Wpoison-system-directories. Disable warnings for it.
 if(TARGET tinyexr)
@@ -258,6 +282,9 @@ add_library(qlike_engine STATIC
     src/engine/vk_engine/post.cpp
     src/engine/vk_engine/bloom.cpp
     src/engine/vk_engine/taa.cpp
+    src/engine/vk_engine/fsr2.cpp
+    src/engine/vk_engine/fsr3.cpp
+    src/engine/vk_engine/restir.cpp
     src/engine/vk_engine/sun_shadow.cpp
     src/engine/vk_engine/combat.cpp
     src/engine/vk_engine/screenshot.cpp
@@ -304,6 +331,24 @@ endif()
 if(TARGET ffx_fsr2_api_vk_x64)
     target_link_libraries(qlike_engine PUBLIC ffx_fsr2_api_vk_x64)
 endif()
+if(TARGET ffx_sdk_vk)
+    # Runtime LoadLibrary path — the SDK's headers hardcode FFX_API_ENTRY
+    # as __declspec(dllexport), so static linkage to the import lib
+    # produces NULL function pointers in the consumer. AMD's recommended
+    # consumer integration is ffx_api_loader.h + GetProcAddress at
+    # runtime. So we DON'T link the .lib here, only pull in the headers
+    # and rely on the staged DLL alongside the exe.
+    target_include_directories(qlike_engine PUBLIC
+        $<TARGET_PROPERTY:ffx_sdk_vk,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_compile_definitions(qlike_engine PUBLIC QLIKE_HAVE_FSR3=1)
+    # Compile fsr3.cpp with /EHa so __try/__except can catch hardware
+    # AVs (NULL function calls, bad ptr derefs) coming back from the
+    # SDK DLL. /EHsc (the project default) only catches synchronous
+    # C++ exceptions and would let the SDK's AVs kill the process
+    # before our SEH handler can flip the fatal flag.
+    set_source_files_properties(src/engine/vk_engine/fsr3.cpp
+        PROPERTIES COMPILE_FLAGS "/EHa")
+endif()
 if(WIN32)
     target_compile_definitions(qlike_engine PUBLIC VK_USE_PLATFORM_WIN32_KHR)
 elseif(APPLE)
@@ -314,6 +359,17 @@ endif()
 
 add_executable(quake_like src/main.cpp)
 target_link_libraries(quake_like PRIVATE qlike_engine)
+
+# Stage the FSR3 DLL next to quake_like.exe so it loads at process start.
+# Must be on the exe target (not qlike_engine, which is a static lib —
+# its POST_BUILD doesn't carry over to the exe's output dir).
+if(TARGET ffx_sdk_vk)
+    add_custom_command(TARGET quake_like POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
+            "$<TARGET_FILE_DIR:quake_like>/amd_fidelityfx_vk.dll"
+        COMMENT "Staging amd_fidelityfx_vk.dll alongside quake_like.exe")
+endif()
 target_compile_definitions(qlike_engine PRIVATE
     QLIKE_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders"
 )
@@ -322,6 +378,8 @@ target_compile_definitions(qlike_engine PRIVATE
 file(GLOB SHADER_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/shaders/*.vert"
     "${CMAKE_SOURCE_DIR}/shaders/*.frag"
+    "${CMAKE_SOURCE_DIR}/shaders/*.tesc"
+    "${CMAKE_SOURCE_DIR}/shaders/*.tese"
     "${CMAKE_SOURCE_DIR}/shaders/*.comp")
 # (grass_raymarch.frag picked up by the glob above)
 

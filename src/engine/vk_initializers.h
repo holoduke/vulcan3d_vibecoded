@@ -67,6 +67,18 @@ void transition_image_aspect(VkCommandBuffer cmd, VkImage image,
                              VkImageLayout from, VkImageLayout to,
                              VkImageAspectFlags aspect);
 
+// Explicit-src-stage overload. The default transition derives the
+// src stage from the `from` layout; for UNDEFINED that's TOP_OF_PIPE,
+// which does NOT form an execution dependency with a wait-semaphore.
+// For the first transition of a freshly-acquired swapchain image the
+// barrier's src stage must match the acquire-semaphore wait stage
+// (COLOR_ATTACHMENT_OUTPUT) so the layout write is correctly ordered
+// after the presentation engine's read (fixes the WRITE_AFTER_READ
+// hazard sync-validation flagged on the swapchain image).
+void transition_image_src_stage(VkCommandBuffer cmd, VkImage image,
+                                 VkImageLayout from, VkImageLayout to,
+                                 VkPipelineStageFlags2 src_stage);
+
 // Per-mip-range overload — used by the bloom mip-chain so we don't transition
 // every mip when only one is being read/written. base_mip + mip_count cover
 // the affected subresource; aspect is COLOR (the bloom image is always color).

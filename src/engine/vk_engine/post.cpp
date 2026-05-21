@@ -92,12 +92,27 @@ void VulkanEngine::init_compose() {
 
 void VulkanEngine::rewrite_compose_image_bindings() {
     if (!compose_desc_set_layout_) return;
-    // When TAAU is on, compose reads the native upscaled output instead of
-    // the LR TAA history. taau_view_ ping-pong matches history_view_ slot.
-    const bool use_taau = rt_.taau_enabled && taau_image_[0] != VK_NULL_HANDLE;
+    // Four sources for compose's history binding, in priority order:
+    //   FSR3  — HR upscaled output via ffx-api (FidelityFX SDK 1.1.4)
+    //   FSR2  — HR upscaled output via legacy FSR2 static lib
+    //   TAAU  — HR temporal upsample
+    //   TAA   — LR temporal AA history (default)
+    // FSR3 only wins when fsr2_enabled is on AND fsr_backend == 1; the
+    // FSR2/FSR3 selection is mutually exclusive (one upscale per frame).
+    const bool use_fsr3 = rt_.fsr2_enabled && rt_.fsr_backend == 1 &&
+                          fsr3_output_view_ != VK_NULL_HANDLE;
+    const bool use_fsr2 = !use_fsr3 && rt_.fsr2_enabled &&
+                          fsr2_output_view_ != VK_NULL_HANDLE;
+    const bool use_taau = !use_fsr3 && !use_fsr2 && rt_.taau_enabled &&
+                          taau_image_[0] != VK_NULL_HANDLE;
+    compose_uses_fsr3_ = use_fsr3;
+    compose_uses_fsr2_ = use_fsr2;
     compose_uses_taau_ = use_taau;
     for (int s = 0; s < kHistorySlots; ++s) {
-        VkImageView hist_src = use_taau ? taau_view_[s] : history_view_[s];
+        VkImageView hist_src = use_fsr3 ? fsr3_output_view_
+                              : use_fsr2 ? fsr2_output_view_
+                              : use_taau ? taau_view_[s]
+                              : history_view_[s];
         VkDescriptorImageInfo i_hist{ linear_sampler_, hist_src,
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo i_depth{ linear_sampler_, depth_view_,

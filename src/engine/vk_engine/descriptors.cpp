@@ -37,7 +37,8 @@ void VulkanEngine::init_descriptors() {
     VkDescriptorPoolSize sizes[] = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 },
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 },
+        // 2 originals (materials, prev_transforms) + 2 ReSTIR reservoirs.
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 },
         // +1 for the heightmap shadow texture at binding 6.
         // +1 for the sun shadow map at binding 7 (sampler2DShadow).
         // +1 for the raw heightmap texture at binding 8 (R32_SFLOAT) —
@@ -49,8 +50,13 @@ void VulkanEngine::init_descriptors() {
         // +kSpomMaterialCount for the SPOM height-map array (binding 12).
         // +1 for the grass-density mask R8 texture (binding 13).
         // +1 for the fog wisp R8 texture (binding 14).
+        // +1 (now 9) for the FULL terrain-height R32F texture at
+        // binding 17 — the water path samples the real mesh surface.
+        // +1 (now 10) for the half-rate shadow R8 image at binding 18
+        // — cube.frag's bilateral upsample consumer (roadmap item #4
+        // Phase 3) samples it in place of the inline PCSS trace.
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            kTextureCount * 2 + 8 + kSpomMaterialCount },
+            kTextureCount * 2 + 10 + kSpomMaterialCount },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -68,7 +74,9 @@ void VulkanEngine::init_descriptors() {
     //           9=LR raymarch color, 10=LR raymarch motion-vec, 11=LR
     //              raymarch depth — read by the compose pass when
     //              terrain_raymarch_scale < 1.
-    VkDescriptorSetLayoutBinding bindings[15]{};
+    //          15=ReSTIR reservoir SSBO (read prev), 16=write cur.
+    //              Owned by restir.cpp; cube.frag's GI loop reads/writes.
+    VkDescriptorSetLayoutBinding bindings[19]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -163,10 +171,42 @@ void VulkanEngine::init_descriptors() {
     bindings[14].descriptorCount = 1;
     bindings[14].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Bindings 15/16: ReSTIR GI reservoir SSBOs (ping-pong). Session 2
+    // ships the bindings + writes; session 3 (temporal) starts reading
+    // binding 15. Layout matches the GLSL Reservoir struct in cube.frag.
+    bindings[15].binding = 15;
+    bindings[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[15].descriptorCount = 1;
+    bindings[15].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[16].binding = 16;
+    bindings[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[16].descriptorCount = 1;
+    bindings[16].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    // Binding 17: FULL baked terrain height (R32_SFLOAT, dim+1²) — the
+    // exact array the CDLOD mesh + physics use. terrain_raymarch.frag's
+    // water path samples this in mesh-terrain mode so shore /
+    // showthrough / reflection / self-shadow follow the real mesh
+    // surface with zero procedural FBM evaluation.
+    bindings[17].binding = 17;
+    bindings[17].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[17].descriptorCount = 1;
+    bindings[17].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    // Binding 18: half-rate sun-shadow R8 image (roadmap item #4
+    // Phase 3). Produced by render_world_shadow_lr_pass at
+    // render_extent_/2; consumed by cube.frag's bilateral upsample
+    // for brush/dyn surfaces when rt_.half_rate_shadows is on. Written
+    // by init_shadow_lr_pipeline and recreate_shadow_lr.
+    bindings[18].binding = 18;
+    bindings[18].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[18].descriptorCount = 1;
+    bindings[18].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 15, .pBindings = bindings,
+        .bindingCount = 19, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),
@@ -206,9 +246,30 @@ void VulkanEngine::update_scene_ubo() {
                   std::cos(pitch) * std::cos(yaw));
     sun = glm::normalize(sun);
     data.sun_direction = glm::vec4(sun, 0.0f);
-    data.sun_color     = glm::vec4(rt_.sun_color, rt_.sun_intensity);
+    // Auto golden-hour tint. When the sun is low (pitch ≤ 20° elevation),
+    // smoothly bias the sun colour toward warm orange and the sky toward
+    // pinkish-amber — the standard sunset/sunrise look. Drives every
+    // shader that reads scene.sun_color / scene.sky_color (cube,
+    // terrain_raymarch, grass, water) from a single uniform source.
+    // Toggle via rt_.auto_golden_hour; user's manual sun_color / sky_color
+    // are still the basis, just modulated by altitude when enabled.
+    glm::vec3 sun_rgb = rt_.sun_color;
+    glm::vec3 sky_rgb = rt_.sky_color;
+    if (rt_.auto_golden_hour) {
+        float alt = sun.y;                       // sin(pitch)
+        // 0 at zenith (alt≥0.6, ~37°), 1 at horizon (alt≤0.10, ~6°).
+        float t = glm::clamp((0.60f - alt) / 0.50f, 0.0f, 1.0f);
+        // Warm sunset tint: orange-amber at horizon, peach at ~15°.
+        // No brightness boost — just shift the spectrum. The previous
+        // 1.35x lift over-cranked the sun and washed everything out.
+        glm::vec3 warm     = glm::vec3(1.00f, 0.55f, 0.25f);
+        glm::vec3 sky_warm = glm::vec3(0.95f, 0.50f, 0.40f);
+        sun_rgb = glm::mix(sun_rgb, sun_rgb * warm, t);
+        sky_rgb = glm::mix(sky_rgb, sky_warm,       t * 0.85f);
+    }
+    data.sun_color     = glm::vec4(sun_rgb, rt_.sun_intensity);
     data.ambient       = glm::vec4(rt_.ground_ambient, rt_.terrain_ao_punch);
-    data.sky_color     = glm::vec4(rt_.sky_color, 1.0f);
+    data.sky_color     = glm::vec4(sky_rgb, 1.0f);
     data.rt_flags = glm::ivec4(rt_.shadow_enabled ? 1 : 0,
                                rt_.shadow_samples,
                                rt_.ao_samples,
@@ -217,10 +278,84 @@ void VulkanEngine::update_scene_ubo() {
                                rt_.ao_radius,
                                rt_.ambient_strength,
                                rt_.shadow_strength);
-    data.rt_flags2 = glm::ivec4(rt_.gi_samples,
+    // ReSTIR-lite: when on, hand the shader gi_samples / 4 (rounded down,
+    // floored at 1 if gi_samples > 0). The 4x reduction is the visible
+    // perf win for session 1; sessions 2+ replace this with the actual
+    // reservoir-resampled algorithm — see docs/restir_plan.md.
+    int gi_samples_eff = rt_.gi_samples;
+    if (rt_.gi_restir_enabled && gi_samples_eff > 0) {
+        gi_samples_eff = std::max(1, gi_samples_eff / 4);
+    }
+    data.rt_flags2 = glm::ivec4(gi_samples_eff,
                                 rt_.reflections_enabled ? 1 : 0,
                                 rt_.gi_bounces,
                                 rt_.ao_mode);  // 0=off, 1=fast, 2=RTAO
+    // ReSTIR session 3+4 (temporal + spatial reservoir blend) was
+    // quarantined after shipping (visible wobble). Session 5 fixed both
+    // root causes and re-enables it (see the restir_params line below).
+    //
+    // The session-1 gi_samples / 4 reduction also stays in effect when
+    // rt_.gi_restir_enabled (see gi_samples_eff above): ReSTIR converges
+    // the quartered sample count back to full quality via temporal +
+    // spatial reservoir reuse.
+    //
+    // restir_params packing:
+    // .x: ReSTIR enabled (rt_.gi_restir_enabled). Consumed ONLY by the
+    //     two reservoir gates in cube.frag — verified no other shader
+    //     reads restir_params.x, so this is independent of FSR.
+    // .y: M_max (sample-count cap; bounds temporal variance/lag).
+    // .zw: jitter UV delta (cur−prev) for FSR3 motion-vec jitter
+    //      cancellation in cube.frag and terrain_raymarch.frag.
+    //      Only non-zero when FSR is on (TAA expects jittered motion
+    //      vec, would freeze if subtracted unconditionally).
+    glm::vec2 jdelta_uv(0.0f, 0.0f);
+    if (rt_.fsr2_enabled) {
+        jdelta_uv = (current_frame_view_.jitter - prev_jitter_) * 0.5f;
+    }
+    // .x re-enabled in ReSTIR session 5. It is consumed ONLY by the two
+    // temporal/spatial reservoir gates in cube.frag (verified — no other
+    // shader reads restir_params.x), so driving it from the user toggle
+    // is independent of FSR. The session 3+4 quarantine root causes are
+    // now fixed: (a) the single-buffer aliasing race is gone — the
+    // reservoir SSBO is a 3-region ring indexed by frame%3 (race-free
+    // under kFrameOverlap=2; see restir.cpp), and (b) disocclusion is
+    // depth-aware — cube.frag carries prev cam-distance in the reservoir
+    // pad slot and rejects reprojected/neighbour samples whose surface
+    // is too far in normal OR depth. .z is no longer the (jitter-
+    // polluted) normal threshold; cube.frag uses fixed constants.
+    float restir_on = rt_.gi_restir_enabled ? 1.0f : 0.0f;
+    data.restir_params = glm::vec4(restir_on, 32.0f, jdelta_uv.x, jdelta_uv.y);
+    // .x = SPOM bump-depth. .yzw = procedural ground splat knobs
+    // (free slots — no UBO layout change): y = material strength,
+    // z = metres per material repeat, w = detail-normal strength.
+    data.spom_params   = glm::vec4(std::max(0.0f, rt_.spom_strength),
+                                    glm::clamp(rt_.ground_mat_strength, 0.0f, 1.0f),
+                                    std::max(0.25f, rt_.ground_mat_tile_m),
+                                    glm::clamp(rt_.ground_mat_normal, 0.0f, 1.0f));
+    // .x = water-only flag for the terrain_raymarch pass: 1.0 when
+    // the mesh terrain is the active ground (raymarch terrain OFF) but
+    // water is enabled — the pass then skips the terrain march and
+    // only renders the water surface on top of the rasterised mesh.
+    // .z = half-rate-shadow toggle for cube.frag (Phase 3 consumer).
+    //      When 1, brush/dyn surfaces skip the inline blocker+PCSS
+    //      block and bilinear-sample u_shadow_lr (binding 18) instead.
+    data.terrain_local_info = glm::vec4(
+        (!rt_.terrain_raymarch_enabled && rt_.water_enabled) ? 1.0f : 0.0f,
+        terrain_height_max_ + 5.0f,   // .y = mesh max height (air early-out)
+        rt_.half_rate_shadows ? 1.0f : 0.0f,
+        0.0f);
+    // Copy the baked 32×32 hi-Z max-cell grid into the UBO (1024
+    // floats → 256 vec4). The grid is static after level load (baked
+    // in init_world from terrain_data_.heights); when it isn't ready
+    // yet, write a high constant so the shader's cell-skip never
+    // wrongly skips real terrain on the first frames.
+    if (terrain_max_grid_ready_) {
+        std::memcpy(data.terrain_max_grid, terrain_max_grid_.data(),
+                    sizeof(float) * 1024);
+    } else {
+        for (int i = 0; i < 256; ++i)
+            data.terrain_max_grid[i] = glm::vec4(1.0e9f);
+    }
     data.rt_params2 = glm::vec4(rt_.gi_strength,
                                 rt_.gi_radius,
                                 rt_.reflection_strength,

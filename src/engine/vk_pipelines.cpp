@@ -37,19 +37,34 @@ VkShaderModule load_shader_module(VkDevice device, const std::string& path) {
 }
 
 VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig& cfg) {
-    VkPipelineShaderStageCreateInfo stages[2]{};
-    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = cfg.vert;
-    stages[0].pName = "main";
+    VkPipelineShaderStageCreateInfo stages[4]{};
+    uint32_t stage_count = 0;
+    stages[stage_count].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[stage_count].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[stage_count].module = cfg.vert;
+    stages[stage_count].pName = "main";
+    ++stage_count;
+    const bool use_tess = cfg.tesc && cfg.tese && cfg.patch_control_points > 0;
+    if (use_tess) {
+        stages[stage_count].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[stage_count].stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+        stages[stage_count].module = cfg.tesc;
+        stages[stage_count].pName = "main";
+        ++stage_count;
+        stages[stage_count].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[stage_count].stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+        stages[stage_count].module = cfg.tese;
+        stages[stage_count].pName = "main";
+        ++stage_count;
+    }
     // Fragment stage is optional — depth-only shadow passes drop it so
     // the rasteriser writes only depth and no color.
-    const uint32_t stage_count = cfg.frag ? 2u : 1u;
     if (cfg.frag) {
-        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        stages[1].module = cfg.frag;
-        stages[1].pName = "main";
+        stages[stage_count].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[stage_count].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[stage_count].module = cfg.frag;
+        stages[stage_count].pName = "main";
+        ++stage_count;
     }
 
     VkPipelineVertexInputStateCreateInfo vi{
@@ -64,8 +79,15 @@ VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig
     VkPipelineInputAssemblyStateCreateInfo ia{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .topology = use_tess ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST
+                             : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         .primitiveRestartEnable = VK_FALSE,
+    };
+
+    VkPipelineTessellationStateCreateInfo tess{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
+        .pNext = nullptr, .flags = 0,
+        .patchControlPoints = cfg.patch_control_points,
     };
 
     VkPipelineViewportStateCreateInfo vp{
@@ -80,7 +102,7 @@ VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig
         .pNext = nullptr, .flags = 0,
         .depthClampEnable = VK_FALSE,
         .rasterizerDiscardEnable = VK_FALSE,
-        .polygonMode = VK_POLYGON_MODE_FILL,
+        .polygonMode = cfg.polygon_mode,
         .cullMode = cfg.cull,
         .frontFace = cfg.front_face,
         .depthBiasEnable = cfg.depth_bias_enable ? VK_TRUE : VK_FALSE,
@@ -202,7 +224,7 @@ VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig
         .stageCount = stage_count, .pStages = stages,
         .pVertexInputState = &vi,
         .pInputAssemblyState = &ia,
-        .pTessellationState = nullptr,
+        .pTessellationState = use_tess ? &tess : nullptr,
         .pViewportState = &vp,
         .pRasterizationState = &rs,
         .pMultisampleState = &ms,

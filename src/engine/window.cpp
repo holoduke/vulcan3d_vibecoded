@@ -80,6 +80,11 @@ InputFrame Window::consume_input() {
     f.sprint   = down(GLFW_KEY_LEFT_SHIFT) || down(GLFW_KEY_RIGHT_SHIFT);
     f.crawl    = down(GLFW_KEY_LEFT_CONTROL) || down(GLFW_KEY_RIGHT_CONTROL);
     f.menu_key = down(GLFW_KEY_ESCAPE);
+    f.edit_key = down(GLFW_KEY_E);
+    f.brush_smaller = down(GLFW_KEY_LEFT_BRACKET);
+    f.brush_larger  = down(GLFW_KEY_RIGHT_BRACKET);
+    f.brush_mode_prev = down(GLFW_KEY_Q);
+    f.brush_mode_next = down(GLFW_KEY_R);
 
     bool fire_now = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
     f.fire = fire_now && !prev_fire_;  // rising edge

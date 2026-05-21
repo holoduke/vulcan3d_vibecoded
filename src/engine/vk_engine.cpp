@@ -98,9 +98,10 @@ void VulkanEngine::present_loader_frame(const char* label, float progress) {
                    "loader: vkWaitForFences");
 
     uint32_t img_idx = 0;
-    VkResult acq = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,
-                                          frame.swapchain_semaphore,
-                                          VK_NULL_HANDLE, &img_idx);
+    // Routes through FSR3 SwapChain proxy fns when active (session 4),
+    // plain Vulkan otherwise.
+    VkResult acq = acquire_next_image(UINT64_MAX, frame.swapchain_semaphore,
+                                       VK_NULL_HANDLE, &img_idx);
     if (acq == VK_ERROR_OUT_OF_DATE_KHR) { resize_requested_ = true; return; }
     if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
         QLIKE_VK_CHECK(acq, "loader: vkAcquireNextImageKHR");
@@ -210,17 +211,8 @@ void VulkanEngine::present_loader_frame(const char* label, float progress) {
                                    frame.render_fence),
                    "loader: vkQueueSubmit2");
 
-    VkPresentInfoKHR present{
-        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = nullptr,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &render_semaphores_[img_idx],
-        .swapchainCount = 1,
-        .pSwapchains = &swapchain_,
-        .pImageIndices = &img_idx,
-        .pResults = nullptr,
-    };
-    VkResult pres = vkQueuePresentKHR(graphics_queue_, &present);
+    // Loader-frame present — same proxy-aware path as the gameplay one.
+    VkResult pres = queue_present_image(img_idx, render_semaphores_[img_idx]);
     if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) {
         resize_requested_ = true;
     } else if (pres != VK_SUCCESS) {
@@ -247,6 +239,15 @@ void VulkanEngine::init() {
     init_depth_image();
     init_commands();
     init_sync();
+    init_gpu_query_pool();
+    // FSR2 needs the swapchain (displaySize) before its context can be
+    // created; the per-frame dispatch path (Phase 4) is still gated on
+    // rt_.fsr2_enabled, so the toggle remains the sole runtime switch.
+    init_fsr2();
+    // FSR3 init is lazy (only fires when the user picks fsr_backend=1
+    // in the UI). The ffx-api SDK's session-2 status was crash-on-
+    // create at startup; deferring keeps the engine launchable even
+    // if the SDK's create path AVs in the user's environment.
     // Loader is presentable from here on. Each subsequent step is the
     // long-running ones (init_world / init_rt / shadow bake) that the
     // user used to stare at a blank window for.
@@ -272,6 +273,11 @@ void VulkanEngine::init() {
     if (std::abs(rt_.render_scale - 1.0f) > 1e-3f) {
         apply_render_scale();
     }
+    // FSR2 mip-bias depends on the loaded fsr2_enabled flag + the actual
+    // render_extent_, both of which are only known after the two calls
+    // above. The recreated sampler is what write_scene_descriptors_once
+    // below captures — without this the FSR2 path runs with bias 0.
+    update_texture_sampler_for_fsr2();
     init_descriptors();
     present_loader_frame("Building ray tracing",  0.50f);
     init_rt();
@@ -290,20 +296,31 @@ void VulkanEngine::init() {
         // fallback). Both are CPU-baked, ~1 MB total, runs once.
         init_grass_mask_texture();
         init_fog_wisp_texture();
+        // ReSTIR reservoir SSBOs at scene_desc bindings 15/16. Allocated
+        // here so the descriptor write below captures live handles.
+        init_restir();
         write_scene_descriptors_once(device_, scene_desc_set_,
                                      scene_ubo_buffer_, tlas_, materials_buffer_,
                                      prev_transforms_buffer_,
                                      alb, nrm, kTextureCount, texture_sampler_,
                                      spom, kSpomMaterialCount,
                                      grass_mask_.view,
-                                     fog_wisp_.view);
+                                     fog_wisp_.view,
+                                     // Session 3 aliases both bindings to buf[0]
+                                     // (see restir.cpp::init_restir). When session
+                                     // 5 ships proper FIF descriptor sets, restore
+                                     // buf[1 - write_slot] / buf[write_slot] here.
+                                     reservoir_buf_[0],
+                                     reservoir_buf_[0]);
     }
     present_loader_frame("Compiling pipelines",   0.70f);
     init_pipeline();
     init_terrain_pipelines();
     init_terrain_raymarch_pipeline();
+    init_terrain_water_pipeline();
     init_terrain_raymarch_compose_pipeline();
     init_terrain_raymarch_lowres();
+    init_shadow_lr();
     // VRS attachment is sized in LR-tile units, so it must come after
     // init_terrain_raymarch_lowres() has set tr_lr_extent_.
     init_vrs_attachment();
@@ -315,6 +332,7 @@ void VulkanEngine::init() {
     // init_world have populated terrain_data_. Cheap (~16 MB at 2048²
     // R32F).
     init_terrain_height_texture();
+    init_terrain_height_full_texture();
     // Heightmap shadow texture must be baked AFTER descriptors and the
     // texture itself can be created; depends on terrain_data_ which
     // init_world fills. Done here so the descriptor write at the end
@@ -336,6 +354,9 @@ void VulkanEngine::init() {
     init_taau();
     init_bloom();
     init_compose();
+    // Must run AFTER init_taa() — needs linear_sampler_ for the binding-18
+    // descriptor write that lets cube.frag sample the half-res shadow.
+    init_shadow_lr_pipeline();
     // Must run AFTER init_taa() — grass raymarch reuses taa_vert_module_
     // as its fullscreen-triangle vertex shader.
     init_grass_raymarch_pipeline();
@@ -370,6 +391,24 @@ void VulkanEngine::draw(uint32_t img_index) {
     // rebuild_tlas (below) and render_world (in the rendering pass) both read
     // from this cache, so we avoid repeating O(n) Jolt queries.
     rebuild_dyn_render_cache();
+
+    // CROSS-QUEUE TLAS HAZARD FIX. tlas_ / tlas_buffer_ are SINGLE-
+    // buffered, rebuilt every frame on the async compute queue with NO
+    // wait. The top-of-frame fence only gates the SAME slot (frame
+    // N-2); frame N-1's graphics (other slot) may still be executing
+    // cube.frag's rayQueryEXT against the shared TLAS when this frame's
+    // compute starts overwriting it → intermittent GPU shader fault
+    // (device-fault type=4 INSTRUCTION_POINTER, frame-rate-independent,
+    // correlated with dyn-prop/TLAS churn). Wait for the PREVIOUS
+    // frame's graphics to finish before rebuilding the TLAS. Do NOT
+    // reset this fence — its own slot resets it on reuse. Fences are
+    // created SIGNALED so frame 0 returns immediately.
+    {
+        VkFence prev = frames_[(frame_number_ + kFrameOverlap - 1) %
+                               kFrameOverlap].render_fence;
+        vk_check(vkWaitForFences(device_, 1, &prev, VK_TRUE, UINT64_MAX),
+                 "prev-frame fence (TLAS hazard)");
+    }
 
     // ---------- Compute queue: per-frame TLAS rebuild ----------
     // Recorded onto a separate compute command buffer and submitted on the
@@ -417,6 +456,23 @@ void VulkanEngine::draw(uint32_t img_index) {
 
     auto begin = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
     vk_check(vkBeginCommandBuffer(frame.command_buffer, &begin), "vkBeginCommandBuffer");
+    // GPU watchdog: reset this slot's queries and write the BEGIN
+    // timestamp at TOP_OF_PIPE. The matching END timestamp goes in
+    // before vkEndCommandBuffer below, into kStageScene's slot — the
+    // pair brackets the entire frame so total GPU time can be diff'd
+    // out post-fence-wait. (Other GpuStage slots stay zero — wire
+    // per-stage breakdown later if we need to localise costs.)
+    const uint32_t gpu_query_slot = frame_number_ % kFrameOverlap;
+    if (gpu_query_pool_) {
+        const uint32_t base = gpu_query_slot *
+                              static_cast<uint32_t>(kQueriesPerFrame);
+        vkCmdResetQueryPool(frame.command_buffer, gpu_query_pool_, base,
+                            static_cast<uint32_t>(kQueriesPerFrame));
+        vkCmdWriteTimestamp(frame.command_buffer,
+                            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            gpu_query_pool_,
+                            base + static_cast<uint32_t>(kStageScene) * 2u);
+    }
 
     // Capture per-frame camera state once for all three render passes
     // (terrain raymarch LR, depth pre-pass, color pass). Replaces three
@@ -493,6 +549,39 @@ void VulkanEngine::draw(uint32_t img_index) {
         vkCmdBeginRendering(frame.command_buffer, &prepass_ri);
         render_world_depth_pass(frame.command_buffer);
         vkCmdEndRendering(frame.command_buffer);
+    }
+
+    // ---------- Pass 0.25: half-rate sun shadow producer ----------
+    // Roadmap item #4 Phase 2 — when rt_.half_rate_shadows is on, fire
+    // one RT shadow ray per half-res pixel into shadow_lr_image_ for
+    // brushes + dyn props. cube.frag's Phase-3 bilateral consumer will
+    // sample this instead of doing the inline 24/40-tap PCSS trace. The
+    // entire pass is skipped (zero cost) when the toggle is off or the
+    // shadow_strength slider is at 0.
+    if (rt_.half_rate_shadows && shadow_lr_pipeline_ &&
+        rt_.shadow_strength > 0.0f) {
+        vkinit::transition_image(frame.command_buffer, shadow_lr_image_,
+                                 VK_IMAGE_LAYOUT_UNDEFINED,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkClearValue lr_clear{};
+        lr_clear.color = { { 0.0f, 0.0f, 0.0f, 0.0f } };
+        VkRenderingAttachmentInfo sh_att = vkinit::color_attachment_info(
+            shadow_lr_view_, &lr_clear,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingInfo sh_ri{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .pNext = nullptr, .flags = 0,
+            .renderArea = { {0, 0}, shadow_lr_extent_ },
+            .layerCount = 1, .viewMask = 0,
+            .colorAttachmentCount = 1, .pColorAttachments = &sh_att,
+            .pDepthAttachment = nullptr, .pStencilAttachment = nullptr,
+        };
+        vkCmdBeginRendering(frame.command_buffer, &sh_ri);
+        render_world_shadow_lr_pass(frame.command_buffer);
+        vkCmdEndRendering(frame.command_buffer);
+        vkinit::transition_image(frame.command_buffer, shadow_lr_image_,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
     // ---------- Pass 0.5: low-res raymarch terrain (when scale < 1) ----------
@@ -731,6 +820,65 @@ void VulkanEngine::draw(uint32_t img_index) {
                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
+    // ---------- Pass 2.2: FSR2 dispatch (optional, replaces TAAU) ----------
+    // When FSR2 is on, the SDK does its own temporal accumulation +
+    // upscale from raw scene_color/depth/motion (NOT from the TAA history,
+    // which is already temporally blended). TAA still runs each frame
+    // because compose falls back to it when fsr2 toggles off; the per-
+    // frame cost is negligible vs the world pass and avoids a one-frame
+    // black flash on toggle.
+    if (rt_.fsr2_enabled) {
+        if (rt_.fsr_backend == 1 && !fsr3_fatal_) {
+            // Lazy init on first frame the FSR3 backend is selected.
+            // SEH-guarded: if init AVs in the SDK, fsr3_fatal_ flips
+            // and the next branch falls back to FSR2.
+            if (!fsr3_context_valid_) init_fsr3();
+            if (fsr3_context_valid_) {
+                dispatch_fsr3(frame.command_buffer);
+                // Session 6 — rolling render-dt avg for low-FPS
+                // auto-disable. last_frame_dt_ excludes FG-paced
+                // present cadence (it's the engine's render-loop dt).
+                fg_dt_avg_ms_ = fg_dt_avg_ms_ * 0.95f +
+                                last_frame_dt_ * 1000.0f * 0.05f;
+                const float kDisableMs = 20.0f;   // 50 fps base
+                const float kEnableMs  = 16.6f;   // 60 fps base (hysteresis)
+                if (!fg_runtime_disabled_ && fg_dt_avg_ms_ > kDisableMs) {
+                    if (++fg_dt_below_count_ > 60) {
+                        fg_runtime_disabled_ = true;
+                        log::infof("[fsr3 fg] auto-disabled — render dt %.1fms "
+                                   "(<50 fps); FG quality degrades below this",
+                                   fg_dt_avg_ms_);
+                    }
+                } else if (fg_runtime_disabled_ && fg_dt_avg_ms_ < kEnableMs) {
+                    fg_runtime_disabled_ = false;
+                    fg_dt_below_count_   = 0;
+                    log::info("[fsr3 fg] auto-re-enabled — render dt back above 60 fps");
+                } else if (fg_dt_avg_ms_ < kDisableMs) {
+                    fg_dt_below_count_ = 0;
+                }
+                // FG is on iff user opted in AND we're not auto-disabled.
+                const bool fg_active = rt_.fg_enabled && !fsr3_fg_fatal_ &&
+                                       !fg_runtime_disabled_;
+                if (fg_active) {
+                    if (!fsr3_fg_context_valid_) init_fsr3_fg();
+                    if (fsr3_fg_context_valid_) {
+                        // Lazy-init the SwapChain proxy so generated frames
+                        // actually reach the display via the SDK's pacer.
+                        if (!fsr3_swapchain_active_ && !fsr3_swapchain_fatal_) {
+                            init_fsr3_swapchain();
+                        }
+                    }
+                }
+                // (FG-off teardown handled by the universal gate above.)
+            } else if (fsr3_fatal_ && fsr2_context_valid_) {
+                rt_.fsr_backend = 0;     // permanently revert UI to FSR2
+                dispatch_fsr2(frame.command_buffer);
+            }
+        } else if (fsr2_context_valid_) {
+            dispatch_fsr2(frame.command_buffer);
+        }
+    }
+
     // ---------- Pass 2.25: TAAU temporal upsample (optional) ----------
     // Reads LR history (just written) + LR motion + LR depth + previous-
     // frame native upscaled. Outputs new native upscaled. Compose then
@@ -809,9 +957,18 @@ void VulkanEngine::draw(uint32_t img_index) {
     // which is fine because compose multiplies by bloom_params.x and the
     // strength slider is the user-facing toggle.
     run_bloom_chain(frame.command_buffer);
-    vkinit::transition_image(frame.command_buffer, swapchain_images_[img_index],
-                             VK_IMAGE_LAYOUT_UNDEFINED,
-                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    // src stage = COLOR_ATTACHMENT_OUTPUT (NOT the default TOP_OF_PIPE
+    // for UNDEFINED) so this layout write chains with the acquire
+    // semaphore wait (also COLOR_ATTACHMENT_OUTPUT, see the submit's
+    // waits[] below). Without this the presentation engine's read of
+    // the swapchain image isn't ordered before this write —
+    // sync-validation flagged it as a WRITE_AFTER_READ hazard and it
+    // is a real intermittent device-lost risk under load.
+    vkinit::transition_image_src_stage(
+        frame.command_buffer, swapchain_images_[img_index],
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
     {
         auto sw_color = vkinit::color_attachment_info(swapchain_views_[img_index], nullptr,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -866,7 +1023,10 @@ void VulkanEngine::draw(uint32_t img_index) {
                       std::sin(pitch),
                       std::cos(pitch) * std::cos(yaw));
         sun = glm::normalize(sun);
-        pc_data.sun_dir   = glm::vec4(sun, 0.0f);
+        // .w carries sun_shaft_intensity for compose.frag's screen-space
+        // crepuscular-ray accumulation. Free slot — the shader treats
+        // sun_dir as a normalized direction (xyz) regardless.
+        pc_data.sun_dir   = glm::vec4(sun, rt_.sun_shaft_intensity);
         pc_data.sun_color = glm::vec4(rt_.sun_color, rt_.sun_intensity);
         pc_data.sky_color = glm::vec4(rt_.sky_color, 0.0f);
         pc_data.flare_params = glm::vec4(rt_.lens_flare_strength,
@@ -923,6 +1083,12 @@ void VulkanEngine::draw(uint32_t img_index) {
         vkCmdEndRendering(frame.command_buffer);
     }
 
+    // ---------- Session 5: snapshot hudless backbuffer for FG ----------
+    // Captures the post-compose, pre-ImGui swapchain to a private image
+    // the SDK uses for HUD extraction. No-op when FSR3 SwapChain proxy
+    // isn't active.
+    capture_hudless_snapshot(frame.command_buffer, img_index);
+
     // ---------- Pass 3: ImGui directly on swapchain (still in COLOR_ATTACHMENT) ----------
 
     if (imgui_initialized_) {
@@ -965,11 +1131,23 @@ void VulkanEngine::draw(uint32_t img_index) {
     // history image was just sampled by compose; leave it in SHADER_READ_ONLY
     // for next frame's TAA-pass read of this slot.
 
+    if (gpu_query_pool_) {
+        const uint32_t base = gpu_query_slot *
+                              static_cast<uint32_t>(kQueriesPerFrame);
+        vkCmdWriteTimestamp(frame.command_buffer,
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            gpu_query_pool_,
+                            base + static_cast<uint32_t>(kStageScene) * 2u + 1u);
+        gpu_query_recorded_mask_ |= uint64_t{1} << gpu_query_slot;
+    }
     vk_check(vkEndCommandBuffer(frame.command_buffer), "vkEndCommandBuffer");
 
     // Snapshot for next frame's reprojection.
     prev_view_proj_ = last_view_proj_;
     prev_view_proj_valid_ = true;
+    // Snapshot the jitter we used this frame so the next frame can
+    // compute (cur_jitter − prev_jitter) and emit unjittered motion.
+    prev_jitter_ = current_frame_view_.jitter;
     history_write_slot_ = 1 - history_write_slot_;
 
     // Two wait semaphores on the graphics submit:
@@ -1008,22 +1186,68 @@ void VulkanEngine::draw(uint32_t img_index) {
         log::infof("[screenshot] saved %s", screenshot_path_this_frame.c_str());
     }
 
-    VkPresentInfoKHR present{
-        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = nullptr,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &render_semaphores_[img_index],
-        .swapchainCount = 1,
-        .pSwapchains = &swapchain_,
-        .pImageIndices = &img_index,
-        .pResults = nullptr,
-    };
-    VkResult pres = vkQueuePresentKHR(graphics_queue_, &present);
+    // Session 5 — push the latest HUDLessColor into the FG context's
+    // pacer state right before present. The SDK uses this for the next
+    // pair of (real, generated) frames.
+    update_fsr3_fg_per_frame_config();
+
+    // Route through FSR3 SwapChain proxy fn when active — that path
+    // internally paces real + generated frames into the present chain.
+    VkResult pres = queue_present_image(img_index, render_semaphores_[img_index]);
     if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) {
         resize_requested_ = true;
     } else if (pres != VK_SUCCESS) {
         vk_check(pres, "vkQueuePresentKHR");
     }
+}
+
+// Called on a device-lost (device handle still valid per spec). Asks
+// the driver — via VK_EXT_device_fault — for the faulting GPU
+// address(es) and vendor fault code, and logs them. This is the only
+// way to get hard data on an intermittent device-lost that won't
+// reproduce under (GPU-slowing) validation.
+void VulkanEngine::dump_device_fault() {
+    if (!device_fault_supported_ || !device_) return;
+    auto pfn = reinterpret_cast<PFN_vkGetDeviceFaultInfoEXT>(
+        vkGetDeviceProcAddr(device_, "vkGetDeviceFaultInfoEXT"));
+    if (!pfn) { log::warn("[devfault] vkGetDeviceFaultInfoEXT not loadable"); return; }
+
+    VkDeviceFaultCountsEXT counts{};
+    counts.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT;
+    VkResult r = pfn(device_, &counts, nullptr);
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+        log::errorf("[devfault] count query failed (VkResult=%d)", static_cast<int>(r));
+        return;
+    }
+    std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT>  vend(counts.vendorInfoCount);
+    counts.vendorBinarySize = 0;   // don't request the opaque vendor blob
+    VkDeviceFaultInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT;
+    info.pAddressInfos = addrs.empty() ? nullptr : addrs.data();
+    info.pVendorInfos  = vend.empty()  ? nullptr : vend.data();
+    r = pfn(device_, &counts, &info);
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+        log::errorf("[devfault] info query failed (VkResult=%d)", static_cast<int>(r));
+        return;
+    }
+    log::errorf("[devfault] --- GPU DEVICE FAULT ---");
+    log::errorf("[devfault] description: %s", info.description);
+    for (uint32_t i = 0; i < counts.addressInfoCount; ++i) {
+        const VkDeviceFaultAddressInfoEXT& a = addrs[i];
+        log::errorf("[devfault] addr[%u] type=%d reported=0x%016llX precision=0x%llX",
+                    i, static_cast<int>(a.addressType),
+                    static_cast<unsigned long long>(a.reportedAddress),
+                    static_cast<unsigned long long>(a.addressPrecision));
+    }
+    for (uint32_t i = 0; i < counts.vendorInfoCount; ++i) {
+        const VkDeviceFaultVendorInfoEXT& v = vend[i];
+        log::errorf("[devfault] vendor[%u] '%s' code=0x%016llX data=0x%016llX",
+                    i, v.description,
+                    static_cast<unsigned long long>(v.vendorFaultCode),
+                    static_cast<unsigned long long>(v.vendorFaultData));
+    }
+    log::errorf("[devfault] --- end GPU DEVICE FAULT ---");
 }
 
 void VulkanEngine::run(const RunOptions& opts) {
@@ -1111,22 +1335,70 @@ void VulkanEngine::run(const RunOptions& opts) {
                            demo_t);
                 window_->request_close();
             }
-            // Synthetic input: walk forward (occasional jump), turn the view
-            // back-and-forth so projectiles hit a variety of brushes/boxes,
-            // hold fire. fire_held drives the auto-fire path so we get a
-            // continuous stream of projectiles regardless of fire_rate_rps.
+            // Synthetic input: walk a calm counter-clockwise lap around the
+            // castle on the plateau. Position is TELEPORTED each frame to
+            // an orbit point (R=15 m, well inside the plateau and clear of
+            // both the castle walls and the water below the plateau edge);
+            // yaw points along the tangent so the camera looks straight
+            // ahead in the direction of motion; pitch locked at 0 (no
+            // head-bob / look-down). No fwd input — position override
+            // does the moving, so physics never accelerates us off-orbit.
+            // No jump, no fire — this demo is for visual + perf inspection,
+            // not for crash repro (use a separate autodemo flavour for that
+            // when it returns). y locked at 23 m (~1 m above plateau top).
             in = InputFrame{};
-            in.fwd  = true;
-            in.jump = (static_cast<int>(demo_t * 0.5f) % 4) == 0;  // every ~2s
-            in.fire_held = true;
-            in.fire = (static_cast<int>(demo_t * 10.0f) & 1) == 0;
-            // Sinusoidal turn — sweeps the view across the room.
-            float turn = std::sin(demo_t * 0.7f) * 3.0f;
-            in.mouse_dx = static_cast<double>(turn);
-            in.mouse_dy = std::sin(demo_t * 1.3f) * 0.4;
+            const float R     = 15.0f;
+            const float omega = 0.30f;   // rad/s — ~17°/s
+            const float ang   = demo_t * omega;
+            player_.position  = glm::vec3(R * std::sin(ang),
+                                          23.0f,
+                                          R * std::cos(ang));
+            player_.yaw       = ang + 3.14159265f * 0.5f;   // tangent (CCW)
+            player_.pitch     = 0.0f;
+            in.mouse_dx = 0.0;
+            in.mouse_dy = 0.0;
         }
         bool menu_edge = in.menu_key && !prev_menu_key_;
         prev_menu_key_ = in.menu_key;
+        // E toggles terrain edit mode (task #201). Edge-detected so a held
+        // key doesn't oscillate. Only fires while playing — pressing E in
+        // the menu shouldn't drop into edit-mode behind the menu.
+        bool edit_edge = in.edit_key && !prev_edit_key_;
+        prev_edit_key_ = in.edit_key;
+        if (edit_edge && state_ == State::Playing) {
+            terrain_edit_mode_ = !terrain_edit_mode_;
+            log::infof("[terrain] edit mode %s (E)",
+                       terrain_edit_mode_ ? "ON" : "OFF");
+        }
+        // Hold [ / ] in edit mode to shrink/grow the brush radius
+        // (mirrors the common sculpt UX in Blender, Houdini, etc.).
+        // 4 m/s rate covers the practical 0.5-50 m clamp in ~12 s; the
+        // existing slider in the tools panel still works.
+        if (terrain_edit_mode_ && state_ == State::Playing) {
+            const float kBrushRate = 4.0f;
+            if (in.brush_larger)  terrain_brush_radius_ += kBrushRate * frame_dt;
+            if (in.brush_smaller) terrain_brush_radius_ -= kBrushRate * frame_dt;
+            terrain_brush_radius_ = std::clamp(terrain_brush_radius_, 0.5f, 50.0f);
+        }
+        // Q / R cycle brush mode (edge-detected so a held key doesn't spin
+        // through every mode each frame). Wraps around the 8-entry enum.
+        bool bm_prev_edge = in.brush_mode_prev && !prev_brush_mode_prev_;
+        bool bm_next_edge = in.brush_mode_next && !prev_brush_mode_next_;
+        prev_brush_mode_prev_ = in.brush_mode_prev;
+        prev_brush_mode_next_ = in.brush_mode_next;
+        if (terrain_edit_mode_ && state_ == State::Playing &&
+            (bm_prev_edge || bm_next_edge)) {
+            constexpr int kModeCount = 8;   // matches TerrainBrushMode enum
+            int m = static_cast<int>(terrain_brush_mode_);
+            m = (m + (bm_next_edge ? 1 : kModeCount - 1)) % kModeCount;
+            terrain_brush_mode_ = static_cast<TerrainBrushMode>(m);
+            static const char* kModeNames[kModeCount] = {
+                "Raise", "Lower", "Smooth", "Flatten",
+                "GrassAdd", "GrassRemove", "Erode", "ErodeSmooth"
+            };
+            log::infof("[terrain] brush mode → %s (%s)",
+                       kModeNames[m], bm_next_edge ? "R" : "Q");
+        }
         if (menu_edge) {
             if (state_ == State::Playing) {
                 state_ = State::Paused;
@@ -1303,12 +1575,25 @@ void VulkanEngine::run(const RunOptions& opts) {
                         if (player_.velocity.y < 0.0f) player_.velocity.y = 0.0f;
                         if (walkable) player_.on_ground = true;
                     } else if (walkable && was_on_ground &&
+                               !player_.on_ground &&
                                player_.velocity.y <= 0.5f &&
                                (feet - h0) < kStepDown) {
                         // Sticky-ground: pull the player down onto the
                         // surface they were just on. Keeps slopes and
                         // stairs feeling "stuck to the ground" instead of
                         // hopping on every step.
+                        //
+                        // Skip if slide_move already grounded us on a brush
+                        // (player_.on_ground TRUE this tick). Otherwise the
+                        // castle floor brush sits 5 cm above the heightmap
+                        // plateau and sticky-ground yanks the player DOWN
+                        // through the floor every tick — depenetration
+                        // pushes them back up next frame, oscillating
+                        // between 22.0 and 22.05. That oscillation:
+                        //   - reads as "invisible terrain" (heightmap
+                        //     under the rendered castle floor),
+                        //   - disrupts stair step-up (player feet keep
+                        //     reverting to terrain Y between steps).
                         player_.position.y = h0 + kHalfHeight;
                         player_.velocity.y = 0.0f;
                         player_.on_ground = true;
@@ -1360,6 +1645,10 @@ void VulkanEngine::run(const RunOptions& opts) {
                            static_cast<unsigned long long>(frame_number_),
                            static_cast<unsigned long long>(g_validation_warning_count.load()),
                            static_cast<unsigned long long>(g_validation_error_count.load()));
+                if (gpu_query_pool_) {
+                    log::infof("gpu    frame=%.2f ms (TDR limit ~2000 ms)",
+                               gpu_timers_.scene_ms);
+                }
             }
         }
 
@@ -1413,6 +1702,13 @@ void VulkanEngine::run(const RunOptions& opts) {
         // TAAU toggle: re-point compose's history sampler at taau_view_ or
         // history_view_. Cheap when state matches.
         rewrite_compose_for_taau();
+        // FSR2 toggle: takes priority over TAAU/TAA in compose's history
+        // binding when the context is valid. wait_idle is paid only on the
+        // actual switch.
+        rewrite_compose_for_fsr2();
+        // FSR3 toggle: only meaningful when fsr2_enabled is on AND the
+        // backend is 1 (FSR3). Same wait-idle-only-on-actual-switch semantics.
+        rewrite_compose_for_fsr3();
 
         // Heightmap-shadow texture is sampled by cube.frag's mesh-terrain
         // branch and grass.vert (raster grass). When raymarch terrain is on
@@ -1434,6 +1730,7 @@ void VulkanEngine::run(const RunOptions& opts) {
         // is set, not every frame the brush is held.
         if (terrain_height_dirty_) {
             refresh_terrain_height_texture();
+            refresh_terrain_height_full_texture();
         }
         // Reupload grass eligibility mask if a GrassAdd/GrassRemove
         // stroke modified the CPU mirror this frame. Same one-shot
@@ -1467,15 +1764,47 @@ void VulkanEngine::run(const RunOptions& opts) {
         // and break the loop; shutdown() then sees device_lost_ and skips the
         // vkDeviceWaitIdle that would otherwise stall on the dead GPU.
         try {
+            // SwapChain-proxy teardown gate — runs BEFORE acquire so we
+            // don't leak a swapchain semaphore. When the user toggles
+            // FSR off (or FG turns off), the SDK's proxied present
+            // doesn't gracefully pass-through — symptom is world
+            // geometry stops reaching the screen, only sky-clear
+            // survives. Tear the proxy down + rebuild plain swapchain
+            // here, then `continue` the loop without touching the
+            // half-prepared frame state.
+            {
+                const bool fg_should_run = rt_.fsr2_enabled && rt_.fg_enabled &&
+                                           !fsr3_fg_fatal_ && !fg_runtime_disabled_ &&
+                                           rt_.fsr_backend == 1;
+                if (!fg_should_run && fsr3_swapchain_active_) {
+                    log::info("[fsr3 sc] FG/FSR turned off — tearing proxy down + restoring plain swapchain");
+                    vkDeviceWaitIdle(device_);
+                    destroy_fsr3_swapchain();
+                    for (auto v : swapchain_views_) vkDestroyImageView(device_, v, nullptr);
+                    swapchain_views_.clear();
+                    swapchain_images_.clear();
+                    for (auto s : render_semaphores_) {
+                        if (s) vkDestroySemaphore(device_, s, nullptr);
+                    }
+                    render_semaphores_.clear();
+                    init_swapchain();
+                    continue;   // re-enter loop with fresh swapchain
+                }
+            }
             auto& frame = current_frame();
             QLIKE_VK_CHECK(vkWaitForFences(device_, 1, &frame.render_fence,
                                            VK_TRUE, UINT64_MAX),
                            "vkWaitForFences");
+            // GPU watchdog: this slot's previous-iteration GPU work is
+            // now finished (we just waited on its fence) so its
+            // timestamps are safe to read non-blocking. Internally
+            // logs a WARN at >1500 ms (Windows TDR is ~2 s).
+            read_gpu_timestamps_for_slot(frame_number_ % kFrameOverlap);
 
             uint32_t img_index = 0;
-            VkResult acq = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,
-                                                 frame.swapchain_semaphore,
-                                                 VK_NULL_HANDLE, &img_index);
+            VkResult acq = acquire_next_image(UINT64_MAX,
+                                              frame.swapchain_semaphore,
+                                              VK_NULL_HANDLE, &img_index);
             if (acq == VK_ERROR_OUT_OF_DATE_KHR) { resize_requested_ = true; continue; }
             if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
                 QLIKE_VK_CHECK(acq, "vkAcquireNextImageKHR");
@@ -1506,6 +1835,10 @@ void VulkanEngine::run(const RunOptions& opts) {
                         "marking device_lost and exiting loop",
                         typeid(e).name());
             device_lost_ = true;
+            // The device handle is still valid here (spec allows
+            // vkGetDeviceFaultInfoEXT after device-lost) — grab the GPU
+            // fault info NOW, before shutdown tears the device down.
+            dump_device_fault();
             break;
         }
     }
@@ -1544,6 +1877,16 @@ void VulkanEngine::shutdown() {
     };
 
     guarded("save_settings",  [&]{ save_settings(); });
+    // FSR2 owns Vulkan resources via its scratch + context — destroy
+    // first so the device + descriptor pool tear-down below isn't
+    // racing with the SDK's internal allocator.
+    guarded("destroy_fsr2",   [&]{ destroy_fsr2(); });
+    // Destroy SwapChain proxy first — it holds Vulkan resources tied
+    // to the FG context's pacing state.
+    guarded("destroy_fsr3_sc",[&]{ destroy_fsr3_swapchain(); });
+    guarded("destroy_fsr3_fg",[&]{ destroy_fsr3_fg(); });
+    guarded("destroy_fsr3",   [&]{ destroy_fsr3(); });
+    guarded("destroy_restir", [&]{ destroy_restir(); });
     guarded("destroy_imgui",  [&]{ destroy_imgui(); });
     guarded("destroy_viewmodel", [&]{ destroy_viewmodel(); });
     guarded("destroy_spacejet",  [&]{ destroy_spacejet(); });
@@ -1564,6 +1907,7 @@ void VulkanEngine::shutdown() {
         destroy_mesh(allocator_, cube_mesh_);
         destroy_mesh(allocator_, cylinder_mesh_);
     });
+    guarded("destroy_gpu_query_pool", [&]{ destroy_gpu_query_pool(); });
     guarded("destroy_skybox", [&]{ destroy_skybox_resources(); });
     guarded("destroy_grass_mask_texture", [&]{ destroy_grass_mask_texture(); });
     guarded("destroy_fog_wisp_texture",   [&]{ destroy_fog_wisp_texture(); });
@@ -1573,8 +1917,10 @@ void VulkanEngine::shutdown() {
     guarded("destroy_terrain_height_texture", [&]{ destroy_terrain_height_texture(); });
     guarded("destroy_vrs_attachment", [&]{ destroy_vrs_attachment(); });
     guarded("destroy_terrain_raymarch_lowres", [&]{ destroy_terrain_raymarch_lowres(); });
+    guarded("destroy_shadow_lr", [&]{ destroy_shadow_lr(); });
     guarded("destroy_terrain_raymarch_compose_pipeline", [&]{ destroy_terrain_raymarch_compose_pipeline(); });
     guarded("destroy_terrain_raymarch_pipeline", [&]{ destroy_terrain_raymarch_pipeline(); });
+    guarded("destroy_terrain_water_pipeline", [&]{ destroy_terrain_water_pipeline(); });
     guarded("destroy_terrain_pipelines", [&]{ destroy_terrain_pipelines(); });
     guarded("destroy_sun_shadow_pipeline", [&]{ destroy_sun_shadow_pipeline(); });
     guarded("destroy_pipeline", [&]{ destroy_pipeline(); });

@@ -22,7 +22,7 @@ namespace qlike {
 void VulkanEngine::init_vulkan() {
     vkb::InstanceBuilder builder;
     auto& b = builder.set_app_name("quake-like")
-                  .request_validation_layers(kUseValidationLayers)
+                  .request_validation_layers(vk_validation_enabled())
                   .require_api_version(1, 3, 0)
                   .set_debug_callback(&debug_callback)
                   .set_debug_messenger_severity(
@@ -32,7 +32,7 @@ void VulkanEngine::init_vulkan() {
                       VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT);
-    if (kUseValidationLayers) {
+    if (vk_validation_enabled()) {
         // Synchronization validation: catches the kind of cross-queue / image-
         // layout / barrier race that produces VK_ERROR_DEVICE_LOST in
         // production. Best-practices flags driver hints. GPU-assisted
@@ -48,7 +48,7 @@ void VulkanEngine::init_vulkan() {
     auto vkb_inst = inst_ret.value();
     instance_ = vkb_inst.instance;
     debug_messenger_ = vkb_inst.debug_messenger;
-    log::infof("vk instance created (validation=%s)", kUseValidationLayers ? "on" : "off");
+    log::infof("vk instance created (validation=%s)", vk_validation_enabled() ? "on" : "off");
 
     surface_ = reinterpret_cast<VkSurfaceKHR>(
         window_->create_surface(reinterpret_cast<VkInstance_T*>(instance_)));
@@ -71,13 +71,46 @@ void VulkanEngine::init_vulkan() {
     rq_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
     rq_features.rayQuery = VK_TRUE;
 
+    // Base (Vulkan 1.0) features. tessellationShader is required for the
+    // near-terrain GPU tessellation pipeline (distance-adaptive subdivision
+    // + displacement). Nothing else in the base feature set is requested
+    // today, so this is purely additive.
+    VkPhysicalDeviceFeatures base_feats{};
+    base_feats.tessellationShader = VK_TRUE;
+    // Anisotropic filtering — the shared albedo/normal sampler enables it
+    // so the big near-horizontal terrain ground plane stays sharp at
+    // grazing angles instead of mip-blurring along the view direction.
+    base_feats.samplerAnisotropy = VK_TRUE;
+    // Wireframe debug view (terrain mesh / tessellation density).
+    base_feats.fillModeNonSolid = VK_TRUE;
+
     vkb::PhysicalDeviceSelector selector{ vkb_inst };
     auto phys_ret = selector.set_minimum_version(1, 3)
+                        .set_required_features(base_feats)
                         .set_required_features_13(f13)
                         .set_required_features_12(f12)
                         .add_required_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
                         .add_required_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME)
                         .add_required_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)
+                        // FSR3 (FidelityFX SDK 1.1.4) backend looks up Vulkan
+                        // functions via the KHR-suffixed names (e.g.
+                        // vkCmdBeginRenderingKHR, vkCmdPipelineBarrier2KHR)
+                        // even on a 1.3 device. Without the extensions
+                        // explicitly enabled, vkGetDeviceProcAddr returns
+                        // NULL for those names and the SDK AVs on first call.
+                        // VK_EXT_subgroup_size_control lets the SDK query
+                        // wave64 capability for its compute shaders.
+                        .add_required_extension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
+                        .add_required_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
+                        .add_required_extension(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)
+                        // VK_KHR_get_memory_requirements2 — promoted to
+                        // Vulkan 1.1 core, but the FSR3 SDK loads the
+                        // KHR-suffixed alias `vkGetBufferMemoryRequirements2KHR`
+                        // via vkGetDeviceProcAddr. That alias only exists when
+                        // this extension is explicitly enabled on the device.
+                        // Without it the SDK gets NULL and AVs in
+                        // ffxCreateContext (proven via procaddr-trace shim).
+                        .add_required_extension(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME)
                         .add_required_extension_features(as_features)
                         .add_required_extension_features(rq_features)
                         .set_surface(surface_)
@@ -126,8 +159,60 @@ void VulkanEngine::init_vulkan() {
         log::info("VRS extension not present — full-rate shading everywhere");
     }
 
+    // VK_EXT_device_fault (optional) — lets us call vkGetDeviceFaultInfoEXT
+    // on a device-lost to retrieve the faulting GPU address + vendor
+    // fault code. Pure diagnostics; no runtime cost when no fault occurs.
+    VkPhysicalDeviceFaultFeaturesEXT fault_feat{};
+    fault_feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+    if (vkb_phys.is_extension_present(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 ff2{};
+        ff2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        ff2.pNext = &fault_feat;
+        vkGetPhysicalDeviceFeatures2(physical_device_, &ff2);
+        if (fault_feat.deviceFault == VK_TRUE) {
+            vkb_phys.enable_extension_if_present(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+            device_fault_supported_ = true;
+            log::info("VK_EXT_device_fault supported — device-lost will dump GPU fault info");
+        }
+    }
+    if (!device_fault_supported_) {
+        log::info("VK_EXT_device_fault not present — device-lost dumps CPU stack only");
+    }
+
     vkb::DeviceBuilder dev_builder{ vkb_phys };
     if (vrs_supported_) dev_builder.add_pNext(&vrs_feat);
+    if (device_fault_supported_) dev_builder.add_pNext(&fault_feat);
+    // FSR3 SwapChain proxy needs FOUR distinct VkQueue handles
+    // (game/asyncCompute/present/imageAcquire). Request 4 queues from
+    // the graphics family so we can hand 3 distinct handles plus the
+    // compute family's queue to the SDK. Discrete GPUs typically expose
+    // 16 queues per family; iGPUs may expose only 1, in which case FG
+    // is unavailable but the rest of the engine works.
+    {
+        uint32_t qf_count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &qf_count, nullptr);
+        std::vector<VkQueueFamilyProperties> qf_props(qf_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &qf_count, qf_props.data());
+        uint32_t gfx_family = 0;
+        for (uint32_t i = 0; i < qf_count; ++i) {
+            if (qf_props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) { gfx_family = i; break; }
+        }
+        const uint32_t gfx_count = qf_props[gfx_family].queueCount;
+        const uint32_t want = (gfx_count >= 4) ? 4u : 1u;
+        std::vector<vkb::CustomQueueDescription> qsetup;
+        qsetup.emplace_back(gfx_family, std::vector<float>(want, 1.0f));
+        // Add the compute family if it's distinct (NVIDIA RTX has one).
+        for (uint32_t i = 0; i < qf_count; ++i) {
+            if (i == gfx_family) continue;
+            if (qf_props[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+                qsetup.emplace_back(i, std::vector<float>{1.0f});
+                break;
+            }
+        }
+        dev_builder.custom_queue_setup(qsetup);
+        log::infof("queue setup: graphics family %u × %u (avail %u), plus %zu more family queue(s)",
+                   gfx_family, want, gfx_count, qsetup.size() - 1);
+    }
     auto dev_ret = dev_builder.build();
     if (!dev_ret) throw std::runtime_error("vkb device build: " +
                                            dev_ret.error().message());
@@ -156,6 +241,28 @@ void VulkanEngine::init_vulkan() {
     log::infof("vk compute queue family=%u (%s)", compute_queue_family_,
                compute_queue_distinct_ ? "ASYNC — separate from graphics"
                                        : "shared with graphics");
+
+    // Pull the extra graphics-family queues for the FSR3 SwapChain
+    // proxy. Indices 1..3 are populated only when custom_queue_setup
+    // requested 4 graphics queues (gfx_count >= 4). On hardware where
+    // we got only 1, these stay VK_NULL_HANDLE and FG is unavailable.
+    fsr3_extra_queue_present_ = VK_NULL_HANDLE;
+    fsr3_extra_queue_acquire_ = VK_NULL_HANDLE;
+    fsr3_extra_queue_compute_ = VK_NULL_HANDLE;
+    {
+        VkQueue q1 = VK_NULL_HANDLE, q2 = VK_NULL_HANDLE, q3 = VK_NULL_HANDLE;
+        vkGetDeviceQueue(device_, graphics_queue_family_, 1, &q1);
+        vkGetDeviceQueue(device_, graphics_queue_family_, 2, &q2);
+        vkGetDeviceQueue(device_, graphics_queue_family_, 3, &q3);
+        fsr3_extra_queue_present_ = q1;
+        fsr3_extra_queue_acquire_ = q2;
+        // Compute role for SDK: if we have 4 graphics queues, take the
+        // 4th and route the SDK to it (keeps async-TLAS on its dedicated
+        // family). Otherwise reuse our compute_queue_ as before.
+        fsr3_extra_queue_compute_ = q3 ? q3 : compute_queue_;
+        log::infof("[fsr3 sc] extra graphics queues: present=%p acquire=%p compute=%p",
+                   (void*)q1, (void*)q2, (void*)q3);
+    }
 
     VmaAllocatorCreateInfo aci{};
     aci.physicalDevice = physical_device_;
@@ -219,6 +326,16 @@ void VulkanEngine::init_swapchain() {
 }
 
 void VulkanEngine::destroy_swapchain() {
+    // When the FSR3 SwapChain proxy is active, swapchain_ is a wrapped
+    // handle internally pointing at FrameInterpolationSwapChainVK*.
+    // Calling the standard vkDestroySwapchainKHR on it AVs because
+    // the loader expects a real Vulkan swapchain. Tear the proxy down
+    // first via the SDK's DestroyContext — that frees the wrapped
+    // swapchain and nulls our handle, then the rest of this function
+    // skips the (now-NULL) vkDestroySwapchainKHR call below.
+    if (fsr3_swapchain_active_) {
+        destroy_fsr3_swapchain();
+    }
     for (auto v : swapchain_views_) vkDestroyImageView(device_, v, nullptr);
     swapchain_views_.clear();
     swapchain_images_.clear();
@@ -304,12 +421,29 @@ void VulkanEngine::recreate_swapchain() {
     if (bloom_image_) recreate_bloom_targets();
     // LR raymarch targets are sized at render_extent_ × scale; rebuild
     // them too so the upscale compose continues to read valid storage.
+    if (shadow_lr_image_) {
+        destroy_shadow_lr();
+        init_shadow_lr();
+    }
     if (tr_lr_color_image_) {
         destroy_terrain_raymarch_lowres();
         init_terrain_raymarch_lowres();
     }
     // VRS attachment is sized in LR-tile units — depends on tr_lr_extent_.
     if (vrs_supported_) recreate_vrs_attachment();
+    // FSR2 bakes maxRenderSize/displaySize into its internal allocations,
+    // so any swapchain change requires a context recreate. No-op when the
+    // SDK isn't compiled in or the context never came up.
+    recreate_fsr2_context();
+    recreate_fsr3_context();
+    // FG context bakes display size into its allocations the same way
+    // the upscaler does — recreate when the swapchain changes. No-op
+    // when FG was never enabled.
+    if (fsr3_fg_context_valid_) { destroy_fsr3_fg(); init_fsr3_fg(); }
+    // ReSTIR reservoir buffers are sized to render_extent_ and rebound
+    // on scene_desc bindings 15/16. recreate_restir_buffers handles the
+    // destroy + alloc + descriptor rewrite atomically.
+    recreate_restir_buffers();
     rewrite_compose_image_bindings();
 
     VkDeviceSize needed = static_cast<VkDeviceSize>(swapchain_extent_.width) *
@@ -361,6 +495,112 @@ void VulkanEngine::init_sync() {
     }
 }
 
+void VulkanEngine::init_gpu_query_pool() {
+    // Read the device's timestamp period (ns per tick) and capture it
+    // for results-conversion. Devices that don't support graphics-queue
+    // timestamps would have timestampComputeAndGraphics=false; on every
+    // mainstream desktop GPU it's true so we don't gate on the bit.
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physical_device_, &props);
+    gpu_timestamp_period_ns_ = props.limits.timestampPeriod;
+    if (gpu_timestamp_period_ns_ <= 0.0f) {
+        log::warn("[gpu-watchdog] device reports timestampPeriod=0 — GPU "
+                  "timing disabled");
+        return;
+    }
+    VkQueryPoolCreateInfo qpci{
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .pNext = nullptr, .flags = 0,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP,
+        .queryCount = static_cast<uint32_t>(kQueriesPerFrame * kFrameOverlap),
+        .pipelineStatistics = 0,
+    };
+    vk_check(vkCreateQueryPool(device_, &qpci, nullptr, &gpu_query_pool_),
+             "vkCreateQueryPool gpu");
+    // NO host-side vkResetQueryPool here. That call requires the
+    // OPTIONAL hostQueryReset feature to be explicitly enabled at
+    // device creation (it is NOT implied by Vulkan 1.2/1.3 — the
+    // earlier comment was wrong). Calling it without the feature is
+    // undefined behaviour and validation flagged it
+    // (VUID-vkResetQueryPool-None-02665) — a real device-lost risk.
+    // The per-frame vkCmdResetQueryPool in draw() (device-side,
+    // always legal) resets each slot before it's written, and
+    // gpu_query_recorded_mask_ blocks any read before the first
+    // write, so no host reset is needed at all.
+    gpu_query_recorded_mask_ = 0;
+    log::infof("[gpu-watchdog] query pool created (%u queries, %.1f ns/tick)",
+               kQueriesPerFrame * kFrameOverlap, gpu_timestamp_period_ns_);
+}
+
+void VulkanEngine::destroy_gpu_query_pool() {
+    if (gpu_query_pool_) {
+        vkDestroyQueryPool(device_, gpu_query_pool_, nullptr);
+        gpu_query_pool_ = VK_NULL_HANDLE;
+    }
+    gpu_query_recorded_mask_ = 0;
+}
+
+void VulkanEngine::read_gpu_timestamps_for_slot(uint32_t slot) {
+    // Skip until this slot has been written at least once (first
+    // kFrameOverlap frames). The mask bit goes high when draw() records
+    // the timestamps for this slot; it stays high for the engine's
+    // lifetime since we always re-record each frame.
+    if (!gpu_query_pool_) return;
+    if ((gpu_query_recorded_mask_ & (uint64_t{1} << slot)) == 0) return;
+
+    // draw() only writes the Scene begin/end pair (kStageScene*2,
+    // +1) — TLAS/Taa/BlitUi slots are reset but never written. The
+    // earlier code queried all kQueriesPerFrame at once; the 6
+    // unwritten queries are "unavailable" so vkGetQueryPoolResults
+    // returned VK_NOT_READY and we bailed EVERY frame → the HUD
+    // permanently showed 0.00 ms and the TDR watchdog could never
+    // fire. Query ONLY the 2 Scene timestamps that are actually
+    // written. base_scene = slot's Scene-pair start index.
+    const uint32_t base_scene = slot *
+        static_cast<uint32_t>(kQueriesPerFrame) +
+        static_cast<uint32_t>(kStageScene) * 2u;
+    uint64_t ts2[2] = {};
+    VkResult r = vkGetQueryPoolResults(device_, gpu_query_pool_,
+                                        base_scene, 2,
+                                        sizeof(ts2), ts2, sizeof(uint64_t),
+                                        VK_QUERY_RESULT_64_BIT);
+    if (r != VK_SUCCESS) return;
+
+    float scene_ms = 0.0f;
+    if (ts2[1] > ts2[0]) {
+        scene_ms = static_cast<float>(
+            static_cast<double>(ts2[1] - ts2[0]) *
+            static_cast<double>(gpu_timestamp_period_ns_) * 1.0e-6);
+    }
+    // TLAS/Taa/BlitUi stages aren't individually instrumented yet —
+    // the Scene pair brackets the whole frame command buffer, so
+    // scene_ms IS the total frame GPU time. Report 0 for the others.
+    float tlas_ms    = 0.0f;
+    float taa_ms     = 0.0f;
+    float blit_ui_ms = 0.0f;
+    // EMA so a single spike doesn't dominate the HUD readout. The
+    // raw-frame TDR check uses the un-smoothed total below.
+    auto ema = [](float prev, float cur) {
+        return (prev <= 0.0f) ? cur : (prev * 0.85f + cur * 0.15f);
+    };
+    gpu_timers_.tlas_ms    = ema(gpu_timers_.tlas_ms,    tlas_ms);
+    gpu_timers_.scene_ms   = ema(gpu_timers_.scene_ms,   scene_ms);
+    gpu_timers_.taa_ms     = ema(gpu_timers_.taa_ms,     taa_ms);
+    gpu_timers_.blit_ui_ms = ema(gpu_timers_.blit_ui_ms, blit_ui_ms);
+
+    float total_raw = tlas_ms + scene_ms + taa_ms + blit_ui_ms;
+    // Windows TDR is ~2 s per submit. Warn at 1.5 s so we have signal
+    // BEFORE the device-lost fires. Use the raw single-frame total,
+    // not the EMA — a single 1.8 s frame will still TDR even if the
+    // average is fine.
+    if (total_raw > 1500.0f) {
+        log::warnf("[gpu-watchdog] frame GPU=%.0f ms (tlas=%.0f scene=%.0f "
+                   "taa=%.0f blit=%.0f) — approaching Windows TDR (2000 ms). "
+                   "Lower render scale / disable RT to recover.",
+                   total_raw, tlas_ms, scene_ms, taa_ms, blit_ui_ms);
+    }
+}
+
 void VulkanEngine::init_readback_buffer() {
     readback_size_ = static_cast<VkDeviceSize>(swapchain_extent_.width) *
                      swapchain_extent_.height * 4;
@@ -398,7 +638,13 @@ void VulkanEngine::init_pipeline() {
     frag_module_ = vkpipe::load_shader_module(device_, sd + "/cube.frag.spv");
 
     VkPushConstantRange pc{};
-    pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Tessellation control/eval stages read pc (mvp/model/prev_mvp) for the
+    // near-terrain tess pipeline, so the range must advertise them too —
+    // referencing an unbacked stage is the same spec violation that bit
+    // shadow.vert (VUID-...-10069).
+    pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+                    VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                    VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
     pc.offset = 0;
     pc.size = sizeof(PushConstants);
 
@@ -521,6 +767,13 @@ void VulkanEngine::init_terrain_pipelines() {
         cfg.vbindings = { b0, b1 };
         cfg.vattrs = vattrs;
         terrain_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+        // Wireframe variant (debug mesh-density view).
+        {
+            vkpipe::GraphicsPipelineConfig wcfg = cfg;
+            wcfg.polygon_mode = VK_POLYGON_MODE_LINE;
+            wcfg.cull = VK_CULL_MODE_NONE;
+            terrain_wire_pipeline_ = vkpipe::build_graphics_pipeline(device_, wcfg);
+        }
     }
 
     // Depth pre-pass — same morph as color pass so LESS_OR_EQUAL passes.
@@ -536,15 +789,77 @@ void VulkanEngine::init_terrain_pipelines() {
         cfg.vattrs = vattrs;
         terrain_depth_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
     }
-    log::info("terrain pipelines built (CD-LOD morph)");
+
+    // Near-terrain GPU tessellation pipeline. Triangle patches (3 CP) so
+    // it reuses the chunk's LOD0 triangle index buffer as a PATCH_LIST.
+    // Only binding 0 (pos/normal/uv) — no parent_y / morph (near chunks
+    // are full LOD0). Distance-adaptive subdivision in .tesc, detail
+    // displacement + normal recompute in .tese, shared cube.frag.
+    {
+        terrain_tess_vert_module_ = vkpipe::load_shader_module(device_, sd + "/terrain_tess.vert.spv");
+        terrain_tesc_module_      = vkpipe::load_shader_module(device_, sd + "/terrain_tess.tesc.spv");
+        terrain_tese_module_      = vkpipe::load_shader_module(device_, sd + "/terrain_tess.tese.spv");
+        std::vector<VkVertexInputAttributeDescription> tattrs = {
+            attr(0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)),
+            attr(1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)),
+            attr(2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(Vertex, uv)),
+        };
+        vkpipe::GraphicsPipelineConfig cfg{};
+        cfg.vert = terrain_tess_vert_module_;
+        cfg.tesc = terrain_tesc_module_;
+        cfg.tese = terrain_tese_module_;
+        cfg.patch_control_points = 3;
+        cfg.frag = frag_module_;       // shared cube.frag
+        // Cull NONE. The tessellator's primitive winding through the
+        // reused triangle index buffer (with fractional_odd spacing)
+        // does NOT reliably match the rasteriser's front-face test, so
+        // back-face culling silently dropped ~half the patches → black
+        // gaps + "no tessellation visible". Disabling cull renders every
+        // patch; the .tese computes the surface normal analytically (not
+        // from gl_FrontFacing), so both facings shade identically — no
+        // back-face darkening, just a benign same-depth double-shade.
+        cfg.cull = VK_CULL_MODE_NONE;
+        cfg.layout = pipeline_layout_;
+        cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+        cfg.depth_format = depth_format_;
+        cfg.vbindings = { b0 };
+        cfg.vattrs = tattrs;
+        terrain_tess_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+        // Wireframe variant — shows every tessellated sub-triangle.
+        {
+            vkpipe::GraphicsPipelineConfig wcfg = cfg;
+            wcfg.polygon_mode = VK_POLYGON_MODE_LINE;
+            terrain_tess_wire_pipeline_ = vkpipe::build_graphics_pipeline(device_, wcfg);
+        }
+
+        // Tessellation DEPTH-prepass pipeline — same vert/tesc/tese so
+        // the primed depth is bit-identical to the color pass (priming
+        // near chunks with the plain terrain.vert instead left a 1-ULP
+        // gl_Position delta → LESS_OR_EQUAL rejects → sky shows through).
+        vkpipe::GraphicsPipelineConfig dcfg = cfg;
+        dcfg.frag = depth_frag_module_;
+        dcfg.color_formats.clear();
+        dcfg.color_attachment_count = 0;
+        dcfg.depth_compare = VK_COMPARE_OP_LESS;
+        terrain_tess_depth_pipeline_ = vkpipe::build_graphics_pipeline(device_, dcfg);
+    }
+    log::info("terrain pipelines built (CD-LOD morph + near tessellation)");
 }
 
 void VulkanEngine::destroy_terrain_pipelines() {
     if (terrain_pipeline_)       vkDestroyPipeline(device_, terrain_pipeline_, nullptr);
     if (terrain_depth_pipeline_) vkDestroyPipeline(device_, terrain_depth_pipeline_, nullptr);
+    if (terrain_tess_pipeline_)  vkDestroyPipeline(device_, terrain_tess_pipeline_, nullptr);
+    if (terrain_tess_depth_pipeline_) vkDestroyPipeline(device_, terrain_tess_depth_pipeline_, nullptr);
+    if (terrain_wire_pipeline_)  vkDestroyPipeline(device_, terrain_wire_pipeline_, nullptr);
+    if (terrain_tess_wire_pipeline_) vkDestroyPipeline(device_, terrain_tess_wire_pipeline_, nullptr);
     if (terrain_vert_module_)    vkDestroyShaderModule(device_, terrain_vert_module_, nullptr);
-    terrain_pipeline_ = terrain_depth_pipeline_ = VK_NULL_HANDLE;
-    terrain_vert_module_ = VK_NULL_HANDLE;
+    if (terrain_tess_vert_module_) vkDestroyShaderModule(device_, terrain_tess_vert_module_, nullptr);
+    if (terrain_tesc_module_)    vkDestroyShaderModule(device_, terrain_tesc_module_, nullptr);
+    if (terrain_tese_module_)    vkDestroyShaderModule(device_, terrain_tese_module_, nullptr);
+    terrain_pipeline_ = terrain_depth_pipeline_ = terrain_tess_pipeline_ = VK_NULL_HANDLE;
+    terrain_vert_module_ = terrain_tess_vert_module_ = VK_NULL_HANDLE;
+    terrain_tesc_module_ = terrain_tese_module_ = VK_NULL_HANDLE;
 }
 
 void VulkanEngine::init_terrain_raymarch_pipeline() {
@@ -591,6 +906,84 @@ void VulkanEngine::destroy_terrain_raymarch_pipeline() {
     }
 }
 
+void VulkanEngine::init_terrain_water_pipeline() {
+    // Big flat plane (2 triangles). The vert lifts every vertex to the
+    // water level (pc.color.x); per-pixel depth is perspective-correct
+    // even with 4 verts, so the terrain↔water edge is pixel-exact.
+    const float H = 8192.0f;   // reaches the horizon for any view
+    Vertex v[4] = {
+        { { -H, 0.0f, -H }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 0.0f } },
+        { {  H, 0.0f, -H }, { 0.0f, 1.0f, 0.0f }, { 1.0f, 0.0f } },
+        { {  H, 0.0f,  H }, { 0.0f, 1.0f, 0.0f }, { 1.0f, 1.0f } },
+        { { -H, 0.0f,  H }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 1.0f } },
+    };
+    const uint32_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+    water_plane_mesh_ = create_mesh_from_data(
+        device_, allocator_, graphics_queue_, graphics_queue_family_,
+        v, 4, idx, 6);
+
+    std::string sd = QLIKE_SHADER_DIR;
+    water_vert_module_ = vkpipe::load_shader_module(
+        device_, sd + "/water.vert.spv");
+    water_frag_module_ = vkpipe::load_shader_module(
+        device_, sd + "/water.frag.spv");
+
+    vkpipe::GraphicsPipelineConfig cfg{};
+    cfg.vert = water_vert_module_;
+    cfg.frag = water_frag_module_;
+    cfg.layout = pipeline_layout_;          // shares the cube push-constant layout
+    cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+    cfg.depth_format = depth_format_;
+
+    VkVertexInputBindingDescription vb{};
+    vb.binding = 0;
+    vb.stride = sizeof(Vertex);
+    vb.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    cfg.vbindings.push_back(vb);
+    VkVertexInputAttributeDescription a0{};
+    a0.location = 0; a0.binding = 0;
+    a0.format = VK_FORMAT_R32G32B32_SFLOAT;
+    a0.offset = offsetof(Vertex, position);
+    cfg.vattrs = { a0 };
+
+    cfg.cull = VK_CULL_MODE_NONE;           // visible from above and below
+    cfg.depth_test = true;
+    // Depth TEST occludes water behind terrain (terrain wrote depth this
+    // frame), but the water plane must NOT WRITE depth: it's an
+    // alpha-blended transparent surface that INTERSECTS the terrain at
+    // the shoreline. Writing depth there made the ≤ test flip per-pixel
+    // (the residual jittery waterline). No write → no self-fight; the
+    // shore alpha-feather handles the visual transition.
+    cfg.depth_write = false;
+    cfg.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+    // Alpha-blend colour only (motion stays opaque for TAA). The frag
+    // feathers the water alpha to 0 over the last ~0.35 m of depth at
+    // the shoreline so the terrain↔water plane intersection dissolves
+    // into the wet shore instead of z-fighting into a jittery line.
+    cfg.alpha_blend_color0_only = true;
+    cfg.enable_vrs = vrs_supported_;
+
+    terrain_water_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    log::infof("rasterised water-plane pipeline built (vrs=%s)",
+               vrs_supported_ ? "on" : "off");
+}
+
+void VulkanEngine::destroy_terrain_water_pipeline() {
+    if (terrain_water_pipeline_) {
+        vkDestroyPipeline(device_, terrain_water_pipeline_, nullptr);
+        terrain_water_pipeline_ = VK_NULL_HANDLE;
+    }
+    if (water_vert_module_) {
+        vkDestroyShaderModule(device_, water_vert_module_, nullptr);
+        water_vert_module_ = VK_NULL_HANDLE;
+    }
+    if (water_frag_module_) {
+        vkDestroyShaderModule(device_, water_frag_module_, nullptr);
+        water_frag_module_ = VK_NULL_HANDLE;
+    }
+    destroy_mesh(allocator_, water_plane_mesh_);
+}
+
 // === Low-res raymarch upscale targets ====================================
 //
 // Three images sized at render_extent_ × terrain_raymarch_scale: HDR
@@ -608,6 +1001,13 @@ bool VulkanEngine::tr_use_lowres() const {
 void VulkanEngine::init_terrain_raymarch_lowres() {
     // Compute the scaled extent. Floor to int, min 1.
     float s = std::clamp(rt_.terrain_raymarch_scale, 0.25f, 1.0f);
+    // Water-only mode (mesh terrain active + water on) skips the whole
+    // terrain march — it's cheap, so render it at FULL res. Half/quarter
+    // res water was the cause of the gap + stair-step line artifacts
+    // along terrain↔water silhouettes (the depth-aware upscale can't
+    // reconstruct a clean edge between full-res rasterised terrain and
+    // a low-res water buffer).
+    if (!rt_.terrain_raymarch_enabled) s = 1.0f;
     uint32_t lw = std::max<uint32_t>(1u, static_cast<uint32_t>(
         std::round(static_cast<float>(render_extent_.width)  * s)));
     uint32_t lh = std::max<uint32_t>(1u, static_cast<uint32_t>(
@@ -938,6 +1338,88 @@ void VulkanEngine::recreate_terrain_raymarch_lowres() {
     init_terrain_raymarch_lowres();
 }
 
+// Half-rate sun-shadow occlusion buffer: R8_UNORM at render_extent_/2.
+// Rendered by a fullscreen PCSS pass (Phase 2), bilateral-upsampled in
+// cube.frag (Phase 3). Allocated unconditionally (cheap, ~0.5 MB) so
+// the runtime toggle needs no resize; sampled via tr_lr_sampler_.
+void VulkanEngine::init_shadow_lr() {
+    uint32_t sw = std::max<uint32_t>(1u, render_extent_.width  / 2u);
+    uint32_t sh = std::max<uint32_t>(1u, render_extent_.height / 2u);
+    shadow_lr_extent_ = { sw, sh };
+    VkImageCreateInfo ici{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = nullptr, .flags = 0,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8_UNORM,
+        .extent = { sw, sh, 1 },
+        .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                 VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vk_check(vmaCreateImage(allocator_, &ici, &aci,
+                            &shadow_lr_image_, &shadow_lr_alloc_, nullptr),
+             "shadow_lr image");
+    VkImageViewCreateInfo vci{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .image = shadow_lr_image_,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8_UNORM,
+        .components = {},
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1,
+        },
+    };
+    vk_check(vkCreateImageView(device_, &vci, nullptr, &shadow_lr_view_),
+             "shadow_lr view");
+    log::infof("half-rate shadow buffer: %ux%u R8", sw, sh);
+}
+
+void VulkanEngine::destroy_shadow_lr() {
+    if (shadow_lr_view_) {
+        vkDestroyImageView(device_, shadow_lr_view_, nullptr);
+        shadow_lr_view_ = VK_NULL_HANDLE;
+    }
+    if (shadow_lr_image_) {
+        vmaDestroyImage(allocator_, shadow_lr_image_, shadow_lr_alloc_);
+        shadow_lr_image_ = VK_NULL_HANDLE;
+        shadow_lr_alloc_ = nullptr;
+    }
+}
+
+// Rewrite scene_desc binding 18 to point at the (possibly newly created)
+// shadow_lr_view_. Called after recreate_swapchain destroys+rebuilds the
+// half-res image.
+static void rewrite_binding18_shadow_lr(VkDevice device,
+                                        VkDescriptorSet set,
+                                        VkImageView view,
+                                        VkSampler sampler) {
+    if (!set || !view || !sampler) return;
+    VkDescriptorImageInfo sh_bi{ sampler, view,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = set; w.dstBinding = 18; w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &sh_bi;
+    vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+}
+
+void VulkanEngine::recreate_shadow_lr() {
+    vkDeviceWaitIdle(device_);
+    destroy_shadow_lr();
+    init_shadow_lr();
+    rewrite_binding18_shadow_lr(device_, scene_desc_set_,
+                                shadow_lr_view_, linear_sampler_);
+}
+
 void VulkanEngine::init_terrain_raymarch_compose_pipeline() {
     std::string sd = QLIKE_SHADER_DIR;
     tr_compose_frag_module_ = vkpipe::load_shader_module(
@@ -1083,14 +1565,80 @@ void VulkanEngine::destroy_grass_pipeline() {
 void VulkanEngine::destroy_pipeline() {
     if (pipeline_)         vkDestroyPipeline(device_, pipeline_, nullptr);
     if (depth_pipeline_)   vkDestroyPipeline(device_, depth_pipeline_, nullptr);
+    if (shadow_lr_pipeline_) vkDestroyPipeline(device_, shadow_lr_pipeline_, nullptr);
     if (pipeline_layout_)  vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     if (vert_module_)      vkDestroyShaderModule(device_, vert_module_, nullptr);
     if (frag_module_)      vkDestroyShaderModule(device_, frag_module_, nullptr);
     if (depth_frag_module_) vkDestroyShaderModule(device_, depth_frag_module_, nullptr);
     if (depth_vert_module_) vkDestroyShaderModule(device_, depth_vert_module_, nullptr);
-    pipeline_ = depth_pipeline_ = VK_NULL_HANDLE;
+    if (shadow_lr_frag_module_) vkDestroyShaderModule(device_, shadow_lr_frag_module_, nullptr);
+    pipeline_ = depth_pipeline_ = shadow_lr_pipeline_ = VK_NULL_HANDLE;
     pipeline_layout_ = VK_NULL_HANDLE;
     vert_module_ = frag_module_ = depth_frag_module_ = depth_vert_module_ = VK_NULL_HANDLE;
+    shadow_lr_frag_module_ = VK_NULL_HANDLE;
+}
+
+// Half-rate shadow producer pipeline (roadmap item #4, Phase 2). Re-uses
+// pipeline_layout_ + vert_module_ (cube.vert) so push-constants and
+// descriptor sets stay identical to the main color pass. Only delta:
+// single R8_UNORM colour attachment, no depth attachment (no depth test
+// — accepts a small amount of overdraw to avoid plumbing a half-res
+// depth buffer for Phase 2), and the trivial shadow_lr.frag.
+void VulkanEngine::init_shadow_lr_pipeline() {
+    std::string sd = QLIKE_SHADER_DIR;
+    shadow_lr_frag_module_ = vkpipe::load_shader_module(
+        device_, sd + "/shadow_lr.frag.spv");
+
+    // Replicate the same vertex-attribute layout the main cube pipeline uses.
+    VkVertexInputBindingDescription b0{};
+    b0.binding = 0; b0.stride = sizeof(Vertex);
+    b0.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription a0{};
+    a0.location = 0; a0.binding = 0;
+    a0.format = VK_FORMAT_R32G32B32_SFLOAT;
+    a0.offset = offsetof(Vertex, position);
+    VkVertexInputAttributeDescription a1{};
+    a1.location = 1; a1.binding = 0;
+    a1.format = VK_FORMAT_R32G32B32_SFLOAT;
+    a1.offset = offsetof(Vertex, normal);
+    VkVertexInputAttributeDescription a2{};
+    a2.location = 2; a2.binding = 0;
+    a2.format = VK_FORMAT_R32G32_SFLOAT;
+    a2.offset = offsetof(Vertex, uv);
+
+    vkpipe::GraphicsPipelineConfig scfg{};
+    scfg.layout = pipeline_layout_;
+    scfg.vert = vert_module_;
+    scfg.frag = shadow_lr_frag_module_;
+    scfg.vbindings = { b0 };
+    scfg.vattrs = { a0, a1, a2 };
+    scfg.color_formats = { VK_FORMAT_R8_UNORM };
+    scfg.color_attachment_count = 1;
+    scfg.depth_format = VK_FORMAT_UNDEFINED;
+    scfg.depth_test = false;
+    scfg.depth_write = false;
+    scfg.cull = VK_CULL_MODE_BACK_BIT;
+    scfg.alpha_blend_color0_only = false;
+    shadow_lr_pipeline_ = vkpipe::build_graphics_pipeline(device_, scfg);
+
+    // Wire the produced image as a sampled texture at scene_desc binding 18
+    // for cube.frag's bilateral-upsample consumer (Phase 3). linear_sampler_
+    // (CLAMP_TO_EDGE, LINEAR mag/min) gives the bilinear interpolation that
+    // is the "bilateral" in this minimum-viable upsample — Phase 3.5 may
+    // add depth/normal edge-stopping if silhouette bleed is visible.
+    if (scene_desc_set_ && shadow_lr_view_ && linear_sampler_) {
+        VkDescriptorImageInfo sh_bi{ linear_sampler_, shadow_lr_view_,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w{};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = scene_desc_set_;
+        w.dstBinding = 18;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &sh_bi;
+        vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+    }
+    log::info("shadow_lr pipeline built (half-rate sun shadow producer)");
 }
 
 void VulkanEngine::init_pipeline_cache() {

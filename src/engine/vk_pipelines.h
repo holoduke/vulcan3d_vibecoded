@@ -12,6 +12,14 @@ VkShaderModule load_shader_module(VkDevice device, const std::string& spv_path);
 struct GraphicsPipelineConfig {
     VkShaderModule vert = VK_NULL_HANDLE;
     VkShaderModule frag = VK_NULL_HANDLE;
+    // Optional tessellation stages. When both are set, the builder adds
+    // the TESC/TESE stages, switches input-assembly topology to
+    // PATCH_LIST, and emits a VkPipelineTessellationStateCreateInfo with
+    // `patch_control_points` control points per patch (3 = triangle
+    // patches, which lets us reuse a normal triangle index buffer).
+    VkShaderModule tesc = VK_NULL_HANDLE;
+    VkShaderModule tese = VK_NULL_HANDLE;
+    uint32_t patch_control_points = 0;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     // Single-attachment shorthand — used by every pipeline that has exactly
     // one color attachment. For multi-attachment output (e.g. cube.frag
@@ -22,6 +30,8 @@ struct GraphicsPipelineConfig {
     VkFormat depth_format = VK_FORMAT_UNDEFINED;
     std::vector<VkVertexInputBindingDescription> vbindings;
     std::vector<VkVertexInputAttributeDescription> vattrs;
+    // Wireframe debug — requires the fillModeNonSolid device feature.
+    VkPolygonMode polygon_mode = VK_POLYGON_MODE_FILL;
     VkCullModeFlags cull = VK_CULL_MODE_BACK_BIT;
     VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     bool depth_test = true;

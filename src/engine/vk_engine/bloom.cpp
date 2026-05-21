@@ -369,10 +369,30 @@ void VulkanEngine::run_bloom_chain(VkCommandBuffer cmd) {
         auto fill = [&](VkImageMemoryBarrier2& b, VkImageLayout from,
                         VkImageLayout to, uint32_t mip) {
             b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-            b.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-            b.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-            b.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-            b.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+            // src covers BOTH possible prior uses of this mip — it was
+            // either just written as a colour attachment (downsample /
+            // previous upsample dest) or sampled as a shader texture.
+            // Covering both is safe and avoids a stale-src hazard.
+            b.srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            b.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                              VK_ACCESS_2_SHADER_READ_BIT;
+            // dst MUST match how the mip is consumed next, derived
+            // from the target layout — NOT hard-coded. The previous
+            // code used FRAGMENT_SHADER/SHADER_READ for both barriers,
+            // but the →COLOR_ATTACHMENT barrier feeds an additive
+            // loadOp=LOAD draw which reads+writes at
+            // COLOR_ATTACHMENT_OUTPUT. That mismatch was the
+            // sync-validation READ_AFTER_WRITE hazard on the bloom
+            // LOAD attachment (a real intermittent device-lost risk).
+            if (to == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+                b.dstStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+                b.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+            } else {  // → SHADER_READ_ONLY_OPTIMAL (sampled next)
+                b.dstStageMask  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+                b.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+            }
             b.oldLayout = from;
             b.newLayout = to;
             b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;

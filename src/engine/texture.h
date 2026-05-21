@@ -30,6 +30,16 @@ Texture2D upload_texture_from_file(VkDevice device, VmaAllocator alloc,
                                    VkQueue queue, uint32_t queue_family,
                                    const std::string& path, VkFormat format);
 
+// Upload an already-decoded, tightly-packed RGBA8 mip-0 buffer (w*h*4
+// bytes) as a 2D texture with a GPU-generated mip chain. Same proven
+// path as the file loader; used for procedurally-baked textures that
+// never touch disk. `label` is for logging only.
+Texture2D upload_texture_from_pixels(VkDevice device, VmaAllocator alloc,
+                                     VkQueue queue, uint32_t queue_family,
+                                     const unsigned char* pixels,
+                                     int w, int h, VkFormat format,
+                                     const char* label);
+
 void destroy_texture_2d(VkDevice device, VmaAllocator alloc, Texture2D& t);
 
 } // namespace qlike

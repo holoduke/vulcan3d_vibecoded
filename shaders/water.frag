@@ -1618,7 +1618,17 @@ void main() {
     // pixel we just need the homogeneous divide + subtract + normalize
     // — the matrix multiplies that used to dominate this stub are gone.
     vec3 ro = scene.camera_pos.xyz;
-    vec3 rd = normalize(vWFar.xyz / vWFar.w - vWNear.xyz / vWNear.w);
+    // Reconstruct the view ray PER-PIXEL from gl_FragCoord. The old
+    // path used interpolated vWNear/vWFar, which only equals the true
+    // screen ray for a fullscreen triangle; this shader is now bound by
+    // the rasterised WATER-PLANE pipeline, where those varyings
+    // interpolate non-linearly across the perspective-projected quad →
+    // every ray missed the water and discarded (no water visible).
+    // gl_FragCoord → NDC → inverse-VP (pc.model) is geometry-agnostic.
+    vec2 _scr = (gl_FragCoord.xy * scene.viewport.zw) * 2.0 - 1.0;
+    vec4 _wn = pc.model * vec4(_scr, 0.0, 1.0);
+    vec4 _wf = pc.model * vec4(_scr, 1.0, 1.0);
+    vec3 rd = normalize(_wf.xyz / _wf.w - _wn.xyz / _wn.w);
 
     // Water plane intersection FIRST — its `t` gives us a max distance
     // for the heightfield march: terrain past the water plane can't be
@@ -1645,7 +1655,10 @@ void main() {
     // Skips the expensive terrain march entirely — only the water
     // plane + the existing full water shading (all styles, foam,
     // showthrough, reflection) run. Identical water to the FBM path.
-    bool water_only = scene.terrain_local_info.x > 0.5;
+    // This shader is ONLY ever bound by the rasterised water-plane
+    // pipeline, so water-only is unconditional — the mesh terrain
+    // already owns the ground this frame; we just shade water.
+    bool water_only = true;
     // The FBM heightfield IS the mesh terrain (the CDLOD mesh is baked
     // from this exact noise), so the water's FBM-driven shore depth,
     // showthrough and reflection all agree with the rasterised ground.
@@ -1655,17 +1668,22 @@ void main() {
     // In water-only mode the FBM terrain itself is never SHADED (the
     // mesh owns the ground); terrain-hit pixels are discarded below so
     // the rasterised mesh shows through.
-    float t = water_only ? raymarchMesh(ro, rd, t_water_plane)
-                         : raymarch(ro, rd, t_water_plane);
-
-    // Resolve water vs terrain ordering for the rest of the shader.
-    float t_water = -1.0;
-    if (t_water_plane > 0.0 && (t < 0.0 || t_water_plane < t)) {
-        t_water = t_water_plane;
-    }
-
-    if (t < 0.0 && t_water < 0.0) {
-        // Sky вЂ” let the existing compose-pass sky handle this pixel.
+    // RASTERISED WATER PLANE: this shader is only ever bound by the
+    // water-plane pipeline. The terrain mesh already wrote its depth
+    // this frame, so occlusion (terrain in front of water) is a
+    // pixel-exact HARDWARE depth test on real geometry. We must NOT
+    // re-decide water-vs-land from the heightmap here: raymarchMesh()
+    // disagrees with the rasterised+displaced terrain silhouette by a
+    // few px, so discarding "land" punched a thin shore/far band that
+    // neither water nor terrain filled → cleared sky bled through and
+    // crawled as the camera moved. Always shade the water plane; the
+    // depth test hides it wherever terrain is nearer. (Also drops the
+    // expensive per-pixel terrain march from the water pass.)
+    float t = -1.0;
+    float t_water = t_water_plane;
+    if (t_water <= 0.0) {
+        // Ray never crosses the water plane (degenerate / looking away)
+        // — nothing to shade. Plane geometry rarely produces these.
         discard;
     }
 
@@ -1959,11 +1977,21 @@ void main() {
         // for the wider shallow→deep tint transition only.
         float depth_clean = max(0.0, water_y - terrain_y);
         float depth_m   = depth_clean;
-        float dn = noise2(wpos.xz * 0.18) +
-                    0.5 * noise2(wpos.xz * 0.42);
+        // Lower-frequency shore noise: the old metre-scale octaves made
+        // the water/land boundary visibly crawl when the camera moved
+        // along the shore. A slow meander reads as a natural coastline
+        // without the swim.
+        float dn = noise2(wpos.xz * 0.10) +
+                    0.35 * noise2(wpos.xz * 0.26);
         depth_m += (dn - 0.6) * shore_blend * shore_noise;
         depth_m  = max(0.0, depth_m);
-        float water_blend = smoothstep(0.0, shore_blend, depth_m);
+        // Screen-space anti-alias the shore transition. A fixed
+        // metre-width smoothstep collapses to <1 px at grazing angles
+        // / distance, so the shoreline aliases and jumps frame-to-
+        // frame as the camera moves. Never let the edge be narrower
+        // than ~2.5 px of depth gradient.
+        float sb_aa = max(shore_blend, fwidth(depth_m) * 2.5);
+        float water_blend = smoothstep(0.0, sb_aa, depth_m);
         // P_Malin-style underwater extinction when river style is on.
         // exp2(-depth * ext_col) gives the characteristic green-river
         // look (red attenuates fastest, then green, blue lasts). Mixed
@@ -2043,19 +2071,32 @@ void main() {
         // T = exp(-depth * absorption) so deep water still hides
         // the bottom while shallow water reads transparent.
         vec3 baseTint = shallow;     // current shore-blended water colour
+        // Transparency / water clarity. The slider now controls how far
+        // light penetrates: 0 = murky (bottom hidden within ~0.5 m),
+        // 1 = very clear (seabed visible many metres down). Crucially
+        // SHALLOW water is strongly see-through whenever clarity > ~0.2,
+        // which is what reads as real shallow water over a sandy bottom.
         float trans_amt = scene.water_shore.w;
         if (trans_amt > 0.001) {
-            // Reuse the depth_m we already computed for the shore
-            // blend. Absorption coefficient picks ~50 % attenuation
-            // at a 2 m depth, ~95 % by 6 m.
-            float absorp = 0.5;
+            // Two decoupled controls:
+            //   trans_amt (Transparency slider) = master see-through
+            //     strength: 0 = always opaque, 1 = full clarity.
+            //   pc.color.y (Water clarity depth, m) = the depth at
+            //     which water goes ~opaque, INDEPENDENT of strength.
+            //     Small → only very shallow water is clear, deep stays
+            //     opaque (what real shallow water looks like). Large →
+            //     see far down.
+            // absorp chosen so Tw = exp(-3) ≈ 0.05 (≈opaque) exactly at
+            // `clarity_depth` metres; shallower water is clear.
+            float clarity_depth = max(0.1, pc.color.y);
+            float absorp = 3.0 / clarity_depth;
             float Tw = exp(-depth_m * absorp);
             // Visibility gate: skip the entire underwater shading
             // (calcNormal = 1× FBM, getMaterial = several `noise2`
             // taps, lambert + ambient) when the contribution is
             // below ~5 % of the surface tint. At 6 m depth Tw drops
             // to 0.05; deep-water pixels read as opaque tint anyway.
-            if (Tw * trans_amt > 0.05) {
+            if (Tw > 0.04) {
                 // Underwater surface вЂ” terrain material at the under-
                 // water point, lambert-shaded by sun (with shadow), no
                 // shore noise so the look is calm.
@@ -2072,8 +2113,10 @@ void main() {
                 // reads as "looking through water", not "no water".
                 u_col *= mix(vec3(1.0), shallow * 1.5 + vec3(0.05),
                               0.5);
-                // Blend: shallow в†’ underwater visible, deep в†’ opaque
-                // water_color. trans_amt scales the maximum showthrough.
+                // Beer's-law transmittance (depth fade governed by the
+                // clarity-depth knob) × trans_amt (master strength). At
+                // Transparency=1 + small clarity depth: shallow reads
+                // crystal-clear, deep water stays fully opaque.
                 baseTint = mix(baseTint, u_col, Tw * trans_amt);
             }
         }
@@ -2093,7 +2136,15 @@ void main() {
         // the natural foam / surf-line you see at real shorelines.
         // Tunable via UI: water_foam_color (rgb tint + a strength)
         // and water_foam_params.x (band width). Strength = 0 disables.
-        if (scene.water_foam_color.a > 0.001) {
+        float foam_amt = 0.0;   // hoisted so the final alpha can see it
+        // Foam opacity (pc.color.w) is a MASTER override: it scales
+        // both the foam colour AND its alpha, so 0 = no foam at all
+        // (the shallow water shows through exactly like non-foam),
+        // 1 = full opaque surf. Computed here so the colour blend can
+        // use it too (previously only the alpha used it, leaving the
+        // white foam tint visible at 0).
+        float foam_op = clamp(pc.color.w, 0.0, 1.0);
+        if (scene.water_foam_color.a > 0.001 && foam_op > 0.001) {
             float foam_w = max(0.05, scene.water_foam_params.x);
             float band   = exp(-depth_clean * (4.0 / foam_w));
             // River style: blend in the flow-driven foam pattern on top
@@ -2101,8 +2152,9 @@ void main() {
             // above (1.0 when river style is off, so no effect).
             float flow_foam = clamp(1.0 - pm_foam_tex, 0.0, 1.0);
             float foam_mix = max(band, flow_foam);
+            foam_amt = foam_mix;
             col_w = mix(col_w, scene.water_foam_color.rgb,
-                        foam_mix * scene.water_foam_color.a);
+                        foam_mix * scene.water_foam_color.a * foam_op);
         }
         col_w += scene.sun_color.rgb * scene.sun_color.a * spec *
                   0.8 * water_lit;
@@ -2115,13 +2167,18 @@ void main() {
         // the wind direction gives the field motion. Foam intensity
         // also modulated by `water_lit` so shadowed water doesn't get
         // bright white speckles.
-        {
+        // Gated by the SAME foam-opacity master (foam_op) as the shore
+        // band, and folded into foam_amt so the final alpha drops here
+        // too — this whitecap foam was previously independent of the
+        // slider, which is why low foam opacity still looked opaque.
+        if (foam_op > 0.001) {
             float steepness = clamp(1.0 - wnor.y * 1.04, 0.0, 1.0);
             vec2 fp = wpos.xz * 0.55 + vec2(wave_t * 0.30, wave_t * 0.18);
             float fn = noise2(fp) * 0.6 + noise2(fp * 2.13) * 0.4;
             float foam = smoothstep(0.45, 0.85, fn * steepness * 1.6);
+            foam_amt = max(foam_amt, foam);
             col_w = mix(col_w, vec3(0.95, 0.97, 1.0),
-                        foam * 0.85 * water_lit);
+                        foam * 0.85 * water_lit * foam_op);
         }
 
         // Apply the same volumetric fog as terrain (reuse the
@@ -2138,20 +2195,57 @@ void main() {
                            0.3 * sd8);
         col_w = col_w * ext_w + fogColW * (1.0 - ext_w);
 
-        // Write hit depth; rasterised geometry that's actually in
-        // front (e.g. a cube on a pier) still occludes us.
+        // Depth is owned by the RASTERISED water plane (this is real
+        // geometry now, not a fullscreen analytic pass) — do NOT write
+        // gl_FragDepth. That makes the terrain↔water silhouette a
+        // pixel-exact hardware depth test (the whole point of the
+        // rasterised-plane port). clipW is still needed for the motion
+        // vector below.
         vec4 clipW = pc.mvp * vec4(wpos, 1.0);
-        // See main terrain branch вЂ” cap below the compose sky-cutoff
-        // threshold so far water doesn't get repainted as sky-below-
-        // horizon (black). Guard against w<=0 (point behind camera) so
-        // the depth divide doesn't produce NaN.
-        gl_FragDepth = min(clipW.z / max(clipW.w, 1e-4), 0.9998);
         // Distance fog on the water surface too.
         {
             float fa = distanceFogAmount(wpos, scene.camera_pos.xyz);
             col_w = mix(col_w, scene.distance_fog_color.rgb, fa);
         }
-        outColor = vec4(col_w, 1.0);
+        // Soft shore depth-feather. The flat water plane and the
+        // terrain mesh INTERSECT at the shoreline, where their depths
+        // are ~equal — the razor-thin coplanar edge z-fights and
+        // jitters as the camera moves. Fade the water alpha out over
+        // the last ~0.35 m of depth so it dissolves into the wet shore
+        // (alpha-blended over the terrain already drawn this pass)
+        // instead of fighting it. Deeper water keeps alpha = 1, so the
+        // open-water look is unchanged.
+        // See-through via the HARDWARE alpha blend. The real splatted
+        // terrain is already in the framebuffer (drawn before the water
+        // plane), so making the water partially transparent in
+        // clear/shallow water reveals the actual ground — far better
+        // than the shader's internal FBM showthrough, which doesn't
+        // match the mesh. trans_amt (Transparency) = master strength;
+        // pc.color.y (Clarity depth, m) sets how deep the see-through
+        // reaches. Deep water → clarT→0 → fully opaque.
+        float clar_d = max(0.1, pc.color.y);
+        float clarT  = exp(-depth_m * (3.0 / clar_d));   // 1 shallow→0 deep
+        // Grazing-angle opacity: at a low view angle the light path
+        // through the water is long and Fresnel turns the surface
+        // reflective, so you should see the SKY, not the bottom. cosV
+        // is 1 looking straight down, →0 at grazing. Without this you
+        // could see through deep water when glancing across it.
+        float graze = smoothstep(0.10, 0.45, cosV);
+        float see   = clamp(trans_amt, 0.0, 1.0) * clarT * graze;
+        // Soft, screen-space-stable waterline. The fade width is the
+        // shoreline-softness knob (pc.color.z, metres of depth), but
+        // never narrower than ~2.5 px of the depth gradient — that
+        // fwidth floor is what kills the frame-to-frame jitter from the
+        // point-sampled heightmap vs the rasterised terrain edge.
+        float shore_soft = max(0.02, pc.color.z);
+        float shore_w    = max(shore_soft, fwidth(depth_clean) * 2.5);
+        float shore_alpha = smoothstep(0.0, shore_w, depth_clean);
+        // Foam opacity (foam_op, computed above) also scales the foam's
+        // alpha so at 0 the foam adds NO opacity — the shallow water
+        // shows through identically to non-foam.
+        float a = shore_alpha * (1.0 - 0.92 * see) *
+                  mix(1.0, foam_op, foam_amt);
+        outColor = vec4(col_w, a);
         // Motion vector for TAA reprojection. clip-space derivation
         // (resolution-independent) so the LR raymarch path doesn't
         // pick up a constant ~0.5 offset from scene.viewport being
@@ -2817,8 +2911,12 @@ void main() {
     // (which is black for typical HDRIs). Result: distant raymarch
     // terrain renders as pure black. Capping keeps compose's sky-
     // detection from misfiring on far terrain hits.
+    // Terrain branch is DEAD in water.frag (water_only is forced true →
+    // discarded long before here). `clip` is still needed by the motion
+    // block below, but we deliberately write NO gl_FragDepth anywhere in
+    // this shader so it is not depth-replacing — the rasterised water
+    // plane's hardware depth is used as-is (pixel-exact shoreline).
     vec4 clip = pc.mvp * vec4(pos, 1.0);
-    gl_FragDepth = min(clip.z / max(clip.w, 1e-4), 0.9998);
 
     // Distance fog — final atmospheric mix, after all the other
     // shading, GI, water, volumetric fog and grass-shadow work.

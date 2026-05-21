@@ -536,6 +536,54 @@ void main() {
         hdr = max(hdr, vec3(0.0));   // RCAS guard against negative
     }
 
+    // Screen-space sun shafts (crepuscular rays). 24 fixed taps along
+    // the line from this pixel toward the sun's screen position; each
+    // tap contributes the sun colour iff the tap is a sky pixel (depth
+    // sentinel ≥ 0.99999). Geometry occluders along the line silhouette
+    // the rays — the classic god-ray look. Cheap: 24 sky-gated depth
+    // fetches, no extra colour samples. Gated on the user's sun_shaft
+    // intensity slider (pc.sun_dir.w) and the sun being in front of the
+    // camera (pc.sun_screen.z > 0.5 — same flag the lens-flare uses).
+    // Runs BEFORE bloom so the brightened shaft pixels pick up bloom's
+    // soft halo for free.
+    if (pc.sun_dir.w > 0.001 && pc.sun_screen.z > 0.5) {
+        vec2  uv_here = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
+        vec2  uv_sun  = pc.sun_screen.xy;
+        vec2  d_total = uv_here - uv_sun;
+        const int   kN     = 24;
+        const float kStep  = 1.0 / float(kN);
+        const float kDecay = 0.94;
+        vec2 d_step = d_total * kStep;
+        // Per-pixel sub-step jitter. Without it the 24 fixed tap
+        // positions visibly band into squares/stripes whenever the line
+        // crosses small sky openings (castle windows): every pixel's
+        // taps land in the same relative slots so the discretisation
+        // shows. The hash offsets the starting position by ∈ [0, kStep),
+        // turning the band pattern into per-pixel noise that TAA's
+        // history blend integrates into smooth continuous rays.
+        float jitter = fract(sin(dot(gl_FragCoord.xy,
+                                      vec2(12.9898, 78.233))) * 43758.5453);
+        vec2 uv_t   = uv_here - d_step * jitter;
+        float w = 1.0;
+        float occ = 0.0;
+        for (int i = 0; i < kN; ++i) {
+            uv_t -= d_step;
+            float dz = texture(history_depth, uv_t).r;
+            if (dz >= 0.99999) occ += w;
+            w *= kDecay;
+        }
+        // Σ w_i = (1 − decay^N) / (1 − decay); divide so shaft ∈ [0,1].
+        const float kNorm  = (1.0 - 0.2272278) / (1.0 - kDecay); // pow(0.94,24)≈0.227
+        float shaft        = occ / kNorm;
+        // Radial falloff away from the sun. Without it shafts wash the
+        // whole frame uniformly whenever the sun is visible at all.
+        float r            = length(d_total);
+        float radial_fade  = exp(-r * 1.8);
+        vec3 shaft_col     = pc.sun_color.rgb * pc.sun_color.a *
+                             shaft * radial_fade * pc.sun_dir.w;
+        hdr += shaft_col;
+    }
+
     // Bloom and lens flare apply on every pixel — including sky. Bloom is
     // one texture() fetch (no more 24-tap spiral); lens-flare early-outs on
     // "sun behind camera" so most non-flare frames exit cheap. Gating on

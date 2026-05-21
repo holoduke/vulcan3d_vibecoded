@@ -22,6 +22,11 @@ struct InputFrame {
     bool sprint = false;    // Left Shift — 1.5× walk speed
     bool crawl = false;     // Left Ctrl — 0.4× walk speed (sprint wins if both)
     bool menu_key = false;  // ESC; engine edge-detects to toggle pause
+    bool edit_key = false;  // E; engine edge-detects to toggle terrain edit mode
+    bool brush_smaller = false; // `[` — level; engine shrinks brush while held
+    bool brush_larger  = false; // `]` — level; engine grows brush while held
+    bool brush_mode_prev = false; // Q; engine edge-detects to cycle brush mode
+    bool brush_mode_next = false; // R; engine edge-detects to cycle brush mode
     bool fire = false;      // left mouse, edge-triggered (one click = one)
     bool fire_held = false; // left mouse, level (true while button is down)
     bool alt_fire_held = false; // right mouse, level (true while button is down)

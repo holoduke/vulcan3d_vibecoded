@@ -133,30 +133,16 @@ uint32_t mip_levels_for(int w, int h) {
 
 } // namespace
 
-Texture2D upload_texture_from_file(VkDevice device, VmaAllocator alloc,
+// Shared GPU-upload core: takes a tightly-packed RGBA8 mip-0 buffer and
+// produces a sampled device-local texture with a full GPU-blitted mip
+// chain. Used by both the file loader and the procedural-bake path so
+// the proven staging/barrier/mip sequence lives in exactly one place.
+static Texture2D upload_rgba8_core(VkDevice device, VmaAllocator alloc,
                                    VkQueue queue, uint32_t qf,
-                                   const std::string& path, VkFormat format) {
+                                   const unsigned char* pixels,
+                                   int w, int h, VkFormat format,
+                                   const char* label) {
     Texture2D r{};
-    int w = 0, h = 0;
-    bool from_cache = false;
-    // Fast path: try the .qtc cache. Falls back to JPG decode on miss
-    // / stale / corrupt. The cache stores raw RGBA8 mip-0 pixels;
-    // mip generation still happens on the GPU below — much faster than
-    // baking mips on the CPU.
-    unsigned char* pixels = try_load_cache(path, &w, &h);
-    if (pixels) {
-        from_cache = true;
-    } else {
-        int comps = 0;
-        pixels = stbi_load(path.c_str(), &w, &h, &comps, 4);
-        if (!pixels) {
-            // Caller probes multiple paths — only worth logging at the call site
-            // when every probe fails.
-            return r;
-        }
-        // Best-effort cache write so the next launch skips the decode.
-        save_cache(path, pixels, w, h);
-    }
     const VkDeviceSize bytes = static_cast<VkDeviceSize>(w) * h * 4;
 
     VkBuffer stage_buf = VK_NULL_HANDLE;
@@ -179,7 +165,7 @@ Texture2D upload_texture_from_file(VkDevice device, VmaAllocator alloc,
         vmaGetAllocationInfo(alloc, stage_alloc, &info);
         std::memcpy(info.pMappedData, pixels, static_cast<size_t>(bytes));
     }
-    stbi_image_free(pixels);
+    // (caller owns `pixels` and frees it after we return)
 
     const uint32_t mip_count = mip_levels_for(w, h);
 
@@ -340,9 +326,45 @@ Texture2D upload_texture_from_file(VkDevice device, VmaAllocator alloc,
     vkDestroyCommandPool(device, pool, nullptr);
     vmaDestroyBuffer(alloc, stage_buf, stage_alloc);
 
-    log::infof("[texture] uploaded %s: %dx%d", path.c_str(), w, h);
+    log::infof("[texture] uploaded %s: %dx%d", label, w, h);
     r.ok = true;
     return r;
+}
+
+Texture2D upload_texture_from_file(VkDevice device, VmaAllocator alloc,
+                                   VkQueue queue, uint32_t qf,
+                                   const std::string& path, VkFormat format) {
+    int w = 0, h = 0;
+    // Fast path: try the .qtc cache. Falls back to JPG decode on miss
+    // / stale / corrupt. The cache stores raw RGBA8 mip-0 pixels;
+    // mip generation still happens on the GPU much faster than CPU.
+    unsigned char* pixels = try_load_cache(path, &w, &h);
+    bool from_cache = pixels != nullptr;
+    if (!pixels) {
+        int comps = 0;
+        pixels = stbi_load(path.c_str(), &w, &h, &comps, 4);
+        if (!pixels) {
+            // Caller probes multiple paths — only worth logging at the
+            // call site when every probe fails.
+            return {};
+        }
+        // Best-effort cache write so the next launch skips the decode.
+        save_cache(path, pixels, w, h);
+    }
+    Texture2D r = upload_rgba8_core(device, alloc, queue, qf, pixels,
+                                    w, h, format, path.c_str());
+    stbi_image_free(pixels);
+    (void)from_cache;
+    return r;
+}
+
+Texture2D upload_texture_from_pixels(VkDevice device, VmaAllocator alloc,
+                                     VkQueue queue, uint32_t qf,
+                                     const unsigned char* pixels,
+                                     int w, int h, VkFormat format,
+                                     const char* label) {
+    return upload_rgba8_core(device, alloc, queue, qf, pixels, w, h,
+                             format, label ? label : "<pixels>");
 }
 
 void destroy_texture_2d(VkDevice device, VmaAllocator alloc, Texture2D& t) {

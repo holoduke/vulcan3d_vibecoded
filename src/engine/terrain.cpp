@@ -64,6 +64,11 @@ inline float rm_hash21(glm::vec2 p) {
 inline float rm_noised(glm::vec2 p, glm::vec2& deriv) {
     glm::vec2 i = glm::floor(p);
     glm::vec2 f = p - i;
+    // Hermite cubic — MUST stay byte-identical in meaning to
+    // terrain_raymarch.frag / grass_raymarch.frag noised(). This is
+    // the CPU FBM that bakes the physics heightfield + grass baseline;
+    // if it diverges from the shader the collision surface no longer
+    // matches the visible terrain. (Reverted quintic experiment.)
     glm::vec2 u  = f * f * (3.0f - 2.0f * f);
     glm::vec2 du = 6.0f * f * (1.0f - f);
     float a = rm_hash21(i + glm::vec2(0, 0));

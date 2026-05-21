@@ -141,6 +141,9 @@ float hash21(vec2 p) {
     return fract((p3.x + p3.y) * p3.z);
 }
 
+// Hermite cubic — MUST match terrain_raymarch.frag's noised() and
+// the CPU rm_noised bake exactly so grass blades sit on the same
+// FBM surface the terrain pass renders. (Reverted quintic experiment.)
 vec3 noised(in vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);

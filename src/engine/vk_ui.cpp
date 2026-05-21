@@ -454,6 +454,8 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SeparatorText("Sun");
         ImGui::SliderFloat("pitch (deg)", &rt_.sun_pitch_deg, 5.0f, 89.0f);
         ImGui::SliderFloat("yaw (deg)", &rt_.sun_yaw_deg, -180.0f, 180.0f);
+        ImGui::Checkbox("Auto golden-hour tint (warm sun + sky when low)",
+                        &rt_.auto_golden_hour);
         ImGui::SliderFloat("intensity", &rt_.sun_intensity, 0.0f, 8.0f);
         ImGui::ColorEdit3("sun color", &rt_.sun_color.x);
 
@@ -464,11 +466,25 @@ void VulkanEngine::build_menu_ui() {
 
         ImGui::SeparatorText("Shadows (RT, contact-hardening)");
         ImGui::Checkbox("enabled", &rt_.shadow_enabled);
+        ImGui::Checkbox("half-rate shadow pass (perf)",
+                        &rt_.half_rate_shadows);
+        ImGui::TextDisabled(
+            "Trace the PCSS sun shadow at half res + bilateral\n"
+            "upsample instead of per-pixel. Big perf win; OFF =\n"
+            "the proven inline path.");
         ImGui::SliderInt("samples", &rt_.shadow_samples, 1, 128);
         ImGui::SliderFloat("near samples multiplier", &rt_.shadow_near_mult, 1.0f, 8.0f, "%.2fx");
         ImGui::SliderFloat("softness", &rt_.shadow_softness, 0.0f, 0.15f);
         ImGui::SliderFloat("strength", &rt_.shadow_strength, 0.0f, 1.0f);
         ImGui::SliderFloat("curve (linear→expo)", &rt_.shadow_curve, 0.0f, 1.0f);
+
+        ImGui::SeparatorText("Castle materials (SPOM)");
+        // Per-pixel parallax depth on castle walls (and any future
+        // SPOM-eligible materials). 0 = flat, 1 = engine default
+        // (~4 cm peak-to-trough at 1 m view), 2.5 = exaggerated
+        // bricks. At 0 the SPOM march is short-circuited entirely so
+        // there's no GPU cost for users who want flat textures.
+        ImGui::SliderFloat("SPOM strength", &rt_.spom_strength, 0.0f, 2.5f, "%.2f");
 
         ImGui::SeparatorText("Sun shadow map (grass receiver)");
         // Resolution dropdown — apply triggers a vkDeviceWaitIdle + image
@@ -508,6 +524,12 @@ void VulkanEngine::build_menu_ui() {
 
         ImGui::SeparatorText("Path-traced GI (multi-bounce)");
         ImGui::SliderInt("GI samples (0=off)", &rt_.gi_samples, 0, 128);
+        // ReSTIR-lite (session 1 of multi-session plan — see
+        // docs/restir_plan.md). Toggle quarters gi_samples at runtime;
+        // the existing TAA + spatial filter smooths the noise. Sessions
+        // 2+ replace the / 4 hack with proper reservoir reuse.
+        ImGui::Checkbox("ReSTIR-lite (samples / 4, lean on TAA)",
+                          &rt_.gi_restir_enabled);
         ImGui::SliderInt("GI bounces", &rt_.gi_bounces, 1, 5);
         ImGui::SliderInt("GI shadow bounces (sun shadow on bounce hits)",
                           &rt_.gi_shadow_max_bounce, 0, 5);
@@ -550,7 +572,40 @@ void VulkanEngine::build_menu_ui() {
         // RCAS) are pending. Toggle currently only switches the
         // jitter sequence; the actual upscale path falls back to
         // FSR1 EASU+RCAS in compose.frag until Phase 5 lands.
-        ImGui::Checkbox("FSR2 (foundation, WIP)", &rt_.fsr2_enabled);
+        ImGui::Checkbox("FSR upscale (renders at render_scale, upscales to native)",
+                        &rt_.fsr2_enabled);
+        // Backend select — only meaningful when FSR upscale is on. FSR3
+        // uses the new ffx-api ABI through the prebuilt vendored DLL;
+        // FSR2 uses the legacy static-lib path. Frame generation (FSR3
+        // sessions 3-6) is NOT yet wired — this only swaps the upscaler.
+        const char* fsr_backends[] = { "FSR2 (legacy static)", "FSR3 (ffx-api DLL)" };
+        ImGui::Combo("FSR backend", &rt_.fsr_backend, fsr_backends,
+                     IM_ARRAYSIZE(fsr_backends));
+        if (fsr3_fatal_) {
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                "FSR3 unavailable on this device (CreateContext AVed in SDK DLL "
+                "— see qlike.log). Backend auto-reverted to FSR2.");
+        }
+        // FSR3 Frame Generation. Only meaningful when FSR3 backend is
+        // active. Session 3 dispatches FG to a private image that
+        // isn't presented yet — toggle visibly costs GPU time but
+        // produces no perceptible delta. Session 4 wires the present
+        // chain so this becomes the FPS-doubling switch.
+        if (rt_.fsr_backend == 1 && !fsr3_fatal_) {
+            ImGui::Checkbox("FSR3 Frame Generation (perceived FPS ×2)",
+                            &rt_.fg_enabled);
+            if (fsr3_fg_fatal_) {
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                    "FG unavailable (init failed) — see qlike.log");
+            } else if (rt_.fg_enabled && fg_runtime_disabled_) {
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                    "FG auto-disabled (render < 50 fps base — interpolation "
+                    "judder dominates below this; will re-enable above 60).");
+            } else if (rt_.fg_enabled && fsr3_swapchain_active_) {
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.5f, 1.0f),
+                    "FG active — SDK pacing real + generated frames");
+            }
+        }
         ImGui::TextDisabled("Phase 1/5 — Halton(2,3) jitter active.\n"
                              "Compute passes pending in future sessions.");
         ImGui::SliderFloat("spatial strength", &rt_.taa_spatial_strength, 0.0f, 1.0f);
@@ -558,6 +613,7 @@ void VulkanEngine::build_menu_ui() {
         // recovers detail the TAA spatial filter softened. 0 disables; 0.55
         // is the default; >1 looks deliberately punchy.
         ImGui::SliderFloat("post-TAA sharpening", &rt_.compose_sharpen_strength, 0.0f, 2.0f);
+        ImGui::SliderFloat("sun shafts (god rays)", &rt_.sun_shaft_intensity, 0.0f, 2.0f);
 
         ImGui::SeparatorText("Bloom (compose-pass spiral-tap)");
         ImGui::Checkbox("bloom enabled", &rt_.bloom_enabled);
@@ -617,12 +673,22 @@ void VulkanEngine::build_menu_ui() {
     if (ImGui::BeginTabItem("Terrain")) {
         if (ImGui::CollapsingHeader("Terrain", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::SeparatorText("Renderer");
-        ImGui::Checkbox("Procedural raymarched terrain (FBM)",
-                         &rt_.terrain_raymarch_enabled);
-        ImGui::TextDisabled("Toggling lazy-builds raster mesh + grass on demand.\n"
-                             "Terrain BLAS (RT shadows on terrain) is built once at\n"
-                             "load — toggling off mid-session means no RT terrain\n"
-                             "shadow contact until restart.");
+        // Mode switch is always visible; everything below adapts to it
+        // so you only see the settings for the selected terrain path.
+        if (ImGui::Checkbox("Procedural raymarched terrain (FBM)",
+                            &rt_.terrain_raymarch_enabled)) {
+            // Mesh(water-only) wants full-res, FBM wants the scaled LR
+            // buffer — resize when the mode flips.
+            recreate_terrain_raymarch_lowres();
+        }
+        ImGui::TextDisabled("Switches the whole terrain renderer. Toggling\n"
+                             "lazy-builds raster mesh + grass on demand.\n"
+                             "Terrain BLAS (RT shadows on terrain) is built once\n"
+                             "at load — toggling off mid-session means no RT\n"
+                             "terrain shadow contact until restart.");
+
+        if (rt_.terrain_raymarch_enabled) {
+        ImGui::SeparatorText("FBM raymarch");
         ImGui::SliderInt("Raymarch steps",
                          &rt_.terrain_raymarch_max_steps, 60, 300);
         ImGui::SliderInt("Raymarch shadow steps",
@@ -632,7 +698,7 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderInt("FBM octaves (normals)",
                          &rt_.terrain_raymarch_normal_octaves, 4, 32);
         ImGui::SliderFloat("Step factor",
-                           &rt_.terrain_raymarch_step_factor, 0.4f, 0.8f, "%.2f");
+                           &rt_.terrain_raymarch_step_factor, 0.15f, 0.8f, "%.2f");
         // Distance-LOD ramp — drops FBM octaves with ray distance so the
         // expensive 3× terrainH() calls in calcNormal collapse to the
         // floor count past `lod_far_m`. Biggest perf win at horizon
@@ -682,6 +748,17 @@ void VulkanEngine::build_menu_ui() {
             "Fog 0 = off, 1 = baseline, 2 = thick valley fog.\n"
             "Relaxation: faster march at the risk of skipping spikes.\n"
             "God-rays: 4 short rays per fog step, ~20% slower fog.");
+        } else {
+        ImGui::SeparatorText("Mesh / tessellation");
+        ImGui::Checkbox("Near GPU tessellation + displacement",
+                         &rt_.terrain_tessellation_enabled);
+        ImGui::TextDisabled("Live toggle. OFF = plain CD-LOD mesh (no\n"
+                             "subdivision/displacement near the camera).");
+        ImGui::SliderFloat("Tessellation range (m)",
+                           &rt_.terrain_tess_range, 30.0f, 250.0f, "%.0f");
+        ImGui::Checkbox("Wireframe (show triangles / mesh density)",
+                         &rt_.terrain_wireframe);
+        }   // end FBM / mesh renderer split
 
         ImGui::SeparatorText("Ocean / water");
         ImGui::Checkbox("Water enabled", &rt_.water_enabled);
@@ -741,6 +818,12 @@ void VulkanEngine::build_menu_ui() {
                            &rt_.water_foam_strength, 0.0f, 1.0f, "%.2f");
         ImGui::SliderFloat("Foam width (m)",
                            &rt_.water_foam_width, 0.05f, 5.0f, "%.2f");
+        ImGui::SliderFloat("Foam opacity",
+                           &rt_.water_foam_opacity, 0.0f, 1.0f, "%.2f");
+        ImGui::TextDisabled("%s",
+            "How opaque the foam is vs the see-through water under it.\n"
+            "0 = foam as transparent as clear shallow water (light\n"
+            "surf), 1 = foam fully opaque.");
         ImGui::Checkbox("RT terrain reflections", &rt_.water_rt_reflections);
         ImGui::Checkbox("RT cube/castle reflections (TLAS)",
                          &rt_.water_tlas_reflections);
@@ -748,9 +831,21 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("Transparency",
                            &rt_.water_transparency, 0.0f, 1.0f, "%.2f");
         ImGui::TextDisabled("%s",
-            "Transparency only affects shallow water (Beer's law\n"
-            "attenuation). Set to 0 for fully opaque, 1 for tropical\n"
-            "showthrough where you can see the seabed.");
+            "Master see-through strength. 0 = always opaque,\n"
+            "1 = full clarity (up to the clarity depth below).");
+        ImGui::SliderFloat("Clarity depth (m)",
+                           &rt_.water_clarity_depth, 0.2f, 20.0f, "%.1f");
+        ImGui::TextDisabled("%s",
+            "How deep you can see, INDEPENDENT of strength.\n"
+            "Small (~1 m) = only very shallow water is clear, deep\n"
+            "water stays opaque (realistic shallows). Large = see\n"
+            "the seabed far down (tropical lagoon).");
+        ImGui::SliderFloat("Shoreline softness (m)",
+                           &rt_.water_shore_softness, 0.05f, 4.0f, "%.2f");
+        ImGui::TextDisabled("%s",
+            "Metres of depth the water fades in over at the land\n"
+            "edge. Larger = a longer, smoother wet-sand → water\n"
+            "transition (also hides the waterline jitter).");
         // Quick presets so the user has a starting point per mood.
         if (ImGui::Button("Tropical")) {
             rt_.water_color         = glm::vec3(0.04f, 0.30f, 0.40f);
@@ -800,6 +895,8 @@ void VulkanEngine::build_menu_ui() {
         }
         ImGui::TextDisabled("* Restart required — heightmap generated at level load.");
 
+        // ---- Mesh-path-only settings (hidden in FBM raymarch mode) ----
+        if (!rt_.terrain_raymarch_enabled) {
         ImGui::SeparatorText("LOD distances");
         ImGui::SliderFloat("Terrain detail (multiplier)",
                             &rt_.terrain_lod_scale, 0.5f, 4.0f, "%.2fx");
@@ -810,6 +907,56 @@ void VulkanEngine::build_menu_ui() {
             rt_.terrain_lod2 = rt_.terrain_lod1 + 20.0f;
         if (rt_.terrain_lod3 < rt_.terrain_lod2 + 20.0f)
             rt_.terrain_lod3 = rt_.terrain_lod2 + 20.0f;
+
+        ImGui::SeparatorText("Near tessellation density (live)");
+        ImGui::SliderFloat("Tess max subdivision",
+                           &rt_.terrain_tess_max_level, 1.0f, 64.0f, "%.0f");
+        ImGui::SliderFloat("Tess full-detail dist (m)",
+                           &rt_.terrain_tess_near_m, 1.0f, 60.0f, "%.0f");
+        ImGui::SliderFloat("Tess fade-out dist (m)",
+                           &rt_.terrain_tess_far_m, 10.0f, 250.0f, "%.0f");
+        ImGui::SliderFloat("Tess falloff (<1 = denser near)",
+                           &rt_.terrain_tess_falloff, 0.2f, 3.0f, "%.2f");
+        ImGui::SliderFloat("Tess smoothing (before texture)",
+                           &rt_.terrain_tess_smooth, 0.0f, 1.0f, "%.2f");
+        ImGui::TextDisabled(
+            "0 = raw per-type relief, 1 = smooth low-frequency swell.\n"
+            "Low-passes the tessellated geometry + normal before the\n"
+            "material splat is applied.");
+        ImGui::SliderFloat("Rock relief (vertex geometry)",
+                           &rt_.terrain_rock_relief, 0.0f, 1.0f, "%.2f");
+        ImGui::TextDisabled(
+            "Real tessellated geometry on rock — the coarse/silhouette\n"
+            "half. Kept chunky even when Tess smoothing is high.");
+        ImGui::SliderFloat("Sand ripple scale",
+                           &rt_.terrain_sand_ripple_scale, 1.0f, 40.0f, "%.1f");
+        ImGui::TextDisabled(
+            "Beach ripple spacing. Lines follow the shoreline (phase =\n"
+            "height above water), so they curve with the coast.");
+        ImGui::SliderFloat("Grass line scale",
+                           &rt_.terrain_grass_line_scale, 0.0f, 40.0f, "%.1f");
+        ImGui::TextDisabled(
+            "Grass contour rows, same shore-following logic.\n"
+            "0 = off. Independent of the sand ripple scale.");
+        ImGui::SliderFloat("Rock parallax (per-pixel depth)",
+                           &rt_.terrain_pom_strength, 0.0f, 1.0f, "%.2f");
+        ImGui::TextDisabled(
+            "Per-pixel parallax of the eroded rock height — the FINE\n"
+            "half. Pair with Rock relief above + Material strength > 0.\n"
+            "Only on rocky pixels, ramps to 0 by ~90 m (LOD). 0 = off.");
+        if (rt_.terrain_tess_far_m < rt_.terrain_tess_near_m + 5.0f)
+            rt_.terrain_tess_far_m = rt_.terrain_tess_near_m + 5.0f;
+
+        ImGui::SeparatorText("Ground material (procedural splat)");
+        ImGui::SliderFloat("Material strength",
+                           &rt_.ground_mat_strength, 0.0f, 1.0f, "%.2f");
+        ImGui::TextDisabled(
+            "0 = old flat height-band colour (A/B off), 1 = full per-texel\n"
+            "rock/grass/dirt/sand/snow blended by height + slope.");
+        ImGui::SliderFloat("Material tile size (m)",
+                           &rt_.ground_mat_tile_m, 0.5f, 12.0f, "%.2f");
+        ImGui::SliderFloat("Detail normal strength",
+                           &rt_.ground_mat_normal, 0.0f, 1.0f, "%.2f");
 
         ImGui::SeparatorText("Shading");
         ImGui::SliderFloat("atmospheric fog",  &rt_.terrain_fog_strength,    0.0f, 1.5f);
@@ -827,7 +974,9 @@ void VulkanEngine::build_menu_ui() {
                 rt_.terrain_bake_supersample = ss_values[ss_idx];
             }
         }
+        }   // end mesh-path-only settings
 
+        // ---- Shared (both terrain modes) ----
         if (ImGui::TreeNode("Layer transitions (height in metres)")) {
             ImGui::SliderFloat("sand->grass start", &rt_.terrain_h_sand_grass_start,  -10.0f,  60.0f);
             ImGui::SliderFloat("sand->grass end",   &rt_.terrain_h_sand_grass_end,    -10.0f,  60.0f);

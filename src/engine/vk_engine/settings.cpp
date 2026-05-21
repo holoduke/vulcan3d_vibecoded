@@ -236,6 +236,7 @@ void VulkanEngine::save_settings() const {
     f << "ao_radius = "          << rt_.ao_radius          << "\n";
     f << "gi_samples = "         << rt_.gi_samples         << "\n";
     f << "gi_bounces = "         << rt_.gi_bounces         << "\n";
+    f << "gi_restir_enabled = "  << (rt_.gi_restir_enabled ? 1 : 0) << "\n";
     f << "gi_shadow_max_bounce = " << rt_.gi_shadow_max_bounce << "\n";
     f << "ao_floor = "             << rt_.ao_floor             << "\n";
     f << "auto_exposure_strength = " << rt_.auto_exposure_strength << "\n";
@@ -248,7 +249,10 @@ void VulkanEngine::save_settings() const {
     f << "terrain_brush_noise_freq = "     << terrain_brush_noise_freq_     << "\n";
     f << "terrain_brush_use_fbm_erosion = " << (terrain_brush_use_fbm_erosion_ ? 1 : 0) << "\n";
     f << "terrain_brush_fbm_octaves = "    << terrain_brush_fbm_octaves_    << "\n";
-    f << "terrain_edit_mode = "            << (terrain_edit_mode_ ? 1 : 0)  << "\n";
+    // terrain_edit_mode is transient interaction state, NOT a saved
+    // preference — persisting it meant a stray auto-save with the brush
+    // active made the edit ring reappear on every later launch even
+    // though the user never entered edit mode. Always start it off.
     f << "terrain_fog_strength = "    << rt_.terrain_fog_strength << "\n";
     f << "terrain_wrap_strength = "   << rt_.terrain_wrap_strength << "\n";
     f << "terrain_detail_strength = " << rt_.terrain_detail_strength << "\n";
@@ -299,8 +303,24 @@ void VulkanEngine::save_settings() const {
     f << "terrain_lod2 = " << rt_.terrain_lod2 << "\n";
     f << "terrain_lod3 = " << rt_.terrain_lod3 << "\n";
     f << "terrain_lod_scale = " << rt_.terrain_lod_scale << "\n";
+    f << "terrain_tessellation_enabled = " << (rt_.terrain_tessellation_enabled ? 1 : 0) << "\n";
+    f << "terrain_tess_range = " << rt_.terrain_tess_range << "\n";
+    f << "terrain_wireframe = " << (rt_.terrain_wireframe ? 1 : 0) << "\n";
+    f << "terrain_tess_max_level = " << rt_.terrain_tess_max_level << "\n";
+    f << "terrain_tess_near_m = " << rt_.terrain_tess_near_m << "\n";
+    f << "terrain_tess_far_m = " << rt_.terrain_tess_far_m << "\n";
+    f << "terrain_tess_falloff = " << rt_.terrain_tess_falloff << "\n";
+    f << "terrain_tess_smooth = " << rt_.terrain_tess_smooth << "\n";
+    f << "terrain_pom_strength = " << rt_.terrain_pom_strength << "\n";
+    f << "terrain_sand_ripple_scale = " << rt_.terrain_sand_ripple_scale << "\n";
+    f << "terrain_grass_line_scale = " << rt_.terrain_grass_line_scale << "\n";
+    f << "terrain_rock_relief = " << rt_.terrain_rock_relief << "\n";
+    f << "ground_mat_strength = " << rt_.ground_mat_strength << "\n";
+    f << "ground_mat_tile_m = " << rt_.ground_mat_tile_m << "\n";
+    f << "ground_mat_normal = " << rt_.ground_mat_normal << "\n";
     f << "terrain_bake_supersample = " << rt_.terrain_bake_supersample << "\n";
     f << "terrain_shading_contrast = " << rt_.terrain_shading_contrast << "\n";
+    f << "spom_strength = " << rt_.spom_strength << "\n";
     f << "terrain_heightmap_scale = " << rt_.terrain_heightmap_scale << "\n";
     f << "terrain_raymarch_enabled = " << (rt_.terrain_raymarch_enabled ? 1 : 0) << "\n";
     f << "terrain_raymarch_max_steps = " << rt_.terrain_raymarch_max_steps << "\n";
@@ -309,11 +329,14 @@ void VulkanEngine::save_settings() const {
     f << "terrain_raymarch_normal_octaves = " << rt_.terrain_raymarch_normal_octaves << "\n";
     f << "taau_enabled = "                << (rt_.taau_enabled ? 1 : 0) << "\n";
     f << "fsr2_enabled = "                << (rt_.fsr2_enabled ? 1 : 0) << "\n";
+    f << "fsr_backend = "                 << rt_.fsr_backend << "\n";
+    f << "fg_enabled = "                  << (rt_.fg_enabled ? 1 : 0) << "\n";
     f << "terrain_raymarch_step_factor = " << rt_.terrain_raymarch_step_factor << "\n";
     f << "terrain_raymarch_lod_near_m = " << rt_.terrain_raymarch_lod_near_m << "\n";
     f << "terrain_raymarch_lod_far_m = " << rt_.terrain_raymarch_lod_far_m << "\n";
     f << "terrain_raymarch_lod_min_octaves = " << rt_.terrain_raymarch_lod_min_octaves << "\n";
     f << "terrain_raymarch_scale = " << rt_.terrain_raymarch_scale << "\n";
+    f << "half_rate_shadows = " << (rt_.half_rate_shadows ? 1 : 0) << "\n";
     f << "terrain_raymarch_sharpen = " << rt_.terrain_raymarch_sharpen << "\n";
     f << "terrain_raymarch_fog_strength = " << rt_.terrain_raymarch_fog_strength << "\n";
     f << "terrain_raymarch_relaxation = " << (rt_.terrain_raymarch_relaxation ? 1 : 0) << "\n";
@@ -331,6 +354,9 @@ void VulkanEngine::save_settings() const {
     f << "water_shore_noise = " << rt_.water_shore_noise << "\n";
     f << "water_shadows_enabled = " << (rt_.water_shadows_enabled ? 1 : 0) << "\n";
     f << "water_transparency = " << rt_.water_transparency << "\n";
+    f << "water_clarity_depth = " << rt_.water_clarity_depth << "\n";
+    f << "water_shore_softness = " << rt_.water_shore_softness << "\n";
+    f << "water_foam_opacity = " << rt_.water_foam_opacity << "\n";
     f << "water_color_shallow = " << rt_.water_color_shallow.r << " "
                                    << rt_.water_color_shallow.g << " "
                                    << rt_.water_color_shallow.b << "\n";
@@ -407,6 +433,8 @@ void VulkanEngine::save_settings() const {
     f << "lens_flare_aberration = "  << rt_.lens_flare_aberration  << "\n";
     f << "taa_jitter_strength = " << rt_.taa_jitter_strength << "\n";
     f << "compose_sharpen_strength = " << rt_.compose_sharpen_strength << "\n";
+    f << "sun_shaft_intensity = " << rt_.sun_shaft_intensity << "\n";
+    f << "auto_golden_hour = " << (rt_.auto_golden_hour ? 1 : 0) << "\n";
     f << "image_contrast = " << rt_.image_contrast << "\n";
     f << "image_brightness = " << rt_.image_brightness << "\n";
     f << "image_gamma = " << rt_.image_gamma << "\n";
@@ -464,7 +492,10 @@ void VulkanEngine::load_settings() {
             if (key == "terrain_brush_noise_freq")      { terrain_brush_noise_freq_      = std::stof(val); ++loaded; continue; }
             if (key == "terrain_brush_use_fbm_erosion") { terrain_brush_use_fbm_erosion_ = (std::stoi(val) != 0); ++loaded; continue; }
             if (key == "terrain_brush_fbm_octaves")     { terrain_brush_fbm_octaves_     = std::stoi(val); ++loaded; continue; }
-            if (key == "terrain_edit_mode")             { terrain_edit_mode_             = (std::stoi(val) != 0); ++loaded; continue; }
+            // terrain_edit_mode intentionally NOT loaded — transient
+            // state, always starts off (old cfgs may still have the key;
+            // it just falls through as unknown and is ignored).
+            if (key == "terrain_edit_mode")             { ++loaded; continue; }
             // Player pose — peeled out of the else-if chain because
             // the recent merge added enough new keys (raymarch LOD,
             // VRS, TAAU) to push past MSVC's nested-block depth limit
@@ -474,6 +505,13 @@ void VulkanEngine::load_settings() {
             if (key == "player_pos_z")                  { player_.position.z = std::stof(val); ++loaded; continue; }
             if (key == "player_yaw")                    { player_.yaw        = std::stof(val); ++loaded; continue; }
             if (key == "player_pitch")                  { player_.pitch      = std::stof(val); ++loaded; continue; }
+            // ReSTIR-lite (session 1) — fast-path so it doesn't deepen the
+            // already-at-limit else-if chain below.
+            if (key == "gi_restir_enabled")             { rt_.gi_restir_enabled = (std::stoi(val) != 0); ++loaded; continue; }
+            // FSR backend select (0=FSR2, 1=FSR3 ffx-api). Persisted alongside
+            // fsr2_enabled in the fast-path section to dodge MSVC's nested-if depth limit.
+            if (key == "fsr_backend")                   { rt_.fsr_backend = std::stoi(val); ++loaded; continue; }
+            if (key == "fg_enabled")                    { rt_.fg_enabled  = (std::stoi(val) != 0); ++loaded; continue; }
             if (key == "water_foam_color") {
                 glm::vec3 v(0.88f, 0.94f, 0.96f);
                 if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
@@ -586,7 +624,34 @@ void VulkanEngine::load_settings() {
             if (key == "grass_base_ao_floor")        { rt_.grass_base_ao_floor        = std::stof(val); ++loaded; continue; }
             if (key == "grass_ground_tint_strength") { rt_.grass_ground_tint_strength = std::stof(val); ++loaded; continue; }
             if (key == "grass_shadow_strength")      { rt_.grass_shadow_strength      = std::stof(val); ++loaded; continue; }
+            // SPOM strength lives in the flat fast-path block, NOT in
+            // the if/else-if chain below — adding one more `else if`
+            // there exceeds MSVC's nested-block limit (C1061).
+            if (key == "spom_strength")              { rt_.spom_strength              = std::stof(val); ++loaded; continue; }
+            // Near-terrain tessellation — flat fast-path (NOT the else-if
+            // chain below; one more `else if` there hits C1061).
+            if (key == "terrain_tessellation_enabled") { rt_.terrain_tessellation_enabled = std::stoi(val) != 0; ++loaded; continue; }
+            if (key == "terrain_tess_range")          { rt_.terrain_tess_range          = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_wireframe")           { rt_.terrain_wireframe           = std::stoi(val) != 0; ++loaded; continue; }
+            if (key == "terrain_tess_max_level")      { rt_.terrain_tess_max_level      = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_tess_near_m")         { rt_.terrain_tess_near_m         = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_tess_far_m")          { rt_.terrain_tess_far_m          = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_tess_falloff")        { rt_.terrain_tess_falloff        = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_tess_smooth")         { rt_.terrain_tess_smooth         = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_pom_strength")        { rt_.terrain_pom_strength        = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_sand_ripple_scale")   { rt_.terrain_sand_ripple_scale   = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_grass_line_scale")    { rt_.terrain_grass_line_scale    = std::stof(val); ++loaded; continue; }
+            if (key == "water_clarity_depth")         { rt_.water_clarity_depth         = std::stof(val); ++loaded; continue; }
+            if (key == "water_shore_softness")        { rt_.water_shore_softness        = std::stof(val); ++loaded; continue; }
+            if (key == "water_foam_opacity")          { rt_.water_foam_opacity          = std::stof(val); ++loaded; continue; }
+            if (key == "terrain_rock_relief")         { rt_.terrain_rock_relief         = std::stof(val); ++loaded; continue; }
+            if (key == "ground_mat_strength")         { rt_.ground_mat_strength         = std::stof(val); ++loaded; continue; }
+            if (key == "ground_mat_tile_m")           { rt_.ground_mat_tile_m           = std::stof(val); ++loaded; continue; }
+            if (key == "ground_mat_normal")           { rt_.ground_mat_normal           = std::stof(val); ++loaded; continue; }
             if (key == "grass_shadow_samples")       { rt_.grass_shadow_samples       = std::stoi(val); ++loaded; continue; }
+            if (key == "half_rate_shadows")          { rt_.half_rate_shadows          = std::stoi(val) != 0; ++loaded; continue; }
+            if (key == "sun_shaft_intensity")        { rt_.sun_shaft_intensity        = std::stof(val); ++loaded; continue; }
+            if (key == "auto_golden_hour")           { rt_.auto_golden_hour           = std::stoi(val) != 0; ++loaded; continue; }
             if (key == "grass_shadow_max_dist")      { rt_.grass_shadow_max_dist      = std::stof(val); ++loaded; continue; }
             if      (key == "sun_pitch_deg")       rt_.sun_pitch_deg = std::stof(val);
             else if (key == "sun_yaw_deg")         rt_.sun_yaw_deg = std::stof(val);

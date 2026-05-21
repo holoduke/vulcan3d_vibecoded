@@ -25,8 +25,11 @@ static_assert(sizeof(PushConstants) == 256, "push constant layout");
 //     → 672 (distance_fog_color + distance_fog_params, exp² distance fog)
 //     → 704 (terrain_shore_general_color + params, bare-terrain shore tint)
 //     → 720 (terrain_sand_color, slider for the beach base colour)
-//     → 752 (water_river_extra + water_river_extinct, river-style tuning).
-static_assert(sizeof(SceneUBO) == 752, "scene ubo layout");
+//     → 752 (water_river_extra + water_river_extinct, river-style tuning)
+//     → 784 (spom_params, slider for SPOM bump depth)
+//     → 800 (terrain_local_info, reserved)
+//     → 4896 (terrain_max_grid[256], 32×32 hi-Z max-cell grid).
+static_assert(sizeof(SceneUBO) == 4896, "scene ubo layout");
 
 RtFuncs g_rt;
 
@@ -154,7 +157,9 @@ void write_scene_descriptors_once(
     uint32_t tex_count, VkSampler tex_sampler,
     const VkImageView* spom_height_views, uint32_t spom_count,
     VkImageView grass_mask_view,
-    VkImageView fog_wisp_view) {
+    VkImageView fog_wisp_view,
+    VkBuffer reservoir_prev,
+    VkBuffer reservoir_cur) {
 
     VkDescriptorBufferInfo ubo_bi{ ubo, 0, VK_WHOLE_SIZE };
     VkDescriptorBufferInfo mat_bi{ materials, 0, VK_WHOLE_SIZE };
@@ -252,9 +257,23 @@ void write_scene_descriptors_once(
     w9.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w9.pImageInfo = &fog_wisp_bi;
 
-    VkWriteDescriptorSet writes[9] = { w[0], w[1], w[2], w[3],
-                                        w[4], w[5], w[6], w8, w9 };
-    vkUpdateDescriptorSets(device, 9, writes, 0, nullptr);
+    // Bindings 15/16: ReSTIR reservoir SSBOs (ping-pong). Caller passes
+    // the previous-frame slot at 15 (read in cube.frag's GI loop in
+    // session 3+) and the current-frame slot at 16 (written in session 2+).
+    VkDescriptorBufferInfo res_prev_bi{ reservoir_prev, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo res_cur_bi { reservoir_cur,  0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet w_res_prev{};
+    w_res_prev.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w_res_prev.dstSet = set; w_res_prev.dstBinding = 15; w_res_prev.descriptorCount = 1;
+    w_res_prev.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w_res_prev.pBufferInfo = &res_prev_bi;
+    VkWriteDescriptorSet w_res_cur = w_res_prev;
+    w_res_cur.dstBinding = 16; w_res_cur.pBufferInfo = &res_cur_bi;
+
+    VkWriteDescriptorSet writes[11] = { w[0], w[1], w[2], w[3],
+                                         w[4], w[5], w[6], w8, w9,
+                                         w_res_prev, w_res_cur };
+    vkUpdateDescriptorSets(device, 11, writes, 0, nullptr);
 }
 
 } // namespace qlike

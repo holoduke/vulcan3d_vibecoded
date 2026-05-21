@@ -1070,6 +1070,144 @@ void VulkanEngine::destroy_terrain_height_texture() {
         vkDestroySampler(device_, terrain_height_sampler_, nullptr);
         terrain_height_sampler_ = VK_NULL_HANDLE;
     }
+    if (terrain_height_full_view_) {
+        vkDestroyImageView(device_, terrain_height_full_view_, nullptr);
+        terrain_height_full_view_ = VK_NULL_HANDLE;
+    }
+    if (terrain_height_full_image_) {
+        vmaDestroyImage(allocator_, terrain_height_full_image_,
+                         terrain_height_full_alloc_);
+        terrain_height_full_image_ = VK_NULL_HANDLE;
+        terrain_height_full_alloc_ = nullptr;
+    }
+    if (terrain_height_full_sampler_) {
+        vkDestroySampler(device_, terrain_height_full_sampler_, nullptr);
+        terrain_height_full_sampler_ = VK_NULL_HANDLE;
+    }
+}
+
+// Stages the FULL baked terrain heights (NOT the baseline delta) into
+// terrain_height_full_image_. This is the exact terrain_data_.heights
+// array the CDLOD mesh + physics are built from, so the water path can
+// reference the real mesh surface without evaluating FBM noise.
+void VulkanEngine::upload_terrain_height_full_payload(VkImageLayout src_layout) {
+    const int W = terrain_data_.dim + 1;
+    const int H = terrain_data_.dim + 1;
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(W) *
+                                static_cast<VkDeviceSize>(H) * sizeof(float);
+    VkBuffer stage = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = nullptr;
+    VkBufferCreateInfo bci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .size = bytes,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+    };
+    VmaAllocationCreateInfo bac{};
+    bac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    bac.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    vmaCreateBuffer(allocator_, &bci, &bac, &stage, &stage_alloc, nullptr);
+    VmaAllocationInfo ai{};
+    vmaGetAllocationInfo(allocator_, stage_alloc, &ai);
+    std::memcpy(ai.pMappedData, terrain_data_.heights.data(),
+                static_cast<size_t>(bytes));
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, terrain_height_full_image_,
+                                 src_layout,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = { static_cast<uint32_t>(W),
+                               static_cast<uint32_t>(H), 1 };
+        vkCmdCopyBufferToImage(cb, stage, terrain_height_full_image_,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               1, &region);
+        vkinit::transition_image(cb, terrain_height_full_image_,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    vmaDestroyBuffer(allocator_, stage, stage_alloc);
+}
+
+void VulkanEngine::init_terrain_height_full_texture() {
+    if (terrain_data_.heights.empty()) {
+        log::warn("init_terrain_height_full_texture: heightmap empty, skipping");
+        return;
+    }
+    const int W = terrain_data_.dim + 1;
+    const int H = terrain_data_.dim + 1;
+
+    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R32_SFLOAT;
+    ici.extent = { static_cast<uint32_t>(W), static_cast<uint32_t>(H), 1 };
+    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vk_check(vmaCreateImage(allocator_, &ici, &aci,
+                             &terrain_height_full_image_,
+                             &terrain_height_full_alloc_, nullptr),
+             "terrain height full image");
+
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = terrain_height_full_image_;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_R32_SFLOAT;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vci.subresourceRange.baseMipLevel = 0;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.baseArrayLayer = 0;
+    vci.subresourceRange.layerCount = 1;
+    vk_check(vkCreateImageView(device_, &vci, nullptr,
+                               &terrain_height_full_view_),
+             "terrain height full view");
+
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = VK_FILTER_LINEAR;
+    si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vk_check(vkCreateSampler(device_, &si, nullptr,
+                             &terrain_height_full_sampler_),
+             "terrain height full sampler");
+
+    upload_terrain_height_full_payload(VK_IMAGE_LAYOUT_UNDEFINED);
+
+    // Write binding 17.
+    VkDescriptorImageInfo dii{};
+    dii.sampler = terrain_height_full_sampler_;
+    dii.imageView = terrain_height_full_view_;
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = scene_desc_set_;
+    w.dstBinding = 17;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &dii;
+    vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+
+    log::infof("full heightmap texture uploaded (%dx%d, %.1f MB)", W, H,
+               static_cast<double>(W) * H * sizeof(float) / (1024.0 * 1024.0));
+}
+
+void VulkanEngine::refresh_terrain_height_full_texture() {
+    if (!terrain_height_full_image_ || terrain_data_.heights.empty()) return;
+    upload_terrain_height_full_payload(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 // ---------------- Sun shadow map (single-cascade ortho) ----------------
@@ -1364,13 +1502,21 @@ void VulkanEngine::init_world() {
         hp.plateau_height = 22.0f;
         hp.plateau_blend  = 20.0f;
         hp.frequency      = 0.0014f;
-        // When the procedural raymarched terrain is selected, generate
-        // the heightmap from the SAME FBM the shader uses so physics,
-        // grass, mesh and BLAS share the visible surface. Otherwise the
-        // FastNoiseLite-driven gameplay heightmap (default).
-        Heightmap hm = rt_.terrain_raymarch_enabled
-            ? generate_heightmap_raymarch(hp)
-            : generate_heightmap(hp);
+        // ALWAYS use the value-noise FBM (generate_heightmap_raymarch),
+        // regardless of whether the game starts in mesh or raymarch
+        // mode. Rationale:
+        //   * The raymarch shader evaluates this same FBM in-shader and
+        //     adds sampleHeightDelta = (current − baseline). The
+        //     baseline MUST be this FBM or, after a runtime mesh→
+        //     raymarch toggle, the delta becomes a difference of two
+        //     unrelated noise fields layered on the shader FBM →
+        //     "way too spikey" terrain (the exact reported bug).
+        //   * mesh / physics / grass / BLAS now all share ONE surface,
+        //     so toggling modes is seamless and the world is
+        //     consistent — and the planned near-distance displacement-
+        //     LOD work needs the mesh to be this same FBM anyway.
+        // generate_heightmap() (FastNoiseLite) is now legacy/unused.
+        Heightmap hm = generate_heightmap_raymarch(hp);
         // Capture procedural baseline NOW (before any disk-overlay
         // load). The raymarch shader's heightmap-delta texture is
         // computed as `current - baseline` so sculpt edits + disk
@@ -1416,6 +1562,52 @@ void VulkanEngine::init_world() {
         terrain_data_.origin_x = hm.origin_x;
         terrain_data_.origin_z = hm.origin_z;
         terrain_data_.heights = hm.heights;
+        // Bake the 32×32 hi-Z max-cell grid from the (post sculpt-
+        // overlay) heightmap. Each grid cell holds the MAX terrain
+        // height over its 64 m × 64 m footprint + a 15 m safety
+        // margin. The margin covers (a) the stride-free exact max so
+        // no real peak is under-reported, and (b) moderate runtime
+        // sculpt brush raises before a rebake. The marcher only uses
+        // this to SKIP empty cells (never to declare sky), so a
+        // too-LOW value would clip terrain — hence the generous
+        // margin. A too-HIGH value just costs a few extra FBM steps.
+        {
+            const int W = hm.dim + 1;                  // 2049 (row pitch)
+            const int G = 32;                          // grid side
+            // Cell boundaries MUST use `dim` (2048), NOT W (2049), so
+            // they line up exactly with the shader's cellMaxHeight():
+            //   shader c = floor((wp/2048 + 0.5) * 32) = floor(hm_x/64)
+            // Using W here gave (gx*2049)/32 ≈ gx*64.03 — an off-by-
+            // fraction that made the shader sample a NEIGHBOURING grid
+            // cell at distance. If that neighbour's max was lower, the
+            // marcher skipped a cell that actually held terrain the
+            // ray would hit → distant low terrain showed as SKY.
+            const int D = hm.dim;                      // 2048
+            // 40 m safety (was 15). The coarse heightmap-derived max
+            // under-represents the shader FBM's sub-texel spikes; on
+            // rugged distant terrain a 15 m margin let the skip jump
+            // over real peaks. 40 m is still far below any open-sky
+            // gap so the perf benefit (skipping genuine air) is kept.
+            for (int gz = 0; gz < G; ++gz) {
+                int z0 = (gz * D) / G;
+                int z1 = ((gz + 1) * D) / G;
+                for (int gx = 0; gx < G; ++gx) {
+                    int x0 = (gx * D) / G;
+                    int x1 = ((gx + 1) * D) / G;
+                    float mx = -1e9f;
+                    for (int z = z0; z < z1; ++z) {
+                        const float* row = hm.heights.data() +
+                            static_cast<size_t>(z) * static_cast<size_t>(W);
+                        for (int x = x0; x < x1; ++x) {
+                            if (row[x] > mx) mx = row[x];
+                        }
+                    }
+                    terrain_max_grid_[static_cast<size_t>(gz) * G + gx] =
+                        mx + 40.0f;
+                }
+            }
+            terrain_max_grid_ready_ = true;
+        }
         // Skip the rasterised terrain mesh + chunks + BLAS source when the
         // procedural raymarch is the active terrain. Saves several hundred
         // MB of VRAM (chunked LOD buffers, parent_y morph buffers, merged
@@ -1526,29 +1718,47 @@ void VulkanEngine::init_world() {
     if (!terrain_data_.heights.empty()) {
         const int W = terrain_data_.dim + 1;        // 2049
         const int physics_samples = (W % 2 == 0) ? W : (W - 1);  // 2048
-        std::vector<float> jolt_heights;
-        if (physics_samples == W) {
-            // Already even РІР‚вЂќ pass through.
-            physics_->add_static_heightfield(
-                terrain_data_.heights.data(), terrain_data_.dim,
-                glm::vec2(terrain_data_.origin_x, terrain_data_.origin_z),
-                terrain_data_.cell);
-        } else {
-            jolt_heights.resize(static_cast<size_t>(physics_samples) *
-                                 static_cast<size_t>(physics_samples));
-            for (int z = 0; z < physics_samples; ++z) {
-                std::memcpy(jolt_heights.data() +
-                                static_cast<size_t>(z) *
-                                static_cast<size_t>(physics_samples),
-                            terrain_data_.heights.data() +
-                                static_cast<size_t>(z) * static_cast<size_t>(W),
-                            static_cast<size_t>(physics_samples) * sizeof(float));
+        // Build the physics-only height buffer (a copy — visual raymarch
+        // keeps terrain_data_.heights as-is). Inside the castle plateau
+        // we depress the floor by kCastleSink so it sits well below the
+        // 5 cm castle-floor brush at Y=22.05. Without this, any FBM
+        // residue or loaded sculpt deltas inside the plateau become
+        // physics-only "invisible hills" (visible terrain is discarded
+        // inside the castle, but Jolt still collides against them) and
+        // bounce the player up and down on what looks like flat tile.
+        // 0.6 m drop > kStepDown (0.45) so the heightmap-clamp branches
+        // never fire when the player is on the brush floor.
+        // Hard-coded to match the hp.* values used at heightmap-gen
+        // time (line ~1363) — hp itself is out of scope here.
+        const float kCastleSink   = 0.6f;
+        const float kPlateauH     = 22.0f;
+        const float kSinkRadius   = 11.5f;
+        const float kSinkLimit    = kPlateauH - kCastleSink;
+        const glm::vec2 plateau_c(0.0f, 0.0f);
+        std::vector<float> jolt_heights(static_cast<size_t>(physics_samples) *
+                                         static_cast<size_t>(physics_samples));
+        for (int z = 0; z < physics_samples; ++z) {
+            float wz = terrain_data_.origin_z +
+                       static_cast<float>(z) * terrain_data_.cell;
+            for (int x = 0; x < physics_samples; ++x) {
+                float wx = terrain_data_.origin_x +
+                           static_cast<float>(x) * terrain_data_.cell;
+                float h = terrain_data_.heights[
+                    static_cast<size_t>(z) * static_cast<size_t>(W) +
+                    static_cast<size_t>(x)];
+                if (std::abs(wx - plateau_c.x) < kSinkRadius &&
+                    std::abs(wz - plateau_c.y) < kSinkRadius) {
+                    h = std::min(h, kSinkLimit);
+                }
+                jolt_heights[static_cast<size_t>(z) *
+                              static_cast<size_t>(physics_samples) +
+                              static_cast<size_t>(x)] = h;
             }
-            physics_->add_static_heightfield(
-                jolt_heights.data(), physics_samples - 1,
-                glm::vec2(terrain_data_.origin_x, terrain_data_.origin_z),
-                terrain_data_.cell);
         }
+        physics_->add_static_heightfield(
+            jolt_heights.data(), physics_samples - 1,
+            glm::vec2(terrain_data_.origin_x, terrain_data_.origin_z),
+            terrain_data_.cell);
     }
 
     log::infof("Jolt: %d static bodies; dynamic boxes will spawn over time "
@@ -1690,7 +1900,7 @@ void VulkanEngine::init_textures() {
     };
     // Index РІвЂ вЂ™ category. Indices ALSO match what level.cpp / spawn_random_box
     // pass into Brush::tex_albedo, so reordering here means reordering there.
-    const Spec specs[kTextureCount] = {
+    const Spec specs[] = {
         { "Ground054",         "Ground054/Ground054_2K-JPG_Color.jpg",
                                "Ground054/Ground054_2K-JPG_NormalGL.jpg" },
         { "Bricks078",         "Bricks078/Bricks078_8K-JPG_Color.jpg",
@@ -1707,12 +1917,16 @@ void VulkanEngine::init_textures() {
                                "Tiles074/Tiles074_8K-JPG_NormalGL.jpg" },
     };
 
-    for (int i = 0; i < kTextureCount; ++i) {
+    static_assert(sizeof(specs) / sizeof(specs[0]) == kFileTextureCount,
+                  "specs[] must list exactly the file-loaded textures");
+    for (int i = 0; i < kFileTextureCount; ++i) {
         // Albedos go through an sRGB sampler so the GPU does the gamma decode
         // automatically; normals stay UNORM (linear-space, already in [0,1]).
         albedo_textures_[i] = probe(specs[i].color_jpg,  VK_FORMAT_R8G8B8A8_SRGB);
         normal_textures_[i] = probe(specs[i].normal_jpg, VK_FORMAT_R8G8B8A8_UNORM);
     }
+    // Slots 7-11: procedurally-baked seamless terrain materials.
+    bake_terrain_materials();
 
     // SPOM displacement maps — bound to cube.frag as sampler2D u_height[4].
     // Order MUST match cube.frag's height_idx_for_albedo() switch:
@@ -1728,6 +1942,324 @@ void VulkanEngine::init_textures() {
         "Tiles130/Tiles130_8K-JPG_Displacement.jpg",                   VK_FORMAT_R8G8B8A8_UNORM);
     spom_height_textures_[3] = probe(
         "Tiles074/Tiles074_8K-JPG_Displacement.jpg",                   VK_FORMAT_R8G8B8A8_UNORM);
+}
+
+// ----------------------------------------------------------------------
+// Procedural terrain materials.
+//
+// No ground textures ship on disk (only Ground054), so the 5 splat
+// materials are generated at load: seamless tiling albedo (sRGB) + a
+// matching tangent-space normal map (UNORM, GL/+Y convention) for each
+// of rock / grass / dirt / sand / snow. cube.frag's is_terrain block
+// blends them by the existing height/slope weights.
+//
+// Seamlessness is by construction: every noise octave uses a lattice
+// whose period equals the number of cells across the [0,1) tile, so the
+// value at u=1 hashes to the same lattice point as u=0. The normal map
+// is the central-difference gradient of the same periodic height field,
+// so it tiles too — no visible seams at any tiling rate.
+// ----------------------------------------------------------------------
+namespace {
+
+inline uint32_t tm_hash(uint32_t x) {
+    x ^= x >> 16; x *= 0x7feb352dU;
+    x ^= x >> 15; x *= 0x846ca68bU;
+    x ^= x >> 16; return x;
+}
+// Hash of a lattice node, wrapped to `period` so the tile is seamless.
+inline float tm_lat(int xi, int yi, int period, uint32_t seed) {
+    xi = ((xi % period) + period) % period;
+    yi = ((yi % period) + period) % period;
+    uint32_t h = tm_hash(static_cast<uint32_t>(xi) * 73856093U ^
+                          static_cast<uint32_t>(yi) * 19349663U ^ seed);
+    return static_cast<float>(h & 0xFFFFFFu) / float(0x1000000);
+}
+// Periodic value noise. `cells` lattice cells span the whole tile, and
+// the lattice period equals `cells`, so f(u=0)==f(u=1) → seamless.
+inline float tm_vnoise(float u, float v, int cells, uint32_t seed) {
+    float x = u * cells, y = v * cells;
+    int x0 = static_cast<int>(std::floor(x));
+    int y0 = static_cast<int>(std::floor(y));
+    float fx = x - x0, fy = y - y0;
+    fx = fx * fx * (3.0f - 2.0f * fx);
+    fy = fy * fy * (3.0f - 2.0f * fy);
+    float a = tm_lat(x0,     y0,     cells, seed);
+    float b = tm_lat(x0 + 1, y0,     cells, seed);
+    float c = tm_lat(x0,     y0 + 1, cells, seed);
+    float d = tm_lat(x0 + 1, y0 + 1, cells, seed);
+    return (a + (b - a) * fx) + ((c + (d - c) * fx) - (a + (b - a) * fx)) * fy;
+}
+// Tileable fBm: each octave's period == its cell count, so the sum
+// stays seamless.
+inline float tm_fbm(float u, float v, int base_cells, int octaves,
+                     uint32_t seed) {
+    float sum = 0.0f, amp = 0.5f, norm = 0.0f;
+    int cells = base_cells;
+    for (int o = 0; o < octaves; ++o) {
+        sum  += amp * tm_vnoise(u, v, cells, seed + o * 1013u);
+        norm += amp;
+        amp  *= 0.5f;
+        cells *= 2;
+    }
+    return sum / norm;                       // ~0..1
+}
+inline float tm_clamp01(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x); }
+// Ridged multifractal — the standard "eroded mountain" basis. Each
+// octave is a sharp ridge (1-|2n-1|), and its amplitude is WEIGHTED by
+// the previous octave's value, so detail accumulates on exposed ridges
+// and valleys stay smooth (mirrors how real erosion distributes relief
+// — crisp crests, clean gullies). `gain` sharpens, `offset` ~1.
+inline float tm_ridged_mf(float u, float v, int base_cells, int octaves,
+                          uint32_t seed) {
+    float sum = 0.0f, freqAmp = 0.5f, norm = 0.0f, prev = 1.0f;
+    int   cells = base_cells;
+    for (int o = 0; o < octaves; ++o) {
+        float n = tm_vnoise(u, v, cells, seed + o * 2237u);
+        float r = 1.0f - std::fabs(2.0f * n - 1.0f);   // ridge
+        r = r * r;                                      // sharpen crest
+        float contrib = r * freqAmp * tm_clamp01(prev); // weight by prev
+        sum  += contrib;
+        norm += freqAmp;
+        prev  = r;
+        freqAmp *= 0.55f;
+        cells   *= 2;
+    }
+    return sum / norm;                       // ~0..1, ridged
+}
+inline float tm_smooth(float a, float b, float x) {
+    float t = tm_clamp01((x - a) / (b - a));
+    return t * t * (3.0f - 2.0f * t);
+}
+// Linear → sRGB 8-bit. Authored colours are linear (matching the old
+// in-shader palette); the array sampler is sRGB and decodes on read, so
+// we must store the sRGB-encoded byte here.
+inline unsigned char tm_lin2srgb8(float c) {
+    c = tm_clamp01(c);
+    float s = (c <= 0.0031308f) ? (c * 12.92f)
+                                : (1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f);
+    int b = static_cast<int>(s * 255.0f + 0.5f);
+    return static_cast<unsigned char>(b < 0 ? 0 : (b > 255 ? 255 : b));
+}
+inline unsigned char tm_unorm8(float c) {
+    int b = static_cast<int>(tm_clamp01(c) * 255.0f + 0.5f);
+    return static_cast<unsigned char>(b);
+}
+
+enum TmKind { TM_ROCK, TM_GRASS, TM_DIRT, TM_SAND, TM_SNOW };
+
+// Fill albedo (sRGB bytes) + normal (UNORM bytes, GL +Y) for one
+// material. Builds a periodic height field first, then derives both the
+// colour ramp and the normal from it so relief and shading agree.
+void tm_generate(TmKind kind, int W, int H,
+                 std::vector<unsigned char>& albedo,
+                 std::vector<unsigned char>& normal) {
+    albedo.resize(static_cast<size_t>(W) * H * 4);
+    normal.resize(static_cast<size_t>(W) * H * 4);
+    std::vector<float> hf(static_cast<size_t>(W) * H);  // low-freq: drives albedo
+    std::vector<float> rf(static_cast<size_t>(W) * H);  // fine relief: drives normal
+
+    // Per-material recipe. n_strength is the bump depth of the detail
+    // normal map. The normal is the gradient of a HIGH-frequency relief
+    // field (rf) so adjacent texels actually differ — the old code took
+    // the gradient of the low-freq albedo field, which barely changed
+    // texel-to-texel, so every normal map came out flat (≈(0,0,1)) and
+    // the strength slider did nothing.
+    int   base_cells, octaves;
+    float n_strength;            // 0..1-ish bump depth
+    uint32_t seed;
+    switch (kind) {
+        case TM_ROCK:  base_cells = 6;  octaves = 9; n_strength = 1.45f; seed = 11u; break;
+        case TM_GRASS: base_cells = 4;  octaves = 6; n_strength = 0.45f; seed = 23u; break;
+        case TM_DIRT:  base_cells = 5;  octaves = 6; n_strength = 0.65f; seed = 37u; break;
+        case TM_SAND:  base_cells = 3;  octaves = 5; n_strength = 0.55f; seed = 53u; break;
+        default:       base_cells = 3;  octaves = 5; n_strength = 0.30f; seed = 71u; break; // SNOW
+    }
+
+    // Height field (periodic).
+    for (int y = 0; y < H; ++y) {
+        float v = static_cast<float>(y) / H;
+        for (int x = 0; x < W; ++x) {
+            float u = static_cast<float>(x) / W;
+            float f = tm_fbm(u, v, base_cells, octaves, seed);
+            if (kind == TM_ROCK) {
+                // Eroded-mountain rock: ridged multifractal (crisp
+                // crests, smooth valleys) + a sharper high-frequency
+                // drainage/gully layer carved in for fine cracks.
+                float mf    = tm_ridged_mf(u, v, base_cells, octaves, seed);
+                float gully = tm_ridged_mf(u, v, base_cells * 4, 4,
+                                           seed + 901u);
+                gully = gully * gully;                  // tighten ravines
+                f = tm_clamp01(mf - 0.35f * gully);
+            } else if (kind == TM_SAND) {
+                // Isotropic — no baked directional content (that caused
+                // either fixed world stripes or, when rotated per-pixel
+                // in cube.frag, per-triangle UV seams). The shore-
+                // following ripple is added smoothly in cube.frag from
+                // the height field instead. Soft dunes + fine grain.
+                float dune  = tm_fbm(u, v, 6,  4, seed + 7u);
+                float grain = tm_fbm(u, v, 48, 2, seed + 13u);
+                f = 0.70f * dune + 0.30f * grain;
+            } else if (kind == TM_SNOW) {
+                // Smooth dunes + sparse sparkle specks.
+                float spark = tm_vnoise(u, v, 256, seed + 9u);
+                f = 0.85f * f + (spark > 0.93f ? 0.15f : 0.0f);
+            }
+            hf[static_cast<size_t>(y) * W + x] = f;
+
+            // Fine relief for the NORMAL map: a high-frequency field
+            // whose neighbouring texels differ enough to give a real
+            // gradient. Mix in the low-freq f so big shapes still cast
+            // the right macro tilt.
+            float fine_r = tm_fbm(u, v, base_cells * 6, octaves, seed + 101u);
+            float micro  = tm_vnoise(u, v, 256, seed + 211u);
+            float relief = 0.45f * f + 0.40f * fine_r + 0.15f * micro;
+            if (kind == TM_ROCK) {
+                // Crisp chiselled relief: the eroded height (f, already
+                // ridged-MF) plus a fine high-frequency ridged-MF layer
+                // → sharp ridge/crack normal at close range.
+                float fine_mf = tm_ridged_mf(u, v, base_cells * 5, 5,
+                                             seed + 701u);
+                relief = 0.40f * f + 0.60f * fine_mf;
+            } else if (kind == TM_SAND) {
+                // Isotropic relief (matches the isotropic albedo). The
+                // directional ripple is a smooth cube.frag overlay.
+                float dn = tm_fbm(u, v, 5,  4, seed + 211u);
+                float gr = tm_fbm(u, v, 40, 3, seed + 311u);
+                relief = 0.6f * dn + 0.4f * gr;
+            }
+            rf[static_cast<size_t>(y) * W + x] = relief;
+        }
+    }
+
+    auto Hsamp = [&](int x, int y) -> float {
+        x = (x % W + W) % W; y = (y % H + H) % H;
+        return rf[static_cast<size_t>(y) * W + x];
+    };
+
+    for (int y = 0; y < H; ++y) {
+        float v = static_cast<float>(y) / H;
+        for (int x = 0; x < W; ++x) {
+            float u = static_cast<float>(x) / W;
+            float h = hf[static_cast<size_t>(y) * W + x];
+            // Fine break-up so flat patches don't read as one colour.
+            float fine = tm_vnoise(u, v, 256, seed + 3u) - 0.5f;
+
+            float rl, gl, bl;       // linear albedo
+            switch (kind) {
+                case TM_ROCK: {
+                    float t = tm_smooth(0.25f, 0.85f, h);
+                    rl = 0.085f + (0.215f - 0.085f) * t;
+                    gl = 0.080f + (0.205f - 0.080f) * t;
+                    bl = 0.072f + (0.190f - 0.072f) * t;
+                    float s = fine * 0.045f; rl += s; gl += s; bl += s;
+                } break;
+                case TM_GRASS: {
+                    float t = tm_smooth(0.30f, 0.72f, h);
+                    // Brighter, lower-contrast green so the cross-fade
+                    // with neighbouring layers reads as a smooth tonal
+                    // gradient, not dark speckle over green.
+                    rl = 0.085f + (0.150f - 0.085f) * t;
+                    gl = 0.150f + (0.240f - 0.150f) * t;
+                    bl = 0.045f + (0.075f - 0.045f) * t;
+                    float clump = (tm_vnoise(u, v, 96, seed + 5u) - 0.5f) * 0.020f;
+                    rl += clump * 0.6f; gl += clump; bl += clump * 0.3f;
+                } break;
+                case TM_DIRT: {
+                    float t = tm_smooth(0.25f, 0.80f, h);
+                    rl = 0.075f + (0.185f - 0.075f) * t;
+                    gl = 0.048f + (0.115f - 0.048f) * t;
+                    bl = 0.025f + (0.060f - 0.025f) * t;
+                    // gentle embedded pebbles (no harsh dark stamps)
+                    float peb = tm_vnoise(u, v, 64, seed + 6u);
+                    if (peb > 0.82f) { rl *= 0.85f; gl *= 0.85f; bl *= 0.85f; }
+                    float s = fine * 0.025f; rl += s; gl += s; bl += s;
+                } break;
+                case TM_SAND: {
+                    float t = tm_smooth(0.30f, 0.75f, h);
+                    rl = 0.300f + 0.070f * t;
+                    gl = 0.235f + 0.060f * t;
+                    bl = 0.120f + 0.040f * t;
+                    float s = fine * 0.030f; rl += s; gl += s; bl += s;
+                } break;
+                default: { // SNOW
+                    float t = tm_smooth(0.35f, 0.80f, h);
+                    rl = 0.760f + 0.180f * t;
+                    gl = 0.790f + 0.170f * t;
+                    bl = 0.880f + 0.110f * t;     // faint cool tint
+                    float s = fine * 0.020f; rl += s; gl += s; bl += s;
+                } break;
+            }
+
+            size_t idx = (static_cast<size_t>(y) * W + x) * 4;
+            albedo[idx + 0] = tm_lin2srgb8(rl);
+            albedo[idx + 1] = tm_lin2srgb8(gl);
+            albedo[idx + 2] = tm_lin2srgb8(bl);
+            albedo[idx + 3] = 255;
+
+            // Tangent-space normal from the FINE relief field's central
+            // difference. GL convention: G = +Y; a bump (higher centre)
+            // tilts the normal toward -gradient. The RELIEF_GAIN turns
+            // the small texel-to-texel relief delta into a visible
+            // surface slope so the detail-normal strength slider has a
+            // real, wide effect.
+            const float RELIEF_GAIN = 14.0f;
+            float g = n_strength * RELIEF_GAIN;
+            float dhx = (Hsamp(x + 1, y) - Hsamp(x - 1, y)) * g;
+            float dhy = (Hsamp(x, y + 1) - Hsamp(x, y - 1)) * g;
+            dhx = dhx < -4.0f ? -4.0f : (dhx > 4.0f ? 4.0f : dhx);
+            dhy = dhy < -4.0f ? -4.0f : (dhy > 4.0f ? 4.0f : dhy);
+            float nx = -dhx, ny = -dhy, nz = 1.0f;
+            float inv = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
+            normal[idx + 0] = tm_unorm8(nx * inv * 0.5f + 0.5f);
+            normal[idx + 1] = tm_unorm8(ny * inv * 0.5f + 0.5f);
+            normal[idx + 2] = tm_unorm8(nz * inv * 0.5f + 0.5f);
+            // Alpha = the relief HEIGHT field itself (0..1). cube.frag's
+            // terrain parallax-occlusion march samples this — free, no
+            // extra texture/binding. Rock gets an extra eroded-gully
+            // term so the POM carves cracked, weathered rock.
+            float reliefH = rf[static_cast<size_t>(y) * W + x];
+            if (kind == TM_ROCK) {
+                // POM height = eroded ridged-MF + deep drainage gullies
+                // so parallax carves crisp ravines into the rock.
+                float ru = static_cast<float>(x) / W;
+                float rv = static_cast<float>(y) / H;
+                float mf  = tm_ridged_mf(ru, rv, base_cells * 2, 6,
+                                         seed + 401u);
+                float gul = tm_ridged_mf(ru, rv, base_cells * 5, 4,
+                                         seed + 411u);
+                reliefH = tm_clamp01(0.60f * mf + 0.40f * gul * gul);
+            }
+            normal[idx + 3] = tm_unorm8(reliefH);
+        }
+    }
+}
+
+} // namespace
+
+void VulkanEngine::bake_terrain_materials() {
+    const int W = 512, H = 512;
+    struct Mat { TmKind kind; int slot; const char* name; };
+    const Mat mats[kTerrainMatCount] = {
+        { TM_ROCK,  kTexRock,  "terrain/rock"  },
+        { TM_GRASS, kTexGrass, "terrain/grass" },
+        { TM_DIRT,  kTexDirt,  "terrain/dirt"  },
+        { TM_SAND,  kTexSand,  "terrain/sand"  },
+        { TM_SNOW,  kTexSnow,  "terrain/snow"  },
+    };
+    std::vector<unsigned char> alb, nrm;
+    for (const Mat& m : mats) {
+        tm_generate(m.kind, W, H, alb, nrm);
+        Texture2D a = upload_texture_from_pixels(
+            device_, allocator_, graphics_queue_, graphics_queue_family_,
+            alb.data(), W, H, VK_FORMAT_R8G8B8A8_SRGB, m.name);
+        Texture2D n = upload_texture_from_pixels(
+            device_, allocator_, graphics_queue_, graphics_queue_family_,
+            nrm.data(), W, H, VK_FORMAT_R8G8B8A8_UNORM, m.name);
+        albedo_textures_[m.slot] = { a.image, a.alloc, a.view };
+        normal_textures_[m.slot] = { n.image, n.alloc, n.view };
+    }
+    log::infof("[texture] baked %d procedural terrain materials (%dx%d)",
+               kTerrainMatCount, W, H);
 }
 
 void VulkanEngine::destroy_textures() {
@@ -1746,6 +2278,59 @@ void VulkanEngine::destroy_textures() {
     if (texture_sampler_) {
         vkDestroySampler(device_, texture_sampler_, nullptr);
         texture_sampler_ = VK_NULL_HANDLE;
+    }
+}
+
+// FSR2 mip-bias (AMD recommendation): when input is rendered below the
+// display resolution, the sampler should bias towards sharper mips so
+// the upscaler's frequency content matches the display. Formula from
+// FSR2 docs:  log2(render_w / display_w) - 1.
+//
+// Called from init() between apply_render_scale() and the scene
+// descriptor write so the new sampler is captured by the descriptor.
+// Live toggling rt_.fsr2_enabled mid-game does NOT update the bias
+// (would require waiting on the device + rewriting every descriptor
+// set that captures the sampler — a follow-up).
+void VulkanEngine::update_texture_sampler_for_fsr2() {
+    if (!device_) return;
+    float bias = 0.0f;
+    if (rt_.fsr2_enabled && swapchain_extent_.width > 0 &&
+        render_extent_.width > 0 &&
+        swapchain_extent_.width != render_extent_.width) {
+        float ratio = static_cast<float>(render_extent_.width) /
+                      static_cast<float>(swapchain_extent_.width);
+        bias = std::log2(ratio) - 1.0f;
+    }
+    if (texture_sampler_) {
+        vkDestroySampler(device_, texture_sampler_, nullptr);
+        texture_sampler_ = VK_NULL_HANDLE;
+    }
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = VK_FILTER_LINEAR;
+    si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    // Anisotropic filtering — keeps the terrain ground crisp at grazing
+    // angles (the dominant "blurry everywhere" cause for a big flat
+    // surface). Clamp to the device's supported max.
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physical_device_, &props);
+    // 4x, not 16x: terrain is triplanar (3 albedo + 3 normal taps per
+    // fragment), so anisotropy cost is multiplied 6x over a screen-
+    // filling ground. 4x removes essentially all the grazing-angle blur
+    // while keeping the per-frame cost sane (16x cratered it to ~20fps).
+    float aniso = std::min(4.0f, props.limits.maxSamplerAnisotropy);
+    si.anisotropyEnable = (aniso > 1.0f) ? VK_TRUE : VK_FALSE;
+    si.maxAnisotropy = aniso;
+    si.maxLod = VK_LOD_CLAMP_NONE;
+    si.mipLodBias = bias;
+    vk_check(vkCreateSampler(device_, &si, nullptr, &texture_sampler_),
+             "texture sampler (fsr2 update)");
+    if (bias != 0.0f) {
+        log::infof("[fsr2] texture sampler bias = %.2f", bias);
     }
 }
 
@@ -2240,7 +2825,7 @@ void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,
         pc.color = color;
         pc.emissive = glm::vec4(emissive, full_emissive ? 1.0f : 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, m.index_count, 1, 0, 0, 0);
     };
@@ -2542,12 +3127,12 @@ void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
     // height. Was 28.0 (pre-shrink default), full-res was already 11.5.
     pc.color    = glm::vec4(0.0f, 0.0f, 11.5f, 22.0f);
     // emissive layout for the raymarch shader:
-    //   x = step factor (0.4..0.8) — march step relative to SDF gap
+    //   x = step factor (0.15..0.8) — march step relative to SDF gap
     //   y = lod_near_m  — ray distance at which the FBM LOD ramp starts
     //   z = lod_far_m   — ray distance at which the FBM LOD ramp ends
     //   w = lod_min_oct — minimum octave count at far end of ramp
     pc.emissive = glm::vec4(
-        std::clamp(rt_.terrain_raymarch_step_factor, 0.4f, 0.8f),
+        std::clamp(rt_.terrain_raymarch_step_factor, 0.15f, 0.8f),
         std::max(1.0f, rt_.terrain_raymarch_lod_near_m),
         std::max(rt_.terrain_raymarch_lod_near_m + 1.0f,
                  rt_.terrain_raymarch_lod_far_m),
@@ -2568,7 +3153,7 @@ void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
         rt_.terrain_raymarch_fog_godrays ? 1.0f : 0.0f,
         rt_.water_rt_reflections ? 1.0f : 0.0f);
     vkCmdPushConstants(cmd, pipeline_layout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                        0, sizeof(PushConstants), &pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 }
@@ -2595,7 +3180,7 @@ void VulkanEngine::render_terrain_raymarch_compose(VkCommandBuffer cmd) {
                          static_cast<float>(tr_lr_extent_.height),
                          0.0f);
     vkCmdPushConstants(cmd, pipeline_layout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                        0, sizeof(PushConstants), &pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 }
@@ -2630,7 +3215,7 @@ void VulkanEngine::render_grass_raymarch(VkCommandBuffer cmd) {
                                  static_cast<float>(frame_number_) * 0.016f,
                                  0.0f);
     vkCmdPushConstants(cmd, pipeline_layout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                        0, sizeof(PushConstants), &pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 }
@@ -2664,7 +3249,7 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         pc.mvp = vp * model;
         pc.model = model;
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     };
@@ -2714,10 +3299,63 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         // active вЂ” its frag writes its own depth via gl_FragDepth in
         // the color pass, and rasterised chunk depths from the prime
         // would wrongly occlude that with stale heightfield depths.
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrain_depth_pipeline_);
         glm::vec3 cam = player_.eye_position();
+        const VkShaderStageFlags kPcStages =
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+            VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+            VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+        const bool tess_on = rt_.terrain_tessellation_enabled &&
+                             terrain_tess_depth_pipeline_ != VK_NULL_HANDLE;
+        const float tess_r2 = rt_.terrain_tess_range * rt_.terrain_tess_range;
+        auto chunk_near = [&](const TerrainChunk& c) {
+            glm::vec3 ctr = 0.5f * (c.aabb_min + c.aabb_max);
+            float dx = ctr.x - cam.x, dz = ctr.z - cam.z;
+            return (dx * dx + dz * dz) < tess_r2;
+        };
+
+        // Pass A: near chunks primed with the SAME tessellation
+        // pipeline (vert/tesc/tese) and SAME push constants as the
+        // color pass, so the primed depth is bit-identical → no
+        // 1-ULP LESS_OR_EQUAL rejects (sky-colour patches).
+        if (tess_on) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              terrain_tess_depth_pipeline_);
+            for (const auto& c : terrain_chunks_.chunks) {
+                if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
+                if (!chunk_near(c)) continue;
+                VkDeviceSize voff = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &voff);
+                vkCmdBindIndexBuffer(cmd, c.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+                PushConstants pc{};
+                pc.mvp = vp;
+                pc.model = glm::mat4(1.0f);
+                float sx = std::max(1e-3f, c.aabb_max.x - c.aabb_min.x);
+                float sz = std::max(1e-3f, c.aabb_max.z - c.aabb_min.z);
+                pc.color = glm::vec4(c.aabb_min.x, c.aabb_min.z,
+                                     1.0f / sx, 1.0f / sz);
+                // Tess knobs — MUST match the color pass exactly or the
+                // primed depth won't equal the color depth (sky patches).
+                pc.emissive = glm::vec4(rt_.terrain_tess_max_level,
+                                        rt_.terrain_tess_near_m,
+                                        rt_.terrain_tess_far_m,
+                                        rt_.terrain_tess_falloff);
+                // .y = rock vertex relief, .z = tess smoothing → .tese.
+                // BOTH MUST equal the colour pass's values or primed
+                // depth ≠ colour depth (sky-patch z-fight).
+                pc.tex_params = glm::vec4(0.0f, rt_.terrain_rock_relief,
+                                          rt_.terrain_tess_smooth, 2.0f);
+                vkCmdPushConstants(cmd, pipeline_layout_, kPcStages,
+                                   0, sizeof(PushConstants), &pc);
+                vkCmdDrawIndexed(cmd, c.index_count_lod[0], 1, 0, 0, 0);
+            }
+        }
+
+        // Pass B: the rest (and everything if tess off) with the plain
+        // CD-LOD depth pipeline.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrain_depth_pipeline_);
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
+            if (tess_on && chunk_near(c)) continue;   // primed in pass A
             int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1 * rt_.terrain_lod_scale, rt_.terrain_lod2 * rt_.terrain_lod_scale, rt_.terrain_lod3 * rt_.terrain_lod_scale);
             float morph = pick_terrain_morph(c, cam, lod, rt_.terrain_lod1 * rt_.terrain_lod_scale);
             VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
@@ -2729,8 +3367,7 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
             pc.mvp = vp;
             pc.model = glm::mat4(1.0f);
             pc.color = glm::vec4(1.0f, 1.0f, 1.0f, morph);
-            vkCmdPushConstants(cmd, pipeline_layout_,
-                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            vkCmdPushConstants(cmd, pipeline_layout_, kPcStages,
                                0, sizeof(PushConstants), &pc);
             vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
         }
@@ -2738,6 +3375,63 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         // continue using that for any non-terrain post-terrain draws.
         // Re-bind so the rest of the depth pre-pass goes through it.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, depth_pipeline_);
+    }
+}
+
+// Half-rate sun-shadow producer pass (roadmap item #4, Phase 2). Re-uses
+// the depth pre-pass geometry walk (brushes + dyn props) at half the
+// render extent. Skips terrain (terrain has its own hybrid bake/grass-
+// shadow-map path that the consumer in cube.frag will continue to
+// honour). Pipeline writes a single R8 occlusion value via one RT
+// shadow ray per half-res pixel into shadow_lr_image_.
+void VulkanEngine::render_world_shadow_lr_pass(VkCommandBuffer cmd) {
+    const FrameView& fv = current_frame_view_;
+    const glm::mat4& vp = fv.vp;
+    Frustum frustum = extract_frustum(vp);
+
+    VkViewport vp_state{};
+    vp_state.x = 0.0f; vp_state.y = 0.0f;
+    vp_state.width  = static_cast<float>(shadow_lr_extent_.width);
+    vp_state.height = static_cast<float>(shadow_lr_extent_.height);
+    vp_state.minDepth = 0.0f; vp_state.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &vp_state);
+    VkRect2D scissor{ {0, 0}, shadow_lr_extent_ };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_lr_pipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
+                            0, 1, &scene_desc_set_, 0, nullptr);
+
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+    vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+
+    auto push = [&](const glm::mat4& model) {
+        PushConstants pc{};
+        pc.mvp = vp * model;
+        pc.model = model;
+        vkCmdPushConstants(cmd, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT |
+                           VK_SHADER_STAGE_FRAGMENT_BIT |
+                           VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                           VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
+    };
+
+    for (size_t i = 0; i < world_.brushes.size(); ++i) {
+        const auto& a = world_.aabbs[i];
+        if (!aabb_visible(frustum, a.min, a.max)) continue;
+        push(static_brush_models_[i]);
+    }
+    for (size_t i = 0; i < dyn_props_.size(); ++i) {
+        const DynRender& dr = i < dyn_render_cache_.size() ? dyn_render_cache_[i]
+                                                            : DynRender{};
+        if (!dr.valid) continue;
+        if (!aabb_visible(frustum, dr.aabb_min, dr.aabb_max)) continue;
+        glm::mat4 model = dr.world * glm::scale(glm::mat4(1.0f),
+                                                dyn_props_[i].full_size);
+        push(model);
     }
 }
 
@@ -2792,7 +3486,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             pc.tex_params = glm::vec4(-1.0f, -1.0f, uv_scale, 0.0f);
         }
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     };
@@ -2803,7 +3497,133 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // The merged-static-BLAS-style "single big draw" is reserved for the
     // RT path; for raster we want LOD + frustum cull per chunk so the
     // 2km terrain stays cheap from any viewpoint.
-    if (rt_.terrain_raymarch_enabled && terrain_raymarch_pipeline_ != VK_NULL_HANDLE
+    // Mesh (CDLOD) terrain draws first when the raymarcher is off, so its
+    // depth is in the buffer before the (optional) water-only raymarch
+    // pass below — hills then correctly occlude the water plane.
+    if (!rt_.terrain_raymarch_enabled && !terrain_chunks_.chunks.empty()) {
+        // Switch to the terrain-specific pipeline (terrain.vert + cube.frag,
+        // 2 vertex bindings РІР‚вЂќ pos/norm/uv + parent_y) so we can morph
+        // between LOD 0 and LOD 1 in the vertex shader. Skirts still hide
+        // LOD-mismatch cracks at higher LOD seams.
+        glm::vec3 cam = player_.eye_position();
+        const bool tess_on = rt_.terrain_tessellation_enabled &&
+                             terrain_tess_pipeline_ != VK_NULL_HANDLE;
+        const float tess_r2 = rt_.terrain_tess_range * rt_.terrain_tess_range;
+        auto chunk_near = [&](const TerrainChunk& c) {
+            glm::vec3 ctr = 0.5f * (c.aabb_min + c.aabb_max);
+            glm::vec3 d(ctr.x - cam.x, 0.0f, ctr.z - cam.z);
+            return (d.x * d.x + d.z * d.z) < tess_r2;
+        };
+        auto fill_pc = [&](const TerrainChunk& c, float morph) {
+            PushConstants pc{};
+            pc.mvp = vp;
+            pc.model = glm::mat4(1.0f);
+            pc.prev_mvp = prev_vp;
+            // .w doubles as the morph factor РІР‚вЂќ terrain.vert lerps Y by it.
+            pc.color = glm::vec4(1.0f, 1.0f, 1.0f, morph);
+            pc.emissive = glm::vec4(0.0f);
+            // .x = terrain parallax-occlusion strength (the terrain
+            // fragment path ignores tex_params.x/.y otherwise).
+            pc.tex_params = glm::vec4(rt_.terrain_pom_strength, 0.0f,
+                                      1.0f, 2.0f);
+            // .x = sand ripple scale, .y = grass contour-line scale
+            // (cube.frag terrain reads these; 0 = grass lines off).
+            pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
+                                        rt_.terrain_grass_line_scale,
+                                        0.0f, 0.0f);
+            vkCmdPushConstants(cmd, pipeline_layout_,
+                               VK_SHADER_STAGE_VERTEX_BIT |
+                               VK_SHADER_STAGE_FRAGMENT_BIT |
+                               VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                               VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                               0, sizeof(PushConstants), &pc);
+        };
+
+        // Pass A: camera-near chunks via the GPU tessellation pipeline
+        // (LOD0 triangle IBO consumed as 3-CP patches; only vertex
+        // binding 0 — no parent_y/morph for near chunks).
+        if (tess_on) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                (rt_.terrain_wireframe && terrain_tess_wire_pipeline_)
+                    ? terrain_tess_wire_pipeline_ : terrain_tess_pipeline_);
+            for (const auto& c : terrain_chunks_.chunks) {
+                if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
+                if (!chunk_near(c)) continue;
+                VkDeviceSize voff = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &voff);
+                vkCmdBindIndexBuffer(cmd, c.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+                PushConstants pc{};
+                pc.mvp = vp;
+                pc.model = glm::mat4(1.0f);
+                pc.prev_mvp = prev_vp;
+                // pc.color carries the chunk XZ footprint for the .tese's
+                // border taper (no morph in the tess path, vColor is a
+                // constant in cube.frag, so .color is free here):
+                //   .xy = chunk min (x,z),  .zw = 1 / chunk size (x,z)
+                float sx = std::max(1e-3f, c.aabb_max.x - c.aabb_min.x);
+                float sz = std::max(1e-3f, c.aabb_max.z - c.aabb_min.z);
+                pc.color = glm::vec4(c.aabb_min.x, c.aabb_min.z,
+                                     1.0f / sx, 1.0f / sz);
+                // Tess knobs (UI sliders) → .tesc. Must equal the
+                // depth-prime pass's value so depths match.
+                pc.emissive = glm::vec4(rt_.terrain_tess_max_level,
+                                        rt_.terrain_tess_near_m,
+                                        rt_.terrain_tess_far_m,
+                                        rt_.terrain_tess_falloff);
+                // .x = parallax (pixel displacement, fragment only),
+                // .y = rock vertex relief, .z = tess smoothing.
+                // .y/.z drive .tese geometry → MUST equal the
+                // depth-prime pass's values or primed depth differs.
+                pc.tex_params = glm::vec4(rt_.terrain_pom_strength,
+                                          rt_.terrain_rock_relief,
+                                          rt_.terrain_tess_smooth, 2.0f);
+                // .x = sand ripple scale, .y = grass contour-line scale.
+                pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
+                                            rt_.terrain_grass_line_scale,
+                                            0.0f, 0.0f);
+                vkCmdPushConstants(cmd, pipeline_layout_,
+                                   VK_SHADER_STAGE_VERTEX_BIT |
+                                   VK_SHADER_STAGE_FRAGMENT_BIT |
+                                   VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                                   VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                                   0, sizeof(PushConstants), &pc);
+                vkCmdDrawIndexed(cmd, c.index_count_lod[0], 1, 0, 0, 0);
+            }
+        }
+
+        // Pass B: the rest (and everything, if tess is off) via the
+        // plain CD-LOD morph pipeline.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            (rt_.terrain_wireframe && terrain_wire_pipeline_)
+                ? terrain_wire_pipeline_ : terrain_pipeline_);
+        for (const auto& c : terrain_chunks_.chunks) {
+            if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
+            if (tess_on && chunk_near(c)) continue;   // drawn in pass A
+            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1 * rt_.terrain_lod_scale, rt_.terrain_lod2 * rt_.terrain_lod_scale, rt_.terrain_lod3 * rt_.terrain_lod_scale);
+            float morph = pick_terrain_morph(c, cam, lod, rt_.terrain_lod1 * rt_.terrain_lod_scale);
+            VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
+            VkDeviceSize voffs[2] = { 0, 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
+            VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
+            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
+            fill_pc(c, morph);
+            vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
+        }
+        // Switch back to the cube pipeline + cube mesh for the brush loop.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    }
+
+    // Raymarch pass. Runs for the full FBM terrain (raymarch enabled) OR,
+    // when the mesh terrain is active, as a water-only pass: the shader
+    // sees terrain_local_info.x > 0.5, skips the terrain march entirely,
+    // and only intersects + shades the water plane (all FBM water types,
+    // foam, showthrough, reflections). Its per-pixel gl_FragDepth is
+    // hardware depth-tested against the mesh depth written just above, so
+    // hills occlude the water exactly like in the FBM path.
+    if (rt_.terrain_raymarch_enabled
+        && terrain_raymarch_pipeline_ != VK_NULL_HANDLE
         && !tr_use_lowres()) {
         // Procedural FBM ray-marched terrain вЂ” fullscreen draw, frag
         // writes hit-point depth so rasterised cubes / castle / dyn-
@@ -2836,12 +3656,12 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             static_cast<float>(std::clamp(rt_.terrain_raymarch_octaves, 4, 24)),
             static_cast<float>(std::clamp(rt_.terrain_raymarch_normal_octaves, 4, 32)));
         // emissive layout — mirrors render_terrain_raymarch_lr:
-        //   x = step factor (0.4..0.8)
+        //   x = step factor (0.15..0.8)
         //   y = lod_near_m  — ray-t at which FBM LOD ramp starts
         //   z = lod_far_m   — ray-t at which FBM LOD ramp ends
         //   w = lod_min_oct — minimum octave count at far end
         pc.emissive = glm::vec4(
-            std::clamp(rt_.terrain_raymarch_step_factor, 0.4f, 0.8f),
+            std::clamp(rt_.terrain_raymarch_step_factor, 0.15f, 0.8f),
             std::max(1.0f, rt_.terrain_raymarch_lod_near_m),
             std::max(rt_.terrain_raymarch_lod_near_m + 1.0f,
                      rt_.terrain_raymarch_lod_far_m),
@@ -2853,7 +3673,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             rt_.terrain_raymarch_fog_godrays ? 1.0f : 0.0f,
             rt_.water_rt_reflections ? 1.0f : 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                            0, sizeof(PushConstants), &pc);
         // 3 verts, 1 instance вЂ” gl_VertexIndex 0..2 covers the screen.
         vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -2862,38 +3682,52 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
-    } else if (!terrain_chunks_.chunks.empty()) {
-        // Switch to the terrain-specific pipeline (terrain.vert + cube.frag,
-        // 2 vertex bindings РІР‚вЂќ pos/norm/uv + parent_y) so we can morph
-        // between LOD 0 and LOD 1 in the vertex shader. Skirts still hide
-        // LOD-mismatch cracks at higher LOD seams.
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrain_pipeline_);
-        glm::vec3 cam = player_.eye_position();
-        for (const auto& c : terrain_chunks_.chunks) {
-            if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
-            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1 * rt_.terrain_lod_scale, rt_.terrain_lod2 * rt_.terrain_lod_scale, rt_.terrain_lod3 * rt_.terrain_lod_scale);
-            float morph = pick_terrain_morph(c, cam, lod, rt_.terrain_lod1 * rt_.terrain_lod_scale);
-            VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
-            VkDeviceSize voffs[2] = { 0, 0 };
-            vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
-            VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
-            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
-            PushConstants pc{};
-            pc.mvp = vp;
-            pc.model = glm::mat4(1.0f);
-            pc.prev_mvp = prev_vp;
-            // .w doubles as the morph factor РІР‚вЂќ terrain.vert lerps Y by it.
-            pc.color = glm::vec4(1.0f, 1.0f, 1.0f, morph);
-            pc.emissive = glm::vec4(0.0f);
-            pc.tex_params = tex_on
-                ? glm::vec4(0.0f, 0.0f, 16.0f, 2.0f)
-                : glm::vec4(-1.0f, -1.0f, 16.0f, 2.0f);
-            vkCmdPushConstants(cmd, pipeline_layout_,
-                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                               0, sizeof(PushConstants), &pc);
-            vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
-        }
-        // Switch back to the cube pipeline + cube mesh for the brush loop.
+    }
+
+    // Mesh-terrain mode + water: draw the REAL rasterised water plane
+    // (verbatim ocean shading in water.frag) instead of the fullscreen
+    // analytic water-only pass. Depth is owned by the plane geometry, so
+    // the terrain↔water silhouette is a pixel-exact hardware depth test
+    // — the previous analytic-vs-rasterised mismatch (edge gaps / seam
+    // lines) is gone by construction.
+    if (rt_.water_enabled && !rt_.terrain_raymarch_enabled
+        && terrain_water_pipeline_ != VK_NULL_HANDLE
+        && water_plane_mesh_.index_count > 0) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          terrain_water_pipeline_);
+        PushConstants pc{};
+        pc.mvp = vp;
+        pc.model = glm::inverse(vp);   // frag reconstructs the view ray
+        pc.prev_mvp = prev_vp;
+        // .x = water level → water.vert lifts the plane to it; the frag
+        // still reads scene.water_params.y for the shaded surface.
+        // .y = clarity depth (m) → Beer's-law absorption in water.frag.
+        // .z = shoreline softness (m of depth the water fades in over).
+        // .w = foam opacity (vs the see-through water it sits on).
+        pc.color = glm::vec4(rt_.water_level,
+                             std::max(0.1f, rt_.water_clarity_depth),
+                             std::max(0.02f, rt_.water_shore_softness),
+                             glm::clamp(rt_.water_foam_opacity, 0.0f, 1.0f));
+        pc.emissive = glm::vec4(0.0f);
+        pc.tex_params = glm::vec4(0.0f);
+        // Fog strength + flags + water RT-reflection toggle (mirrors the
+        // raymarch water-only push so reflections/fog match exactly).
+        pc.grass_params = glm::vec4(
+            std::max(0.0f, rt_.terrain_raymarch_fog_strength),
+            rt_.terrain_raymarch_relaxation ? 1.0f : 0.0f,
+            rt_.terrain_raymarch_fog_godrays ? 1.0f : 0.0f,
+            rt_.water_rt_reflections ? 1.0f : 0.0f);
+        vkCmdPushConstants(cmd, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+                           VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                           VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           0, sizeof(PushConstants), &pc);
+        VkDeviceSize woff = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &water_plane_mesh_.vertex_buffer, &woff);
+        vkCmdBindIndexBuffer(cmd, water_plane_mesh_.index_buffer, 0,
+                             VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, water_plane_mesh_.index_count, 1, 0, 0, 0);
+        // Restore cube pipeline + mesh for the passes that follow.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -2939,7 +3773,9 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                 pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
                 vkCmdPushConstants(cmd, pipeline_layout_,
                                    VK_SHADER_STAGE_VERTEX_BIT |
-                                     VK_SHADER_STAGE_FRAGMENT_BIT,
+                                     VK_SHADER_STAGE_FRAGMENT_BIT |
+                                     VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                                     VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                                    0, sizeof(PushConstants), &pc);
                 vkCmdDrawIndexed(cmd, sm.mesh.index_count, 1, 0, 0, 0);
             }
@@ -2985,7 +3821,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         float t = static_cast<float>(frame_number_) * 0.016f;
         gpc.grass_params = glm::vec4(rt_.grass_distance, rt_.grass_wind, t, 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                            0, sizeof(PushConstants), &gpc);
         // Density slider goes 0..4. We map (density / 4.0) onto the
         // [0, total_placed] range so density=1.0 gives 25% of the
@@ -3071,7 +3907,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             pc.color = p.color;
             pc.emissive = glm::vec4(p.emissive, 1.0f);  // full_emissive
             vkCmdPushConstants(cmd, pipeline_layout_,
-                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                                0, sizeof(PushConstants), &pc);
             vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
         }

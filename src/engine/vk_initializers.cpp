@@ -217,6 +217,36 @@ void transition_image_aspect(VkCommandBuffer cmd, VkImage image,
     vkCmdPipelineBarrier2(cmd, &dep);
 }
 
+void transition_image_src_stage(VkCommandBuffer cmd, VkImage image,
+                                 VkImageLayout from, VkImageLayout to,
+                                 VkPipelineStageFlags2 src_stage) {
+    VkImageMemoryBarrier2 barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .pNext = nullptr,
+        // Caller-supplied src stage forms the execution dependency
+        // with the preceding semaphore wait. srcAccessMask stays
+        // derived from `from` (0 for UNDEFINED — no memory hazard,
+        // contents discarded; only the execution order matters).
+        .srcStageMask = src_stage,
+        .srcAccessMask = access_for_layout(from),
+        .dstStageMask = stage_for_layout(to),
+        .dstAccessMask = access_for_layout(to),
+        .oldLayout = from, .newLayout = to,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = image_subresource_range(VK_IMAGE_ASPECT_COLOR_BIT),
+    };
+    VkDependencyInfo dep{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .pNext = nullptr, .dependencyFlags = 0,
+        .memoryBarrierCount = 0, .pMemoryBarriers = nullptr,
+        .bufferMemoryBarrierCount = 0, .pBufferMemoryBarriers = nullptr,
+        .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier,
+    };
+    vkCmdPipelineBarrier2(cmd, &dep);
+}
+
 void transition_image(VkCommandBuffer cmd, VkImage image,
                       VkImageLayout from, VkImageLayout to) {
     VkImageAspectFlags aspect =

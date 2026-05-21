@@ -335,7 +335,7 @@ void VulkanEngine::draw_decals(VkCommandBuffer cmd, const glm::mat4& vp) {
         pc.emissive = glm::vec4(0.0f);
         pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
     }
@@ -362,7 +362,7 @@ void VulkanEngine::draw_spark_trails(VkCommandBuffer cmd, const glm::mat4& vp) {
         pc.color = glm::vec4(glm::min(emissive, glm::vec3(1.0f)), 1.0f);
         pc.emissive = glm::vec4(emissive, 1.0f);    // full_emissive
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
     };
@@ -429,7 +429,7 @@ void VulkanEngine::draw_shadow_debug(VkCommandBuffer cmd, const glm::mat4& vp) {
         pc.color = glm::vec4(glm::min(emissive, glm::vec3(1.0f)), 1.0f);
         pc.emissive = glm::vec4(emissive, 1.0f);  // .a > 0 → skip lighting in cube.frag
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
     };

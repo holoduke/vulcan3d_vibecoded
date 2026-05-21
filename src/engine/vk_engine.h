@@ -97,6 +97,17 @@ private:
     void destroy_depth_image();
     void init_commands();
     void init_sync();
+    // GPU timestamp watchdog: writes TOP_OF_PIPE / BOTTOM_OF_PIPE
+    // timestamps around the main render command buffer per frame slot
+    // and reads back the previous-iteration result after the fence
+    // wait. Logs a WARN when frame GPU time approaches Windows TDR
+    // (~2 s) so we have actionable signal before the device-lost.
+    void init_gpu_query_pool();
+    void destroy_gpu_query_pool();
+    // Called AFTER vkWaitForFences for the slot we're about to record
+    // — the slot's GPU work has just finished, so its previous-frame
+    // timestamps are now safe to read non-blocking.
+    void read_gpu_timestamps_for_slot(uint32_t slot);
 
     // Show a blocking loader frame on the swapchain. Cheap progress bar
     // drawn via vkCmdClearAttachments rectangles — no pipelines, no
@@ -171,7 +182,14 @@ private:
     void init_skybox();
     void destroy_skybox_resources();
     void init_textures();
+    // CPU-generate the 5 seamless tiling terrain materials (albedo+normal)
+    // into texture-array slots 7-11. Called at the end of init_textures().
+    void bake_terrain_materials();
     void destroy_textures();
+    // Recreate texture_sampler_ with the FSR2 mip-bias if applicable.
+    // Idempotent — bias resolves to 0 when fsr2 is off or render scale
+    // == 1.0, producing the same sampler as init_textures.
+    void update_texture_sampler_for_fsr2();
     void init_grass_mask_texture();
     void destroy_grass_mask_texture();
     void init_fog_wisp_texture();
@@ -244,6 +262,17 @@ private:
     // Depth-only pipeline used for the early-Z pre-pass; shares pipeline
     // layout + vertex shader with `pipeline_`.
     VkPipeline depth_pipeline_ = VK_NULL_HANDLE;
+    // Half-rate sun-shadow producer pipeline (roadmap item #4, Phase 2).
+    // Same pipeline_layout_ + cube.vert as the main color pass, but its
+    // fragment shader (shadow_lr.frag) writes a single R8 occlusion value
+    // per half-res pixel into shadow_lr_image_ via one RT shadow ray. The
+    // bilateral-upsample consumer in cube.frag (Phase 3) replaces the
+    // expensive inline PCSS trace for brush/dyn surfaces. Pass is skipped
+    // entirely when rt_.half_rate_shadows is off.
+    VkPipeline     shadow_lr_pipeline_    = VK_NULL_HANDLE;
+    VkShaderModule shadow_lr_frag_module_ = VK_NULL_HANDLE;
+    void init_shadow_lr_pipeline();
+    void render_world_shadow_lr_pass(VkCommandBuffer cmd);
     // Terrain-specific pipelines that bind a second vertex stream (parent_y)
     // and morph between LOD 0 and LOD 1 in the vertex shader. Color and
     // depth-prepass variants must both morph or their depth values
@@ -251,6 +280,19 @@ private:
     VkPipeline      terrain_pipeline_       = VK_NULL_HANDLE;
     VkPipeline      terrain_depth_pipeline_ = VK_NULL_HANDLE;
     VkShaderModule  terrain_vert_module_    = VK_NULL_HANDLE;
+    // Near-terrain GPU tessellation pipeline (distance-adaptive
+    // subdivision + detail displacement + normal recompute). Used for
+    // camera-near chunks only; far chunks keep the plain terrain_pipeline_.
+    VkPipeline      terrain_tess_pipeline_  = VK_NULL_HANDLE;
+    VkPipeline      terrain_tess_depth_pipeline_ = VK_NULL_HANDLE;
+    // Wireframe debug variants (POLYGON_MODE_LINE) of the plain + tess
+    // terrain color pipelines — shows every triangle incl. tessellated
+    // sub-triangles so the mesh density is directly visible.
+    VkPipeline      terrain_wire_pipeline_      = VK_NULL_HANDLE;
+    VkPipeline      terrain_tess_wire_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule  terrain_tess_vert_module_ = VK_NULL_HANDLE;
+    VkShaderModule  terrain_tesc_module_      = VK_NULL_HANDLE;
+    VkShaderModule  terrain_tese_module_      = VK_NULL_HANDLE;
     void init_terrain_pipelines();
     void destroy_terrain_pipelines();
 
@@ -264,6 +306,19 @@ private:
     VkShaderModule  terrain_raymarch_frag_module_ = VK_NULL_HANDLE;
     void init_terrain_raymarch_pipeline();
     void destroy_terrain_raymarch_pipeline();
+
+    // Rasterised water plane (mesh-terrain mode). A real plane mesh at
+    // the water level drawn in the main pass with the verbatim ocean
+    // shading (water.frag = terrain_raymarch.frag) so the terrain↔water
+    // silhouette is pixel-exact hardware depth — no compose, no analytic
+    // depth, no edge gaps / seam lines. Replaces the fullscreen water-
+    // only raymarch draw when the mesh terrain is active.
+    VkPipeline      terrain_water_pipeline_   = VK_NULL_HANDLE;
+    VkShaderModule  water_vert_module_        = VK_NULL_HANDLE;
+    VkShaderModule  water_frag_module_        = VK_NULL_HANDLE;
+    Mesh            water_plane_mesh_{};
+    void init_terrain_water_pipeline();
+    void destroy_terrain_water_pipeline();
 
     // Low-res raymarch render target. When `terrain_raymarch_scale` < 1
     // the FBM ray-march renders into these (cheaper, since each pixel
@@ -308,6 +363,20 @@ private:
     void destroy_vrs_attachment();
     void recreate_vrs_attachment();
     VkExtent2D      tr_lr_extent_{};
+
+    // --- Half-rate sun-shadow pass (perf) ---------------------------
+    // The expensive inline PCSS sun-shadow ray-query is traced at
+    // render_extent_/2 into this R8 occlusion buffer, then bilateral-
+    // upsampled in cube.frag (≈75% fewer shadow rays). Reuses the
+    // linear tr_lr_sampler_. Gated by rt_.half_rate_shadows; when off
+    // the pass is skipped and cube.frag traces inline as before.
+    VkImage         shadow_lr_image_ = VK_NULL_HANDLE;
+    VmaAllocation   shadow_lr_alloc_ = nullptr;
+    VkImageView     shadow_lr_view_  = VK_NULL_HANDLE;
+    VkExtent2D      shadow_lr_extent_{};
+    void init_shadow_lr();
+    void destroy_shadow_lr();
+    void recreate_shadow_lr();
 
     // Compose pipeline that samples the low-res raymarch and writes
     // upscaled color/motion + gl_FragDepth into scene_color/depth with
@@ -356,8 +425,19 @@ private:
     float sample_terrain_height(float x, float z) const;
 
     // PBR-ish material textures. kTextureCount must match the size of the
-    // sampler arrays in cube.frag.
-    static constexpr int kTextureCount = 7;
+    // sampler arrays in cube.frag. Slots 0-6 are file-loaded; slots 7-11
+    // are procedurally baked seamless terrain materials, splatted in
+    // cube.frag's is_terrain block by the height/slope weights.
+    static constexpr int kFileTextureCount   = 7;
+    static constexpr int kTerrainMatCount    = 5;
+    static constexpr int kTextureCount       = kFileTextureCount +
+                                               kTerrainMatCount;   // 12
+    // Albedo/normal-array indices of the baked terrain materials.
+    static constexpr int kTexRock  = kFileTextureCount + 0;  // 7
+    static constexpr int kTexGrass = kFileTextureCount + 1;  // 8
+    static constexpr int kTexDirt  = kFileTextureCount + 2;  // 9
+    static constexpr int kTexSand  = kFileTextureCount + 3;  // 10
+    static constexpr int kTexSnow  = kFileTextureCount + 4;  // 11
     struct TextureSlot {
         VkImage image = VK_NULL_HANDLE;
         VmaAllocation alloc = nullptr;
@@ -660,6 +740,9 @@ private:
     enum class State { Playing, Paused };
     State state_ = State::Playing;
     bool prev_menu_key_ = false;
+    bool prev_edit_key_ = false;   // edge-detect E to toggle terrain edit mode
+    bool prev_brush_mode_prev_ = false;
+    bool prev_brush_mode_next_ = false;
     VkDescriptorPool imgui_pool_ = VK_NULL_HANDLE;
     bool imgui_initialized_ = false;
 
@@ -764,6 +847,19 @@ private:
     float             terrain_height_max_     = 0.0f;   // upper-bound for raymarch early-out
     void init_terrain_height_texture();
     void destroy_terrain_height_texture();
+    // FULL (non-delta) baked terrain height as its own R32F texture at
+    // binding 17 — the exact array the CDLOD mesh + physics are built
+    // from. The water path in terrain_raymarch.frag samples THIS in
+    // mesh-terrain mode so its shore / showthrough / reflection /
+    // self-shadow reference the real mesh surface instead of evaluating
+    // the procedural FBM noise. Same dim+1 layout as binding 8.
+    VkImage           terrain_height_full_image_   = VK_NULL_HANDLE;
+    VmaAllocation     terrain_height_full_alloc_   = nullptr;
+    VkImageView       terrain_height_full_view_    = VK_NULL_HANDLE;
+    VkSampler         terrain_height_full_sampler_ = VK_NULL_HANDLE;
+    void init_terrain_height_full_texture();
+    void refresh_terrain_height_full_texture();
+    void upload_terrain_height_full_payload(VkImageLayout src_layout);
     // Persist / load the live (possibly sculpt-edited) heightmap to
     // assets/level1_heights.bin. Save writes dim/cell/origin header +
     // raw float data; load is automatic in init_world if the file
@@ -782,6 +878,11 @@ private:
     // Procedural baseline captured at init_world. delta_to_upload =
     // terrain_data_.heights[i] - terrain_baseline_heights_[i].
     std::vector<float> terrain_baseline_heights_;
+    // 32×32 max-height hi-Z grid, baked once at world load from
+    // terrain_data_.heights (post sculpt-overlay) + safety margin.
+    // Copied into SceneUBO.terrain_max_grid each frame. 1024 floats.
+    std::array<float, 1024> terrain_max_grid_{};
+    bool terrain_max_grid_ready_ = false;
     // Add stratified noise to the heightmap inside the rectangular
     // plateau region — gives the castle pad some natural relief
     // instead of being a perfect flat. Modifies terrain_data_ in
@@ -1100,6 +1201,128 @@ private:
     void recreate_taau_targets();
     void rewrite_compose_for_taau();
 
+    // --- FSR2 (vendored AMD FidelityFX SDK, MIT) ---
+    // Phase 3 — context lifecycle. Opaque pointer + scratch buffer so
+    // the rest of the engine doesn't drag the FSR2 headers in.
+    // Phase 4 — per-frame dispatch. Output image is HR (swapchain-sized)
+    // R16G16B16A16_SFLOAT, written by FSR2's compute shaders, sampled
+    // by compose when fsr2_enabled. compose_uses_fsr2_ tracks the
+    // currently-bound source so we only re-write desc sets on toggle.
+    void* fsr2_scratch_ = nullptr;
+    size_t fsr2_scratch_size_ = 0;
+    void* fsr2_context_ = nullptr;   // FfxFsr2Context* (heap-allocated)
+    bool  fsr2_context_valid_ = false;
+    bool  fsr2_reset_history_ = true; // first frame after context create
+    VkImage       fsr2_output_image_ = VK_NULL_HANDLE;
+    VmaAllocation fsr2_output_alloc_ = nullptr;
+    VkImageView   fsr2_output_view_  = VK_NULL_HANDLE;
+    VkFormat      fsr2_output_format_ = VK_FORMAT_R16G16B16A16_SFLOAT;
+    bool          compose_uses_fsr2_ = false;
+    void init_fsr2();
+    void destroy_fsr2();
+    void recreate_fsr2_context();
+    void dispatch_fsr2(VkCommandBuffer cmd);
+    void rewrite_compose_for_fsr2();
+
+    // --- FSR3 upscaler (FidelityFX SDK 1.1.4 ffx-api, prebuilt DLL) ---
+    // Parallel path to FSR2; selected via rt_.fsr_backend (0=FSR2 legacy,
+    // 1=FSR3 upscaler). FSR3 uses the new ffxContext + ffxDispatch ABI
+    // and the prebuilt amd_fidelityfx_vk.dll. Output image is the same
+    // HR R16G16B16A16 storage as fsr2_output_image_; compose's history
+    // binding flips to fsr3_output_view_ when the backend is FSR3.
+    void*         fsr3_upscaler_context_ = nullptr;  // ffxContext (opaque)
+    bool          fsr3_context_valid_    = false;
+    bool          fsr3_reset_history_    = true;
+    // Set when init_fsr3() AVs inside the SDK — sticks for the process
+    // lifetime so we never retry. UI auto-reverts to FSR2 backend.
+    bool          fsr3_fatal_            = false;
+    VkImage       fsr3_output_image_ = VK_NULL_HANDLE;
+    VmaAllocation fsr3_output_alloc_ = nullptr;
+    VkImageView   fsr3_output_view_  = VK_NULL_HANDLE;
+    bool          compose_uses_fsr3_ = false;
+    void init_fsr3();
+    void destroy_fsr3();
+    void recreate_fsr3_context();
+    void dispatch_fsr3(VkCommandBuffer cmd);
+    void rewrite_compose_for_fsr3();
+
+    // --- FSR3 frame generation (session 3 of docs/fsr3_plan.md) ---
+    // Separate ffxContext for the FG effect — uses the same DLL +
+    // backend as the upscaler. Lazy-init when rt_.fg_enabled goes
+    // true (and fsr_backend == 1). Output is an HR image we OWN; this
+    // session does NOT integrate with the swapchain (session 4).
+    void*         fsr3_fg_context_       = nullptr;
+    bool          fsr3_fg_context_valid_ = false;
+    bool          fsr3_fg_fatal_         = false;
+    VkImage       fsr3_fg_output_image_  = VK_NULL_HANDLE;
+    VmaAllocation fsr3_fg_output_alloc_  = nullptr;
+    VkImageView   fsr3_fg_output_view_   = VK_NULL_HANDLE;
+    uint64_t      fsr3_fg_frame_id_      = 0;  // must increment by exactly 1
+    void init_fsr3_fg();
+    void destroy_fsr3_fg();
+    void dispatch_fsr3_fg(VkCommandBuffer cmd);
+
+    // --- FSR3 SwapChain proxy (session 4 of docs/fsr3_plan.md) ---
+    // The SDK takes ownership of our VkSwapchainKHR and gives back its
+    // own wrapped handle plus a function table that REPLACES
+    // vkAcquireNextImageKHR / vkQueuePresentKHR. The engine then routes
+    // every acquire/present through SDK-provided pointers — when FG is
+    // active, those functions internally pace + insert generated frames
+    // into the present chain.
+    //
+    // Lazy: created when fg_enabled goes true, destroyed when it goes
+    // false. SEH-guarded init falls back to plain swapchain on AV.
+    void* fsr3_swapchain_context_ = nullptr;  // ffxContext (opaque)
+    bool  fsr3_swapchain_active_  = false;
+    bool  fsr3_swapchain_fatal_   = false;
+    // Extra graphics-family queues for the SDK's distinct-queue check.
+    // Pulled at device-create when we requested 4 queues; null on
+    // hardware that exposes only 1 graphics queue (FG then unavailable).
+    VkQueue fsr3_extra_queue_present_ = VK_NULL_HANDLE;
+    VkQueue fsr3_extra_queue_acquire_ = VK_NULL_HANDLE;
+    VkQueue fsr3_extra_queue_compute_ = VK_NULL_HANDLE;
+    // SDK-provided replacement function pointers — populated after a
+    // successful init via ffxQuery. Plain Vulkan when active==false.
+    PFN_vkAcquireNextImageKHR  fsr3_acquire_fn_ = nullptr;
+    PFN_vkQueuePresentKHR      fsr3_present_fn_ = nullptr;
+    PFN_vkGetSwapchainImagesKHR fsr3_get_images_fn_ = nullptr;
+    // Session 5 — UI mask via HUDLessColor. Snapshot of swapchain
+    // post-compose pre-ImGui each frame; SDK uses it to extract UI
+    // pixels by diffing against the final backbuffer (with HUD).
+    VkImage       fsr3_hudless_image_ = VK_NULL_HANDLE;
+    VmaAllocation fsr3_hudless_alloc_ = nullptr;
+    VkImageView   fsr3_hudless_view_  = VK_NULL_HANDLE;
+    void capture_hudless_snapshot(VkCommandBuffer cmd, uint32_t swapchain_idx);
+    void update_fsr3_fg_per_frame_config();
+    // Session 6 — auto-disable FG when base render FPS sustains below
+    // ~50 (interpolation between 20 fps frames produces visible
+    // judder + inflates input latency). Rolling 60-frame average of
+    // the engine's render dt; flips fg_runtime_disabled_ when the
+    // average crosses the threshold either way.
+    float fg_dt_avg_ms_         = 16.6f;
+    int   fg_dt_below_count_    = 0;
+    bool  fg_runtime_disabled_  = false;
+    void init_fsr3_swapchain();
+    void destroy_fsr3_swapchain();
+    // Wrappers that route to SDK fns when the proxy is active.
+    VkResult acquire_next_image(uint64_t timeout, VkSemaphore sem, VkFence fence,
+                                uint32_t* out_image_index);
+    VkResult queue_present_image(uint32_t image_index, VkSemaphore wait_sem);
+
+    // --- ReSTIR GI session 2 — reservoir SSBO foundation ---
+    // Two ping-pong storage buffers sized at render_extent_.w * h *
+    // sizeof(Reservoir) (48 B per pixel std430). Bound on scene_desc at
+    // bindings 15 (read prev) and 16 (write cur). Slot index toggles
+    // each frame; on swapchain resize both buffers are recreated.
+    // cube.frag writes a 1-sample reservoir per fragment in session 2;
+    // session 3 adds the temporal read + WRS combine.
+    VkBuffer      reservoir_buf_[2]   { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VmaAllocation reservoir_alloc_[2] { nullptr, nullptr };
+    int           reservoir_write_slot_ = 0;
+    void init_restir();
+    void destroy_restir();
+    void recreate_restir_buffers();
+
     // --- Compose / tonemap pass ---
     VkDescriptorPool       compose_desc_pool_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout  compose_desc_set_layout_ = VK_NULL_HANDLE;
@@ -1142,6 +1365,12 @@ private:
     // (~150 cycles each).
     glm::mat4 last_inv_view_proj_{ 1.0f };
     bool      prev_view_proj_valid_ = false;
+    // Previous frame's jitter (NDC-half-extent units, same convention
+    // as FrameView::jitter). Used to compute (cur_jitter − prev_jitter)
+    // in the shader so motion vec output excludes the per-frame jitter
+    // pattern — FSR3 expects geometric motion only and was reading the
+    // jitter delta as real motion → edge wobble.
+    glm::vec2 prev_jitter_ = glm::vec2(0.0f);
     int       history_write_slot_ = 0;  // toggles each frame
 
     // --- GPU stage timing (per-frame timestamp queries) ---
@@ -1168,6 +1397,12 @@ private:
         // Sun position via spherical angles (so a UI slider feels intuitive).
         float sun_pitch_deg = 52.0f;   // elevation above horizon
         float sun_yaw_deg   = 35.0f;   // around Y, 0 = +Z
+        // Auto golden-hour tint. When on, low sun (pitch ≲ 20°) drifts
+        // the sun + sky colours toward warm orange / pinkish-amber for a
+        // sunset/sunrise look; high sun is unaffected. Lives in
+        // descriptors.cpp's update_scene_ubo so every shader that reads
+        // sun_color / sky_color picks it up uniformly.
+        bool  auto_golden_hour = true;
         float sun_intensity = 2.6f;
         glm::vec3 sun_color  = glm::vec3(1.00f, 0.96f, 0.86f);
         glm::vec3 sky_color  = glm::vec3(0.55f, 0.72f, 0.95f);
@@ -1189,6 +1424,15 @@ private:
         // segments, picking up tinted color along the way.
         int   gi_samples = 64;        // paths per pixel; 0 = off
         int   gi_bounces = 3;         // 1 = single-bounce sky GI; 2-5 = multi-bounce
+        // ReSTIR-lite (session 1 of the multi-session plan in
+        // docs/restir_plan.md). When enabled, gi_samples is divided by 4
+        // before the shader uses it — cube.frag traces 4x fewer rays per
+        // pixel, the existing TAA + spatial filter fold the noise back
+        // into a stable image. Sessions 2+ replace the / 4 hack with a
+        // real reservoir SSBO, motion-vec reproject, and 3-tap spatial
+        // neighbour merge. Leaving the toggle here so users can A/B the
+        // perf delta now and we don't have to plumb a new field later.
+        bool  gi_restir_enabled = false;
         // How many bounce levels get a sun shadow ray. 0 = no shadow
         // rays in GI (every shadowed bounce uses sky_fill, fastest);
         // 1 = first bounce only (default, balanced); higher = more
@@ -1365,6 +1609,69 @@ private:
         // above. Crank up to push distant terrain to higher LOD (more
         // triangles, more detail).
         float terrain_lod_scale = 1.0f;
+        // Near-terrain GPU tessellation: distance-adaptive subdivision +
+        // detail displacement on camera-near chunks. Far chunks keep the
+        // plain mesh (the .tesc ramps level→1 by ~110 m anyway). Toggle
+        // off to fall straight back to the known-good flat mesh.
+        // Near-terrain GPU tessellation + per-ground-type displacement.
+        // Distance-adaptive (dense near, ~none past ~110 m), border-
+        // tapered (crack-free), runtime-toggleable.
+        bool  terrain_tessellation_enabled = true;
+        // Chunk-centroid distance (m) under which a chunk is drawn with
+        // the tessellation pipeline. Beyond this it's the plain mesh.
+        // Slightly past the shader's fade-out so the transition is on
+        // already-flat patches.
+        float terrain_tess_range = 130.0f;
+        // Debug: draw terrain (incl. tessellated near chunks) as
+        // wireframe so the triangle/mesh density is directly visible.
+        bool  terrain_wireframe = true;
+        // Per-distance tessellation density knobs (fed to terrain_tess
+        // .tesc via pc.emissive). Live-tunable from the Terrain tab.
+        float terrain_tess_max_level = 40.0f;  // peak subdivision
+        float terrain_tess_near_m    = 7.0f;   // full-detail radius
+        float terrain_tess_far_m     = 60.0f;  // ramps to base by here
+        float terrain_tess_falloff   = 0.55f;  // <1 = dense band hugs cam
+        // Geometry smoothing pass applied in terrain_tess.tese BEFORE
+        // the material splat: 0 = raw per-type detail relief, 1 = fully
+        // smooth low-frequency swell. Fed to the .tese via the terrain
+        // draw's pc.tex_params.z (the terrain fragment path ignores
+        // that slot; the same value MUST go to the depth-prime and
+        // colour tess passes or primed depth won't match → sky patches).
+        float terrain_tess_smooth    = 0.65f;  // 0..1
+        // Per-pixel parallax-occlusion on terrain (rocky/eroded depth).
+        // Carried to cube.frag via the terrain colour draw's
+        // pc.tex_params.x (terrain path ignores that slot otherwise).
+        // Gated to rocky/snow pixels + ramped to 0 by ~45 m (built-in
+        // per-pixel LOD). 0 = off.
+        float terrain_pom_strength   = 0.6f;   // 0..1
+        // Rock VERTEX relief: real tessellated geometry on rock (the
+        // coarse/silhouette half of the vertex+pixel displacement
+        // combo; terrain_pom_strength is the fine pixel half). Carried
+        // to terrain_tess.tese via pc.tex_params.y on BOTH the
+        // depth-prime and colour tess passes (must match → no z-fight).
+        float terrain_rock_relief    = 0.5f;   // 0..1
+        // Shore-following contour ripple scales (cube.frag terrain, via
+        // the terrain draw's pc.grass_params.xy). Phase = height above
+        // water so the lines parallel the coast. Independent:
+        //   sand_ripple_scale : beach ripple frequency
+        //   grass_line_scale  : grass contour-row frequency (0 = off)
+        float terrain_sand_ripple_scale = 9.0f;   // 1..40
+        float terrain_grass_line_scale  = 0.0f;   // 0 = off, else 1..40
+        // Procedural ground material splatting (cube.frag is_terrain).
+        // Fed to cube.frag via the free slots of scene.spom_params.yzw
+        // (no UBO layout change). The 5 baked materials (rock/grass/
+        // dirt/sand/snow) are blended by the existing height/slope
+        // weights.
+        //   strength: 0 = old flat height-band colour (A/B off),
+        //             1 = full per-texel baked material. Default high
+        //             so the effect is clearly visible.
+        //   tile_m:   metres per material texture repeat (smaller =
+        //             finer detail, more obvious tiling).
+        //   normal:   detail normal-map strength (0 = flat shading,
+        //             1 = full baked relief).
+        float ground_mat_strength = 0.85f;  // 0..1
+        float ground_mat_tile_m   = 2.5f;   // 0.5..12 m
+        float ground_mat_normal   = 0.80f;  // 0..1
         // Supersample factor for the heightmap shadow bake. 1 = native
         // (1 texel per 1m heightmap cell). 2 = 4x more texels (sub-
         // metre shadow precision). 4 = 16x more texels (sharpest
@@ -1377,6 +1684,13 @@ private:
         // <1 softens. Visible difference between e.g. 2.0 and 4.0 on
         // mountain slopes.
         float terrain_shading_contrast = 1.0f;
+        // SPOM (silhouette parallax occlusion mapping) bump-depth
+        // multiplier. Affects the cube.frag SPOM path on castle walls
+        // (and any future SPOM-eligible materials). 1.0 = engine
+        // default (~4 cm peak-to-trough at 1 m view), 0 = disabled
+        // (textures render flat). Floors are gated out of SPOM in
+        // height_idx_for_albedo regardless of this value (#198).
+        float spom_strength = 1.0f;
         // Heightmap resolution multiplier (per-axis). 1 = baseline
         // 2048×2048 cells at 1m. 2 = 4096×4096 at 0.5m (16× more
         // samples total, ~600MB extra mesh memory). 4 = 8192×8192
@@ -1425,6 +1739,10 @@ private:
         // upscale composite (~4× fewer FBM evaluations per frame).
         // Cubes / castle / dyn-props always rasterise at native res.
         float terrain_raymarch_scale         = 1.0f;
+        // Trace the PCSS sun shadow at half resolution + bilateral
+        // upsample instead of inline per-pixel (big perf win). OFF =
+        // the proven inline path, byte-identical.
+        bool  half_rate_shadows              = false;
         // Post-upscale sharpen strength applied during the compose
         // pass. Cheap CAS-style 4-neighbour adaptive sharpen — only
         // boosts contrast around real edges, ignores flat / noisy
@@ -1566,6 +1884,21 @@ private:
         // shallow water shows the underwater terrain through it
         // (linearly attenuated by depth so deep water still hides).
         float     water_transparency    = 0.6f;
+        // Depth (m) at which water becomes ~opaque. Decoupled from
+        // transparency: small = only very shallow water is see-through
+        // (deep stays opaque), large = clear far down. Fed to water.frag
+        // via the water-plane draw's pc.color.y (no UBO-layout change).
+        float     water_clarity_depth   = 2.5f;
+        // Shoreline softness: metres of water DEPTH over which the
+        // water fades in from the land edge. Larger = a longer, softer
+        // wet-sand → water transition (and hides the heightmap-vs-
+        // rasterised waterline jitter). Fed via the water draw's
+        // pc.color.z.
+        float     water_shore_softness  = 0.6f;
+        // Foam opacity vs the (see-through) water it sits on. 0 = foam
+        // is as transparent as clear shallow water, 1 = foam fully
+        // opaque. Fed via the water draw's pc.color.w.
+        float     water_foam_opacity    = 0.45f;
         // Multiplier on the RT shadow ray count for fragments within
         // rt_lod.x (close to the camera). 1 = unchanged, higher = more
         // rays close-by for smoother penumbras under boxes / castle.
@@ -1621,6 +1954,17 @@ private:
         // ReconstructPrevDepth / Lock / Accumulate / RCAS).
         // Default off until the implementation is feature-complete.
         bool  fsr2_enabled       = false;
+        // FSR upscaler backend select: 0 = legacy FSR2 path
+        // (external/FidelityFX-FSR2 static lib), 1 = FSR3 via ffx-api
+        // (external/FidelityFX-SDK prebuilt DLL). Only consumed when
+        // fsr2_enabled is on. See docs/fsr3_plan.md for the multi-
+        // session arc.
+        int   fsr_backend        = 0;
+        // FSR3 Frame Generation. Only meaningful when fsr_backend == 1.
+        // Session 3 dispatches FG to a private output image without
+        // presenting it — sessions 4-6 wire it into the swapchain
+        // proxy + UI composition. Default off; user must opt in.
+        bool  fg_enabled         = false;
         float taa_spatial_strength = 0.7f;  // 0 = no à-trous, 1 = fully filtered
 
         // Bloom (single-pass spiral-tap inside the compose shader).
@@ -1668,6 +2012,13 @@ private:
         // a reasonable default that recovers most lost detail without
         // ringing on edges. >1 looks deliberately punchy / over-sharpened.
         float compose_sharpen_strength = 0.55f;
+        // Screen-space sun shafts (crepuscular rays) in compose.frag.
+        // Radial accumulation from each pixel toward the sun's screen
+        // position, depth-gated to only contribute from sky pixels —
+        // produces visible god-rays whenever geometry silhouettes the
+        // sun direction. 0 = off; 0.6 = subtle default; 1.5 = heavy.
+        // Cheap (24 fetches per pixel, sky-gated early-out per tap).
+        float sun_shaft_intensity = 0.6f;
         // Final-image contrast applied in compose.frag right after the
         // ACES tonemap, before sRGB encode. 1.0 = neutral, > 1 punches
         // up midtones, < 1 flattens them. Sane range 0.5..2.0.
@@ -1757,6 +2108,12 @@ private:
     // vkDeviceWaitIdle in that case — waiting on a hung device just hangs the
     // shutdown thread and adds 2-3s to process exit.
     bool device_lost_ = false;
+    // VK_EXT_device_fault — when supported, on a device-lost we ask the
+    // driver for the faulting GPU address(es) + vendor fault info and
+    // log it, so an otherwise-unreproducible intermittent device-lost
+    // leaves hard diagnostic data from the actual occurrence.
+    bool device_fault_supported_ = false;
+    void dump_device_fault();
     // Most-recent TLAS instance count from rebuild_tlas. Surfaced in the
     // per-second telemetry log so we can correlate device-lost events with
     // RT scene size.
