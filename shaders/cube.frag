@@ -423,7 +423,13 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     // direction → grey patches that flickered with TAA jitter as the
     // player moved. SPOM displacement still works on floors; only the
     // alpha-cavity effect is gated to walls.
-    float pad = 0.25;
+    // Tightened from 0.25 → 0.15: the wider pad let entire wall panes
+    // read as "elevated outward" because all corner bricks could poke a
+    // noticeable distance past the edge. 15 % is enough to absorb the
+    // typical 1-cm parallax displacement without producing a visible
+    // shelf at the geometric edge. The improved seam ray below catches
+    // the extra silhouette pixels the tighter pad creates.
+    float pad = 0.15;
     if (axis != 1 &&
         (abs(vis_T) > ext_T * (1.0 + pad) ||
          abs(vis_B) > ext_B * (1.0 + pad))) out_overhang_disc = true;
@@ -1404,18 +1410,41 @@ void main() {
             // bounded; a few thousand extra rays per frame is well
             // under any GPU-budget concern.
             if (spom_disc) {
-                vec3 to_disp = spom_world - vWorldPos;
-                float to_disp_len = length(to_disp);
+                // Reworked seam ray (trade-off, not a clean fix). Old
+                // version fired the ray purely laterally along this
+                // wall's tangent plane — at coplanar wall segments
+                // meeting edge-to-edge it skimmed parallel to both
+                // faces and never hit the neighbour, so silhouette
+                // discarded → user saw dark sky panes at the seam.
+                //
+                // New version fires perpendicularly INTO the wall plane
+                // (-face_n) FROM the displaced lateral point. This
+                // reliably catches a coplanar neighbour: the neighbour's
+                // face is in the same plane, our ray crosses it within
+                // ~10 mm. BUT the discard fires on a SINGLE-axis
+                // overshoot (vis_T OR vis_B past the padded edge), so
+                // the displaced point is often still inside the current
+                // brush on the other axis. The -face_n probe then hits
+                // the current brush's own front face, has_neighbour
+                // reports true, and we fall back to flat un-parallaxed
+                // brick. The visible net: no more dark sky panes (the
+                // user's complaint), at the cost of silhouette
+                // extension at true outside corners — those now also
+                // fall back to flat instead of showing sky-through
+                // bumped bricks. Accepted trade-off; revisit only if
+                // outside-corner silhouette becomes desirable again
+                // (would need instance-ID rejection or per-axis ray
+                // dispatch — see commit notes).
                 bool has_neighbour = false;
-                if (to_disp_len > 1e-4) {
-                    vec3 dir = to_disp / to_disp_len;
+                {
+                    vec3 origin = spom_world + spom_face_n * 0.005;
+                    vec3 dir    = -spom_face_n;
                     rayQueryEXT rq_seam;
                     rayQueryInitializeEXT(rq_seam, topLevelAS,
                                           gl_RayFlagsTerminateOnFirstHitEXT |
                                           gl_RayFlagsOpaqueEXT,
                                           0xFFu,
-                                          vWorldPos + spom_face_n * 0.005,
-                                          0.001, dir, 0.30);
+                                          origin, 0.001, dir, 0.12);
                     while (rayQueryProceedEXT(rq_seam)) {}
                     has_neighbour =
                         rayQueryGetIntersectionTypeEXT(rq_seam, true) ==

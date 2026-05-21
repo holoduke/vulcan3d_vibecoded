@@ -508,6 +508,23 @@ void main() {
     // at non-100 % render scale, with no ringing halos.
     vec2 src_size = vec2(textureSize(history_color, 0));
     vec3 hdr   = fsr1_easu(history_color, sample_uv, src_size);
+    // Edge chromatic aberration. Re-samples R and B from history_color
+    // at a small radial offset away from the centre — green keeps the
+    // EASU-sharpened reconstruction, R/B fringes outward at the corners.
+    // ramp t ≈ 0 through centre 30% of frame → ≈1.5 px split at corners.
+    // Branchless: the if guard around this previously triggered for ~84%
+    // of pixels (the inner cut-off was at length(ndc)=0.4), so the
+    // divergence cost more than the saved fetches. Two extra texture
+    // fetches per pixel; offsets are ≈zero near the centre so R/B end up
+    // visually identical to the EASU values there anyway.
+    {
+        vec2 inv_res = pc.viewport.zw;
+        vec2 ndc     = (gl_FragCoord.xy + 0.5) * inv_res * 2.0 - 1.0;
+        float ca_t   = smoothstep(0.55, 1.05, length(ndc));
+        vec2 ca_off  = ndc * ca_t * inv_res * 1.5;
+        hdr.r = texture(history_color, sample_uv + ca_off).r;
+        hdr.b = texture(history_color, sample_uv - ca_off).b;
+    }
     float depth = texture(history_depth, sample_uv).r;
 
     // Background pixel (no geometry hit) — paint procedural sky.
@@ -546,7 +563,12 @@ void main() {
     // camera (pc.sun_screen.z > 0.5 — same flag the lens-flare uses).
     // Runs BEFORE bloom so the brightened shaft pixels pick up bloom's
     // soft halo for free.
-    if (pc.sun_dir.w > 0.001 && pc.sun_screen.z > 0.5) {
+    // Gate on current pixel NOT being sky — without this the shaft
+    // accumulation piles full sun-color on top of the sun itself when
+    // the user looks into it (every tap is sky, occ saturates to 1).
+    // Shafts are a "light streaks through silhouettes onto geometry"
+    // effect; the sky already has its own sun disc + bloom + halo.
+    if (pc.sun_dir.w > 0.001 && pc.sun_screen.z > 0.5 && depth < 0.99999) {
         vec2  uv_here = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
         vec2  uv_sun  = pc.sun_screen.xy;
         vec2  d_total = uv_here - uv_sun;
@@ -700,6 +722,17 @@ void main() {
         float fill = (d < radius) ? 0.08 : 0.0;
         vec3 ring_color = vec3(0.2, 0.95, 1.0);   // cyan, reads on any terrain
         mapped = mix(mapped, ring_color, clamp(band * 0.85 + fill, 0.0, 1.0));
+    }
+
+    // Subtle cinematic vignette. Radial darkening from screen centre —
+    // ~8% drop at the corners, zero through the centre 60% of the frame.
+    // Cheap (1 length, 1 smoothstep) and always on; deliberately mild so
+    // it reads as atmosphere not as a black border.
+    {
+        vec2 ndc = (gl_FragCoord.xy + 0.5) * pc.viewport.zw * 2.0 - 1.0;
+        float r  = length(ndc);
+        float vig = 1.0 - 0.18 * smoothstep(0.6, 1.4, r);
+        mapped *= vig;
     }
 
     outColor = vec4(to_srgb(mapped), 1.0);
