@@ -39,6 +39,9 @@ void VulkanEngine::init_descriptors() {
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
         // 2 originals (materials, prev_transforms) + 2 ReSTIR reservoirs.
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 },
+        // SVGF GI denoiser storage images: 1 raw gi (binding 19) +
+        // 2 history ping-pong (bindings 20, 21).
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
         // +1 for the heightmap shadow texture at binding 6.
         // +1 for the sun shadow map at binding 7 (sampler2DShadow).
         // +1 for the raw heightmap texture at binding 8 (R32_SFLOAT) —
@@ -62,7 +65,7 @@ void VulkanEngine::init_descriptors() {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
         .maxSets = 1,
-        .poolSizeCount = 4,
+        .poolSizeCount = 5,
         .pPoolSizes = sizes,
     };
     vk_check(vkCreateDescriptorPool(device_, &pci, nullptr, &scene_desc_pool_),
@@ -76,7 +79,7 @@ void VulkanEngine::init_descriptors() {
     //              terrain_raymarch_scale < 1.
     //          15=ReSTIR reservoir SSBO (read prev), 16=write cur.
     //              Owned by restir.cpp; cube.frag's GI loop reads/writes.
-    VkDescriptorSetLayoutBinding bindings[19]{};
+    VkDescriptorSetLayoutBinding bindings[22]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -203,10 +206,31 @@ void VulkanEngine::init_descriptors() {
     bindings[18].descriptorCount = 1;
     bindings[18].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Binding 19: SVGF GI denoiser storage image. cube.frag writes raw
+    // per-pixel GI irradiance via imageStore; sessions 2+ (in
+    // docs/svgf_plan.md) add the temporal-accumulation and à-trous
+    // passes that read it. R16G16B16A16F at render_extent_.
+    bindings[19].binding = 19;
+    bindings[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[19].descriptorCount = 1;
+    bindings[19].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    // Bindings 20 / 21: SVGF history ping-pong pair (Session 2). cube.frag
+    // selects read vs write by frame parity (scene.rt_flags.w & 1) —
+    // same race-free model as the ReSTIR ring buffer.
+    bindings[20].binding = 20;
+    bindings[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[20].descriptorCount = 1;
+    bindings[20].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[21].binding = 21;
+    bindings[21].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[21].descriptorCount = 1;
+    bindings[21].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 19, .pBindings = bindings,
+        .bindingCount = 22, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),
@@ -339,11 +363,14 @@ void VulkanEngine::update_scene_ubo() {
     // .z = half-rate-shadow toggle for cube.frag (Phase 3 consumer).
     //      When 1, brush/dyn surfaces skip the inline blocker+PCSS
     //      block and bilinear-sample u_shadow_lr (binding 18) instead.
+    // .w = SVGF GI denoiser enable (Session 2). When >0.5 cube.frag
+    //      EMA-blends shade_radiance with the reprojected history
+    //      sample from binding 20/21 (ping-pong by frame parity).
     data.terrain_local_info = glm::vec4(
         (!rt_.terrain_raymarch_enabled && rt_.water_enabled) ? 1.0f : 0.0f,
         terrain_height_max_ + 5.0f,   // .y = mesh max height (air early-out)
         rt_.half_rate_shadows ? 1.0f : 0.0f,
-        0.0f);
+        rt_.svgf_enabled ? 1.0f : 0.0f);
     // Copy the baked 32×32 hi-Z max-cell grid into the UBO (1024
     // floats → 256 vec4). The grid is static after level load (baked
     // in init_world from terrain_data_.heights); when it isn't ready

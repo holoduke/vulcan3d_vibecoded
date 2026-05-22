@@ -456,6 +456,8 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("yaw (deg)", &rt_.sun_yaw_deg, -180.0f, 180.0f);
         ImGui::Checkbox("Auto golden-hour tint (warm sun + sky when low)",
                         &rt_.auto_golden_hour);
+        ImGui::SliderFloat("sun glare / flare strength", &rt_.sun_glare_strength,
+                            0.0f, 2.0f);
         ImGui::SliderFloat("intensity", &rt_.sun_intensity, 0.0f, 8.0f);
         ImGui::ColorEdit3("sun color", &rt_.sun_color.x);
 
@@ -614,6 +616,8 @@ void VulkanEngine::build_menu_ui() {
         // is the default; >1 looks deliberately punchy.
         ImGui::SliderFloat("post-TAA sharpening", &rt_.compose_sharpen_strength, 0.0f, 2.0f);
         ImGui::SliderFloat("sun shafts (god rays)", &rt_.sun_shaft_intensity, 0.0f, 2.0f);
+        ImGui::Checkbox("SVGF GI denoiser (Session 2 — temporal accum)",
+                        &rt_.svgf_enabled);
 
         ImGui::SeparatorText("Bloom (compose-pass spiral-tap)");
         ImGui::Checkbox("bloom enabled", &rt_.bloom_enabled);

@@ -425,6 +425,11 @@ void VulkanEngine::recreate_swapchain() {
         destroy_shadow_lr();
         init_shadow_lr();
     }
+    if (svgf_gi_image_) {
+        // recreate_svgf_targets also rewrites scene_desc binding 19
+        // so it points at the new view.
+        recreate_svgf_targets();
+    }
     if (tr_lr_color_image_) {
         destroy_terrain_raymarch_lowres();
         init_terrain_raymarch_lowres();
@@ -1418,6 +1423,152 @@ void VulkanEngine::recreate_shadow_lr() {
     init_shadow_lr();
     rewrite_binding18_shadow_lr(device_, scene_desc_set_,
                                 shadow_lr_view_, linear_sampler_);
+}
+
+// SVGF GI denoiser — Session 1 plumbing (docs/svgf_plan.md). Allocates
+// the R16G16B16A16F storage image cube.frag writes raw per-pixel GI
+// irradiance into via imageStore. STORAGE + SAMPLED usage so later
+// sessions can also read it from the denoiser passes. Layout starts
+// UNDEFINED; vk_engine.cpp transitions to GENERAL before the main
+// color pass and leaves it there (storage images can both write and
+// sample-read in GENERAL).
+void VulkanEngine::init_svgf_targets() {
+    uint32_t w = std::max<uint32_t>(1u, render_extent_.width);
+    uint32_t h = std::max<uint32_t>(1u, render_extent_.height);
+    VkImageCreateInfo ici{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = nullptr, .flags = 0,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+        .extent = { w, h, 1 },
+        .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_STORAGE_BIT |
+                 VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vk_check(vmaCreateImage(allocator_, &ici, &aci,
+                            &svgf_gi_image_, &svgf_gi_alloc_, nullptr),
+             "svgf gi image");
+    VkImageViewCreateInfo vci{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .image = svgf_gi_image_,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+        .components = {},
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1,
+        },
+    };
+    vk_check(vkCreateImageView(device_, &vci, nullptr, &svgf_gi_view_),
+             "svgf gi view");
+
+    // History ping-pong pair (Session 2). Same format/size. Same one-
+    // time UNDEFINED→GENERAL transition. cube.frag indexes by
+    // (frame & 1) — even frames read slot 0 / write slot 1, odd frames
+    // swap. Race-free under kFrameOverlap=2 because frame F's write
+    // target was last touched by F-2 (already retired by F-1's fence).
+    for (int s = 0; s < 2; ++s) {
+        vk_check(vmaCreateImage(allocator_, &ici, &aci,
+                                &svgf_history_image_[s],
+                                &svgf_history_alloc_[s], nullptr),
+                 "svgf history image");
+        VkImageViewCreateInfo hvci = vci;
+        hvci.image = svgf_history_image_[s];
+        vk_check(vkCreateImageView(device_, &hvci, nullptr,
+                                   &svgf_history_view_[s]),
+                 "svgf history view");
+    }
+
+    // One-time transitions: all 3 SVGF images go UNDEFINED → GENERAL
+    // in a single submit.
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, svgf_gi_image_,
+                                 VK_IMAGE_LAYOUT_UNDEFINED,
+                                 VK_IMAGE_LAYOUT_GENERAL);
+        for (int s = 0; s < 2; ++s) {
+            vkinit::transition_image(cb, svgf_history_image_[s],
+                                     VK_IMAGE_LAYOUT_UNDEFINED,
+                                     VK_IMAGE_LAYOUT_GENERAL);
+        }
+    });
+
+    // Initial descriptor writes at bindings 19 / 20 / 21.
+    if (scene_desc_set_) {
+        VkDescriptorImageInfo infos[3] = {
+            { VK_NULL_HANDLE, svgf_gi_view_,         VK_IMAGE_LAYOUT_GENERAL },
+            { VK_NULL_HANDLE, svgf_history_view_[0], VK_IMAGE_LAYOUT_GENERAL },
+            { VK_NULL_HANDLE, svgf_history_view_[1], VK_IMAGE_LAYOUT_GENERAL },
+        };
+        VkWriteDescriptorSet wr[3]{};
+        for (int i = 0; i < 3; ++i) {
+            wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wr[i].dstSet = scene_desc_set_;
+            wr[i].dstBinding = 19 + i;
+            wr[i].descriptorCount = 1;
+            wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            wr[i].pImageInfo = &infos[i];
+        }
+        vkUpdateDescriptorSets(device_, 3, wr, 0, nullptr);
+    }
+    log::infof("[svgf] gi + history(×2) storage images: %ux%u R16G16B16A16F",
+               w, h);
+}
+
+void VulkanEngine::destroy_svgf_targets() {
+    if (svgf_gi_view_) {
+        vkDestroyImageView(device_, svgf_gi_view_, nullptr);
+        svgf_gi_view_ = VK_NULL_HANDLE;
+    }
+    if (svgf_gi_image_) {
+        vmaDestroyImage(allocator_, svgf_gi_image_, svgf_gi_alloc_);
+        svgf_gi_image_ = VK_NULL_HANDLE;
+        svgf_gi_alloc_ = nullptr;
+    }
+    for (int s = 0; s < 2; ++s) {
+        if (svgf_history_view_[s]) {
+            vkDestroyImageView(device_, svgf_history_view_[s], nullptr);
+            svgf_history_view_[s] = VK_NULL_HANDLE;
+        }
+        if (svgf_history_image_[s]) {
+            vmaDestroyImage(allocator_, svgf_history_image_[s],
+                            svgf_history_alloc_[s]);
+            svgf_history_image_[s] = VK_NULL_HANDLE;
+            svgf_history_alloc_[s] = nullptr;
+        }
+    }
+}
+
+// Rewrite scene_desc binding 19 to point at the (possibly newly
+// allocated) svgf_gi_view_. Used both by initial wire-up and the
+// post-swapchain-recreate path.
+static void rewrite_binding19_svgf_gi(VkDevice device,
+                                      VkDescriptorSet set,
+                                      VkImageView view) {
+    if (!set || !view) return;
+    VkDescriptorImageInfo gi_bi{ VK_NULL_HANDLE, view,
+                                 VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = set; w.dstBinding = 19; w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w.pImageInfo = &gi_bi;
+    vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+}
+
+void VulkanEngine::recreate_svgf_targets() {
+    vkDeviceWaitIdle(device_);
+    destroy_svgf_targets();
+    init_svgf_targets();
+    rewrite_binding19_svgf_gi(device_, scene_desc_set_, svgf_gi_view_);
 }
 
 void VulkanEngine::init_terrain_raymarch_compose_pipeline() {

@@ -378,6 +378,26 @@ private:
     void destroy_shadow_lr();
     void recreate_shadow_lr();
 
+    // SVGF GI denoiser foundation (Session 1 of docs/svgf_plan.md).
+    // R16G16B16A16F storage image at render_extent; cube.frag writes
+    // the raw (un-albedo-modulated) GI irradiance per pixel via
+    // imageStore. Sessions 2-5 add the temporal accumulation + 3-pass
+    // à-trous filter that read this; for now it's just allocated and
+    // written, never sampled — verifies the plumbing in isolation.
+    VkImage         svgf_gi_image_ = VK_NULL_HANDLE;
+    VmaAllocation   svgf_gi_alloc_ = nullptr;
+    VkImageView     svgf_gi_view_  = VK_NULL_HANDLE;
+    // SVGF temporal-accumulation history (Session 2). 2 R16G16B16A16F
+    // storage images at render_extent ping-ponged via frame parity
+    // (scene.rt_flags.w & 1) — same race-free model as the ReSTIR ring
+    // buffer. .rgb = accumulated irradiance, .a = M-count [1..kMmax].
+    VkImage         svgf_history_image_[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VmaAllocation   svgf_history_alloc_[2] = { nullptr, nullptr };
+    VkImageView     svgf_history_view_[2]  = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    void init_svgf_targets();
+    void destroy_svgf_targets();
+    void recreate_svgf_targets();
+
     // Compose pipeline that samples the low-res raymarch and writes
     // upscaled color/motion + gl_FragDepth into scene_color/depth with
     // depth-test enabled (so closer rasterised geometry survives).
@@ -1403,6 +1423,18 @@ private:
         // descriptors.cpp's update_scene_ubo so every shader that reads
         // sun_color / sky_color picks it up uniformly.
         bool  auto_golden_hour = true;
+        // Sun glare / flare strength. Multiplies pc.sun_color.a going
+        // into compose, scaling the sun's procedural DISC + HALO + lens-
+        // flare brightness uniformly. Does NOT touch scene.sun_color so
+        // direct lighting + shadows are unaffected. 0 = no procedural
+        // disc/halo (sky tex alone), 1 = engine default brightness.
+        float sun_glare_strength = 0.4f;
+        // SVGF GI denoiser (Session 2 of docs/svgf_plan.md). Default
+        // OFF — when on, cube.frag EMA-blends the GI signal with a
+        // reprojected history sample, cutting noise dramatically on
+        // static scenes. Mild ghosting on movement (bounded by M-cap
+        // ≤ 8) until Session 3 adds the à-trous spatial filter.
+        bool  svgf_enabled = false;
         float sun_intensity = 2.6f;
         glm::vec3 sun_color  = glm::vec3(1.00f, 0.96f, 0.86f);
         glm::vec3 sky_color  = glm::vec3(0.55f, 0.72f, 0.95f);

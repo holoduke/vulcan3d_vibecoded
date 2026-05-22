@@ -435,6 +435,8 @@ void VulkanEngine::save_settings() const {
     f << "compose_sharpen_strength = " << rt_.compose_sharpen_strength << "\n";
     f << "sun_shaft_intensity = " << rt_.sun_shaft_intensity << "\n";
     f << "auto_golden_hour = " << (rt_.auto_golden_hour ? 1 : 0) << "\n";
+    f << "sun_glare_strength = " << rt_.sun_glare_strength << "\n";
+    f << "svgf_enabled = " << (rt_.svgf_enabled ? 1 : 0) << "\n";
     f << "image_contrast = " << rt_.image_contrast << "\n";
     f << "image_brightness = " << rt_.image_brightness << "\n";
     f << "image_gamma = " << rt_.image_gamma << "\n";
@@ -652,6 +654,8 @@ void VulkanEngine::load_settings() {
             if (key == "half_rate_shadows")          { rt_.half_rate_shadows          = std::stoi(val) != 0; ++loaded; continue; }
             if (key == "sun_shaft_intensity")        { rt_.sun_shaft_intensity        = std::stof(val); ++loaded; continue; }
             if (key == "auto_golden_hour")           { rt_.auto_golden_hour           = std::stoi(val) != 0; ++loaded; continue; }
+            if (key == "sun_glare_strength")         { rt_.sun_glare_strength         = std::stof(val); ++loaded; continue; }
+            if (key == "svgf_enabled")               { rt_.svgf_enabled               = std::stoi(val) != 0; ++loaded; continue; }
             if (key == "grass_shadow_max_dist")      { rt_.grass_shadow_max_dist      = std::stof(val); ++loaded; continue; }
             if      (key == "sun_pitch_deg")       rt_.sun_pitch_deg = std::stof(val);
             else if (key == "sun_yaw_deg")         rt_.sun_yaw_deg = std::stof(val);

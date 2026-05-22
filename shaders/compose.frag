@@ -508,23 +508,14 @@ void main() {
     // at non-100 % render scale, with no ringing halos.
     vec2 src_size = vec2(textureSize(history_color, 0));
     vec3 hdr   = fsr1_easu(history_color, sample_uv, src_size);
-    // Edge chromatic aberration. Re-samples R and B from history_color
-    // at a small radial offset away from the centre — green keeps the
-    // EASU-sharpened reconstruction, R/B fringes outward at the corners.
-    // ramp t ≈ 0 through centre 30% of frame → ≈1.5 px split at corners.
-    // Branchless: the if guard around this previously triggered for ~84%
-    // of pixels (the inner cut-off was at length(ndc)=0.4), so the
-    // divergence cost more than the saved fetches. Two extra texture
-    // fetches per pixel; offsets are ≈zero near the centre so R/B end up
-    // visually identical to the EASU values there anyway.
-    {
-        vec2 inv_res = pc.viewport.zw;
-        vec2 ndc     = (gl_FragCoord.xy + 0.5) * inv_res * 2.0 - 1.0;
-        float ca_t   = smoothstep(0.55, 1.05, length(ndc));
-        vec2 ca_off  = ndc * ca_t * inv_res * 1.5;
-        hdr.r = texture(history_color, sample_uv + ca_off).r;
-        hdr.b = texture(history_color, sample_uv - ca_off).b;
-    }
+    // Chromatic aberration REMOVED. Tried it as cinematic polish but
+    // produced three real artifacts the user immediately noticed:
+    // (a) purple haze on object silhouettes against the sun,
+    // (b) purple fringe inside shadows at lit/shadow edges,
+    // (c) compounded with the sun glare to make looking-into-sun nasty.
+    // All three are the standard CA failure mode: at high-contrast
+    // edges R+B shift the same direction while G stays put → purple
+    // (red+blue) fringe on one side. Vignette below stays, it's clean.
     float depth = texture(history_depth, sample_uv).r;
 
     // Background pixel (no geometry hit) — paint procedural sky.

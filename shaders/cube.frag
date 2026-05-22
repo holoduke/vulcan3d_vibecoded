@@ -98,6 +98,23 @@ layout(set = 0, binding = 0) uniform SceneUBO {
 // half-res texels is the "bilateral" part of this minimum-viable upsample.
 layout(set = 0, binding = 18) uniform sampler2D u_shadow_lr;
 
+// SVGF GI denoiser raw-irradiance write target (Session 1 of
+// docs/svgf_plan.md). cube.frag stores the post-temporal/spatial
+// reservoir reuse irradiance HERE before it gets multiplied by
+// albedo, so the future denoiser passes (sessions 2-4) operate on the
+// clean lighting signal. Format MUST match the C++ image
+// (VK_FORMAT_R16G16B16A16_SFLOAT). No reader in session 1.
+layout(set = 0, binding = 19, rgba16f) uniform image2D u_svgf_gi;
+
+// SVGF temporal accumulator history (Session 2). Ping-pong pair: on
+// frame F, cube.frag reads from binding (20 + ((F+1) & 1)) and writes
+// to binding (20 + (F & 1)). Race-free under kFrameOverlap == 2 — F's
+// write target was last touched by F-2, which is retired by the F-1
+// fence the CPU waits on before recording F. .rgb = accumulated
+// irradiance, .a = M-count [1..kSvgfMmax] for the EMA weight.
+layout(set = 0, binding = 20, rgba16f) uniform image2D u_svgf_hist0;
+layout(set = 0, binding = 21, rgba16f) uniform image2D u_svgf_hist1;
+
 // Distance-based sample LOD. fragments within lod_near get full samples;
 // fragments past lod_far drop to a single ray. Standard "RT becomes a luxury
 // at distance" trick used in commercial engines.
@@ -1791,8 +1808,19 @@ void main() {
             float t_norm = avg_t * 0.1;
             float curve_exp = mix(1.0, 3.0, clamp(scene.rt_params2.w, 0.0, 1.0));
             float scale = pow(max(t_norm, 0.0), curve_exp);
+            // Terrain receivers need a much higher minimum penumbra
+            // floor than walls. Boxes / dyn props sit ~1 m above the
+            // ground (small blocker distance → scale ≈ 0.1), which
+            // clamps the cone to ~0.25× base_softness — too tight for
+            // ~10 half-rate samples to produce a smooth gradient, so
+            // the edge reads as a hard line with dither dots. Walls
+            // have far-away casters (long blocker distance) so they
+            // don't hit the min clamp. Lift the terrain floor to 2.0×
+            // so box-on-ground shadows always have a perceptibly soft
+            // penumbra regardless of how low the blocker sits.
+            float min_pen_mult = is_terrain_pre ? 2.0 : 0.25;
             float penumbra = clamp(base_softness * scale * 0.6,
-                                   base_softness * 0.25,
+                                   base_softness * min_pen_mult,
                                    base_softness * 6.0);
 
             // 3. Stratified shadow rays in the size-adapted cone.
@@ -2065,6 +2093,36 @@ void main() {
     // (gi_indirect *= rt_params2.x at line 1308) is multiplied by 0 —
     // every ray is pure waste. Skip the loop and keep sky_vis = 1.0
     // (ambient stays full, matching "GI off" expectation in the UI).
+    // Cheap sky-vis probe for TERRAIN pixels (full GI loop is gated off
+    // for terrain — adjacent triangle normals diverge enough that
+    // cos_hemi sampling produces patchy bright/dark faces). Without
+    // this, terrain inside enclosed structures (the little house, the
+    // castle keep) stays at sky_vis = 1.0 → full sky ambient → bright
+    // green floor while the cube walls/ceiling around it darken to
+    // pitch black. Fire 4 hemisphere rays around +Y with the terrain
+    // BLAS masked out (so terrain doesn't self-occlude). Distance-LOD'd
+    // to near pixels — far terrain doesn't matter for interior look.
+    if (is_terrain_pre && scene.rt_flags.x != 0 && cam_dist < 50.0) {
+        const int kProbeN = 4;
+        const uint kProbeMask = 0xFDu;        // skip terrain BLAS (bit 0x02)
+        vec3 probe_origin = vWorldPos + vec3(0.0, 0.10, 0.0);
+        int probe_misses = 0;
+        for (int i = 0; i < kProbeN; ++i) {
+            float r1 = rand(seed_base + uvec3(uint(i), 41u, 67u));
+            float r2 = rand(seed_base + uvec3(uint(i), 13u, 89u));
+            float r_h = sqrt(r1);
+            float phi = 6.28318530718 * r2;
+            vec3 dir = vec3(r_h * cos(phi),
+                            sqrt(max(0.0, 1.0 - r1)),
+                            r_h * sin(phi));
+            if (!any_hit_m(probe_origin, dir, 60.0, kProbeMask)) {
+                probe_misses += 1;
+            }
+        }
+        sky_misses = probe_misses;
+        sky_total  = kProbeN;
+        sky_vis    = float(probe_misses) / float(kProbeN);
+    }
     if (N_gi > 0 && !is_terrain_pre && scene.rt_params2.x > 1e-4) {
         float gi_radius = scene.rt_params2.y;
 
@@ -2235,7 +2293,52 @@ void main() {
         // not an inline per-fragment gather.
         vec3 shade_radiance = blended;
 
-        gi_indirect = albedo * shade_radiance * scene.rt_params2.x;
+        // SVGF GI denoiser feed (Session 1). Store the unmodulated
+        // irradiance signal (pre-albedo, post-temporal-reservoir-blend)
+        // for future spatial-filter passes to denoise.
+        imageStore(u_svgf_gi, ivec2(gl_FragCoord.xy),
+                   vec4(shade_radiance, 1.0));
+
+        // SVGF temporal accumulator (Session 2). When the toggle is on
+        // (terrain_local_info.w), EMA-blend with the previous frame's
+        // accumulated irradiance at the motion-reprojected pixel. .a
+        // tracks M (sample count, 1..kSvgfMmax); EMA weight =
+        // (M-1)/M. Frame parity picks read/write halves of the
+        // ping-pong pair.
+        vec3 svgf_out = shade_radiance;
+        if (scene.terrain_local_info.w > 0.5) {
+            const float kSvgfMmax = 8.0;
+            uint   svFrame = uint(scene.rt_flags.w);
+            ivec2  svPix   = ivec2(gl_FragCoord.xy);
+            bool   parity0 = ((svFrame & 1u) == 0u);
+            // Reprojected previous pixel from the existing vPrevClip
+            // varying (already used by the motion-vec output).
+            float  prevM   = 0.0;
+            vec3   prevRgb = vec3(0.0);
+            if (vPrevClip.w > 0.0) {
+                vec2 pndc = vPrevClip.xy / vPrevClip.w;
+                vec2 puv  = pndc * 0.5 + 0.5;
+                if (puv.x > 0.0 && puv.x < 1.0 &&
+                    puv.y > 0.0 && puv.y < 1.0) {
+                    ivec2 ppx = ivec2(puv * scene.viewport.xy);
+                    ppx = clamp(ppx, ivec2(0),
+                                ivec2(scene.viewport.xy) - ivec2(1));
+                    vec4 prev = parity0
+                        ? imageLoad(u_svgf_hist1, ppx)
+                        : imageLoad(u_svgf_hist0, ppx);
+                    prevRgb = prev.rgb;
+                    prevM   = prev.a;
+                }
+            }
+            float Mnew = min(prevM + 1.0, kSvgfMmax);
+            float wPrev = (Mnew - 1.0) / Mnew;
+            svgf_out = mix(shade_radiance, prevRgb, wPrev);
+            // Write to the OPPOSITE slot of what we just read.
+            vec4 storeVal = vec4(svgf_out, Mnew);
+            if (parity0) imageStore(u_svgf_hist0, svPix, storeVal);
+            else         imageStore(u_svgf_hist1, svPix, storeVal);
+        }
+        gi_indirect = albedo * svgf_out * scene.rt_params2.x;
         // Hard ceiling — a bounce ray happening to land on a sun-lit
         // white wall + multiple bounces can compound to 10×+ sun color
         // for a single sample. Without a cap the bright spike feeds

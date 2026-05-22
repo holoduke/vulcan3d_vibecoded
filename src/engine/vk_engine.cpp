@@ -321,6 +321,10 @@ void VulkanEngine::init() {
     init_terrain_raymarch_compose_pipeline();
     init_terrain_raymarch_lowres();
     init_shadow_lr();
+    // SVGF GI denoiser storage image (Session 1 — see docs/svgf_plan.md).
+    // cube.frag writes raw irradiance to it via imageStore. No
+    // consumer in session 1 — just allocates + binds.
+    init_svgf_targets();
     // VRS attachment is sized in LR-tile units, so it must come after
     // init_terrain_raymarch_lowres() has set tr_lr_extent_.
     init_vrs_attachment();
@@ -716,6 +720,8 @@ void VulkanEngine::draw(uint32_t img_index) {
     };
 
     // ---------- Pass 1: scene → scene_color_image_ + motion_vec_image_ ----------
+    // (svgf_gi_image_ is in GENERAL — transitioned once at init via
+    // one_time_submit in init_svgf_targets, survives recreate cleanly.)
     vkCmdBeginRendering(frame.command_buffer, &rendering);
     // When LR upscaling is active, run the compose first so the
     // upscaled raymarch terrain populates scene_color/motion/depth
@@ -1027,7 +1033,12 @@ void VulkanEngine::draw(uint32_t img_index) {
         // crepuscular-ray accumulation. Free slot — the shader treats
         // sun_dir as a normalized direction (xyz) regardless.
         pc_data.sun_dir   = glm::vec4(sun, rt_.sun_shaft_intensity);
-        pc_data.sun_color = glm::vec4(rt_.sun_color, rt_.sun_intensity);
+        // .a scaled by sun_glare_strength so the user can dial the
+        // procedural disc + halo + lens-flare brightness independently
+        // of scene lighting. Scene direct lighting uses scene.sun_color
+        // from the UBO (descriptors.cpp), which is unaffected.
+        pc_data.sun_color = glm::vec4(rt_.sun_color,
+                                      rt_.sun_intensity * rt_.sun_glare_strength);
         pc_data.sky_color = glm::vec4(rt_.sky_color, 0.0f);
         pc_data.flare_params = glm::vec4(rt_.lens_flare_strength,
                                           rt_.lens_flare_threshold,
@@ -1918,6 +1929,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_vrs_attachment", [&]{ destroy_vrs_attachment(); });
     guarded("destroy_terrain_raymarch_lowres", [&]{ destroy_terrain_raymarch_lowres(); });
     guarded("destroy_shadow_lr", [&]{ destroy_shadow_lr(); });
+    guarded("destroy_svgf_targets", [&]{ destroy_svgf_targets(); });
     guarded("destroy_terrain_raymarch_compose_pipeline", [&]{ destroy_terrain_raymarch_compose_pipeline(); });
     guarded("destroy_terrain_raymarch_pipeline", [&]{ destroy_terrain_raymarch_pipeline(); });
     guarded("destroy_terrain_water_pipeline", [&]{ destroy_terrain_water_pipeline(); });
