@@ -90,6 +90,18 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  terrain_sand_color;  // padding only — terrain raymarch uses
     vec4  water_river_extra;   // padding — river-style tuning
     vec4  water_river_extinct; // padding — river extinction
+    // Tail fields. We only consume grass_side_lit_params here, but the
+    // layout must reach it -- everything else is padding to match the
+    // shared SceneUBO offset map.
+    vec4  restir_params;
+    vec4  spom_params;
+    vec4  terrain_local_info;
+    vec4  _terrain_max_grid[256];
+    vec4  terrain_disp_params;
+    vec4  terrain_antitile_params;
+    vec4  grass_shadow_on_terrain_params;
+    // Side-lit grass shading. .x = strength, .y = master toggle.
+    vec4  grass_side_lit_params;
 } scene;
 
 // Heightmap (R32_SFLOAT) — shared with terrain raymarch + cube shaders.
@@ -569,7 +581,21 @@ void main() {
     vec3 sun_term = scene.sun_color.rgb * scene.sun_color.a *
                     (n_dot_l_wrap * sun_lit);
     vec3 sky_term = scene.sky_color.rgb * 0.18;
-    vec3 col = grassCol * (sun_term + sky_term) * ao;
+    // Side-lit blade shading: sun-side brighter, away-side darker.
+    // Uses RAW dot(N, L) so the sign carries direction (n_dot_l above
+    // was max'd to 0 for Lambert, which would always tint upward).
+    float side_tint = 1.0;
+    {
+        float sl_on  = scene.grass_side_lit_params.y;
+        float sl_str = scene.grass_side_lit_params.x;
+        if (sl_on > 0.5 && sl_str > 0.001) {
+            float raw_ndl = dot(N, L);
+            side_tint = clamp(1.0 + sl_str * raw_ndl,
+                              1.0 - sl_str * 0.9,
+                              1.0 + sl_str * 0.9);
+        }
+    }
+    vec3 col = grassCol * (sun_term * side_tint + sky_term) * ao;
 
     // View-dependent backlit / translucency — sun shining THROUGH the
     // blade from behind makes the leaves glow warm. Strongest when:

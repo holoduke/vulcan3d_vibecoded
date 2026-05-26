@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -249,10 +250,20 @@ namespace {
 // worst-case adjacent-cell height jumps on the steepest mountains.
 constexpr float kTerrainSkirtDepth = 8.0f;
 
+// densify >= 1: sub-divide each source heightmap cell within the chunk
+// into `densify` quads per axis. sample_dim therefore corresponds to
+// chunk_cells * densify + 1 vertices per side. The vertex at densified
+// integer coords (ix, iz) maps to source heightmap fractional coords
+// (origin_ix + ix/densify, origin_iz + iz/densify) and the height is
+// bilinearly sampled. At densify=1 the math collapses to integer sample
+// lookups (the original code path), and at densify=N the vertex grid is
+// N x N times finer in BOTH axes than the source heightmap.
 void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
                      int sample_dim,
                      std::vector<Vertex>& verts,
-                     glm::vec3& aabb_min, glm::vec3& aabb_max) {
+                     glm::vec3& aabb_min, glm::vec3& aabb_max,
+                     int densify = 1) {
+    if (densify < 1) densify = 1;
     verts.clear();
     verts.reserve(static_cast<size_t>(sample_dim) * static_cast<size_t>(sample_dim) +
                    static_cast<size_t>(4) * static_cast<size_t>(sample_dim));
@@ -277,36 +288,79 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
         float dhdz = (hm.at(gx, zp) - hm.at(gx, zm)) * inv_2dz;
         return glm::normalize(glm::vec3(-dhdx, 1.0f, -dhdz));
     };
-    // Interior (sample_dim × sample_dim).
+    // Bilinear-sample the source heightmap at fractional source-cell
+    // coords. At densify=1 fx,fz are always integers and the math
+    // reduces to a clamped hm.at() lookup (no precision loss vs the
+    // original code).
+    const float inv_d = 1.0f / static_cast<float>(densify);
+    auto sample_h = [&](int ix, int iz) -> float {
+        float fx = static_cast<float>(origin_ix) + static_cast<float>(ix) * inv_d;
+        float fz = static_cast<float>(origin_iz) + static_cast<float>(iz) * inv_d;
+        int ax = static_cast<int>(std::floor(fx));
+        int az = static_cast<int>(std::floor(fz));
+        float tx = fx - static_cast<float>(ax);
+        float tz = fz - static_cast<float>(az);
+        int axc = std::clamp(ax,     0, hm.width()  - 1);
+        int axn = std::clamp(ax + 1, 0, hm.width()  - 1);
+        int azc = std::clamp(az,     0, hm.height() - 1);
+        int azn = std::clamp(az + 1, 0, hm.height() - 1);
+        float h00 = hm.at(axc, azc);
+        float h10 = hm.at(axn, azc);
+        float h01 = hm.at(axc, azn);
+        float h11 = hm.at(axn, azn);
+        float h0 = h00 * (1.0f - tx) + h10 * tx;
+        float h1 = h01 * (1.0f - tx) + h11 * tx;
+        return h0 * (1.0f - tz) + h1 * tz;
+    };
+    // Source-aligned integer (gx, gz) used for the normal sample. For
+    // sub-cell densified verts we round to the nearest source cell;
+    // gives the same heightmap-gradient normal as the surrounding
+    // source verts which avoids visible faceted shading on the
+    // upsampled grid (the surface itself is the bilinear interpolant,
+    // so its slope is already smooth between source verts).
+    auto nearest_src = [&](int ix, int iz, int& gx, int& gz) {
+        float fx = static_cast<float>(origin_ix) + static_cast<float>(ix) * inv_d;
+        float fz = static_cast<float>(origin_iz) + static_cast<float>(iz) * inv_d;
+        gx = std::clamp(static_cast<int>(std::floor(fx + 0.5f)),
+                         0, hm.width()  - 1);
+        gz = std::clamp(static_cast<int>(std::floor(fz + 0.5f)),
+                         0, hm.height() - 1);
+    };
+    // Interior (sample_dim × sample_dim) at densified resolution.
     for (int iz = 0; iz < sample_dim; ++iz) {
         for (int ix = 0; ix < sample_dim; ++ix) {
-            int gx = std::clamp(origin_ix + ix, 0, hm.width()  - 1);
-            int gz = std::clamp(origin_iz + iz, 0, hm.height() - 1);
-            glm::vec3 p(hm.origin_x + static_cast<float>(gx) * hm.cell,
-                        hm.at(gx, gz),
-                        hm.origin_z + static_cast<float>(gz) * hm.cell);
+            float wx = hm.origin_x + (static_cast<float>(origin_ix) +
+                                       static_cast<float>(ix) * inv_d) * hm.cell;
+            float wz = hm.origin_z + (static_cast<float>(origin_iz) +
+                                       static_cast<float>(iz) * inv_d) * hm.cell;
+            float hy = sample_h(ix, iz);
+            int gx, gz; nearest_src(ix, iz, gx, gz);
+            glm::vec3 p(wx, hy, wz);
             glm::vec2 uv(p.x, p.z);
             verts.push_back({p, sample_normal(gx, gz), uv});
             aabb_min = glm::min(aabb_min, p);
             aabb_max = glm::max(aabb_max, p);
         }
     }
-    // Skirt twins: 4 edges × sample_dim verts. Each one is the interior
-    // edge vertex with Y dropped by kTerrainSkirtDepth. Normal inherits
-    // from the corresponding interior vertex (heightmap-gradient normal,
-    // mostly upward) so the skirt shades like the terrain above it
-    // rather than reading as a dark vertical wall — distant chunks at
-    // low LOD would otherwise show their outward-facing skirts as
-    // visible dark faces against the sky.
+    // Skirt twins: 4 edges × sample_dim verts (the densified perimeter).
+    // Each one is the interior edge vertex with Y dropped by
+    // kTerrainSkirtDepth. Normal inherits from the corresponding
+    // interior vertex (heightmap-gradient normal, mostly upward) so the
+    // skirt shades like the terrain above it rather than reading as a
+    // dark vertical wall — distant chunks at low LOD would otherwise
+    // show their outward-facing skirts as visible dark faces against
+    // the sky.
     auto add_skirt_edge = [&](int ix0, int iz0, int dx, int dz) {
         for (int k = 0; k < sample_dim; ++k) {
             int ix = ix0 + dx * k;
             int iz = iz0 + dz * k;
-            int gx = std::clamp(origin_ix + ix, 0, hm.width()  - 1);
-            int gz = std::clamp(origin_iz + iz, 0, hm.height() - 1);
-            glm::vec3 p(hm.origin_x + static_cast<float>(gx) * hm.cell,
-                        hm.at(gx, gz) - kTerrainSkirtDepth,
-                        hm.origin_z + static_cast<float>(gz) * hm.cell);
+            float wx = hm.origin_x + (static_cast<float>(origin_ix) +
+                                       static_cast<float>(ix) * inv_d) * hm.cell;
+            float wz = hm.origin_z + (static_cast<float>(origin_iz) +
+                                       static_cast<float>(iz) * inv_d) * hm.cell;
+            float hy = sample_h(ix, iz);
+            int gx, gz; nearest_src(ix, iz, gx, gz);
+            glm::vec3 p(wx, hy - kTerrainSkirtDepth, wz);
             verts.push_back({p, sample_normal(gx, gz), glm::vec2(p.x, p.z)});
         }
     };
@@ -314,6 +368,25 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
     add_skirt_edge(sample_dim - 1, 0,             0, 1);  // right(x=N-1)
     add_skirt_edge(0,             sample_dim - 1, 1, 0);  // bot  (z=N-1)
     add_skirt_edge(0,             0,             0, 1);  // left (x=0)
+
+    // Expand the chunk AABB to cover (a) the skirt twins (dropped by
+    // kTerrainSkirtDepth) and (b) the worst-case tessellated vertex
+    // displacement applied in terrain_tess.tese. The .tese is bumps-
+    // up-only. Worst-case stack at the current UI sliders:
+    //   - per-type ampM peaks at ~1.5 m on rock pixels when the
+    //     "Rock relief" slider hits its max (1.0) -- see the
+    //     `ampM += kRockReliefV() * (0.40 + wRockN * 1.10)` line.
+    //   - the rocky-grass height-map contribution adds up to
+    //     kRockyAmp == `terrain_disp_amp` (slider max 1.0 m) on top of
+    //     that on grass-band pixels.
+    // Total peak ~2.5 m up. 4 m of headroom keeps a comfortable margin
+    // so a chunk near the frustum edge whose interior verts barely
+    // fall outside the frustum still has its displaced verts inside
+    // the AABB -- otherwise we frustum-cull it and drop a chunk-sized
+    // patch of terrain at the screen edge. Was 3 m before -- tight at
+    // max slider settings; bumped to 4 m for safety headroom.
+    aabb_min.y -= kTerrainSkirtDepth;
+    aabb_max.y += 4.0f;
 }
 
 // Per-vertex "parent Y" for CD-LOD morphing between LOD 0 and LOD 1.
@@ -326,16 +399,39 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
 // morph_factor → 1 produces the LOD-1 surface; → 0 keeps the full LOD-0
 // surface. Smooth transition with no popping. Skirt verts (after the N²
 // interior block) inherit parent_y == self_y so the skirt stays put.
+// Per-chunk densification: lx/lz are in densified vertex space, the same
+// space as sample_dim. The parent_y morph snaps to even (stride-2)
+// densified verts. Stride 2 in densified space is the LOD-1 grid which
+// the renderer draws when terrain_lod_stride[1] == 2 (the default), so
+// the morph target stays correct independent of densify. At densify=1
+// h_at collapses to an integer hm.at() lookup.
 void gen_chunk_parent_y(const Heightmap& hm, int origin_ix, int origin_iz,
-                        int sample_dim, std::vector<float>& out) {
+                        int sample_dim, std::vector<float>& out,
+                        int densify = 1) {
+    if (densify < 1) densify = 1;
     const int N = sample_dim;
     out.clear();
     out.resize(static_cast<size_t>(N) * static_cast<size_t>(N) +
                 static_cast<size_t>(4) * static_cast<size_t>(N));
+    const float inv_d = 1.0f / static_cast<float>(densify);
     auto h_at = [&](int lx, int lz) {
-        int gx = std::clamp(origin_ix + lx, 0, hm.width()  - 1);
-        int gz = std::clamp(origin_iz + lz, 0, hm.height() - 1);
-        return hm.at(gx, gz);
+        float fx = static_cast<float>(origin_ix) + static_cast<float>(lx) * inv_d;
+        float fz = static_cast<float>(origin_iz) + static_cast<float>(lz) * inv_d;
+        int ax = static_cast<int>(std::floor(fx));
+        int az = static_cast<int>(std::floor(fz));
+        float tx = fx - static_cast<float>(ax);
+        float tz = fz - static_cast<float>(az);
+        int axc = std::clamp(ax,     0, hm.width()  - 1);
+        int axn = std::clamp(ax + 1, 0, hm.width()  - 1);
+        int azc = std::clamp(az,     0, hm.height() - 1);
+        int azn = std::clamp(az + 1, 0, hm.height() - 1);
+        float h00 = hm.at(axc, azc);
+        float h10 = hm.at(axn, azc);
+        float h01 = hm.at(axc, azn);
+        float h11 = hm.at(axn, azn);
+        float h0 = h00 * (1.0f - tx) + h10 * tx;
+        float h1 = h01 * (1.0f - tx) + h11 * tx;
+        return h0 * (1.0f - tz) + h1 * tz;
     };
     for (int iz = 0; iz < N; ++iz) {
         for (int ix = 0; ix < N; ++ix) {
@@ -745,11 +841,17 @@ TerrainChunkSet build_terrain_chunks(VkDevice device, VmaAllocator alloc,
     set.chunk_cells = hm.dim / chunks_per_side;
     const int sample_dim = set.chunk_cells + 1;
 
-    // Pre-build the four LOD index buffers (stride 1, 2, 4, 8). They're
-    // identical for every chunk (same topology), so we share the host
-    // arrays but each chunk gets its own GPU buffer for cache locality.
+    // Pre-build the kTerrainLodCount LOD index buffers (default strides
+    // 1, 2, 4, 8, 16, 32, 64, 128). They're identical for every chunk
+    // (same topology), so we share the host arrays but each chunk gets
+    // its own GPU buffer for cache locality. gen_indices_for_lod clamps
+    // strides > sample_dim - 1 to sample_dim - 1 (degenerate single quad)
+    // so going past chunk_cells is safe; the user-tunable per-LOD
+    // strides via rt_.terrain_lod_stride can later re-bake with custom
+    // values through rebuild_chunk_lod_indices.
     std::vector<uint32_t> idx_lod[kTerrainLodCount];
-    int strides[kTerrainLodCount] = { 1, 2, 4, 8 };
+    int strides[kTerrainLodCount];
+    for (int i = 0; i < kTerrainLodCount; ++i) strides[i] = 1 << i;  // 1,2,4,...
     for (int i = 0; i < kTerrainLodCount; ++i) {
         gen_indices_for_lod(sample_dim, strides[i], idx_lod[i]);
     }
@@ -800,16 +902,26 @@ TerrainChunkSet build_terrain_chunks(VkDevice device, VmaAllocator alloc,
             set.chunks.push_back(std::move(c));
         }
     }
-    log::infof("[terrain] chunks: %dx%d (= %d) at %d cells/chunk; verts/chunk=%d "
-               "lod0_tris=%u lod1=%u lod2=%u lod3=%u",
+    // Compact one-line summary: chunk count + per-LOD triangle counts.
+    // kTerrainLodCount is 8 so we can't keep the old fixed format string;
+    // build the per-LOD section dynamically.
+    char lod_buf[256];
+    int  lod_off = 0;
+    for (int i = 0; i < kTerrainLodCount; ++i) {
+        int written = std::snprintf(lod_buf + lod_off,
+                                     sizeof(lod_buf) - static_cast<size_t>(lod_off),
+                                     " lod%d=%u", i,
+                                     static_cast<unsigned>(idx_lod[i].size() / 3u));
+        if (written < 0) break;
+        lod_off += written;
+        if (lod_off >= static_cast<int>(sizeof(lod_buf))) break;
+    }
+    log::infof("[terrain] chunks: %dx%d (= %d) at %d cells/chunk; verts/chunk=%d%s",
                chunks_per_side, chunks_per_side,
                static_cast<int>(set.chunks.size()),
                set.chunk_cells,
                sample_dim * sample_dim + 4 * sample_dim,
-               static_cast<unsigned>(idx_lod[0].size() / 3u),
-               static_cast<unsigned>(idx_lod[1].size() / 3u),
-               static_cast<unsigned>(idx_lod[2].size() / 3u),
-               static_cast<unsigned>(idx_lod[3].size() / 3u));
+               lod_buf);
     return set;
 }
 
@@ -840,8 +952,18 @@ void rebuild_chunk_vertices(VkDevice device, VmaAllocator alloc, VkQueue queue,
                             uint32_t queue_family,
                             const Heightmap& hm, TerrainChunk& c) {
     std::vector<Vertex> verts;
+    // Thread c.densify through so the brush rebuild matches the chunk's
+    // CURRENT density. Without this, the VBO is regenerated at densify=1
+    // even when the chunk's sample_dim was sized for densify>1; the
+    // resulting VBO has the wrong number of vertices and gen_chunk_verts
+    // bilinear-samples on the wrong source-grid spacing. The next densify
+    // dirty-handler tick would eventually reupload at the correct density,
+    // but during the brush stroke the chunk briefly renders with broken
+    // topology. fake chunks built from default initialisation get
+    // densify=1 from the struct default so the previous behaviour is
+    // preserved for refresh_terrain_blas's whole-mesh "chunk".
     gen_chunk_verts(hm, c.origin_ix, c.origin_iz, c.sample_dim,
-                    verts, c.aabb_min, c.aabb_max);
+                    verts, c.aabb_min, c.aabb_max, c.densify);
     // Re-upload via stage-then-copy. We could keep a persistent host-
     // mapped staging buffer for sculpt strokes if this becomes a hot
     // path, but a single chunk is ~40KB so the one-shot path is fine.
@@ -902,6 +1024,170 @@ void rebuild_chunk_vertices(VkDevice device, VmaAllocator alloc, VkQueue queue,
     vkQueueWaitIdle(queue);
     vkDestroyCommandPool(device, pool, nullptr);
     vmaDestroyBuffer(alloc, stage, stage_alloc);
+}
+
+void rebuild_chunk_lod_indices(VkDevice device, VmaAllocator alloc,
+                                VkQueue queue, uint32_t queue_family,
+                                TerrainChunkSet& set,
+                                const int strides[kTerrainLodCount]) {
+    if (set.chunks.empty()) return;
+
+    // Clamp non-positive strides to 1 to avoid a degenerate empty buffer
+    // the renderer would still try to bind. gen_indices_for_lod itself
+    // clamps stride > N-1 to N-1 (single-quad degenerate chunk).
+    int eff_strides[kTerrainLodCount];
+    for (int i = 0; i < kTerrainLodCount; ++i)
+        eff_strides[i] = std::max(1, strides[i]);
+
+    // Per-chunk densification means sample_dim can differ across chunks
+    // (densify=1 chunk has 65 verts/side; densify=4 chunk has 257). IBO
+    // topology depends on sample_dim, so we cache index lists per unique
+    // sample_dim instead of baking N times per chunk. Most builds use
+    // <= 4 unique densities at any moment so the cache is tiny.
+    struct LodCache {
+        int sample_dim = 0;
+        std::vector<uint32_t> idx_lod[kTerrainLodCount];
+    };
+    std::vector<LodCache> caches;
+    auto get_cache = [&](int sample_dim) -> const LodCache& {
+        for (const auto& c : caches) if (c.sample_dim == sample_dim) return c;
+        LodCache nc;
+        nc.sample_dim = sample_dim;
+        for (int i = 0; i < kTerrainLodCount; ++i)
+            gen_indices_for_lod(sample_dim, eff_strides[i], nc.idx_lod[i]);
+        caches.push_back(std::move(nc));
+        return caches.back();
+    };
+
+    // Wait for any in-flight work to drain before destroying GPU buffers.
+    // Caller is expected to be on the render thread between frames, so
+    // vkQueueWaitIdle is the simplest sync; this is a rare event (user
+    // dragging a slider) so the cost is hidden.
+    vkQueueWaitIdle(queue);
+
+    for (auto& c : set.chunks) {
+        const LodCache& cache = get_cache(c.sample_dim);
+        // LOD 0 still lives in the mesh.index_buffer baked at chunk
+        // build. Re-uploading it would require recreating the Mesh which
+        // also owns the vertex buffer -- overkill for a stride tweak.
+        // Skip LOD 0 in the rebuild; the LOD 0 slider is therefore a
+        // no-op visually (kept in the UI for symmetry but the renderer
+        // always draws stride=1 at LOD 0). The user note in the UI text
+        // tells the user this.
+        c.index_count_lod[0] = c.mesh.index_count;
+
+        for (int lod = 1; lod < kTerrainLodCount; ++lod) {
+            if (c.ibo_lod[lod - 1]) {
+                vmaDestroyBuffer(alloc, c.ibo_lod[lod - 1],
+                                  c.ibo_lod_alloc[lod - 1]);
+                c.ibo_lod[lod - 1] = VK_NULL_HANDLE;
+                c.ibo_lod_alloc[lod - 1] = nullptr;
+            }
+            upload_index_buffer(device, alloc, queue, queue_family,
+                                 cache.idx_lod[lod].data(),
+                                 static_cast<uint32_t>(cache.idx_lod[lod].size()),
+                                 c.ibo_lod[lod - 1],
+                                 c.ibo_lod_alloc[lod - 1]);
+            c.index_count_lod[lod] =
+                static_cast<uint32_t>(cache.idx_lod[lod].size());
+        }
+    }
+
+    log::infof("[terrain] rebuilt LOD index buffers; strides:"
+                " %d %d %d %d %d %d %d %d (%zu densify variants)",
+                eff_strides[0], eff_strides[1], eff_strides[2], eff_strides[3],
+                eff_strides[4], eff_strides[5], eff_strides[6], eff_strides[7],
+                caches.size());
+}
+
+void rebuild_chunk_at_density(VkDevice device, VmaAllocator alloc,
+                               VkQueue queue, uint32_t queue_family,
+                               const Heightmap& hm, TerrainChunk& c,
+                               int densify,
+                               const int strides[kTerrainLodCount]) {
+    if (densify < 1) densify = 1;
+    // Chunk_cells in source heightmap space. Recover it from the old
+    // sample_dim and old densify so the helper doesn't need extra args.
+    // sample_dim = chunk_cells * old_densify + 1, so chunk_cells =
+    // (sample_dim - 1) / old_densify.
+    const int chunk_cells =
+        (c.sample_dim - 1) / std::max(1, c.densify);
+    const int new_sample_dim = chunk_cells * densify + 1;
+
+    // Wait for any in-flight GPU work using this chunk's buffers to
+    // complete before destroying them. Caller may have batched calls so
+    // queueing a single wait per call is acceptable -- this path runs
+    // once per slider change, not per frame.
+    vkQueueWaitIdle(queue);
+
+    // Drop the old VBO + skirt mesh + IBO0.
+    if (c.mesh.vertex_buffer) {
+        destroy_mesh(alloc, c.mesh);
+        c.mesh = Mesh{};
+    }
+    // Drop LODs 1..N-1.
+    for (int lod = 0; lod < kTerrainLodCount - 1; ++lod) {
+        if (c.ibo_lod[lod]) {
+            vmaDestroyBuffer(alloc, c.ibo_lod[lod], c.ibo_lod_alloc[lod]);
+            c.ibo_lod[lod] = VK_NULL_HANDLE;
+            c.ibo_lod_alloc[lod] = nullptr;
+        }
+    }
+    // Drop parent_y.
+    if (c.parent_y_buffer) {
+        vmaDestroyBuffer(alloc, c.parent_y_buffer, c.parent_y_alloc);
+        c.parent_y_buffer = VK_NULL_HANDLE;
+        c.parent_y_alloc = nullptr;
+    }
+
+    // Rebuild verts at new densify.
+    std::vector<Vertex> verts;
+    gen_chunk_verts(hm, c.origin_ix, c.origin_iz, new_sample_dim,
+                    verts, c.aabb_min, c.aabb_max, densify);
+    c.center = 0.5f * (c.aabb_min + c.aabb_max);
+    c.sample_dim = new_sample_dim;
+    c.densify = densify;
+
+    // Clamp / sanitise strides. LOD 0 is FORCED to stride 1 to match
+    // the existing renderer assumption (LOD 0 always draws every vert
+    // in the chunk VBO; the user-facing LOD 0 stride slider is marked
+    // informational). At densify N this gives N*N times more triangles
+    // per chunk than densify 1; LOD 1+ user strides still apply in
+    // densified space.
+    int eff_strides[kTerrainLodCount];
+    eff_strides[0] = 1;
+    for (int i = 1; i < kTerrainLodCount; ++i)
+        eff_strides[i] = std::max(1, strides[i]);
+
+    std::vector<uint32_t> idx_lod[kTerrainLodCount];
+    for (int i = 0; i < kTerrainLodCount; ++i)
+        gen_indices_for_lod(new_sample_dim, eff_strides[i], idx_lod[i]);
+
+    c.mesh = create_mesh_from_data(
+        device, alloc, queue, queue_family,
+        verts.data(), static_cast<uint32_t>(verts.size()),
+        idx_lod[0].data(), static_cast<uint32_t>(idx_lod[0].size()));
+    c.index_count_lod[0] = static_cast<uint32_t>(idx_lod[0].size());
+
+    for (int lod = 1; lod < kTerrainLodCount; ++lod) {
+        upload_index_buffer(device, alloc, queue, queue_family,
+                             idx_lod[lod].data(),
+                             static_cast<uint32_t>(idx_lod[lod].size()),
+                             c.ibo_lod[lod - 1], c.ibo_lod_alloc[lod - 1]);
+        c.index_count_lod[lod] =
+            static_cast<uint32_t>(idx_lod[lod].size());
+    }
+
+    // CD-LOD parent_y stream rebuilt at the new densified resolution.
+    std::vector<float> parent_y;
+    gen_chunk_parent_y(hm, c.origin_ix, c.origin_iz, new_sample_dim,
+                       parent_y, densify);
+    upload_typed_buffer(device, alloc, queue, queue_family,
+                         parent_y.data(),
+                         static_cast<VkDeviceSize>(parent_y.size()) *
+                         sizeof(float),
+                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                         c.parent_y_buffer, c.parent_y_alloc);
 }
 
 } // namespace qlike

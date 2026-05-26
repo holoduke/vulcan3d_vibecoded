@@ -284,6 +284,34 @@ struct SceneUBO {
     // declares sky — the NEXT cell is re-evaluated, so a distant
     // taller peak is never missed). 1024 floats packed 4-per-vec4.
     glm::vec4  terrain_max_grid[256];
+    // Runtime knobs added later. Appended at the very END of the UBO
+    // so the (large) terrain_max_grid array indexing in shaders stays
+    // unchanged.
+    //   .x = rocky-grass vertex displacement amplitude (m)
+    //   .y = rocky displacement smoothing mip-bias (0 = crisp, +2 = blurred)
+    //   .z = per-pixel POM far-fade distance (m)
+    //   .w = reserved
+    glm::vec4  terrain_disp_params;
+    // Anti-tile sampling on terrain ground (cube.frag is_terrain block).
+    //   .x = master toggle (0 / 1)
+    //   .y = blend strength of the rotated sample (0..1)
+    //   .zw = reserved
+    glm::vec4  terrain_antitile_params;
+    // Grass-cast shadow on rasterised terrain (cube.frag is_terrain),
+    // sampled along the sun XZ direction through the grass mask
+    // (binding 13). Separate from grass_shadow_params (raymarched
+    // terrain only).
+    //   .x = strength (0 = off, 1 = full dark under dense grass)
+    //   .y = sample count along sun XZ (1..8)
+    //   .z = max walk distance (m)
+    //   .w = master toggle (0 / 1) -- shader fast-exits when 0 even if
+    //        strength was left non-zero, to keep the toggle deterministic.
+    glm::vec4  grass_shadow_on_terrain_params;
+    // Side-lit grass shading (grass.frag / grass_raymarch.frag).
+    //   .x = strength (0 = engine default flat shading, 1 = full wrap)
+    //   .y = master toggle (0 / 1)
+    //   .zw = reserved
+    glm::vec4  grass_side_lit_params;
 };
 
 // ---- KHR ray tracing entry points ----

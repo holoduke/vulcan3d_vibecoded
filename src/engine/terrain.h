@@ -112,22 +112,47 @@ void bake_heightmap_shadow_tile_ss(const Heightmap& hm, glm::vec3 sun_dir,
 // The vertex buffer is also kept on the host side (`positions` stores
 // per-vertex world Y) so Phase 4 sculpt can apply heightmap edits then
 // rebuild the affected chunk meshes incrementally. Skirt vertices live
-// in the same buffer past the interior block (offset = sample_dim²).
-constexpr int kTerrainLodCount = 4;
+// in the same buffer past the interior block (offset = sample_dim^2).
+//
+// LOD count bumped from 4 to 8 so the user can taper density much further
+// out before hitting the degenerate single-quad LOD. Each level's default
+// stride doubles: 1, 2, 4, 8, 16, 32, 64, 128. Strides exceeding
+// chunk_cells (typically 64) are clamped by gen_indices_for_lod to N-1
+// (one giant quad covering the chunk). The user-tunable per-LOD stride
+// array in rt_ lets the runtime override these defaults.
+constexpr int kTerrainLodCount = 8;
 struct TerrainChunk {
     Mesh mesh{};                                // VBO (interior + skirt verts) and LOD-0 IBO
     VkBuffer      ibo_lod[kTerrainLodCount - 1] = { VK_NULL_HANDLE };
     VmaAllocation ibo_lod_alloc[kTerrainLodCount - 1] = { nullptr };
     uint32_t      index_count_lod[kTerrainLodCount] = { 0 };  // [0] mirrors mesh.index_count
-    // Per-vertex "parent Y" for CD-LOD morphing — see gen_chunk_parent_y.
+    // Per-vertex "parent Y" for CD-LOD morphing -- see gen_chunk_parent_y.
     // One float per vertex (same vertex order as the mesh's VBO), bound at
     // vertex binding 1 by the terrain pipeline. Stays VK_NULL_HANDLE if
     // morphing is disabled.
+    //
+    // ONLY morphs LOD0 <-> LOD1 today. Bake is hard-coded for the
+    // stride-1 -> stride-2 vertex grid. Transitions LOD1->2, LOD2->3,
+    // ... pop visibly. Workaround: thresholds for LODs 2+ are pushed
+    // far out in the default ladder so pops are fog-masked / subtend
+    // few pixels (see Runtime::terrain_lod_distance). Follow-up to ship
+    // the "right" fix: bake per-LOD-pair parent streams (parent_y[lod]
+    // referencing LOD lod+1) and bind them per draw; adds
+    // (kTerrainLodCount - 1) extra vertex buffers per chunk plus the
+    // descriptor / pipeline plumbing to switch streams. Not shipped
+    // because the threshold workaround hides the artefact at low cost.
     VkBuffer      parent_y_buffer = VK_NULL_HANDLE;
     VmaAllocation parent_y_alloc  = nullptr;
     int cx = 0, cz = 0;                // grid coords (0..N-1)
     int origin_ix = 0, origin_iz = 0;  // first heightmap sample
-    int sample_dim = 0;                // samples per chunk side (chunk_cells+1)
+    int sample_dim = 0;                // samples per chunk side (chunk_cells*densify+1)
+    // Per-chunk densification multiplier. 1 = one vertex per heightmap
+    // cell (the original baseline); 2/4/8 = sub-divide each heightmap
+    // cell into N x N quads via bilinear sampling of the source
+    // heightmap. Drives the chunk VBO + parent_y + IBO sample_dim. Each
+    // chunk tracks its own densify so only the chunks near the camera
+    // pay the VRAM + triangle cost.
+    int densify = 1;
     glm::vec3 aabb_min{0.0f};
     glm::vec3 aabb_max{0.0f};
     glm::vec3 center{0.0f};            // world-space chunk centre — used for LOD distance
@@ -142,15 +167,32 @@ struct TerrainChunkSet {
 // Camera-distance LOD picker. Same thresholds drive depth pre-pass +
 // color pass + sun-shadow pass so depth values match across passes
 // (mismatch breaks the depth pre-pass's LESS_OR_EQUAL test).
+//
+// `thresholds[i]` is the camera-XZ distance at which the chunk leaves
+// LOD i and switches to LOD i+1. `n_thresholds` must equal
+// kTerrainLodCount - 1; the returned LOD is in [0, kTerrainLodCount-1].
+//
+// Distance is the CLOSEST POINT on the chunk AABB (XZ) to the camera.
+// The chunk you're standing IN gives distance 0 (clamps inside the
+// AABB), so it always picks LOD 0 regardless of where the chunk's
+// centre is. Was chunk-CENTRE distance which on 64 m chunks could put
+// a chunk you're standing in at distance up to ~45 m (half-diagonal)
+// and bump it to a higher LOD than expected -- the user reported this
+// as "sometimes the closeup LOD is not the 0-10 one but a less dense
+// one." pick_terrain_morph below uses the same AABB-clamp distance so
+// the picker and morph fade window stay aligned across chunks.
 inline int pick_terrain_lod(const TerrainChunk& c, glm::vec3 cam_xz,
-                            float lod1, float lod2, float lod3) {
-    float dx = c.center.x - cam_xz.x;
-    float dz = c.center.z - cam_xz.z;
+                            const float* thresholds, int n_thresholds) {
+    // Parens around std::min/max bypass the windows.h macro clobbering.
+    float cx = (std::min)((std::max)(cam_xz.x, c.aabb_min.x), c.aabb_max.x);
+    float cz = (std::min)((std::max)(cam_xz.z, c.aabb_min.z), c.aabb_max.z);
+    float dx = cx - cam_xz.x;
+    float dz = cz - cam_xz.z;
     float d = std::sqrt(dx * dx + dz * dz);
-    if (d < lod1) return 0;
-    if (d < lod2) return 1;
-    if (d < lod3) return 2;
-    return 3;
+    for (int i = 0; i < n_thresholds; ++i) {
+        if (d < thresholds[i]) return i;
+    }
+    return n_thresholds;
 }
 
 // Builds chunks_per_side² chunks from `hm`. `chunks_per_side` must
@@ -170,5 +212,31 @@ void destroy_terrain_chunks(VkDevice device, VmaAllocator alloc,
 void rebuild_chunk_vertices(VkDevice device, VmaAllocator alloc, VkQueue queue,
                             uint32_t queue_family,
                             const Heightmap& hm, TerrainChunk& c);
+
+// Rebuild every chunk's LOD index buffers from the supplied per-LOD
+// strides. Used when the user tweaks the per-LOD stride sliders. The
+// vertex buffers are untouched; only the kTerrainLodCount index buffers
+// per chunk are regenerated. Stride values <= 0 are clamped to 1. Each
+// chunk's IBOs are sized by its own c.sample_dim (which may differ when
+// per-chunk densification is in use).
+void rebuild_chunk_lod_indices(VkDevice device, VmaAllocator alloc,
+                                VkQueue queue, uint32_t queue_family,
+                                TerrainChunkSet& set,
+                                const int strides[kTerrainLodCount]);
+
+// Re-bake a single chunk at a new densify multiplier. Destroys + recreates
+// the chunk's VBO (via Mesh), parent_y stream, AND every LOD index buffer
+// (their topology depends on sample_dim = chunk_cells * densify + 1). The
+// per-LOD `strides` apply unchanged: stride N in densified vertex space
+// gives stride N * densify in source heightmap cells, so stride 4 at
+// densify 4 reproduces the densify-1 stride-1 mesh exactly. The chunk's
+// origin_ix/iz, cx/cz, center, etc are preserved; the AABB is recomputed
+// from the new vertex positions. Caller is expected to vkQueueWaitIdle
+// before calling so the old buffers are not in flight.
+void rebuild_chunk_at_density(VkDevice device, VmaAllocator alloc,
+                               VkQueue queue, uint32_t queue_family,
+                               const Heightmap& hm, TerrainChunk& c,
+                               int densify,
+                               const int strides[kTerrainLodCount]);
 
 } // namespace qlike

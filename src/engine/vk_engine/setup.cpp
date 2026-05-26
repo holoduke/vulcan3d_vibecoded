@@ -912,20 +912,51 @@ void VulkanEngine::destroy_terrain_raymarch_pipeline() {
 }
 
 void VulkanEngine::init_terrain_water_pipeline() {
-    // Big flat plane (2 triangles). The vert lifts every vertex to the
-    // water level (pc.color.x); per-pixel depth is perspective-correct
-    // even with 4 verts, so the terrain↔water edge is pixel-exact.
-    const float H = 8192.0f;   // reaches the horizon for any view
-    Vertex v[4] = {
-        { { -H, 0.0f, -H }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 0.0f } },
-        { {  H, 0.0f, -H }, { 0.0f, 1.0f, 0.0f }, { 1.0f, 0.0f } },
-        { {  H, 0.0f,  H }, { 0.0f, 1.0f, 0.0f }, { 1.0f, 1.0f } },
-        { { -H, 0.0f,  H }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 1.0f } },
-    };
-    const uint32_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+    // 64x64 subdivided water grid covering +-2048 m (~64 m per cell).
+    // Was a single 2-triangle quad spanning +-8192 m. Perspective-
+    // correct interpolation of the world-position varying (vWPos)
+    // across triangles that huge has bounded float32 precision in
+    // the barycentric weights. At the shoreline (~50-200 m from
+    // camera) that translated to ~cm-scale per-frame wobble of
+    // wpos.xz as the camera changed, which the user perceived as
+    // "the water height jumps" since meshHeight(wpos.xz) -> shore
+    // alpha is sensitive to small xz shifts at the iso-line.
+    // Smaller triangles bound the barycentric precision tightly
+    // (per-triangle vert distance <= 64 m means barycentric error
+    // -> world error stays <= mm).
+    constexpr int   kGrid = 64;             // 64x64 quads = 65x65 verts
+    constexpr float kHalf = 2048.0f;        // +-2048 m total span
+    constexpr float kStep = (2.0f * kHalf) / float(kGrid);
+    std::vector<Vertex> verts;
+    verts.reserve((kGrid + 1) * (kGrid + 1));
+    for (int j = 0; j <= kGrid; ++j) {
+        for (int i = 0; i <= kGrid; ++i) {
+            float x = -kHalf + float(i) * kStep;
+            float z = -kHalf + float(j) * kStep;
+            Vertex vt{};
+            vt.position = { x, 0.0f, z };
+            vt.normal   = { 0.0f, 1.0f, 0.0f };
+            vt.uv       = { float(i) / float(kGrid),
+                            float(j) / float(kGrid) };
+            verts.push_back(vt);
+        }
+    }
+    std::vector<uint32_t> indices;
+    indices.reserve(kGrid * kGrid * 6);
+    for (int j = 0; j < kGrid; ++j) {
+        for (int i = 0; i < kGrid; ++i) {
+            uint32_t a = uint32_t(j * (kGrid + 1) + i);
+            uint32_t b = a + 1;
+            uint32_t c = a + (kGrid + 1);
+            uint32_t d = c + 1;
+            indices.push_back(a); indices.push_back(b); indices.push_back(d);
+            indices.push_back(a); indices.push_back(d); indices.push_back(c);
+        }
+    }
     water_plane_mesh_ = create_mesh_from_data(
         device_, allocator_, graphics_queue_, graphics_queue_family_,
-        v, 4, idx, 6);
+        verts.data(), static_cast<uint32_t>(verts.size()),
+        indices.data(), static_cast<uint32_t>(indices.size()));
 
     std::string sd = QLIKE_SHADER_DIR;
     water_vert_module_ = vkpipe::load_shader_module(
@@ -952,15 +983,28 @@ void VulkanEngine::init_terrain_water_pipeline() {
     cfg.vattrs = { a0 };
 
     cfg.cull = VK_CULL_MODE_NONE;           // visible from above and below
+    // depth_test ON — the only reliable way to hide water at pixels
+    // where terrain is in front. Multiple software approaches
+    // (12-step ray-vs-heightmap, adaptive 16-48 step, with/without
+    // bias) all had failure modes: foam floating above terrain,
+    // residual see-through, killed shore band, etc. The hardware
+    // depth-test silhouette wobbles per TAA jitter, which is mostly
+    // hidden by the +2 m water-plane lift in water.vert — wobble
+    // lives in the transparent band where shore_alpha = 0.
     cfg.depth_test = true;
-    // Depth TEST occludes water behind terrain (terrain wrote depth this
-    // frame), but the water plane must NOT WRITE depth: it's an
-    // alpha-blended transparent surface that INTERSECTS the terrain at
-    // the shoreline. Writing depth there made the ≤ test flip per-pixel
-    // (the residual jittery waterline). No write → no self-fight; the
-    // shore alpha-feather handles the visual transition.
     cfg.depth_write = false;
     cfg.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+    // Depth bias enabled so the water plane sits "slightly behind" the
+    // terrain mesh at every coplanar pixel. Without bias, the flat
+    // water plane and the displaced terrain produce identical NDC
+    // depth at their geometric intersection — perspective-interp
+    // precision differences between a 2-triangle plane and a finely
+    // tessellated mesh flip depth-test pass/fail per pixel as the
+    // camera moves, and that flipping reads to the user as "the
+    // water height is jumping" at the shoreline. With +bias terrain
+    // wins all ties, the visible water/land boundary is the heightmap
+    // iso-line decided shader-side via shore_alpha, frame-stable.
+    cfg.depth_bias_enable = true;
     // Alpha-blend colour only (motion stays opaque for TAA). The frag
     // feathers the water alpha to 0 over the last ~0.35 m of depth at
     // the shoreline so the terrain↔water plane intersection dissolves
@@ -1445,7 +1489,8 @@ void VulkanEngine::init_svgf_targets() {
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_STORAGE_BIT |
-                 VK_IMAGE_USAGE_SAMPLED_BIT,
+                 VK_IMAGE_USAGE_SAMPLED_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_DST_BIT,   // needed by clear-to-zero below
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1487,8 +1532,87 @@ void VulkanEngine::init_svgf_targets() {
                  "svgf history view");
     }
 
-    // One-time transitions: all 3 SVGF images go UNDEFINED → GENERAL
-    // in a single submit.
+    // Variance-moments ping-pong pair (4a-deep). R32G32 SFLOAT keeps
+    // luminance + luminance^2 EMA estimates without precision loss on
+    // HDR pixels (R16F would clip the squared term well below 1, killing
+    // the variance estimate). Same render_extent + GENERAL layout +
+    // zero-clear behaviour as the irradiance history slots so the very
+    // first frame reads a sane prevMoments = (0, 0) and the EMA fully
+    // takes the fresh sample (alpha=1 path inside svgf_moments.frag).
+    // Also gets STORAGE+SAMPLED so svgf_atrous.frag can sample with
+    // texelFetch later if we ever switch to a sampler-based bind.
+    VkImageCreateInfo mici = ici;
+    mici.format = VK_FORMAT_R32G32_SFLOAT;
+    VkImageViewCreateInfo mvci = vci;
+    mvci.format = VK_FORMAT_R32G32_SFLOAT;
+    for (int s = 0; s < 2; ++s) {
+        vk_check(vmaCreateImage(allocator_, &mici, &aci,
+                                &svgf_moments_image_[s],
+                                &svgf_moments_alloc_[s], nullptr),
+                 "svgf moments image");
+        mvci.image = svgf_moments_image_[s];
+        vk_check(vkCreateImageView(device_, &mvci, nullptr,
+                                   &svgf_moments_view_[s]),
+                 "svgf moments view");
+    }
+
+    // A-trous ping-pong pair (4a-deep). Stays as a colour-attachment +
+    // sampled-image pair (no STORAGE) because svgf_atrous.frag is a
+    // standard fragment-output pipeline; descriptor uses sampler2D.
+    // Format matches svgf_gi_image_/scene_color so the 3-pass chain
+    // (scene_color -> atrous[0] -> atrous[1] -> scene_color) doesn't
+    // bottleneck on a precision drop.
+    VkImageCreateInfo atici{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = nullptr, .flags = 0,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = scene_color_format_,
+        .extent = { w, h, 1 },
+        .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                 VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    VkImageViewCreateInfo atvci{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = nullptr, .flags = 0, .image = VK_NULL_HANDLE,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = scene_color_format_,
+        .components = {},
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1,
+        },
+    };
+    for (int s = 0; s < 2; ++s) {
+        vk_check(vmaCreateImage(allocator_, &atici, &aci,
+                                &svgf_atrous_image_[s],
+                                &svgf_atrous_alloc_[s], nullptr),
+                 "svgf atrous image");
+        atvci.image = svgf_atrous_image_[s];
+        vk_check(vkCreateImageView(device_, &atvci, nullptr,
+                                   &svgf_atrous_view_[s]),
+                 "svgf atrous view");
+    }
+
+    // One-time transitions + ZERO CLEAR. R16G16B16A16_SFLOAT and
+    // R32G32_SFLOAT allocations can hold NaN/Inf garbage; cube.frag's
+    // first-frame imageLoad on history (or svgf_moments.frag on the
+    // prev moments slot) would pull those into mix(rgb, NaN, NaN) ->
+    // black/firefly pixels everywhere SVGF is enabled. Clear all of
+    // gi + history(2) + moments(2) to (0,0,0,0) so M-count=0 ->
+    // temporal blend takes the fresh sample only.
+    //
+    // svgf_atrous_image_ entries do not need clearing; they're written
+    // before being read in the same frame (always fully overwritten by
+    // the previous a-trous pass). They do need to land in
+    // SHADER_READ_ONLY so the first atrous pass sampling its OTHER
+    // ping-pong slot doesn't read UNDEFINED.
     vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
                             [&](VkCommandBuffer cb) {
         vkinit::transition_image(cb, svgf_gi_image_,
@@ -1498,28 +1622,48 @@ void VulkanEngine::init_svgf_targets() {
             vkinit::transition_image(cb, svgf_history_image_[s],
                                      VK_IMAGE_LAYOUT_UNDEFINED,
                                      VK_IMAGE_LAYOUT_GENERAL);
+            vkinit::transition_image(cb, svgf_moments_image_[s],
+                                     VK_IMAGE_LAYOUT_UNDEFINED,
+                                     VK_IMAGE_LAYOUT_GENERAL);
+            vkinit::transition_image(cb, svgf_atrous_image_[s],
+                                     VK_IMAGE_LAYOUT_UNDEFINED,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        VkClearColorValue zero{};
+        VkImageSubresourceRange sub{
+            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
+        };
+        vkCmdClearColorImage(cb, svgf_gi_image_,
+                             VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &sub);
+        for (int s = 0; s < 2; ++s) {
+            vkCmdClearColorImage(cb, svgf_history_image_[s],
+                                 VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &sub);
+            vkCmdClearColorImage(cb, svgf_moments_image_[s],
+                                 VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &sub);
         }
     });
 
-    // Initial descriptor writes at bindings 19 / 20 / 21.
+    // Initial descriptor writes at bindings 19 / 20 / 21 / 22 / 23.
     if (scene_desc_set_) {
-        VkDescriptorImageInfo infos[3] = {
+        VkDescriptorImageInfo infos[5] = {
             { VK_NULL_HANDLE, svgf_gi_view_,         VK_IMAGE_LAYOUT_GENERAL },
             { VK_NULL_HANDLE, svgf_history_view_[0], VK_IMAGE_LAYOUT_GENERAL },
             { VK_NULL_HANDLE, svgf_history_view_[1], VK_IMAGE_LAYOUT_GENERAL },
+            { VK_NULL_HANDLE, svgf_moments_view_[0], VK_IMAGE_LAYOUT_GENERAL },
+            { VK_NULL_HANDLE, svgf_moments_view_[1], VK_IMAGE_LAYOUT_GENERAL },
         };
-        VkWriteDescriptorSet wr[3]{};
-        for (int i = 0; i < 3; ++i) {
+        VkWriteDescriptorSet wr[5]{};
+        for (int i = 0; i < 5; ++i) {
             wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             wr[i].dstSet = scene_desc_set_;
-            wr[i].dstBinding = 19 + i;
+            wr[i].dstBinding = static_cast<uint32_t>(19 + i);
             wr[i].descriptorCount = 1;
             wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             wr[i].pImageInfo = &infos[i];
         }
-        vkUpdateDescriptorSets(device_, 3, wr, 0, nullptr);
+        vkUpdateDescriptorSets(device_, 5, wr, 0, nullptr);
     }
-    log::infof("[svgf] gi + history(×2) storage images: %ux%u R16G16B16A16F",
+    log::infof("[svgf] gi + history(x2) + moments(x2) + atrous(x2) at %ux%u",
                w, h);
 }
 
@@ -1544,31 +1688,71 @@ void VulkanEngine::destroy_svgf_targets() {
             svgf_history_image_[s] = VK_NULL_HANDLE;
             svgf_history_alloc_[s] = nullptr;
         }
+        if (svgf_moments_view_[s]) {
+            vkDestroyImageView(device_, svgf_moments_view_[s], nullptr);
+            svgf_moments_view_[s] = VK_NULL_HANDLE;
+        }
+        if (svgf_moments_image_[s]) {
+            vmaDestroyImage(allocator_, svgf_moments_image_[s],
+                            svgf_moments_alloc_[s]);
+            svgf_moments_image_[s] = VK_NULL_HANDLE;
+            svgf_moments_alloc_[s] = nullptr;
+        }
+        if (svgf_atrous_view_[s]) {
+            vkDestroyImageView(device_, svgf_atrous_view_[s], nullptr);
+            svgf_atrous_view_[s] = VK_NULL_HANDLE;
+        }
+        if (svgf_atrous_image_[s]) {
+            vmaDestroyImage(allocator_, svgf_atrous_image_[s],
+                            svgf_atrous_alloc_[s]);
+            svgf_atrous_image_[s] = VK_NULL_HANDLE;
+            svgf_atrous_alloc_[s] = nullptr;
+        }
     }
 }
 
-// Rewrite scene_desc binding 19 to point at the (possibly newly
-// allocated) svgf_gi_view_. Used both by initial wire-up and the
-// post-swapchain-recreate path.
-static void rewrite_binding19_svgf_gi(VkDevice device,
-                                      VkDescriptorSet set,
-                                      VkImageView view) {
-    if (!set || !view) return;
-    VkDescriptorImageInfo gi_bi{ VK_NULL_HANDLE, view,
-                                 VK_IMAGE_LAYOUT_GENERAL };
-    VkWriteDescriptorSet w{};
-    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w.dstSet = set; w.dstBinding = 19; w.descriptorCount = 1;
-    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    w.pImageInfo = &gi_bi;
-    vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+// Rewrite scene_desc bindings 19..23 to point at the (possibly newly
+// allocated) SVGF storage views. Used both by initial wire-up (via
+// init_svgf_targets's own write block) and the post-swapchain-recreate
+// path here. Belt-and-braces: init_svgf_targets already wrote these
+// once at allocation, this confirms after a destroy+realloc.
+static void rewrite_svgf_storage_bindings(VkDevice device,
+                                          VkDescriptorSet set,
+                                          VkImageView gi_view,
+                                          const VkImageView (&hist)[2],
+                                          const VkImageView (&moments)[2]) {
+    if (!set || !gi_view) return;
+    VkDescriptorImageInfo infos[5] = {
+        { VK_NULL_HANDLE, gi_view,     VK_IMAGE_LAYOUT_GENERAL },
+        { VK_NULL_HANDLE, hist[0],     VK_IMAGE_LAYOUT_GENERAL },
+        { VK_NULL_HANDLE, hist[1],     VK_IMAGE_LAYOUT_GENERAL },
+        { VK_NULL_HANDLE, moments[0],  VK_IMAGE_LAYOUT_GENERAL },
+        { VK_NULL_HANDLE, moments[1],  VK_IMAGE_LAYOUT_GENERAL },
+    };
+    VkWriteDescriptorSet w[5]{};
+    for (int i = 0; i < 5; ++i) {
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = set;
+        w[i].dstBinding = static_cast<uint32_t>(19 + i);
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[i].pImageInfo = &infos[i];
+    }
+    vkUpdateDescriptorSets(device, 5, w, 0, nullptr);
 }
 
 void VulkanEngine::recreate_svgf_targets() {
     vkDeviceWaitIdle(device_);
     destroy_svgf_targets();
     init_svgf_targets();
-    rewrite_binding19_svgf_gi(device_, scene_desc_set_, svgf_gi_view_);
+    rewrite_svgf_storage_bindings(device_, scene_desc_set_,
+                                  svgf_gi_view_,
+                                  svgf_history_view_,
+                                  svgf_moments_view_);
+    // The a-trous fragment pipeline samples scene_color / depth /
+    // moments / atrous_view via its own desc sets; rewrite those too
+    // so the chained 3-pass filter follows the new image handles.
+    recreate_svgf_pass_targets();
 }
 
 void VulkanEngine::init_terrain_raymarch_compose_pipeline() {

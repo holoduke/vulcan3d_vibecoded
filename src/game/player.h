@@ -45,6 +45,14 @@ struct Player {
     // — so it keeps its old height for a frame and rises smoothly back as
     // step_smooth_offset decays toward zero.
     float step_smooth_offset = 0.0f;
+    // Double-jump state. air_jumps_left starts at kAirJumps when the
+    // player leaves the ground; each in-air space press consumes one.
+    // jump_edge tracks the previous tick's `in.jump` so we only fire
+    // on the leading edge (held-down doesn't burn both jumps in one
+    // frame).
+    int  air_jumps_left = 0;
+    bool jump_edge      = false;
+    static constexpr int kAirJumps = 1;        // 1 = double-jump total
 
     // 0.6 m wide, 1.8 m tall — narrower than the previous 0.8 m so the player
     // can fit between closer obstacles (settled boxes, lantern posts, etc.).

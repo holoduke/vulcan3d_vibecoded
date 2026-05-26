@@ -133,15 +133,36 @@ void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
     p.ttl = kProjectileTtl;
     p.initial_speed = speed;
     p.initial_dir = dir;
-    p.color = glm::vec4(1.0f, 0.78f, 0.30f, 1.0f);   // warm tracer
-    // Stay just below the bloom threshold so the bullet reads as a hot line
-    // rather than a star-shaped halo.
-    p.emissive = glm::vec3(0.95f, 0.70f, 0.25f);
+    // Laser beam look — bluish-red glowing core (magenta-violet).
+    // .rgb is the surface colour you'd see if bloom were off; emissive
+    // is HDR-bright (well above the 1.0 bloom threshold), so the bullet
+    // reads as a thick glowing line surrounded by a bloom halo. The
+    // long thin cylinder geometry (kProjectileHalf = 0.90 m → 1.8 m
+    // total) doubles as motion-blur trail — moving so fast there's no
+    // per-pixel jitter to blur, the persistent length itself IS the
+    // trail.
+    p.color    = glm::vec4(1.0f, 0.20f, 0.55f, 1.0f);  // red-magenta core
+    p.emissive = glm::vec3(2.20f, 0.30f, 1.80f);        // HDR bloom feed
     projectiles_.push_back(p);
 }
 
 void VulkanEngine::update_projectiles(float dt) {
     if (!physics_) return;
+    // Per-spacejet AABB half-extents in WORLD space (model is centred,
+    // base scale ≈ 6 m / max_side, per-flight scale jitter ±0.4). We
+    // use 3.6 m on X (wing axis), 1.0 m on Y (fuselage thickness),
+    // 3.6 m on Z (length) at base scale=1. Slightly generous so fast
+    // bullets that pass through in 1 frame still register.
+    auto spacejet_aabb = [&](const SpacejetFlight& f,
+                              glm::vec3& mn, glm::vec3& mx) {
+        const float s = spacejet_base_scale_ * f.scale;
+        // Half-extents bumped (was 3.6 / 1.0 / 3.6 m) so the hit box
+        // generously surrounds the visible plane silhouette — the
+        // user could see clean misses on what looked like solid hits.
+        glm::vec3 he = glm::vec3(5.5f, 2.0f, 5.5f) * s;
+        mn = f.pos - he;
+        mx = f.pos + he;
+    };
     for (auto it = projectiles_.begin(); it != projectiles_.end(); ) {
         it->ttl -= dt;
         bool drop = it->ttl <= 0.0f;
@@ -155,6 +176,116 @@ void VulkanEngine::update_projectiles(float dt) {
             } else if (m[3].y < -100.0f) {
                 drop = true;     // fell out of the world
             } else {
+                // Spacejet hit detection — swept segment-vs-AABB
+                // against each active (non-destroying) flight. At
+                // 220 m/s bullet + up to 130 m/s jet closure, the
+                // bullet can travel ~5.8 m per frame at 60 fps —
+                // larger than the wing-axis half-extent. A pure
+                // point-in-AABB test misses ("tunnels through") on
+                // those frames. The slab method below catches any
+                // segment that crosses the AABB even partially.
+                glm::vec3 bp = glm::vec3(m[3]);
+                glm::vec3 b_prev = bp;       // default: no swept test on first frame
+                if (!std::isnan(it->prev_pos.x)) b_prev = it->prev_pos;
+                for (auto& f : spacejet_flights_) {
+                    if (f.destroying || f.hp <= 0) continue;
+                    glm::vec3 mn, mx;
+                    spacejet_aabb(f, mn, mx);
+                    // Slab method: clip the segment b_prev->bp against
+                    // each axis-aligned plane pair, tracking the
+                    // tightest entry/exit t. Overlap exists iff
+                    // t_enter <= t_exit AND the range intersects
+                    // [0, 1]. Degenerate axes (seg parallel to plane)
+                    // pass if the bullet's coordinate sits inside the
+                    // slab, fail otherwise.
+                    glm::vec3 seg = bp - b_prev;
+                    float t_enter = 0.0f, t_exit = 1.0f;
+                    bool  hit_aabb = true;
+                    for (int ax = 0; ax < 3 && hit_aabb; ++ax) {
+                        float s = seg[ax];
+                        if (std::abs(s) < 1e-6f) {
+                            if (b_prev[ax] < mn[ax] || b_prev[ax] > mx[ax])
+                                hit_aabb = false;
+                        } else {
+                            float inv = 1.0f / s;
+                            float t1 = (mn[ax] - b_prev[ax]) * inv;
+                            float t2 = (mx[ax] - b_prev[ax]) * inv;
+                            if (t1 > t2) std::swap(t1, t2);
+                            if (t1 > t_enter) t_enter = t1;
+                            if (t2 < t_exit)  t_exit  = t2;
+                            if (t_enter > t_exit) hit_aabb = false;
+                        }
+                    }
+                    if (hit_aabb) {
+                        // Register hit on this plane, terminate bullet.
+                        f.hp           -= 1;
+                        f.hit_flash_t   = 0.20f;
+                        drop            = true;
+                        was_impact      = true;
+                        hit_pos         = bp;
+                        // Top-center HUD damage indicator: snapshot
+                        // this plane's hp + reset the fade timer. The
+                        // 3 s window lets the player register the hit
+                        // and watch the next bullet land before the
+                        // bar fades.
+                        last_target_plane_hp_     = f.hp;
+                        last_target_plane_hp_max_ = 3;
+                        last_target_hud_ttl_      = 3.0f;
+                        if (audio_) {
+                            audio_->play_at(ClipID::Impact, bp,
+                                             0.85f, 0.10f, 0.06f);
+                        }
+                        if (f.hp <= 0) {
+                            // BIG explosion: 6-cone sphere coverage (was
+                            // 4) for a denser spray, plus a fullscreen
+                            // kill flash + louder/deeper audio.
+                            f.destroying = true;
+                            f.destroy_t  = 0.0f;
+                            glm::vec3 dirs[6] = {
+                                glm::vec3( 1, 0, 0),
+                                glm::vec3(-1, 0, 0),
+                                glm::vec3( 0, 1, 0),
+                                glm::vec3( 0,-1, 0),
+                                glm::vec3( 0, 0, 1),
+                                glm::vec3( 0, 0,-1),
+                            };
+                            for (auto& d : dirs) {
+                                spawn_hit_particles(f.pos, d, -d);
+                            }
+                            // Secondary inner burst from a slight Y
+                            // offset — gives the fireball a "rising
+                            // mushroom" silhouette as the sparks fan out.
+                            spawn_hit_particles(f.pos + glm::vec3(0, 1.5f, 0),
+                                                 glm::vec3(0, 1, 0),
+                                                 glm::vec3(0,-1, 0));
+                            // Screen flash — fullscreen white overlay
+                            // that fades out over kKillFlashDuration.
+                            // Brightness scales with distance so far
+                            // kills don't blind, close kills white-out.
+                            float dist = glm::length(f.pos - player_.eye_position());
+                            float close = glm::clamp(1.0f - dist / 500.0f, 0.15f, 1.0f);
+                            kill_flash_t_ = kKillFlashDuration * close;
+                            if (audio_) {
+                                // Big boom: 2× volume, deep pitch, wide
+                                // jitter; gain headroom by playing the
+                                // Impact clip twice with offset pitches.
+                                audio_->play_at(ClipID::Impact, f.pos,
+                                                 2.0f, -0.30f, 0.15f);
+                                audio_->play_at(ClipID::Impact, f.pos,
+                                                 1.4f,  0.05f, 0.10f);
+                            }
+                        }
+                        break;     // bullet is dead, no other planes
+                    }
+                }
+                // If drop was set by a plane hit above, the regular
+                // physics-impact check below will harmlessly re-check
+                // and re-overwrite the same was_impact/hit_pos values
+                // (bullet is at the plane AABB and still fast). The
+                // outer drop block then handles cleanup (decal raycast
+                // returns no hit at 150 m altitude → no decal in air;
+                // extra sparks at hit_pos look like the bullet biting
+                // the plane).
                 // Impact detection. After Jolt's step the bullet's velocity
                 // tells us what happened. The previous heuristic only
                 // checked the speed-along-fire-axis — that meant a shallow
@@ -166,18 +297,31 @@ void VulkanEngine::update_projectiles(float dt) {
                 // i.e. only super grazing hits ricochet.
                 glm::vec3 v = physics_->get_linear_velocity_h(it->jolt_handle);
                 float speed = glm::length(v);
-                float min_speed = std::max(20.0f, it->initial_speed * 0.5f);
+                // min_speed dropped from initial*0.5 (110 m/s for the
+                // 220 m/s laser) to 30 m/s. The high bar was false-
+                // tripping bullets that had simply slowed via gravity
+                // arc — bullet decals appeared in mid-air. Lasers
+                // shouldn't impact-and-die just because they slowed.
+                float min_speed = 30.0f;
                 bool dir_change = false;
                 if (speed > 0.5f) {
                     float align = glm::dot(v / speed, it->initial_dir);
-                    // cos(6°) ≈ 0.9945 — anything more deflected impacts.
-                    if (align < 0.9945f) dir_change = true;
+                    // cos(25°) ≈ 0.906. Was cos(6°) ≈ 0.9945 — that
+                    // threshold detected pure-gravity arcs as
+                    // "deflection" and spawned a decal in mid-air on
+                    // every long-range shot. Real glance-offs deflect
+                    // ≥30°, well past the new threshold.
+                    if (align < 0.906f) dir_change = true;
                 }
                 if (dir_change || speed < min_speed) {
                     drop = true;
                     was_impact = true;
                     hit_pos = glm::vec3(m[3]);
                 }
+                // Latch this frame's position so next tick's spacejet
+                // swept test has a valid prev. Only when the bullet
+                // survives this tick — drop=true exits the projectile.
+                if (!drop) it->prev_pos = bp;
             }
         }
 
@@ -520,10 +664,22 @@ void VulkanEngine::spawn_impact_decal(glm::vec3 hit_pos, glm::vec3 incoming_dir)
     glm::vec3 dir = glm::length(incoming_dir) > 1e-3f
                         ? glm::normalize(incoming_dir)
                         : glm::vec3(0, 0, 1);
-    glm::vec3 from = hit_pos - dir * 0.5f;
-    auto rh = physics_->raycast(from, dir, 1.0f);
-    glm::vec3 normal = rh.hit ? rh.normal : -dir;
-    glm::vec3 pos    = rh.hit ? rh.position : hit_pos;
+    // Cast from 5 m behind hit_pos along the incoming direction, with
+    // a 20 m total ray length. The OLD numbers (0.5 m back, 1 m total)
+    // were just enough for genuine close-range hits, but after the
+    // dir_change threshold was relaxed for laser bullets, "impact" can
+    // trip mid-flight from a gravity arc — hit_pos is in mid-air,
+    // 1 m ray finds nothing nearby, and the fallback dropped a decal
+    // straight at the in-air hit_pos (the floating-decal bug).
+    glm::vec3 from = hit_pos - dir * 5.0f;
+    auto rh = physics_->raycast(from, dir, 20.0f);
+    // Hard skip if the ray finds NO surface within 20 m. Previously
+    // this fell through to "place decal at hit_pos with synthetic
+    // normal" which is exactly what put decals in mid-air. No surface
+    // = no decal — the user's eye correctly registers "shot missed."
+    if (!rh.hit) return;
+    glm::vec3 normal = rh.normal;
+    glm::vec3 pos    = rh.position;
     pos += normal * 0.005f;     // anti-z-fight skin
 
     Decal d{};

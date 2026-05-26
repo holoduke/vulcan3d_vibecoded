@@ -28,8 +28,11 @@ static_assert(sizeof(PushConstants) == 256, "push constant layout");
 //     → 752 (water_river_extra + water_river_extinct, river-style tuning)
 //     → 784 (spom_params, slider for SPOM bump depth)
 //     → 800 (terrain_local_info, reserved)
-//     → 4896 (terrain_max_grid[256], 32×32 hi-Z max-cell grid).
-static_assert(sizeof(SceneUBO) == 4896, "scene ubo layout");
+//     → 4896 (terrain_max_grid[256], 32x32 hi-Z max-cell grid).
+//     → 4912 (terrain_disp_params, rocky-grass disp amp/smooth/POM far).
+//     → 4960 (terrain_antitile_params + grass_shadow_on_terrain_params +
+//             grass_side_lit_params, 3 vec4 trailing batch).
+static_assert(sizeof(SceneUBO) == 4960, "scene ubo layout");
 
 RtFuncs g_rt;
 

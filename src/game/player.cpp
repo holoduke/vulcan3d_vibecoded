@@ -91,17 +91,51 @@ void update_player(Player& p, const PlayerInput& in,
     // Gravity (per-tick override from PlayerInput so the menu can drive it).
     p.velocity = physics::apply_gravity(p.velocity, in.gravity, dt);
 
-    // Jump: instantaneous upward kick, only when grounded.
-    if (in.jump && p.on_ground) {
-        p.velocity.y = kPlayerMove.jump_speed;
-        p.on_ground = false;
+    // Jump: leading-edge-only so we don't burn the air jump on a single
+    // long press. Ground jump uses the regular speed. Air (double) jump
+    // gets +10% boost AND a horizontal-speed-scaled extra kick — when
+    // strafe-jumping (high horizontal speed), the second jump goes a
+    // bit higher than a standing double-jump, rewarding the trick.
+    bool jump_pressed = in.jump && !p.jump_edge;
+    if (jump_pressed) {
+        if (p.on_ground) {
+            p.velocity.y = kPlayerMove.jump_speed;
+            p.on_ground  = false;
+            p.air_jumps_left = game::Player::kAirJumps;
+        } else if (p.air_jumps_left > 0) {
+            // Base double-jump 10% higher than ground jump.
+            float base = kPlayerMove.jump_speed * 1.10f;
+            // Strafe bonus: scale with horizontal speed beyond walk
+            // speed. At kMaxStrafe (12 m/s — well-tuned strafe-jump
+            // chain), add up to +20% on top of the base.
+            float hsp = std::sqrt(p.velocity.x * p.velocity.x +
+                                   p.velocity.z * p.velocity.z);
+            constexpr float kStrafeFloor = kPlayerMove.max_walk_speed;  // 8
+            constexpr float kMaxStrafe   = 12.0f;
+            float strafe = glm::clamp((hsp - kStrafeFloor) /
+                                       (kMaxStrafe - kStrafeFloor),
+                                       0.0f, 1.0f);
+            float jump_y = base * (1.0f + 0.20f * strafe);
+            // Take the MAX of (current upward velocity, jump impulse) —
+            // a double-jump while already rising shouldn't slow you
+            // down, but a double-jump while falling should reset to a
+            // full impulse.
+            p.velocity.y = std::max(p.velocity.y, jump_y);
+            p.air_jumps_left -= 1;
+        }
     }
+    p.jump_edge = in.jump;
 
     auto move = collision::slide_move(p.shape(), p.position, p.velocity,
                                        world_aabbs, dt, 4, static_count);
     p.position = move.position;
     p.velocity = move.velocity;
+    bool was_grounded = p.on_ground;
     p.on_ground = move.grounded;
+    // Refill air jumps the moment we touch ground (rising edge of
+    // on_ground). Reset on the immediate jump above doesn't catch
+    // landings between jumps.
+    if (p.on_ground && !was_grounded) p.air_jumps_left = game::Player::kAirJumps;
 
     // Step-up smoothing — the renderer subtracts step_smooth_offset from the
     // eye y, so an instant physics jump up a stair reads as a smooth ramp.

@@ -21,6 +21,15 @@
 #include <limits>
 #include <vector>
 
+// stb_image forward declarations. The implementation lives in skybox.cpp's
+// TU (the project's single STB_IMAGE_IMPLEMENTATION owner). We need the raw
+// loader here to AO-multiply the stylized-grass albedo before uploading
+// (the texture upload path doesn't expose a pre-process hook).
+extern "C" {
+    unsigned char* stbi_load(const char*, int*, int*, int*, int);
+    void           stbi_image_free(void*);
+}
+
 namespace qlike {
 
 // Classic GLSL-style hash + value-noise + 3-octave FBM, used by every
@@ -128,8 +137,14 @@ inline float terrain_fbm_eroded(float wx, float wz, float scale,
 static float pick_terrain_morph(const TerrainChunk& c, glm::vec3 cam_xz,
                                 int lod, float lod1) {
     if (lod != 0) return 0.0f;
-    float dx = c.center.x - cam_xz.x;
-    float dz = c.center.z - cam_xz.z;
+    // Closest-point-on-AABB distance, identical metric to
+    // pick_terrain_lod above. Was chunk-centre distance which could
+    // misalign the morph fade window with the picker's LOD boundary
+    // after the picker switched to AABB-clamp.
+    float cx = std::min(std::max(cam_xz.x, c.aabb_min.x), c.aabb_max.x);
+    float cz = std::min(std::max(cam_xz.z, c.aabb_min.z), c.aabb_max.z);
+    float dx = cx - cam_xz.x;
+    float dz = cz - cam_xz.z;
     float d = std::sqrt(dx * dx + dz * dz);
     float fade_start = lod1 * 0.75f;
     float fade_end   = lod1;
@@ -1928,12 +1943,16 @@ void VulkanEngine::init_textures() {
     // Slots 7-11: procedurally-baked seamless terrain materials.
     bake_terrain_materials();
 
-    // SPOM displacement maps — bound to cube.frag as sampler2D u_height[4].
+    // SPOM displacement maps — bound to cube.frag as sampler2D u_height[5].
     // Order MUST match cube.frag's height_idx_for_albedo() switch:
     //   [0] Bricks078         (albedo idx 1) — castle outer walls
     //   [1] PaintedBricks001  (albedo idx 4) — keep walls
     //   [2] Tiles130          (albedo idx 5) — courtyard floor
     //   [3] Tiles074          (albedo idx 6) — keep interior floor
+    //   [4] stylized-grass1 (albedo idx kTexGrass / 8) -- terrain grass
+    //                       band material (ground under blades); also
+    //                       sampled by .tese for vertex displacement
+    //                       on the grass band.
     spom_height_textures_[0] = probe(
         "Bricks078/Bricks078_8K-JPG_Displacement.jpg",                 VK_FORMAT_R8G8B8A8_UNORM);
     spom_height_textures_[1] = probe(
@@ -1942,6 +1961,195 @@ void VulkanEngine::init_textures() {
         "Tiles130/Tiles130_8K-JPG_Displacement.jpg",                   VK_FORMAT_R8G8B8A8_UNORM);
     spom_height_textures_[3] = probe(
         "Tiles074/Tiles074_8K-JPG_Displacement.jpg",                   VK_FORMAT_R8G8B8A8_UNORM);
+
+    // Stylized-grass texture set (assets/stylized_grass/...). Used as the
+    // ground beneath where grass blades grow -- replaces the procedurally
+    // baked grass at slot kTexGrass (8). Feeds:
+    //   - cube.frag's is_terrain splat path (per-texel grass detail under
+    //     the blades) via albedo_textures_[8] + normal_textures_[8].
+    //   - cube.frag's per-pixel SPOM displacement in the is_terrain block
+    //     and terrain_tess.tese's vertex displacement, both via
+    //     spom_height_textures_[4] (height_idx_for_albedo returns 4 for
+    //     albedo idx 8).
+    // The albedo is multiplied by the AO map at load time to bake in the
+    // crevice darkening before sampling (no extra texture binding, no
+    // per-frame ALU). Paths probed under multiple roots so the engine
+    // runs from build/ (Windows) or the project root (CI) alike.
+    auto resolve_grass_path = [&](const char* tail) -> std::string {
+        const std::string roots[] = {
+            std::string("assets/stylized_grass/stylized-grass1-bl/") + tail,
+            std::string("../assets/stylized_grass/stylized-grass1-bl/") + tail,
+            std::string("../../assets/stylized_grass/stylized-grass1-bl/") + tail,
+        };
+        for (const std::string& p : roots) {
+            std::ifstream f(p);
+            if (f.good()) return p;
+        }
+        return std::string();
+    };
+    auto probe_grass = [&](const char* tail, VkFormat fmt) -> TextureSlot {
+        std::string p = resolve_grass_path(tail);
+        if (!p.empty()) {
+            Texture2D r = upload_texture_from_file(
+                device_, allocator_, graphics_queue_,
+                graphics_queue_family_, p, fmt);
+            if (r.ok) {
+                TextureSlot s{};
+                s.image = r.image; s.alloc = r.alloc; s.view = r.view;
+                return s;
+            }
+        }
+        log::warnf("[texture] stylized-grass %s missing on every probe path",
+                   tail);
+        return {};
+    };
+    // Build the AO-multiplied albedo CPU-side. stbi_load is brought in by
+    // texture.cpp's TU; the prototypes are re-declared at file scope above
+    // to avoid pulling stb_image.h into world.cpp.
+    TextureSlot sg_alb{};
+    {
+        std::string alb_path = resolve_grass_path("stylized-grass1_albedo.png");
+        std::string ao_path  = resolve_grass_path("stylized-grass1_ao.png");
+        if (!alb_path.empty()) {
+            int aw = 0, ah = 0, ac = 0;
+            unsigned char* alb_px = stbi_load(alb_path.c_str(),
+                                              &aw, &ah, &ac, 4);
+            if (alb_px) {
+                int ow = 0, oh = 0, oc = 0;
+                unsigned char* ao_px = ao_path.empty()
+                    ? nullptr
+                    : stbi_load(ao_path.c_str(), &ow, &oh, &oc, 4);
+                // Multiply RGB by AO.r. If the AO map size differs from
+                // the albedo (it shouldn't with this asset, but be safe)
+                // use nearest sampling rather than skipping the AO bake.
+                if (ao_px) {
+                    for (int y = 0; y < ah; ++y) {
+                        int ay = (oh > 0) ? (y * oh / ah) : 0;
+                        for (int x = 0; x < aw; ++x) {
+                            int ax = (ow > 0) ? (x * ow / aw) : 0;
+                            int ai = (y  * aw + x ) * 4;
+                            int oi = (ay * ow + ax) * 4;
+                            unsigned int ao = ao_px[oi]; // R channel
+                            // gamma-aware-ish: AO maps are usually linear,
+                            // so multiply straight on the sRGB-encoded
+                            // albedo. Slightly stronger than linear-space
+                            // would be, which matches the artistic intent
+                            // (deepen the crevices).
+                            for (int c = 0; c < 3; ++c) {
+                                unsigned int v = alb_px[ai + c];
+                                alb_px[ai + c] =
+                                    static_cast<unsigned char>((v * ao) / 255U);
+                            }
+                        }
+                    }
+                    stbi_image_free(ao_px);
+                }
+                Texture2D r = upload_texture_from_pixels(
+                    device_, allocator_, graphics_queue_,
+                    graphics_queue_family_, alb_px, aw, ah,
+                    VK_FORMAT_R8G8B8A8_SRGB, "stylized-grass1_albedo*AO");
+                stbi_image_free(alb_px);
+                if (r.ok) {
+                    sg_alb.image = r.image;
+                    sg_alb.alloc = r.alloc;
+                    sg_alb.view  = r.view;
+                }
+            } else {
+                log::warnf("[texture] stylized-grass albedo decode failed");
+            }
+        } else {
+            log::warnf("[texture] stylized-grass albedo missing on every probe path");
+        }
+    }
+    TextureSlot sg_nrm = probe_grass(
+        "stylized-grass1_normal-ogl.png", VK_FORMAT_R8G8B8A8_UNORM);
+    TextureSlot sg_h   = probe_grass(
+        "stylized-grass1_height.png",     VK_FORMAT_R8G8B8A8_UNORM);
+    // Swap the procedural-grass slot for the stylized-grass albedo/normal.
+    // The procedural bake just ran above, so destroy its slot-8 image to
+    // avoid leaking before overwriting. If the disk asset failed to load
+    // (probe miss) we keep the procedural fallback intact.
+    auto kill_slot = [&](TextureSlot& s) {
+        if (s.view)  vkDestroyImageView(device_, s.view, nullptr);
+        if (s.image) vmaDestroyImage(allocator_, s.image, s.alloc);
+        s = {};
+    };
+    if (sg_alb.image) {
+        kill_slot(albedo_textures_[kTexGrass]);
+        albedo_textures_[kTexGrass] = sg_alb;
+    }
+    if (sg_nrm.image) {
+        kill_slot(normal_textures_[kTexGrass]);
+        normal_textures_[kTexGrass] = sg_nrm;
+    }
+    // SPOM slot 4 is the stylized-grass height. Always populated; cube.frag's
+    // height_idx_for_albedo() returns 4 for albedo idx kTexGrass, and the
+    // .tese reads it through u_height[4] for vertex displacement.
+    spom_height_textures_[4] = sg_h;
+
+    // Restore the rocky-rugged-terrain PNG on the ROCK slot (kTexRock).
+    // The user originally asked for this asset; the earlier integration
+    // put it on the grass slot and the stylized-grass swap replaced it.
+    // Rocky terrain (cliffs / steep slopes) is the natural home for a
+    // realistic rock texture, so we overwrite the procedural rock slot
+    // with the PNGs. Probes follow the same multi-root pattern as
+    // probe_grass so the engine still finds them from build/ or root.
+    auto resolve_rock_path = [&](const char* tail) -> std::string {
+        const std::string roots[] = {
+            std::string("assets/rocky_terrain/rocky-rugged-terrain-bl/") + tail,
+            std::string("../assets/rocky_terrain/rocky-rugged-terrain-bl/") + tail,
+            std::string("../../assets/rocky_terrain/rocky-rugged-terrain-bl/") + tail,
+        };
+        for (const std::string& p : roots) {
+            std::ifstream f(p);
+            if (f.good()) return p;
+        }
+        return std::string();
+    };
+    auto probe_rock = [&](const char* tail, VkFormat fmt) -> TextureSlot {
+        std::string p = resolve_rock_path(tail);
+        if (!p.empty()) {
+            Texture2D r = upload_texture_from_file(
+                device_, allocator_, graphics_queue_,
+                graphics_queue_family_, p, fmt);
+            if (r.ok) {
+                TextureSlot s{};
+                s.image = r.image; s.alloc = r.alloc; s.view = r.view;
+                return s;
+            }
+        }
+        log::warnf("[texture] rocky-rugged %s missing on every probe path",
+                   tail);
+        return {};
+    };
+    TextureSlot rr_alb = probe_rock(
+        "rocky-rugged-terrain_1_albedo.png",    VK_FORMAT_R8G8B8A8_SRGB);
+    TextureSlot rr_nrm = probe_rock(
+        "rocky-rugged-terrain_1_normal-ogl.png", VK_FORMAT_R8G8B8A8_UNORM);
+    TextureSlot rr_h   = probe_rock(
+        "rocky-rugged-terrain_1_height.png",    VK_FORMAT_R8G8B8A8_UNORM);
+    // SPOM slot 5 = rocky-rugged height. Lets the tess displacement +
+    // per-pixel SPOM bump where the visible STONES are (not where the
+    // grass-height noise wanted them).
+    if (rr_h.image) {
+        kill_slot(spom_height_textures_[5]);
+        spom_height_textures_[5] = rr_h;
+    }
+    // Rocky-rugged goes into the GRASS-BAND NON-MASK FALLBACK slot
+    // (kTexProcGrass / slot 12). cube.frag's grass splat lerps:
+    //   grass_mask = 1  -> kTexGrass slot 8  (stylized green grass)
+    //   grass_mask = 0  -> kTexProcGrass slot 12 (now rocky-rugged)
+    // So on the green terrain band, areas without grass blades read
+    // as rocky ground -- which is what the user wants visible.
+    // Cliffs / steep slopes keep the procedural rock at kTexRock.
+    if (rr_alb.image) {
+        kill_slot(albedo_textures_[kTexProcGrass]);
+        albedo_textures_[kTexProcGrass] = rr_alb;
+    }
+    if (rr_nrm.image) {
+        kill_slot(normal_textures_[kTexProcGrass]);
+        normal_textures_[kTexProcGrass] = rr_nrm;
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -2240,11 +2448,16 @@ void VulkanEngine::bake_terrain_materials() {
     const int W = 512, H = 512;
     struct Mat { TmKind kind; int slot; const char* name; };
     const Mat mats[kTerrainMatCount] = {
-        { TM_ROCK,  kTexRock,  "terrain/rock"  },
-        { TM_GRASS, kTexGrass, "terrain/grass" },
-        { TM_DIRT,  kTexDirt,  "terrain/dirt"  },
-        { TM_SAND,  kTexSand,  "terrain/sand"  },
-        { TM_SNOW,  kTexSnow,  "terrain/snow"  },
+        { TM_ROCK,  kTexRock,      "terrain/rock"  },
+        { TM_GRASS, kTexGrass,     "terrain/grass" },
+        { TM_DIRT,  kTexDirt,      "terrain/dirt"  },
+        { TM_SAND,  kTexSand,      "terrain/sand"  },
+        { TM_SNOW,  kTexSnow,      "terrain/snow"  },
+        // Second copy of the procedural grass into slot 12. The
+        // probe_grass step will overwrite slot 8 with the stylized
+        // PNG; slot 12 keeps the procedural grass so cube.frag can
+        // lerp grass-mask=0 -> procedural, grass-mask=1 -> stylized.
+        { TM_GRASS, kTexProcGrass, "terrain/proc_grass" },
     };
     std::vector<unsigned char> alb, nrm;
     for (const Mat& m : mats) {
@@ -2729,34 +2942,68 @@ void VulkanEngine::destroy_spacejet() {
 }
 
 void VulkanEngine::tick_spacejet(float dt) {
+    // Decay the top-center damage HUD ttl regardless of whether any
+    // flights exist (we want it to fade out cleanly after the last
+    // plane in a wave is destroyed and the list is emptied).
+    if (last_target_hud_ttl_ > 0.0f) last_target_hud_ttl_ -= dt;
+    if (kill_flash_t_       > 0.0f) kill_flash_t_       -= dt;
     if (spacejet_meshes_.empty()) return;
 
     // Per-tick: integrate heading (turn_rate * dt), then position
     // along the new heading. Despawn when ttl elapses.
+    constexpr float kDestroyFade  = 0.6f;   // seconds before removal
+    constexpr float kPostCastleMax = 20.0f; // seconds after passing castle
     for (auto& f : spacejet_flights_) {
         f.prev_pos     = f.pos;
         f.prev_heading = f.heading;
+        // Destroying flights pitch down + decelerate so the explosion
+        // burst reads as "the plane was killed". 0.6 s window matches
+        // the spark TTL so the wreckage disappears as sparks fade.
+        if (f.destroying) {
+            f.destroy_t += dt;
+            f.speed     *= std::max(0.0f, 1.0f - dt * 1.5f);
+            f.pos.y     -= dt * 14.0f * f.destroy_t;     // accelerating fall
+        }
         f.heading += f.turn_rate * dt;
         glm::vec3 fwd{ std::sin(f.heading), 0.0f, std::cos(f.heading) };
+        glm::vec3 prev = f.pos;
         f.pos += fwd * (f.speed * dt);
         f.t   += dt;
+        if (f.hit_flash_t > 0.0f) f.hit_flash_t -= dt;
+        // Detect castle pass: dot(pos, fwd) goes from negative (before
+        // origin) to positive (past origin). The castle sits at world
+        // origin. Once detected, start counting post-castle seconds
+        // toward the 20 s hard removal.
+        if (f.post_castle_t < 0.0f) {
+            float dot_prev = glm::dot(prev,  fwd);
+            float dot_cur  = glm::dot(f.pos, fwd);
+            if (dot_prev <= 0.0f && dot_cur > 0.0f) f.post_castle_t = 0.0f;
+        } else {
+            f.post_castle_t += dt;
+        }
     }
     spacejet_flights_.erase(
         std::remove_if(spacejet_flights_.begin(), spacejet_flights_.end(),
-                       [](const SpacejetFlight& f){ return f.t >= f.ttl; }),
+                       [kDestroyFade, kPostCastleMax](const SpacejetFlight& f){
+                           return f.t >= f.ttl ||
+                                  (f.destroying && f.destroy_t >= kDestroyFade) ||
+                                  (f.post_castle_t >= kPostCastleMax);
+                       }),
         spacejet_flights_.end());
 
-    // Spawn cadence вЂ” random next wave 4-12 s out, wave size 1-5 jets.
+    // Spawn cadence -- the sky is busy now. Was 4-12 s between waves
+    // with 55% solo flights; now 1.5-4 s and the distribution is
+    // biased toward multi-jet formations.
     spacejet_spawn_timer_ -= dt;
     if (spacejet_spawn_timer_ > 0.0f) return;
-    spacejet_spawn_timer_ = frand_range(spacejet_rng_state_, 4.0f, 12.0f);
+    spacejet_spawn_timer_ = frand_range(spacejet_rng_state_, 1.5f, 4.0f);
 
-    // Wave size weighted toward 1: heavy-tail distribution so 5-jet
-    // formations are rare-but-cool.
+    // Wave size: pairs / trios dominate, 5-jet formations frequent.
     uint32_t r = xorshift32(spacejet_rng_state_) % 100u;
-    int wave = (r < 55) ? 1 :          // 55% solo
-               (r < 85) ? 2 :          //  30% pair
-               (r < 95) ? 3 : 5;       //  10% trio, 5% formation of five
+    int wave = (r < 15) ? 1 :          //  15% solo
+               (r < 45) ? 2 :          //  30% pair
+               (r < 75) ? 3 :          //  30% trio
+               (r < 90) ? 4 : 5;       //  15% quad, 10% five
 
     // Pick a flight heading. 0..2ПЂ, 0 = +Z. Spawn point is 1.4 km
     // behind the castle (i.e. opposite the heading direction) so the
@@ -2766,10 +3013,17 @@ void VulkanEngine::tick_spacejet(float dt) {
     glm::vec3 right{ fwd.z, 0.0f, -fwd.x };
 
     constexpr float kTrackLen = 2800.0f;
-    constexpr float kSideJit  = 80.0f;
+    // Lateral jitter dropped 80 m → 25 m so every wave actually
+    // crosses (or grazes) the castle silhouette at midflight. 80 m
+    // could put flights at the edge of view; 25 m guarantees the
+    // jets pass within the castle footprint plus a small jitter
+    // for visual variety.
+    constexpr float kSideJit  = 25.0f;
     float lateral  = frand_range(spacejet_rng_state_, -kSideJit, kSideJit);
-    // Altitude clear of FBM peaks (TERRAIN_HEIGHT = 120 m).
-    float altitude = frand_range(spacejet_rng_state_, 150.0f, 190.0f);
+    // Altitude lowered (was 150-190 m). Still clear of FBM peaks at
+    // 120 m by a comfortable margin, but close enough that the jets
+    // read as a real combat threat instead of a distant flyover.
+    float altitude = frand_range(spacejet_rng_state_, 95.0f, 130.0f);
     float speed    = frand_range(spacejet_rng_state_,  70.0f, 130.0f);
 
     // Random gentle turn rate. Most waves go straight; some bank
@@ -3344,6 +3598,14 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
                 // depth ≠ colour depth (sky-patch z-fight).
                 pc.tex_params = glm::vec4(0.0f, rt_.terrain_rock_relief,
                                           rt_.terrain_tess_smooth, 2.0f);
+                // grass_params .z/.w drive the .tese's rocky-grass HEIGHT-
+                // map displacement (kRockyAmp / kDispMip). MUST match the
+                // colour pass's values or the primed depth sits below the
+                // colour geometry → LESS_OR_EQUAL rejects → missing tris.
+                pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
+                                            rt_.terrain_grass_line_scale,
+                                            rt_.terrain_disp_amp,
+                                            rt_.terrain_disp_smooth_mip);
                 vkCmdPushConstants(cmd, pipeline_layout_, kPcStages,
                                    0, sizeof(PushConstants), &pc);
                 vkCmdDrawIndexed(cmd, c.index_count_lod[0], 1, 0, 0, 0);
@@ -3353,11 +3615,16 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         // Pass B: the rest (and everything if tess off) with the plain
         // CD-LOD depth pipeline.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrain_depth_pipeline_);
+        // Same scaled thresholds shared with the colour + sun-shadow
+        // passes -- mismatch would cause LESS_OR_EQUAL depth rejects.
+        float thresh[kTerrainLodCount - 1];
+        for (int i = 0; i < kTerrainLodCount - 1; ++i)
+            thresh[i] = rt_.terrain_lod_distance[i] * rt_.terrain_lod_scale;
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
             if (tess_on && chunk_near(c)) continue;   // primed in pass A
-            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1 * rt_.terrain_lod_scale, rt_.terrain_lod2 * rt_.terrain_lod_scale, rt_.terrain_lod3 * rt_.terrain_lod_scale);
-            float morph = pick_terrain_morph(c, cam, lod, rt_.terrain_lod1 * rt_.terrain_lod_scale);
+            int lod = pick_terrain_lod(c, cam, thresh, kTerrainLodCount - 1);
+            float morph = pick_terrain_morph(c, cam, lod, thresh[0]);
             VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
             VkDeviceSize voffs[2] = { 0, 0 };
             vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
@@ -3367,6 +3634,15 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
             pc.mvp = vp;
             pc.model = glm::mat4(1.0f);
             pc.color = glm::vec4(1.0f, 1.0f, 1.0f, morph);
+            // grass_params.z/.w drive the terrain.vert rocky vertex
+            // displacement. MUST match the colour pass values exactly
+            // or the primed depth sits BELOW the displaced colour
+            // geometry -> LESS_OR_EQUAL rejects -> sky/black patches.
+            // (Same bug class as the tess depth-prime issue earlier.)
+            pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
+                                        rt_.terrain_grass_line_scale,
+                                        rt_.terrain_disp_amp,
+                                        rt_.terrain_disp_smooth_mip);
             vkCmdPushConstants(cmd, pipeline_layout_, kPcStages,
                                0, sizeof(PushConstants), &pc);
             vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
@@ -3528,9 +3804,14 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                                       1.0f, 2.0f);
             // .x = sand ripple scale, .y = grass contour-line scale
             // (cube.frag terrain reads these; 0 = grass lines off).
+            // .z = rocky vertex disp amplitude, .w = disp mip smooth
+            // -- consumed by terrain_tess.tese for the grass-band
+            // displacement. Wired to UI sliders so the user can dial
+            // both at runtime.
             pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
                                         rt_.terrain_grass_line_scale,
-                                        0.0f, 0.0f);
+                                        rt_.terrain_disp_amp,
+                                        rt_.terrain_disp_smooth_mip);
             vkCmdPushConstants(cmd, pipeline_layout_,
                                VK_SHADER_STAGE_VERTEX_BIT |
                                VK_SHADER_STAGE_FRAGMENT_BIT |
@@ -3580,7 +3861,8 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                 // .x = sand ripple scale, .y = grass contour-line scale.
                 pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
                                             rt_.terrain_grass_line_scale,
-                                            0.0f, 0.0f);
+                                            rt_.terrain_disp_amp,
+                                            rt_.terrain_disp_smooth_mip);
                 vkCmdPushConstants(cmd, pipeline_layout_,
                                    VK_SHADER_STAGE_VERTEX_BIT |
                                    VK_SHADER_STAGE_FRAGMENT_BIT |
@@ -3596,11 +3878,16 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
             (rt_.terrain_wireframe && terrain_wire_pipeline_)
                 ? terrain_wire_pipeline_ : terrain_pipeline_);
+        // Hoist the scaled LOD thresholds out of the per-chunk loop --
+        // identical to the depth pre-pass thresholds above.
+        float thresh[kTerrainLodCount - 1];
+        for (int i = 0; i < kTerrainLodCount - 1; ++i)
+            thresh[i] = rt_.terrain_lod_distance[i] * rt_.terrain_lod_scale;
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
             if (tess_on && chunk_near(c)) continue;   // drawn in pass A
-            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1 * rt_.terrain_lod_scale, rt_.terrain_lod2 * rt_.terrain_lod_scale, rt_.terrain_lod3 * rt_.terrain_lod_scale);
-            float morph = pick_terrain_morph(c, cam, lod, rt_.terrain_lod1 * rt_.terrain_lod_scale);
+            int lod = pick_terrain_lod(c, cam, thresh, kTerrainLodCount - 1);
+            float morph = pick_terrain_morph(c, cam, lod, thresh[0]);
             VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
             VkDeviceSize voffs[2] = { 0, 0 };
             vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
@@ -3722,6 +4009,17 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                            VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
                            VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                            0, sizeof(PushConstants), &pc);
+        // Push the water plane slightly farther in NDC than coplanar
+        // terrain so depth-test ties go to the terrain. Constant 16 +
+        // slope 1.5 is generous enough to swamp perspective-interp
+        // precision differences between the 2-triangle water plane
+        // and the tessellated CDLOD terrain at the shoreline. The
+        // bias is in depth-buffer units (D32 float here) so the
+        // effective world-space push is sub-mm at near depth and a
+        // few cm at 1 km — invisible to the eye, decisive for the
+        // depth test.
+        vkCmdSetDepthBias(cmd, /*const*/ 16.0f, /*clamp*/ 0.0f,
+                          /*slope*/ 1.5f);
         VkDeviceSize woff = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &water_plane_mesh_.vertex_buffer, &woff);
         vkCmdBindIndexBuffer(cmd, water_plane_mesh_.index_buffer, 0,
@@ -3759,6 +4057,21 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             glm::mat4 model      = build_model(f.pos,      yaw_now,  bank_now);
             glm::mat4 prev_model = build_model(f.prev_pos, yaw_prev, bank_prev);
 
+            // Red hit-flash: emissive bumps to bright red for the
+            // hit_flash_t window (~0.2 s) so the player sees damage
+            // register. Destroying flights also flash continuously
+            // until they're removed at the end of the fade.
+            const float flash = std::max(f.destroying ? 0.6f : 0.0f,
+                                          glm::clamp(f.hit_flash_t / 0.20f,
+                                                     0.0f, 1.0f));
+            const glm::vec4 hit_emissive(2.8f * flash, 0.05f * flash,
+                                          0.05f * flash, 0.0f);
+            // Tint the base colour reddish while flashing too — emissive
+            // alone reads as glow but the body still looks neutral; the
+            // colour mix sells it as "the plane is on fire."
+            const glm::vec4 hit_color = glm::mix(glm::vec4(1.0f),
+                                                  glm::vec4(1.6f, 0.4f, 0.4f, 1.0f),
+                                                  flash);
             for (const auto& sm : spacejet_meshes_) {
                 VkDeviceSize off = 0;
                 vkCmdBindVertexBuffers(cmd, 0, 1, &sm.mesh.vertex_buffer, &off);
@@ -3768,8 +4081,8 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                 pc.mvp      = vp * model;
                 pc.model    = model;
                 pc.prev_mvp = prev_vp * prev_model;
-                pc.color    = sm.base_color;
-                pc.emissive = glm::vec4(0.0f);
+                pc.color    = sm.base_color * hit_color;
+                pc.emissive = hit_emissive;
                 pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
                 vkCmdPushConstants(cmd, pipeline_layout_,
                                    VK_SHADER_STAGE_VERTEX_BIT |

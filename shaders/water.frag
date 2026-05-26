@@ -16,6 +16,11 @@
 layout(location = 0) in vec2 vNDC;
 layout(location = 1) in vec4 vWNear;
 layout(location = 2) in vec4 vWFar;
+// Perspective-correct world position of the water surface at this
+// pixel, output by water.vert from the actual plane mesh vertices.
+// Replaces the per-frame inv(view_proj) reconstruction below — that
+// was the source of the "water orientation drifts with camera" wobble.
+layout(location = 3) in vec3 vWPos;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
@@ -1613,22 +1618,18 @@ vec3 waterNormal(vec2 worldXZ, float t, float strength, float scale) {
 }
 
 void main() {
-    // Ray reconstruction: vWNear / vWFar were computed in the vert
-    // shader (pc.model × ndc-near / ndc-far) and interpolated. Per
-    // pixel we just need the homogeneous divide + subtract + normalize
-    // — the matrix multiplies that used to dominate this stub are gone.
+    // World position of the water surface at this pixel comes directly
+    // from the rasterised plane's vertex interpolation (vWPos). The old
+    // inv(view_proj) reconstruction (`pc.model * ndc...`) drifted by
+    // µm-mm per frame as camera moved — the user saw this as the
+    // shoreline orientation shifting with every camera move. Perspective-
+    // correct interp of fixed vertex positions is bit-stable per camera
+    // pose and matches the rasterised depth exactly. Ray dir & ray-t
+    // are derived from (vWPos - camera) so reflection helpers below see
+    // the same world geometry.
     vec3 ro = scene.camera_pos.xyz;
-    // Reconstruct the view ray PER-PIXEL from gl_FragCoord. The old
-    // path used interpolated vWNear/vWFar, which only equals the true
-    // screen ray for a fullscreen triangle; this shader is now bound by
-    // the rasterised WATER-PLANE pipeline, where those varyings
-    // interpolate non-linearly across the perspective-projected quad →
-    // every ray missed the water and discarded (no water visible).
-    // gl_FragCoord → NDC → inverse-VP (pc.model) is geometry-agnostic.
-    vec2 _scr = (gl_FragCoord.xy * scene.viewport.zw) * 2.0 - 1.0;
-    vec4 _wn = pc.model * vec4(_scr, 0.0, 1.0);
-    vec4 _wf = pc.model * vec4(_scr, 1.0, 1.0);
-    vec3 rd = normalize(_wf.xyz / _wf.w - _wn.xyz / _wn.w);
+    vec3 _to_surf = vWPos - ro;
+    vec3 rd = normalize(_to_surf);
 
     // Water plane intersection FIRST — its `t` gives us a max distance
     // for the heightfield march: terrain past the water plane can't be
@@ -1637,11 +1638,10 @@ void main() {
     // beneath water.
     bool water_on = scene.water_params.x > 0.5;
     float water_y = scene.water_params.y;
-    float t_water_plane = -1.0;
-    if (water_on && abs(rd.y) > 1e-4) {
-        float tw = (water_y - ro.y) / rd.y;
-        if (tw > 0.0) t_water_plane = tw;
-    }
+    // Distance to the water plane is just |vWPos - camera|. Replaces the
+    // analytic ray-vs-plane intersection (which was algebraically equal
+    // but numerically drifted with inv_vp, same root cause as wpos drift).
+    float t_water_plane = water_on ? length(_to_surf) : -1.0;
 
     // Water-only mode: the mesh terrain path already rasterised the
     // ground (with depth) this frame, so we must NOT raymarch terrain
@@ -1689,7 +1689,11 @@ void main() {
 
     // === Water surface shading ===========================================
     if (t_water > 0.0) {
-        vec3 wpos = ro + rd * t_water;
+        // Hardware depth-test (depth_test ON in setup.cpp) handles
+        // "is terrain in front?" occlusion. wpos comes straight from
+        // vWPos — perspective-correct world position from the plane
+        // mesh vertices, no per-frame inv_vp drift, no need to snap.
+        vec3 wpos = vWPos;
         float wave_str = scene.water_params.z;
         float wave_t   = scene.water_params.w;
         // wave-frequency multiplier вЂ” packed in water_color_shallow.w
@@ -1969,6 +1973,9 @@ void main() {
         vec3 shallow_tint = scene.water_color_shallow.rgb;
         float shore_blend = max(0.1, scene.water_shore.x);
         float shore_noise = scene.water_shore.y;
+        // wpos.xz was already 1 cm-snapped at the source (line ~1692)
+        // so everything in this block — terrain_y, foam, shore noise,
+        // wave normals — sees TAA-jitter-stable coordinates.
         float terrain_y = water_only ? meshHeight(wpos.xz)
                                       : terrainM_lod(wpos.xz, t_water);
         // Noise-free depth — the foam band uses this so the highlight
@@ -2237,14 +2244,46 @@ void main() {
         // never narrower than ~2.5 px of the depth gradient — that
         // fwidth floor is what kills the frame-to-frame jitter from the
         // point-sampled heightmap vs the rasterised terrain edge.
-        float shore_soft = max(0.02, pc.color.z);
-        float shore_w    = max(shore_soft, fwidth(depth_clean) * 2.5);
+        // Shore fade band, widened from the previous (0.02 floor, 2.5×
+        // fwidth) to (2.0 metre floor, 8× fwidth). The narrow band
+        // was producing visible boundary jitter as the user walked:
+        // wpos.xz shifts a few cm per frame, terrain_y shifts the
+        // same, depth_clean swings ~5 cm — within a narrow shore_w
+        // that's a big alpha jump, but inside a 2 m soft band it's
+        // a tiny gradient shift TAA can fully absorb.
+        // 6 m floor (was 2 m). The visible shore line is the smoothstep
+        // of depth_clean across this width. Anything narrower exposes
+        // the cm-scale mismatch between the rasterised CDLOD/tessellated
+        // terrain mesh (per-frame sub-pixel TAA jitter on triangle
+        // edges) and the smooth heightmap meshHeight() this shader
+        // samples — the user reads that mismatch as "shore jumps up
+        // and down a few cm" as the camera moves. A 6 m fade band
+        // makes those few cm < 1% of alpha change → below visual
+        // threshold. Pc.color.z (UI slider) can still override upward.
+        // Floor dropped 6 m -> 0.8 m: the 64x64 subdivided water plane
+        // killed the shore wobble that the wide fade was masking, so
+        // the see-through band can shrink to "wet shore" widths. UI
+        // slider (pc.color.z) can widen if the user wants soft shores.
+        float shore_soft = max(0.8, pc.color.z);
+        float shore_w    = max(shore_soft, fwidth(depth_clean) * 8.0);
         float shore_alpha = smoothstep(0.0, shore_w, depth_clean);
-        // Foam opacity (foam_op, computed above) also scales the foam's
-        // alpha so at 0 the foam adds NO opacity — the shallow water
-        // shows through identically to non-foam.
-        float a = shore_alpha * (1.0 - 0.92 * see) *
-                  mix(1.0, foam_op, foam_amt);
+        // Aggressive grazing-angle clamp: at shallow viewing angles
+        // (cosV < ~0.35) Fresnel makes water near-fully-reflective and
+        // the "you can see the terrain UNDER the lake from the shore"
+        // bug is the see-through still being nonzero. Multiply shore
+        // alpha back up by (1 - graze_terms) so the water plane is
+        // hard-opaque at low view angles regardless of clarity.
+        float opaque_kick = 1.0 - smoothstep(0.05, 0.40, cosV);
+        shore_alpha = max(shore_alpha, opaque_kick * 0.95);
+        // Foam forced opaque where present so it reads as a bright
+        // white band at the shoreline regardless of underlying water
+        // clarity. Safe — the software ray-vs-heightmap occlusion
+        // test at the top of this branch already discarded any pixel
+        // where terrain is in front of the water plane, so foam can
+        // never bleed onto hill-occluded pixels.
+        float water_a = shore_alpha * (1.0 - 0.92 * see) *
+                        mix(1.0, foam_op, foam_amt);
+        float a       = mix(water_a, 1.0, foam_amt);
         outColor = vec4(col_w, a);
         // Motion vector for TAA reprojection. clip-space derivation
         // (resolution-independent) so the LR raymarch path doesn't

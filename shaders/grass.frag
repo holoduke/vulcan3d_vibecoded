@@ -34,6 +34,21 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  grass_extra;   // x: height_scale, y: alpha_cutoff, z: slope_n_min, w: distance_density
     vec4  grass_extra2;  // x: alt_min, y: alt_max, z: shadow_map_world_half
     mat4  light_vp;      // unused in frag, keeps UBO layout identical
+    // Trailing fields. Most are unused here but the layout MUST line up
+    // so the side-lit knob at the tail maps to the right UBO offset.
+    // Mirror the cube.frag / internal.h order exactly. Adding a new
+    // field below requires the matching SceneUBO entry on the C++ side.
+    vec4  terrain_extra;
+    vec4  _scene_pad[24];
+    vec4  restir_params;
+    vec4  spom_params;
+    vec4  terrain_local_info;
+    vec4  _terrain_max_grid[256];
+    vec4  terrain_disp_params;
+    vec4  terrain_antitile_params;
+    vec4  grass_shadow_on_terrain_params;
+    // Side-lit grass shading. .x = strength, .y = master toggle.
+    vec4  grass_side_lit_params;
 } scene;
 
 // (Per-pixel sun_blocked() ray query was removed — the rasterised sun
@@ -66,6 +81,24 @@ void main() {
     // cap below still bounds total brightness for bloom safety.
     float sun_amt = scene.sun_color.a * 0.35 * n_dot_l;
     float sky_amt = 0.20;
+
+    // Side-lit blade shading: brighten the sunward side and darken the
+    // away-side using the RAW n_dot_l (sign carries direction). Done
+    // as a multiplicative tint AFTER the wrap-Lambert sun term so the
+    // existing half-Lambert floor is preserved and unshadowed/back-of-
+    // blade pixels still have a base brightness. Strength=0 leaves
+    // shading bit-identical to the old path.
+    float sl_on  = scene.grass_side_lit_params.y;
+    float sl_str = scene.grass_side_lit_params.x;
+    float side_tint = 1.0;
+    if (sl_on > 0.5 && sl_str > 0.001) {
+        // n_dot_l_raw in [-1, 1]; map to a tint in [1-str, 1+str].
+        side_tint = 1.0 + sl_str * n_dot_l_raw;
+        // Clamp to a sane range so a high-strength slider doesn't
+        // crush blades to pure black on the far side.
+        side_tint = clamp(side_tint, 1.0 - sl_str * 0.9,
+                                       1.0 + sl_str * 0.9);
+    }
 
     // Shadow factor: rely on the sun shadow map sampled in grass.vert
     // (vSunShadow) plus the heightmap-bake fallback. The previous
@@ -103,7 +136,7 @@ void main() {
     vec3 tip_lift = mix(vec3(0.95), vec3(1.05, 1.0, 0.9), vHeightRatio);
     vec3 base = vColor * tip_lift * base_ao;
 
-    vec3 lit = base * lum + trans * vColor;
+    vec3 lit = base * (lum * side_tint) + trans * vColor;
     // Hard ceiling — guarantees we never feed the bloom mip chain with
     // grass pixels above its threshold even under aggressive
     // auto-exposure boosts.

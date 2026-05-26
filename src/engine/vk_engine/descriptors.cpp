@@ -40,8 +40,9 @@ void VulkanEngine::init_descriptors() {
         // 2 originals (materials, prev_transforms) + 2 ReSTIR reservoirs.
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 },
         // SVGF GI denoiser storage images: 1 raw gi (binding 19) +
-        // 2 history ping-pong (bindings 20, 21).
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
+        // 2 history ping-pong (bindings 20, 21) +
+        // 2 variance-moments ping-pong (bindings 22, 23 — 4a-deep).
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 },
         // +1 for the heightmap shadow texture at binding 6.
         // +1 for the sun shadow map at binding 7 (sampler2DShadow).
         // +1 for the raw heightmap texture at binding 8 (R32_SFLOAT) —
@@ -79,11 +80,17 @@ void VulkanEngine::init_descriptors() {
     //              terrain_raymarch_scale < 1.
     //          15=ReSTIR reservoir SSBO (read prev), 16=write cur.
     //              Owned by restir.cpp; cube.frag's GI loop reads/writes.
-    VkDescriptorSetLayoutBinding bindings[22]{};
+    VkDescriptorSetLayoutBinding bindings[24]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    // TESS_EVAL flag added so terrain_tess.tese can read scene.spom_params.z
+    // (UI-driven ground tile metres). Without it the .tese hardcodes
+    // kGroundTile=2.5 and the displacement detaches from the texture
+    // tiling whenever the user moves the "ground material repeat" slider.
+    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT |
+                             VK_SHADER_STAGE_FRAGMENT_BIT |
+                             VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
 
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
@@ -149,13 +156,22 @@ void VulkanEngine::init_descriptors() {
     }
 
     // Binding 12: SPOM displacement map array. cube.frag samples one entry
-    // per parallax-using material (currently 4: castle walls, keep walls,
-    // courtyard floor, keep interior floor). Array index = SPOM material
-    // ID returned by cube.frag::height_idx_for_albedo().
+    // per parallax-using material (currently 5: castle walls, keep walls,
+    // courtyard floor, keep interior floor, terrain rocky-grass). Array
+    // index = SPOM material ID returned by cube.frag::height_idx_for_albedo().
+    // Also visible to terrain_tess.tese: the rocky-grass slot drives
+    // per-vertex displacement at the grass band, matching cube.frag's
+    // splat UV so the bumps line up with the textured pixels.
     bindings[12].binding = 12;
     bindings[12].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[12].descriptorCount = kSpomMaterialCount;
-    bindings[12].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[12].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT |
+                              VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+                              // terrain.vert (non-tess path) now also
+                              // displaces vertices from slot 5 so the
+                              // rocky relief survives even when tess
+                              // is disabled.
+                              VK_SHADER_STAGE_VERTEX_BIT;
 
     // Binding 13: grass-density mask (R8). Both the raymarched grass
     // pass and the terrain raymarch's getMaterial sample this for
@@ -227,10 +243,25 @@ void VulkanEngine::init_descriptors() {
     bindings[21].descriptorCount = 1;
     bindings[21].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Bindings 22 / 23: SVGF variance-moments ping-pong pair (4a-deep).
+    // R32G32 SFLOAT per pixel: .r = EMA mean of scene luminance,
+    // .g = EMA mean of luminance^2. svgf_moments.frag reads the prev-
+    // frame slot via motion-vector reprojection and writes the new slot
+    // each frame; svgf_atrous.frag reads the freshly-written slot to
+    // compute per-pixel variance for its luminance edge-stop weight.
+    bindings[22].binding = 22;
+    bindings[22].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[22].descriptorCount = 1;
+    bindings[22].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[23].binding = 23;
+    bindings[23].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[23].descriptorCount = 1;
+    bindings[23].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 22, .pBindings = bindings,
+        .bindingCount = 24, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),
@@ -455,6 +486,33 @@ void VulkanEngine::update_scene_ubo() {
                                     rt_.shadow_near_mult,
                                     rt_.gi_softener,
                                     rt_.gi_debug_viz ? 1.0f : 0.0f);
+    // Rocky-grass displacement + POM far-fade knobs (terrain_disp_params
+    // tail field on the UBO; see SceneUBO comment in internal.h).
+    data.terrain_disp_params = glm::vec4(
+        std::max(0.0f, rt_.terrain_disp_amp),
+        glm::clamp(rt_.terrain_disp_smooth_mip, 0.0f, 6.0f),
+        std::max(20.0f, rt_.terrain_pom_far_m),
+        0.0f);
+    // Anti-tile blend params -- gates the rotated extra sample inside
+    // cube.frag's terrain splat. .x is the master toggle; .y the blend
+    // weight of the rotated sample (0 = single sample, 1 = full blend).
+    data.terrain_antitile_params = glm::vec4(
+        rt_.terrain_antitile ? 1.0f : 0.0f,
+        glm::clamp(rt_.terrain_antitile_strength, 0.0f, 1.0f),
+        0.0f, 0.0f);
+    // Grass-cast shadow on rasterised terrain. Strength=0 OR toggle=0
+    // -> cube.frag fast-exits the mask march (no extra texture taps).
+    data.grass_shadow_on_terrain_params = glm::vec4(
+        glm::clamp(rt_.grass_shadow_on_terrain_strength, 0.0f, 1.0f),
+        static_cast<float>(glm::clamp(rt_.grass_shadow_on_terrain_samples,
+                                       1, 8)),
+        std::max(0.1f, rt_.grass_shadow_on_terrain_dist),
+        rt_.grass_shadow_on_terrain ? 1.0f : 0.0f);
+    // Side-lit grass shading.
+    data.grass_side_lit_params = glm::vec4(
+        glm::clamp(rt_.grass_side_lit_strength, 0.0f, 1.0f),
+        rt_.grass_side_lit_enabled ? 1.0f : 0.0f,
+        0.0f, 0.0f);
     // Ocean / water plane params. Time is derived from frame number
     // at a nominal 60 Hz — exact wall-clock isn't needed for waves
     // and avoids threading a real timer here.

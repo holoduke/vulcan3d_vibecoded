@@ -123,7 +123,7 @@ void VulkanEngine::present_loader_frame(const char* label, float progress) {
                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     VkClearValue clear_bg{};
-    clear_bg.color = { { 0.045f, 0.055f, 0.075f, 1.0f } };  // dark navy
+    clear_bg.color = { { 0.020f, 0.025f, 0.040f, 1.0f } };  // deep navy
     auto sw_color = vkinit::color_attachment_info(
         swapchain_views_[img_idx], &clear_bg,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -137,9 +137,10 @@ void VulkanEngine::present_loader_frame(const char* label, float progress) {
     };
     vkCmdBeginRendering(frame.command_buffer, &ri);
 
-    // Progress-bar geometry — drawn purely with vkCmdClearAttachments
-    // rectangles so we don't need a pipeline / shaders / vertex buffer
-    // up at this point in init().
+    // Everything is drawn with vkCmdClearAttachments rectangles — we
+    // can't use ImGui/pipelines here (this runs DURING init, before
+    // any pipeline exists). The pixel-block font below lets us show
+    // a real percentage and title without a font atlas.
     auto clear_rect = [&](int x, int y, int w, int h,
                           float r, float g, float b) {
         if (w <= 0 || h <= 0) return;
@@ -158,30 +159,136 @@ void VulkanEngine::present_loader_frame(const char* label, float progress) {
 
     int W = static_cast<int>(swapchain_extent_.width);
     int H = static_cast<int>(swapchain_extent_.height);
-    int bar_w = std::min(640, W - 80);
-    int bar_h = 14;
+
+    // ---- Background gradient: dim radial vignette from centre ----
+    // Built with concentric darker bands so the centre reads as the
+    // focal point. Cheap (~10 quads).
+    {
+        int cx = W / 2, cy = H / 2;
+        for (int b = 0; b < 8; ++b) {
+            float t = float(b) / 8.0f;
+            float d = 0.020f - 0.010f * t;       // fade to near-black at edges
+            int pad = static_cast<int>(t * std::max(W, H) * 0.5f);
+            clear_rect(pad, pad, W - 2 * pad, H - 2 * pad, d, d * 1.1f, d * 1.4f);
+        }
+    }
+
+    // ---- Pixel font (5×7), drawn as rectangle blocks at any scale ----
+    // Bit 6 of each column byte is the TOP row, bit 0 is the BOTTOM row.
+    // Only the chars actually rendered are defined: digits, %, space,
+    // and "QUAKELIKEKLAOIDNG" letters.
+    struct Glyph { uint8_t col[5]; };
+    auto G = [](uint8_t a, uint8_t b, uint8_t c, uint8_t d, uint8_t e) {
+        Glyph g{}; g.col[0]=a; g.col[1]=b; g.col[2]=c; g.col[3]=d; g.col[4]=e;
+        return g;
+    };
+    auto glyph_for = [&](char ch) -> Glyph {
+        switch (ch) {
+            case '0': return G(0x3E,0x51,0x49,0x45,0x3E);
+            case '1': return G(0x00,0x42,0x7F,0x40,0x00);
+            case '2': return G(0x42,0x61,0x51,0x49,0x46);
+            case '3': return G(0x21,0x41,0x45,0x4B,0x31);
+            case '4': return G(0x18,0x14,0x12,0x7F,0x10);
+            case '5': return G(0x27,0x45,0x45,0x45,0x39);
+            case '6': return G(0x3C,0x4A,0x49,0x49,0x30);
+            case '7': return G(0x01,0x71,0x09,0x05,0x03);
+            case '8': return G(0x36,0x49,0x49,0x49,0x36);
+            case '9': return G(0x06,0x49,0x49,0x29,0x1E);
+            case '%': return G(0x23,0x13,0x08,0x64,0x62);
+            case 'Q': return G(0x3E,0x41,0x51,0x21,0x5E);
+            case 'U': return G(0x3F,0x40,0x40,0x40,0x3F);
+            case 'A': return G(0x7E,0x09,0x09,0x09,0x7E);
+            case 'K': return G(0x7F,0x08,0x14,0x22,0x41);
+            case 'E': return G(0x7F,0x49,0x49,0x49,0x41);
+            case 'L': return G(0x7F,0x40,0x40,0x40,0x40);
+            case 'I': return G(0x00,0x41,0x7F,0x41,0x00);
+            case 'O': return G(0x3E,0x41,0x41,0x41,0x3E);
+            case 'D': return G(0x7F,0x41,0x41,0x41,0x3E);
+            case 'N': return G(0x7F,0x02,0x0C,0x30,0x7F);
+            case 'G': return G(0x3E,0x41,0x49,0x49,0x7A);
+            case ' ': default: return G(0,0,0,0,0);
+        }
+    };
+    auto draw_text = [&](int x, int y, int px, const char* s,
+                         float r, float g, float b) {
+        for (const char* p_s = s; *p_s; ++p_s) {
+            Glyph g_ = glyph_for(*p_s);
+            for (int c = 0; c < 5; ++c) {
+                uint8_t col = g_.col[c];
+                for (int r2 = 0; r2 < 7; ++r2) {
+                    if (col & (1 << r2)) {
+                        clear_rect(x + c * px, y + r2 * px, px, px, r, g, b);
+                    }
+                }
+            }
+            x += 6 * px;        // 5 px + 1 px spacing
+        }
+    };
+
+    // ---- "QUAKE LIKE" title centred near the top third ----
+    {
+        const char* title = "QUAKE LIKE";
+        int px = std::max(3, W / 280);
+        int title_w = static_cast<int>(strlen(title)) * 6 * px - px;
+        int tx = (W - title_w) / 2;
+        int ty = H / 3;
+        // Drop shadow for legibility
+        draw_text(tx + px, ty + px, px, title, 0.0f, 0.0f, 0.0f);
+        draw_text(tx,      ty,      px, title, 0.92f, 0.94f, 0.98f);
+        // Accent rule below title
+        int rule_w = title_w + px * 8;
+        int rule_x = (W - rule_w) / 2;
+        clear_rect(rule_x, ty + 7 * px + px * 3, rule_w, std::max(1, px / 2),
+                   0.32f, 0.55f, 0.92f);
+    }
+
+    // ---- Progress bar — bigger, framed, with bright leading edge ----
+    int bar_w = std::min(720, W - 120);
+    int bar_h = std::max(18, H / 60);
     int bar_x = (W - bar_w) / 2;
     int bar_y = H * 5 / 8;
-
-    // Title strip — a slim accent band above the progress bar so the
-    // window isn't just a blank rectangle. Position picked so the bar
-    // sits roughly where eye-line would on a 1280×720 / 1920×1080 split.
-    int strip_w = bar_w;
-    int strip_h = 3;
-    int strip_x = bar_x;
-    int strip_y = bar_y - 36;
-    clear_rect(strip_x, strip_y, strip_w, strip_h,
-               0.30f, 0.38f, 0.55f);
-
-    // Track + filled portion. Track is dim, fill is a brand-blue.
-    clear_rect(bar_x, bar_y, bar_w, bar_h,
-               0.13f, 0.15f, 0.19f);
+    int frame_t = std::max(2, bar_h / 8);
+    // Outer frame (subtle blue)
+    clear_rect(bar_x - frame_t, bar_y - frame_t,
+               bar_w + 2 * frame_t, bar_h + 2 * frame_t,
+               0.18f, 0.26f, 0.38f);
+    // Track (deep)
+    clear_rect(bar_x, bar_y, bar_w, bar_h, 0.04f, 0.06f, 0.10f);
     float p = progress;
     if (p < 0.0f) p = 0.0f;
     if (p > 1.0f) p = 1.0f;
     int fill_w = static_cast<int>(static_cast<float>(bar_w) * p + 0.5f);
-    clear_rect(bar_x, bar_y, fill_w, bar_h,
-               0.42f, 0.62f, 0.92f);
+    // Fill — bright brand blue
+    clear_rect(bar_x, bar_y, fill_w, bar_h, 0.32f, 0.58f, 0.95f);
+    // Leading edge — brighter highlight column for "active" feel
+    int edge_w = std::max(2, bar_h / 4);
+    if (fill_w >= edge_w) {
+        clear_rect(bar_x + fill_w - edge_w, bar_y, edge_w, bar_h,
+                   0.85f, 0.92f, 1.00f);
+    }
+
+    // ---- Percentage display centred below the bar ("XX%") ----
+    {
+        int pct = static_cast<int>(p * 100.0f + 0.5f);
+        char buf[6];
+        std::snprintf(buf, sizeof(buf), "%d%%", pct);
+        int px = std::max(2, W / 360);
+        int txt_w = static_cast<int>(strlen(buf)) * 6 * px - px;
+        int tx = (W - txt_w) / 2;
+        int ty = bar_y + bar_h + std::max(16, bar_h);
+        draw_text(tx + 1, ty + 1, px, buf, 0.0f, 0.0f, 0.0f);
+        draw_text(tx,     ty,     px, buf, 0.82f, 0.92f, 1.00f);
+    }
+
+    // ---- "LOADING" label at the bottom ----
+    {
+        const char* lbl = "LOADING";
+        int px = std::max(2, W / 480);
+        int txt_w = static_cast<int>(strlen(lbl)) * 6 * px - px;
+        int tx = (W - txt_w) / 2;
+        int ty = H - H / 10;
+        draw_text(tx, ty, px, lbl, 0.42f, 0.50f, 0.62f);
+    }
 
     vkCmdEndRendering(frame.command_buffer);
 
@@ -358,6 +465,12 @@ void VulkanEngine::init() {
     init_taau();
     init_bloom();
     init_compose();
+    // SVGF moments + 3-pass a-trous pipelines (4a-deep). Must run
+    // AFTER init_taa() (reuses linear_sampler_ + taa_vert_module_) and
+    // AFTER init_svgf_targets() (binds the moments + atrous storage
+    // image views). Toggled per-frame via rt_.svgf_enabled; pipelines
+    // stand up regardless so the toggle is a per-frame branch.
+    init_svgf_passes();
     // Must run AFTER init_taa() — needs linear_sampler_ for the binding-18
     // descriptor write that lets cube.frag sample the half-res shadow.
     init_shadow_lr_pipeline();
@@ -761,6 +874,18 @@ void VulkanEngine::draw(uint32_t img_index) {
         };
         vkinit::transition_images_batch(frame.command_buffer, kPostWorld, 3);
     }
+
+    // ---------- Pass 1.5: SVGF deep denoise (4a-deep) ----------
+    // Updates the per-pixel luminance moments (binding 22/23) by
+    // reprojecting last frame's moments through motion_vec, then runs
+    // a 3-pass a-trous filter with edge-stop weights derived from the
+    // resulting per-pixel variance plus depth + normal-from-depth. The
+    // final pass writes its filtered colour BACK into scene_color,
+    // so TAA (below) sees a denoised input and its own single-pass
+    // a-trous compounds rather than competes. No-op when
+    // rt_.svgf_enabled is false (per-frame branch -- pipelines stand
+    // up unconditionally so the toggle is allocation-free).
+    render_svgf(frame.command_buffer, static_cast<uint32_t>(frame_number_));
     // Both history slots end the previous frame in SHADER_READ_ONLY (write slot
     // exited at frame end; read slot wasn't touched). Read slot needs no
     // transition; write slot moves into COLOR_ATTACHMENT.
@@ -781,10 +906,19 @@ void VulkanEngine::draw(uint32_t img_index) {
         float w = static_cast<float>(render_extent_.width);
         float h = static_cast<float>(render_extent_.height);
         u.viewport = glm::vec4(w, h, 1.0f / w, 1.0f / h);
+        // When SVGF is on, its 3-pass a-trous already filtered the
+        // scene_color we're about to TAA-blend; running TAA's own
+        // single-pass a-trous on top of that is just double-blurring.
+        // Zero out the spatial strength so TAA degrades to temporal-
+        // only (history blend + variance clip). When SVGF is off,
+        // taa_spatial_strength keeps its slider value -- the existing
+        // single-pass a-trous covers the spatial reconstruction.
+        const float spatial = rt_.svgf_enabled ? 0.0f
+                                               : rt_.taa_spatial_strength;
         u.params = glm::vec4(rt_.taa_history_blend,
                              0.05f,
                              prev_view_proj_valid_ ? 1.0f : 0.0f,
-                             rt_.taa_spatial_strength);
+                             spatial);
         VmaAllocationInfo ai{};
         vmaGetAllocationInfo(allocator_, taa_ubo_alloc_, &ai);
         if (ai.pMappedData) std::memcpy(ai.pMappedData, &u, sizeof(u));
@@ -1033,10 +1167,13 @@ void VulkanEngine::draw(uint32_t img_index) {
         // crepuscular-ray accumulation. Free slot — the shader treats
         // sun_dir as a normalized direction (xyz) regardless.
         pc_data.sun_dir   = glm::vec4(sun, rt_.sun_shaft_intensity);
-        // .a scaled by sun_glare_strength so the user can dial the
-        // procedural disc + halo + lens-flare brightness independently
-        // of scene lighting. Scene direct lighting uses scene.sun_color
-        // from the UBO (descriptors.cpp), which is unaffected.
+        // .a scaled by sun_glare_strength so the user can dial down
+        // every sun-derived compose-pass effect together: procedural
+        // disc + halo, lens flare, AND sun shafts (compose.frag reads
+        // pc.sun_color.a for the shaft tint too). Scene direct
+        // lighting comes from scene.sun_color in the UBO and is
+        // unaffected — the slider only changes the "look-at-the-sun"
+        // brightness, not how much the sun illuminates the world.
         pc_data.sun_color = glm::vec4(rt_.sun_color,
                                       rt_.sun_intensity * rt_.sun_glare_strength);
         pc_data.sky_color = glm::vec4(rt_.sky_color, 0.0f);
@@ -1381,6 +1518,16 @@ void VulkanEngine::run(const RunOptions& opts) {
             log::infof("[terrain] edit mode %s (E)",
                        terrain_edit_mode_ ? "ON" : "OFF");
         }
+        // Digit 9 -> toggle terrain wireframe. Same edge-detect pattern
+        // as the E key above. Only fires while playing so a 9 in the
+        // pause menu / chat input wouldn't flip it.
+        bool wire_edge = in.wireframe_key && !prev_wireframe_key_;
+        prev_wireframe_key_ = in.wireframe_key;
+        if (wire_edge && state_ == State::Playing) {
+            rt_.terrain_wireframe = !rt_.terrain_wireframe;
+            log::infof("[terrain] wireframe %s (9)",
+                       rt_.terrain_wireframe ? "ON" : "OFF");
+        }
         // Hold [ / ] in edit mode to shrink/grow the brush radius
         // (mirrors the common sculpt UX in Blender, Houdini, etc.).
         // 4 m/s rate covers the practical 0.5-50 m clamp in ~12 s; the
@@ -1675,6 +1822,125 @@ void VulkanEngine::run(const RunOptions& opts) {
             destroy_sun_shadow_resources();
             init_sun_shadow_resources();
         }
+        // Per-LOD stride sliders changed -- the user wants to re-bake
+        // every chunk's LOD index buffers. Drain the GPU and rebuild
+        // synchronously; cost scales with chunk count * stride count
+        // and is paid once per slider change (not continuous drag).
+        if (terrain_lod_dirty_ && !terrain_chunks_.chunks.empty()) {
+            vkDeviceWaitIdle(device_);
+            rebuild_chunk_lod_indices(device_, allocator_, graphics_queue_,
+                                       graphics_queue_family_,
+                                       terrain_chunks_,
+                                       rt_.terrain_lod_stride);
+            terrain_lod_dirty_ = false;
+        }
+        // Near-camera chunk-vertex densification. Each chunk has its own
+        // c.densify (1 = baseline source-cell resolution; 2/4/8 = N x N
+        // bilinear sub-division of the source heightmap on the chunk
+        // VBO). Per-frame: compute desired densify for each chunk (near
+        // == near_density, far == 1) and queue a re-bake for any chunk
+        // whose current c.densify differs. Throttle to a small batch per
+        // frame so a slider jump never causes a multi-second hitch on
+        // large maps.
+        if (!terrain_chunks_.chunks.empty() &&
+            !terrain_data_.heights.empty() &&
+            !rt_.terrain_raymarch_enabled) {
+            int desired_near = std::clamp(rt_.terrain_near_density, 1, 8);
+            float r_m = std::max(0.0f, rt_.terrain_near_density_radius_m);
+            // Hysteresis on the radius boundary: a chunk that is
+            // currently dense stays dense until the camera moves past
+            // (r_m + kHysteresis_m); a chunk that is currently sparse
+            // only becomes dense when the camera comes within r_m.
+            // Without this, a chunk straddling the radius boundary
+            // would flip densify state every single frame as the
+            // camera bobs / rotates, and each flip triggers a full VBO
+            // re-bake (vkQueueWaitIdle + buffer realloc + LOD index
+            // rebake). 30 m is wider than a single chunk (64 m chunks
+            // -> 32 m radius) so a chunk can't flip back and forth
+            // within one chunk-width of camera motion.
+            constexpr float kHysteresis_m = 30.0f;
+            float r_dense_keep = r_m + kHysteresis_m;
+            float r2_enter = r_m * r_m;
+            float r2_keep  = r_dense_keep * r_dense_keep;
+            glm::vec3 cam = player_.position;
+            // Per-chunk desired-densify policy with hysteresis:
+            //   - currently dense (densify > 1) AND inside r_keep -> stay dense
+            //   - currently sparse (densify == 1) AND inside r_enter -> go dense
+            //   - otherwise -> sparse (densify = 1)
+            // The "desired" densify value still tracks the user's
+            // slider (`desired_near`) so a slider change re-bakes the
+            // chunks that fall under the new policy.
+            // Distance is CLOSEST POINT on the chunk AABB to the
+            // camera (XZ). Chunk you're standing in -> d=0 -> reliably
+            // dense. Was chunk-CENTRE distance which could put a chunk
+            // straight under the player at ~30 m and skip densification
+            // until walking forward triggered a rebuild a second later
+            // -- the user reported this as alternating dense/sparse
+            // patches as they walked.
+            auto desired_densify = [&](const TerrainChunk& c) -> int {
+                float cx = glm::clamp(cam.x, c.aabb_min.x, c.aabb_max.x);
+                float cz = glm::clamp(cam.z, c.aabb_min.z, c.aabb_max.z);
+                float dx = cx - cam.x;
+                float dz = cz - cam.z;
+                float d2 = dx * dx + dz * dz;
+                bool keep_dense = (c.densify > 1) && (d2 <= r2_keep);
+                bool enter_dense = (d2 <= r2_enter);
+                return (keep_dense || enter_dense) ? desired_near : 1;
+            };
+            // Cheap pre-scan: skip the heightmap-copy + bake path when
+            // every chunk already has the correct densify. This is the
+            // steady-state happy path -- the user isn't moving past
+            // any chunk boundary and the slider is unchanged.
+            bool any_needs_rebake = false;
+            for (const auto& c : terrain_chunks_.chunks) {
+                if (desired_densify(c) != c.densify) {
+                    any_needs_rebake = true; break;
+                }
+            }
+            if (any_needs_rebake) {
+                // A re-bake costs a vkQueueWaitIdle inside
+                // rebuild_chunk_at_density, so the per-frame cap keeps
+                // the stall on the order of a couple of ms even at
+                // densify 8. When the dirty flag is set (user just
+                // moved the slider) we bake every queued chunk in one
+                // shot so the visible change is immediate.
+                // Bumped 2 -> 8 to keep up with walking speed. At
+                // 8 m/s walking + 64 m chunk pitch you enter a new
+                // chunk every ~8 s, so a 7-chunk-wide near-radius
+                // queue of 14 dirty chunks at the old cap took ~7
+                // frames to drain -- visibly sparse while you walked.
+                // 8 per frame drains the queue in <2 frames at ~16 ms.
+                constexpr int kMaxRebakesPerFrame = 8;
+                int rebakes = 0;
+                // Build a Heightmap view -- the source-of-truth heights
+                // live in terrain_data_; we wrap them with origin/cell
+                // so the densified sampling matches what the BLAS /
+                // physics see. The copy is ~16 MB at 2049^2 but we only
+                // hit this path when a chunk actually needs re-baking.
+                Heightmap hm{};
+                hm.dim = terrain_data_.dim;
+                hm.cell = terrain_data_.cell;
+                hm.origin_x = terrain_data_.origin_x;
+                hm.origin_z = terrain_data_.origin_z;
+                hm.heights = terrain_data_.heights;
+                bool bake_all = terrain_density_dirty_;
+                for (auto& c : terrain_chunks_.chunks) {
+                    int want = desired_densify(c);
+                    if (want == c.densify) continue;
+                    if (!bake_all && rebakes >= kMaxRebakesPerFrame) break;
+                    rebuild_chunk_at_density(device_, allocator_, graphics_queue_,
+                                              graphics_queue_family_,
+                                              hm, c, want,
+                                              rt_.terrain_lod_stride);
+                    ++rebakes;
+                }
+                if (rebakes > 0) {
+                    log::infof("[terrain] densify rebaked %d chunk(s) (near=%d r=%.0fm hyst=%.0fm)",
+                               rebakes, desired_near, r_m, kHysteresis_m);
+                }
+            }
+            if (terrain_density_dirty_) terrain_density_dirty_ = false;
+        }
         // Heightmap-bake supersample changed → recreate texture and
         // restart the worker so subsequent jobs run at the new ss.
         // The user can flip 1x/2x/4x freely; texture realloc is cheap.
@@ -1906,6 +2172,11 @@ void VulkanEngine::shutdown() {
     guarded("destroy_compose", [&]{ destroy_compose(); });
     guarded("destroy_bloom",   [&]{ destroy_bloom(); });
     guarded("destroy_taau",    [&]{ destroy_taau(); });
+    // SVGF passes own pipelines + descriptors that reference
+    // linear_sampler_ (owned by TAA) and the SVGF storage image views
+    // (owned by init_svgf_targets). Tear them down BEFORE destroy_taa
+    // (sampler) and destroy_svgf_targets (image views).
+    guarded("destroy_svgf_passes", [&]{ destroy_svgf_passes(); });
     guarded("destroy_taa",     [&]{ destroy_taa(); });
     // Order: tear down the renderer's GPU dependencies on dynamic-prop world
     // matrices (TLAS instance buffer) BEFORE destroying the physics world that

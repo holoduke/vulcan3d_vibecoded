@@ -85,6 +85,7 @@ InputFrame Window::consume_input() {
     f.brush_larger  = down(GLFW_KEY_RIGHT_BRACKET);
     f.brush_mode_prev = down(GLFW_KEY_Q);
     f.brush_mode_next = down(GLFW_KEY_R);
+    f.wireframe_key   = down(GLFW_KEY_9);
 
     bool fire_now = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
     f.fire = fire_now && !prev_fire_;  // rising edge

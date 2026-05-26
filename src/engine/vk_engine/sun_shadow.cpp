@@ -348,9 +348,16 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
     // and matches the resolution the user actually sees.
     if (!terrain_chunks_.chunks.empty()) {
         glm::vec3 cam = player_.eye_position();
+        // Shared LOD thresholds with the depth + colour passes -- a
+        // mismatch here would silently break the depth pre-pass's
+        // LESS_OR_EQUAL test. Build the scaled threshold array once
+        // and reuse for every chunk.
+        float thresh[kTerrainLodCount - 1];
+        for (int i = 0; i < kTerrainLodCount - 1; ++i)
+            thresh[i] = rt_.terrain_lod_distance[i] * rt_.terrain_lod_scale;
         for (const auto& c : terrain_chunks_.chunks) {
             if (!aabb_visible(light_frustum, c.aabb_min, c.aabb_max)) continue;
-            int lod = pick_terrain_lod(c, cam, rt_.terrain_lod1 * rt_.terrain_lod_scale, rt_.terrain_lod2 * rt_.terrain_lod_scale, rt_.terrain_lod3 * rt_.terrain_lod_scale);
+            int lod = pick_terrain_lod(c, cam, thresh, kTerrainLodCount - 1);
             VkDeviceSize toff = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
             VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];

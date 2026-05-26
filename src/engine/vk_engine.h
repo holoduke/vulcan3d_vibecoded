@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -394,9 +395,66 @@ private:
     VkImage         svgf_history_image_[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
     VmaAllocation   svgf_history_alloc_[2] = { nullptr, nullptr };
     VkImageView     svgf_history_view_[2]  = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    // SVGF variance moments (Session 4a-deep). 2 R32G32_SFLOAT images at
+    // render_extent ping-ponged by frame parity. .r = EMA mean of scene
+    // luminance, .g = EMA mean of luminance^2. Estimated variance per
+    // pixel = max(0, g - r*r); fed into the a-trous edge-stop weights so
+    // stable surfaces filter tightly while noisy GI pixels can accept
+    // bigger spatial neighbours. Bindings 22 (slot 0) / 23 (slot 1) on
+    // scene_desc; svgf_moments.frag reprojects the previous-frame slot
+    // through the existing motion_vec image and writes the new slot.
+    VkImage         svgf_moments_image_[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VmaAllocation   svgf_moments_alloc_[2] = { nullptr, nullptr };
+    VkImageView     svgf_moments_view_[2]  = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    // SVGF a-trous ping-pong pair. Two R16G16B16A16F sampled+attachment
+    // images at render_extent. The 3-pass a-trous filter bounces:
+    //   pass 0 (stride 1): scene_color -> atrous[0]
+    //   pass 1 (stride 2): atrous[0]   -> atrous[1]
+    //   pass 2 (stride 4): atrous[1]   -> scene_color  (writes back, so
+    //                                                   TAA reads the
+    //                                                   denoised result)
+    // Only allocated when rt_.svgf_enabled; reused across frames.
+    VkImage         svgf_atrous_image_[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VmaAllocation   svgf_atrous_alloc_[2] = { nullptr, nullptr };
+    VkImageView     svgf_atrous_view_[2]  = { VK_NULL_HANDLE, VK_NULL_HANDLE };
     void init_svgf_targets();
     void destroy_svgf_targets();
     void recreate_svgf_targets();
+
+    // SVGF moments + a-trous passes (4a-deep). The moments pass updates
+    // svgf_moments_image_ at the current frame slot; the a-trous pass
+    // runs 3 times with growing stride and edge-stop weights derived
+    // from depth, normal-from-depth and the per-pixel luminance
+    // variance computed from the moments. Both pipelines stand up at
+    // engine init alongside TAA. recreate_svgf_pass_targets() handles
+    // descriptor rewrites when scene_color / depth / moments / atrous
+    // views change after a swapchain resize.
+    VkDescriptorSetLayout svgf_moments_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool      svgf_moments_desc_pool_  = VK_NULL_HANDLE;
+    VkDescriptorSet       svgf_moments_desc_sets_[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkPipelineLayout      svgf_moments_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline            svgf_moments_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule        svgf_moments_frag_module_ = VK_NULL_HANDLE;
+    VkBuffer              svgf_moments_ubo_buffer_ = VK_NULL_HANDLE;
+    VmaAllocation         svgf_moments_ubo_alloc_  = nullptr;
+
+    VkDescriptorSetLayout svgf_atrous_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool      svgf_atrous_desc_pool_  = VK_NULL_HANDLE;
+    // 3 sets per output target (scene_color, atrous0, atrous1) x 2
+    // frame parities = 6 sets total. svgf_atrous_pass_idx selects which
+    // 3-set bank to use per frame so the read views always point at
+    // the moments slot just written by svgf_moments.
+    VkDescriptorSet       svgf_atrous_desc_sets_[6] = {};
+    VkPipelineLayout      svgf_atrous_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline            svgf_atrous_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule        svgf_atrous_frag_module_ = VK_NULL_HANDLE;
+    VkBuffer              svgf_atrous_ubo_buffer_  = VK_NULL_HANDLE;
+    VmaAllocation         svgf_atrous_ubo_alloc_   = nullptr;
+
+    void init_svgf_passes();
+    void destroy_svgf_passes();
+    void recreate_svgf_pass_targets();
+    void render_svgf(VkCommandBuffer cmd, uint32_t frame_parity);
 
     // Compose pipeline that samples the low-res raymarch and writes
     // upscaled color/motion + gl_FragDepth into scene_color/depth with
@@ -449,15 +507,21 @@ private:
     // are procedurally baked seamless terrain materials, splatted in
     // cube.frag's is_terrain block by the height/slope weights.
     static constexpr int kFileTextureCount   = 7;
-    static constexpr int kTerrainMatCount    = 5;
+    static constexpr int kTerrainMatCount    = 6;     // +1 for kTexProcGrass
     static constexpr int kTextureCount       = kFileTextureCount +
-                                               kTerrainMatCount;   // 12
+                                               kTerrainMatCount;   // 13
     // Albedo/normal-array indices of the baked terrain materials.
     static constexpr int kTexRock  = kFileTextureCount + 0;  // 7
-    static constexpr int kTexGrass = kFileTextureCount + 1;  // 8
+    static constexpr int kTexGrass = kFileTextureCount + 1;  // 8 (stylized PNG)
     static constexpr int kTexDirt  = kFileTextureCount + 2;  // 9
     static constexpr int kTexSand  = kFileTextureCount + 3;  // 10
     static constexpr int kTexSnow  = kFileTextureCount + 4;  // 11
+    // 12: the OLD procedural grass texture. probe_grass overwrites
+    // slot 8 with the stylized PNG, but this slot keeps the
+    // procedurally-baked grass material intact -- cube.frag's splat
+    // lerps between slot 12 (no grass blades here) and slot 8 (grass
+    // blades grow here), gated by the grass eligibility mask.
+    static constexpr int kTexProcGrass = kFileTextureCount + 5;  // 12
     struct TextureSlot {
         VkImage image = VK_NULL_HANDLE;
         VmaAllocation alloc = nullptr;
@@ -473,7 +537,16 @@ private:
     //   [1] PaintedBricks001  (albedo idx 4) — keep walls
     //   [2] Tiles130          (albedo idx 5) — courtyard floor
     //   [3] Tiles074          (albedo idx 6) — keep interior floor
-    static constexpr int kSpomMaterialCount = 4;
+    //   [4] rocky-rugged      (albedo idx 8 / kTexGrass) -- terrain grass
+    //                           band material. Also sampled by
+    //                           terrain_tess.tese for vertex displacement.
+    // Bumped 5 -> 6: slot 5 holds the rocky-rugged height map so the
+    // tess vertex displacement on the grass band can bump the actual
+    // visible stones (slot 12 albedo is rocky-rugged) instead of the
+    // grass height-map's high-freq noise (slot 4) where no stones are
+    // visible. cube.frag's grass-band SPOM lerps between slot 4 (grass)
+    // and slot 5 (rocky) by the grass mask.
+    static constexpr int kSpomMaterialCount = 6;
     TextureSlot spom_height_textures_[kSpomMaterialCount]{};
 
     // Grass-density mask. R8 1024² covering 2048m world (≈2 m/texel).
@@ -545,14 +618,26 @@ private:
         glm::vec3 initial_dir;
         glm::vec4 color;
         glm::vec3 emissive;
+        // Previous-frame world position — used by update_projectiles to
+        // do a swept segment-vs-AABB test against the spacejets. At
+        // 220 m/s bullet + ~130 m/s jet closure (~5.8 m per frame at
+        // 60 fps) a point-in-AABB test can pass straight through a
+        // ~5.5 m extent. The segment test catches those.
+        // Sentinel: any-NaN means "first frame, no swept test yet".
+        glm::vec3 prev_pos{ std::numeric_limits<float>::quiet_NaN() };
     };
     std::vector<Projectile> projectiles_;
     void fire_projectile(glm::vec3 origin, glm::vec3 direction);
     void update_projectiles(float dt);
-    static constexpr float kProjectileTtl     = 3.0f;
+    static constexpr float kProjectileTtl     = 8.0f;   // ~1.7 km flight
     static constexpr float kProjectileSpeed   = 220.0f;   // m/s
-    static constexpr float kProjectileRad     = 0.025f;   // thin
-    static constexpr float kProjectileHalf    = 0.40f;    // long (= 0.8m total)
+    // Laser-beam dimensions. Thicker (4 cm radius) + much longer
+    // (1.8 m total) than a regular tracer so the bloom-fed glow reads
+    // as a continuous beam, and the persistent length stands in for
+    // motion blur (the projectile moves ~220 m/s, would otherwise be
+    // a single bright pixel per frame).
+    static constexpr float kProjectileRad     = 0.04f;
+    static constexpr float kProjectileHalf    = 0.90f;    // (= 1.8 m total)
     static constexpr float kProjectileMass    = 10.0f;    // kg — really shoves
     static constexpr float kProjectileMinSpeed = 100.0f;  // despawn below this
 
@@ -676,9 +761,36 @@ private:
         float     ttl     = 30.0f;
         glm::vec3 prev_pos{};     // previous-frame pos for TAA motion vec
         float     prev_heading = 0.0f;
+        // Combat state: 3 hits to kill. hit_flash_t > 0 → tint red for
+        // ~0.2 s after each impact. destroying = true once hp hits 0;
+        // explosion already spawned, flight stays in the list for a
+        // short fade so the HUD bar can fade out and TAA can resolve
+        // motion vectors.
+        int       hp           = 3;
+        float     hit_flash_t  = 0.0f;
+        bool      destroying   = false;
+        float     destroy_t    = 0.0f;
+        // post_castle_t = seconds elapsed since the plane crossed the
+        // castle midflight. -1 until detected (tick_spacejet flips it
+        // to 0 when prev/cur straddle the origin along the heading).
+        // Hard removal at 20 s post-cross so flights don't drift off
+        // into the horizon for the rest of their natural TTL.
+        float     post_castle_t = -1.0f;
     };
     std::vector<SpacejetMesh>   spacejet_meshes_;
     std::vector<SpacejetFlight> spacejet_flights_;
+    // Last-target HUD state (top-center damage indicator). Set when a
+    // bullet damages a plane, decays over kTargetHudFade s. Decoupled
+    // from the per-flight hp so the bar can outlive a kill (player still
+    // sees "JET 0/3" briefly after the explosion).
+    float last_target_hud_ttl_     = 0.0f;
+    int   last_target_plane_hp_    = -1;
+    int   last_target_plane_hp_max_ = 3;
+    // Bright screen flash on plane kill. Set by combat.cpp when hp
+    // hits 0, decayed in tick_spacejet, consumed by vk_ui.cpp's hud
+    // draw to paint a fullscreen white overlay that fades out.
+    float kill_flash_t_            = 0.0f;
+    static constexpr float kKillFlashDuration = 0.35f;
     glm::vec3 spacejet_centre_offset_{0.0f};      // gltf bbox-centre, applied per draw
     float     spacejet_base_scale_      = 1.0f;   // gltf-bbox-derived scale
     float     spacejet_spawn_timer_     = 2.0f;   // first wave after 2s
@@ -761,6 +873,7 @@ private:
     State state_ = State::Playing;
     bool prev_menu_key_ = false;
     bool prev_edit_key_ = false;   // edge-detect E to toggle terrain edit mode
+    bool prev_wireframe_key_ = false; // edge-detect 9 to toggle terrain wireframe
     bool prev_brush_mode_prev_ = false;
     bool prev_brush_mode_next_ = false;
     VkDescriptorPool imgui_pool_ = VK_NULL_HANDLE;
@@ -1025,6 +1138,14 @@ private:
     bool  terrain_stroke_active_ = false;     // mouse held since stroke begin
     bool  terrain_blas_dirty_    = false;     // rebuild BLAS at next safe point
     bool  terrain_jolt_dirty_    = false;     // rebuild Jolt heightfield
+    bool  terrain_lod_dirty_     = false;     // rebake all chunk LOD index buffers
+    // Set when the user touches the near-density slider or near-radius
+    // slider. The next frame re-evaluates each chunk's desired densify
+    // (camera distance vs radius) and queues a re-bake of any chunk
+    // whose desired densify differs from its current `c.densify`. The
+    // queue is drained at a throttled rate (N chunks/frame) so a big
+    // jump never hitches more than a few ms.
+    bool  terrain_density_dirty_ = false;
     TerrainBrushMode terrain_brush_mode_ = TerrainBrushMode::Raise;
     float terrain_brush_radius_  = 6.0f;       // metres
     float terrain_brush_strength_ = 8.0f;      // metres/sec at brush centre
@@ -1051,6 +1172,14 @@ private:
     void rebuild_dirty_terrain_chunks();
     void refresh_terrain_blas();
     void refresh_terrain_collision();
+    // Settings loader helper: parse keys of the form
+    // `terrain_lod_distance_<i>` and `terrain_lod_stride_<i>` into the
+    // per-LOD arrays. Returns true if the key matched (handled), false
+    // so the caller falls through to the next else-if. Lives here so
+    // settings.cpp can call it without nesting another `if` block in
+    // its already-long key-dispatch chain (MSVC's C1061 limit).
+    bool apply_terrain_lod_key(const std::string& key,
+                                const std::string& val);
 
     VkBuffer tlas_buffer_ = VK_NULL_HANDLE;
     VmaAllocation tlas_alloc_ = nullptr;
@@ -1594,6 +1723,23 @@ private:
         float grass_shadow_strength = 0.0f;    // 0 = off
         int   grass_shadow_samples  = 6;       // 0..8 sample taps along sun XZ
         float grass_shadow_max_dist = 3.0f;    // metres of reach along sun direction
+        // Grass-cast shadow on the RASTERISED terrain (cube.frag is_terrain
+        // path). Walks the grass eligibility mask (binding 13) along the
+        // sun XZ direction with a few short steps, accumulating occlusion
+        // for ground pixels covered by overhead grass. Cheap (~6 texture
+        // taps per terrain pixel, gated on strength > 0). Separate from
+        // grass_shadow_strength which only affects the raymarched terrain.
+        bool  grass_shadow_on_terrain        = true;   // master toggle
+        float grass_shadow_on_terrain_strength = 0.45f; // 0=off, 1=full dark
+        int   grass_shadow_on_terrain_samples  = 5;     // 1..8 mask taps
+        float grass_shadow_on_terrain_dist     = 1.6f;  // metres along sun XZ
+        // Side-lit grass shading. Adds a wrap-Lambert directional term to
+        // the grass blades (sunward side brighter, away-side darker).
+        //   strength: 0 = flat per-blade colour (engine default), 1 = full
+        //             directional contrast. ~0.4 reads as natural without
+        //             losing the slider colour gradient.
+        bool  grass_side_lit_enabled  = true;
+        float grass_side_lit_strength = 0.45f;
         // Strength of the terrain green tint (0..1).
         float grass_ground_tint_strength = 0.85f;
         // Raymarched-grass base AO floor at the blade base. Lower = darker
@@ -1625,20 +1771,51 @@ private:
         int   terrain_debug_mode = 0;
 
         // Terrain LOD distance thresholds (metres of camera-XZ-to-chunk
-        // centre). A chunk renders at LOD 0 when below `terrain_lod1`,
-        // LOD 1 below `terrain_lod2`, LOD 2 below `terrain_lod3`, else
-        // LOD 3. Bigger thresholds = sharper distant terrain at higher
-        // triangle cost. Defaults preserve the original 80/160/320m
-        // behaviour.
-        // Default LOD distances bumped much higher so most of the
-        // visible mid-far terrain stays at full / half resolution by
-        // default — the previous 80/160/320 had everything past 80m
-        // looking soft because it was already at stride-2 cells.
-        float terrain_lod1 = 200.0f;
-        float terrain_lod2 = 500.0f;
-        float terrain_lod3 = 1000.0f;
-        // Master multiplier on all three LOD distances. 1.0 = defaults
-        // above. Crank up to push distant terrain to higher LOD (more
+        // centre). `terrain_lod_distance[i]` is the distance at which a
+        // chunk leaves LOD i and switches to LOD i+1. With
+        // kTerrainLodCount = 8 we have 7 thresholds. The same array
+        // drives the depth pre-pass + colour pass + sun-shadow pass --
+        // they MUST share or depth values mismatch and LESS_OR_EQUAL
+        // discards fragments. The default ladder roughly doubles each
+        // step so far chunks use the very coarse strides without losing
+        // the near-chunk detail bands.
+        //
+        // CD-LOD morphing currently only covers LOD0 -> LOD1 (parent_y
+        // is baked between strides 1 and 2). LODs 2..7 transitions pop
+        // visibly. The thresholds for LODs 2+ are intentionally pushed
+        // far out so the pops happen at distances where (a) each chunk
+        // subtends few pixels, (b) the user typically has distance fog
+        // on (distance_fog_density default 0.005/m -> e-fold ~200 m),
+        // and (c) the user is unlikely to be looking at one specific
+        // chunk long enough to catch the snap. The 80 m threshold for
+        // LOD0->1 stays close because it's the only morphed transition.
+        // Follow-up: bake parent_y per LOD pair to morph every band.
+        float terrain_lod_distance[kTerrainLodCount - 1] = {
+            80.0f, 250.0f, 500.0f, 900.0f, 1400.0f, 2000.0f, 2700.0f
+        };
+        // Per-LOD vertex stride for the chunk index buffers. Defaults
+        // are powers of two: LOD 0 = stride 1 (full), LOD 7 = stride
+        // 128 (degenerate single quad on the 64-cell chunks). User can
+        // bump density via the UI; setting terrain_lod_dirty triggers a
+        // full LOD index re-bake at the next safe frame. LOD 0 stride
+        // is informational only -- the renderer always draws the mesh's
+        // baked stride-1 IBO for LOD 0.
+        int   terrain_lod_stride[kTerrainLodCount] = {
+            1, 2, 4, 8, 16, 32, 64, 128
+        };
+        // Per-chunk densification for chunks within `terrain_near_density_radius_m`
+        // metres of the camera (XZ). 1 = baseline (one vert per heightmap
+        // cell). 2/4/8 sub-divide each heightmap cell into N x N quads in
+        // the chunk VBO via bilinear sampling of the heightmap; LOD 0
+        // stride 1 then draws N x N times more triangles per chunk than
+        // the original LOD 0. Stride N at densify N reproduces the
+        // densify-1 mesh exactly, so the LOD ladder still applies.
+        // Memory cost scales O(N^2) per affected chunk; the near-radius
+        // bound keeps total VRAM bounded. Set to 1 to disable entirely.
+        int   terrain_near_density = 1;        // clamped to [1, 8]
+        float terrain_near_density_radius_m = 200.0f;  // metres from camera
+        // Master multiplier on all LOD distances. 1.0 = defaults above.
+        // Crank up to push distant terrain to higher LOD (more
         // triangles, more detail).
         float terrain_lod_scale = 1.0f;
         // Near-terrain GPU tessellation: distance-adaptive subdivision +
@@ -1659,10 +1836,28 @@ private:
         bool  terrain_wireframe = true;
         // Per-distance tessellation density knobs (fed to terrain_tess
         // .tesc via pc.emissive). Live-tunable from the Terrain tab.
-        float terrain_tess_max_level = 40.0f;  // peak subdivision
-        float terrain_tess_near_m    = 7.0f;   // full-detail radius
-        float terrain_tess_far_m     = 60.0f;  // ramps to base by here
+        // Bumped defaults (was 40 / 7 / 60). The rocky-grass vertex
+        // displacement in terrain_tess.tese creates visible spikes
+        // anywhere tess level falls below ~5 (adjacent wider-spaced
+        // verts land on different rocky-height peaks). With max_level
+        // 64 + full radius 15 + ramp to 110, level stays >=5 out to
+        // ~95 m -- matches the rocky displacement fade band so we get
+        // real high-frequency vertex relief in the entire near band
+        // without the per-vertex spike artefacts.
+        float terrain_tess_max_level = 64.0f;  // peak subdivision
+        float terrain_tess_near_m    = 15.0f;  // full-detail radius
+        float terrain_tess_far_m     = 110.0f; // ramps to base by here
         float terrain_tess_falloff   = 0.55f;  // <1 = dense band hugs cam
+        // Rocky-grass vertex displacement (terrain_tess.tese).
+        //   amp  = 0..1 m peak metres of displacement
+        //   smooth_mip = 0 = LOD0 crisp, +N = blur by N mip levels
+        //                (use to kill per-vert spikes without lowering amp)
+        float terrain_disp_amp        = 0.40f;
+        float terrain_disp_smooth_mip = 0.0f;
+        // Per-pixel SPOM/POM far-fade distance (cube.frag is_terrain).
+        // Bumps stop being raymarched past this distance; far terrain
+        // uses just the splat normal. Was hardcoded 220 m.
+        float terrain_pom_far_m       = 220.0f;
         // Geometry smoothing pass applied in terrain_tess.tese BEFORE
         // the material splat: 0 = raw per-type detail relief, 1 = fully
         // smooth low-frequency swell. Fed to the .tese via the terrain
@@ -1704,6 +1899,20 @@ private:
         float ground_mat_strength = 0.85f;  // 0..1
         float ground_mat_tile_m   = 2.5f;   // 0.5..12 m
         float ground_mat_normal   = 0.80f;  // 0..1
+        // Anti-tile sampling: blend a SECOND albedo/normal sample at a
+        // per-pixel rotated UV with the standard sample, weighted by a
+        // low-frequency noise field. Breaks up the obvious grid repeat
+        // on terrain without the cost of full hex-tile / Heitz-Neyret
+        // stochastic sampling (just one extra texture fetch per channel).
+        // Off by default while the user A/Bs the look; can be left on
+        // permanently if the cost is acceptable. Only affects cube.frag's
+        // per-pixel splat path -- vertex displacement in .tese keeps the
+        // strict (unrotated) UV so SPOM and tess stay aligned.
+        bool  terrain_antitile        = true;
+        // Strength of the rotated/offset sample in the blend. 0 = the
+        // standard single-sample look, 1 = max anti-tile (and slightly
+        // softer micro-detail because the two samples partially average).
+        float terrain_antitile_strength = 0.55f;
         // Supersample factor for the heightmap shadow bake. 1 = native
         // (1 texel per 1m heightmap cell). 2 = 4x more texels (sub-
         // metre shadow precision). 4 = 16x more texels (sharpest
@@ -1893,12 +2102,19 @@ private:
         // Distance fog — standard exp² atmospheric fog. Disabled by
         // default (strength = 0). Applied at end of cube.frag /
         // terrain_raymarch.frag / grass_raymarch.frag shading.
+        // Defaults tuned for "absolutely realistic" atmospheric perspective
+        // on cube.frag's mesh-terrain path. Was strength = 0 (off) which
+        // meant the user saw no fog at all by default. New defaults give
+        // a soft cool-blue atmospheric haze that reaches ~50% at ~700 m
+        // and saturates by ~1.5 km, with the height attenuation pulling
+        // the layer off the mountain peaks. Tunable per scene via the
+        // sliders in the menu (Quality > Fog).
         glm::vec3 distance_fog_color    = glm::vec3(0.62f, 0.70f, 0.78f);
-        float     distance_fog_strength = 0.0f;     // 0 = off
-        float     distance_fog_density  = 0.005f;   // per metre (exp² falloff)
-        float     distance_fog_start    = 50.0f;    // metres before fog kicks in
-        float     distance_fog_height   = 80.0f;    // height-falloff top (0 = uniform fog)
-        float     distance_fog_max      = 0.95f;    // clamp on mix weight (1.0 = pure fog at infinity)
+        float     distance_fog_strength = 0.85f;    // master on
+        float     distance_fog_density  = 0.0015f;  // per metre (exp^2 falloff)
+        float     distance_fog_start    = 80.0f;    // metres before fog kicks in
+        float     distance_fog_height   = 220.0f;   // height-falloff top (0 = uniform fog)
+        float     distance_fog_max      = 0.92f;    // clamp on mix weight
         // GENERAL terrain shore tint — applied to BARE terrain near
         // water (no grass). Companion to terrain_shore_* (grass-area).
         glm::vec3 terrain_shore_general_color    = glm::vec3(0.50f, 0.42f, 0.30f);

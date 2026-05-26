@@ -45,7 +45,8 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     ivec4 rt_flags;     // x:shadow_on, y:shadow_samples, z:ao_samples, w:frame
     vec4  rt_params;    // x:shadow_softness, y:ao_radius, z:ambient_strength, w:shadow_strength
     ivec4 rt_flags2;    // x:gi_samples, y:reflections_on, z:gi_bounces, w:ao_mode
-                        //   ao_mode: 0=off, 1=fast (2 short rays), 2=RTAO (full)
+                        //   ao_mode: 0=off, 1=fast (2 short rays), 2=RTAO (full),
+                        //            3=HBAO (horizon-angle, contact AO)
     vec4  rt_params2;   // x:gi_strength, y:gi_radius, z:reflection_strength,
                         // w:shadow_curve (0=linear, 1=cubic)
     vec4  camera_pos;   // xyz = world-space eye
@@ -91,6 +92,27 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     // the binding-18 u_shadow_lr texture for brush/dyn surfaces instead
     // of running the inline blocker+PCSS block below).
     vec4  terrain_local_info;
+    // 32x32 hi-Z max-cell grid used by other shaders. cube.frag doesn't
+    // sample it but the layout must include it so the trailing
+    // terrain_disp_params below maps to the right UBO offset.
+    vec4  _terrain_max_grid[256];
+    // Rocky-grass vertex displacement + POM far-fade knobs.
+    //   .x = vertex displacement amplitude (m)
+    //   .y = displacement smoothing mip-bias (0 = crisp)
+    //   .z = per-pixel POM far-fade distance (m)
+    vec4  terrain_disp_params;
+    // Anti-tile ground sampling. .x = master toggle, .y = rotated-sample
+    // blend strength. Sampled in the is_terrain splat path only.
+    vec4  terrain_antitile_params;
+    // Grass-cast shadow on rasterised terrain (mask-march along sun XZ).
+    //   .x = strength (0 = off), .y = sample count, .z = max walk dist,
+    //   .w = master toggle (0/1 -- the C++ side gates this independently
+    //        of strength so a saved profile stays predictable).
+    vec4  grass_shadow_on_terrain_params;
+    // Side-lit grass shading -- consumed by grass.frag / grass_raymarch.frag.
+    // cube.frag carries the field so the UBO layout stays aligned.
+    //   .x = strength, .y = master toggle.
+    vec4  grass_side_lit_params;
 } scene;
 
 // Half-rate shadow producer output, sampled when terrain_local_info.z
@@ -137,7 +159,7 @@ layout(set = 0, binding = 2, std430) readonly buffer Materials {
 };
 
 // Bound texture arrays (must match kTextureCount on the C++ side).
-const int kTextureCount = 12;
+const int kTextureCount = 13;     // +1 for kTexProcGrass (slot 12)
 // Procedurally-baked terrain material slots (see bake_terrain_materials
 // in world.cpp). Must match kTexRock/.. in vk_engine.h.
 const int kMatRock  = 7;
@@ -167,8 +189,19 @@ layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 // SPOM (parallax-occlusion) displacement map array. cube.frag picks the
 // right entry per fragment via height_idx_for_albedo() below; non-SPOM
 // materials skip the parallax march entirely. Order MUST match the
-// spom_height_textures_ array on the host (vk_engine.h).
-layout(set = 0, binding = 12) uniform sampler2D u_height[4];
+// spom_height_textures_ array on the host (vk_engine.h). Slot [4] is the
+// stylized-grass1 height for the kTexGrass / grass-band terrain
+// material -- sampled in cube.frag's is_terrain block for SPOM-style
+// pixel displacement AND in terrain_tess.tese for vertex displacement.
+layout(set = 0, binding = 12) uniform sampler2D u_height[6];
+
+// Grass eligibility mask (RG8). Same binding as in grass_raymarch.frag /
+// terrain_raymarch.frag / water.frag -- the descriptor set layout
+// already publishes this slot. R = paint mask (0 = no grass, 1 = full),
+// G = slope clamp. cube.frag samples it in the is_terrain block to
+// approximate grass-cast shadow on the ground by walking a few short
+// steps along the sun's XZ direction and accumulating mask coverage.
+layout(set = 0, binding = 13) uniform sampler2D u_grass_mask;
 
 // ReSTIR GI reservoir buffers (session 2 — see docs/restir_plan.md).
 // Layout MUST match the C++ Reservoir struct in restir.cpp (std430,
@@ -207,6 +240,12 @@ layout(set = 0, binding = 16, std430) buffer ReservoirCur {
 int height_idx_for_albedo(int a) {
     if (a == 1) return 0;   // Bricks078         — castle outer walls
     if (a == 4) return 1;   // PaintedBricks001  — keep walls
+    if (a == 8) return 4;   // stylized-grass1 (kTexGrass / grass band).
+                            // Used by the in-terrain SPOM pixel-displacement
+                            // path inside the is_terrain block, NOT by the
+                            // outer SPOM brush path (terrain bypasses that
+                            // path via the is_terrain gate -- terrain uses
+                            // its own splat-aware march, see below).
     // Floor tile materials (5 / 6) intentionally omitted: floor brushes are
     // 0.5 m thin slabs, so their side faces are axis 0/2 and bypass the
     // axis==1 silhouette gate. SPOM raymarched past the slab thickness and
@@ -1220,6 +1259,59 @@ void main() {
         vec3 Tt = normalize(vec3(1.0, 0.0, 0.0) - N * N.x);
         vec3 Bt = cross(N, Tt);
         float pom_str = clamp(vTexParams.x, 0.0, 1.0);
+        // GRASS-BAND SPOM: extra parallax march driven by the rocky-
+        // rugged-terrain height map (u_height[5]) so the new texture's
+        // micro-relief actually displaces pixels on the grass-band
+        // splat. MUST match terrain_tess.tese's u_height[5] sample
+        // (rocky-rugged) so pixel POM and vertex displacement read
+        // the SAME height field -- otherwise highlights drift off the
+        // displaced bumps. Was u_height[4] (stylized-grass height)
+        // before: that produced bumps at the wrong world position
+        // because tess sampled a different texture for the geometry.
+        // Runs on pixels where the grass weight is non-negligible AND
+        // rock isn't dominating. Same distance ramp as the rock POM.
+        // textureLod(.., 0) -- no mip smoothing on the height fetch
+        // so the high-frequency detail survives (the user explicitly
+        // does NOT want smoothing).
+        float grass_w_band = clamp(t_sand * (1.0 - t_dirt) *
+                                   (1.0 - max(t_rock, steep)),
+                                   0.0, 1.0);
+        float pom_grass_w = pom_str * grass_w_band *
+                            (1.0 - smoothstep(60.0, max(70.0, scene.terrain_disp_params.z), cam_dist));
+        if (pom_grass_w > 0.02) {
+            vec3 Vw = normalize(scene.camera_pos.xyz - vWorldPos);
+            vec3 Vt = vec3(dot(Vw, Tt), dot(Vw, Bt), dot(Vw, N));
+            Vt.z = max(abs(Vt.z), 0.20);
+            int   steps = int(mix(10.0, 22.0, pom_grass_w));
+            float layer = 1.0 / float(steps);
+            // Modest peak-to-trough; the texture's height is already
+            // pretty high-contrast, and the vertex displacement in
+            // .tese adds the bulk of the relief silhouette.
+            vec2  Pmax  = (Vt.xy / Vt.z) * (0.06 * pom_grass_w);
+            vec2  dtex  = Pmax * layer;
+            vec2  uvc   = uvm;
+            float curD  = 0.0;
+            for (int i = 0; i < 22; ++i) {
+                if (i >= steps) break;
+                // textureLod 0 -> no mip averaging -> bumps stay crisp.
+                float hh = 1.0 - textureLod(u_height[5], uvc, 0.0).r;
+                if (curD >= hh) break;
+                uvc -= dtex;
+                curD += layer;
+            }
+            vec2  lo = uvc + dtex;   float dLo = curD - layer;
+            vec2  hi = uvc;          float dHi = curD;
+            for (int b = 0; b < 4; ++b) {
+                vec2  mid  = (lo + hi) * 0.5;
+                float dMid = (dLo + dHi) * 0.5;
+                float hM   = 1.0 - textureLod(u_height[5], mid, 0.0).r;
+                if (dMid < hM) { lo = mid; dLo = dMid; }
+                else           { hi = mid; dHi = dMid; }
+            }
+            vec2  duv = (lo + hi) * 0.5 - uvm;
+            uvm += duv;
+            uvM += duv * 0.125;
+        }
         // Parallax everywhere rock/dirt/snow contribute (a small base
         // floor too so even gentle rocky ground gets some), ramped over
         // a longer range so it doesn't vanish the moment you step back.
@@ -1266,10 +1358,102 @@ void main() {
             uvM += duv * 0.125;
         }
 
-        #define MAT_A(i) (texture(u_albedo[i], uvm).rgb * 0.75 + \
-                          texture(u_albedo[i], uvM).rgb * 0.25)
+        // Anti-tiling: blend a SECOND sample at a rotated/offset UV with
+        // the standard one, weighted by a low-frequency noise field. Cuts
+        // the visible grid repeat on terrain (the typical Heitz-Neyret
+        // problem) without paying for the full stochastic / hex-tile
+        // approach. ~2x texture taps per ground pixel when on; gated on
+        // the master toggle so the user can A/B for free.
+        //
+        // Implementation:
+        //   - Sample a low-freq noise (~100 m feature size) at vWorldPos.xz
+        //     to get a per-pixel rotation angle. Smooth so neighbouring
+        //     pixels rotate by the same amount (no per-pixel hash noise).
+        //   - Rotate uvm/uvM about the local repeat origin and add a
+        //     translation offset so it doesn't share any lattice nodes
+        //     with the strict sample.
+        //   - Blend with weight scene.terrain_antitile_params.y * cube-
+        //     ramped noise so the rotated copy dominates inside the
+        //     "alternate" patches and the strict copy dominates outside.
+        bool  at_on = scene.terrain_antitile_params.x > 0.5;
+        float at_w  = at_on ? clamp(scene.terrain_antitile_params.y, 0.0, 1.0)
+                            : 0.0;
+        float at_a    = 0.0;
+        float at_blend = 0.0;
+        vec2  uvm_r = uvm;
+        vec2  uvM_r = uvM;
+        if (at_w > 0.001) {
+            // Low-freq angle field. tnoise is in [0,1]; map to roughly
+            // [-pi/3, +pi/3] so the rotated sample is visibly different
+            // from the strict one but not 90 deg (which would re-align
+            // axis-aligned bricky textures back to the same look).
+            float ang_n = tnoise(vWorldPos.xz * 0.011 + vec2(31.7, 17.3));
+            at_a = (ang_n - 0.5) * 2.094;  // ~ +/- 60 deg in radians
+            // Patch-presence noise: a separate field that decides where
+            // the rotated copy "wins" -- 0..1 with soft edges so the
+            // transition doesn't look like a procedural mask.
+            float patch_n = tnoise(vWorldPos.xz * 0.025 + vec2(7.1, 91.7));
+            at_blend = smoothstep(0.35, 0.75, patch_n) * at_w;
+            float cs = cos(at_a), sn = sin(at_a);
+            mat2 R = mat2(cs, -sn, sn, cs);
+            // Translation breaks lattice alignment between the two
+            // samples. World-derived so it's spatially consistent.
+            vec2 offm = vec2(13.7, 27.1);
+            vec2 offM = vec2(5.3, 41.9);
+            uvm_r = R * uvm + offm;
+            uvM_r = R * uvM + offM;
+        }
+        // MAT_A samples the strict copy by default; when anti-tile is on,
+        // blend in the rotated copy by `at_blend`. Strict path is exactly
+        // the previous code (same two-fetch macro/micro mix) so toggling
+        // the slider off restores the previous look bit-for-bit.
+        #define MAT_A(i) ( \
+            mix( \
+                texture(u_albedo[i], uvm  ).rgb * 0.75 + \
+                texture(u_albedo[i], uvM  ).rgb * 0.25, \
+                texture(u_albedo[i], uvm_r).rgb * 0.75 + \
+                texture(u_albedo[i], uvM_r).rgb * 0.25, \
+                at_blend))
+        // Gate the stylized-grass material by the grass eligibility
+        // mask -- the kTexGrass slot was painting bright green ground
+        // EVERYWHERE the height-band weight was non-zero, including
+        // bare areas with no actual grass blades. Sample the same
+        // mask the blade-spawner reads (binding 13, 2048 m square
+        // centered on origin -- see grass shadow march below) and
+        // scale the grass slot weight by it. Where mask=0 (no grass
+        // here) the splat falls back to the sand-band texture under
+        // the existing band-colour tint, so bare terrain looks like
+        // sand/dirt again.
+        float _grass_present = 0.0;
+        {
+            vec2 _gm_uv = (vWorldPos.xz / 2048.0) + vec2(0.5);
+            if (_gm_uv.x >= 0.0 && _gm_uv.x <= 1.0 &&
+                _gm_uv.y >= 0.0 && _gm_uv.y <= 1.0) {
+                _grass_present = textureLod(u_grass_mask, _gm_uv, 0.0).r;
+            }
+            // Soft edge so the green doesn't stop on a hard line.
+            _grass_present = smoothstep(0.05, 0.55, _grass_present);
+        }
+        // Pick the grass-band TEXTURE based on the eligibility mask:
+        // slot 8 (stylized PNG, green blade ground) where grass grows,
+        // slot 12 (procedural grass, the OLD pre-stylized look) where
+        // it doesn't. The grass-band WEIGHT (t_sand) is unchanged so
+        // the height/slope blend is identical -- only the texture
+        // sampled in the grass slot changes.
+        // Rocky-rugged slot 12: STRICT single-tap at uvm only, no
+        // rotation AND no macro mix. The macro tap at uvM=uvm/8 was
+        // contributing 25% of the visible texture but the tess height
+        // sampler only reads uvm, so visible stones at the macro tile
+        // had bumps at a different world position -> "some stones
+        // perfectly fine, many in the wrong place". Macro break-up
+        // disabled here trades some visible tiling for stone-on-bump
+        // alignment (essential for vertex displacement to read).
+        vec3 rocky_strict = texture(u_albedo[12], uvm).rgb;
+        vec3 grass_albedo = mix(rocky_strict,
+                                 MAT_A(kMatGrass),
+                                 _grass_present);
         vec3 m = MAT_A(kMatSand);
-        m = mix(m, MAT_A(kMatGrass), t_sand);
+        m = mix(m, grass_albedo,     t_sand);
         m = mix(m, MAT_A(kMatDirt),  t_dirt);
         m = mix(m, MAT_A(kMatRock),  t_rock);
         m = mix(m, MAT_A(kMatSnow),  t_snow);
@@ -1293,7 +1477,12 @@ void main() {
         // Fade to the flat band colour only at long range so mid-
         // distance terrain still shows real material (the prior
         // 110→300 m fade made everything past the plateau look flat).
-        float far_fade = smoothstep(280.0, 760.0, cam_dist);
+        // Push the far-flatten fade WAY out so distant terrain keeps
+        // its splat textures (rocky-rugged, etc.) visible. Was 280-760
+        // -> too aggressive, distant ground read as untextured colour
+        // bands. 450-1500 keeps splat detail across the whole visible
+        // valley before the per-texel filter loses energy.
+        float far_fade = smoothstep(450.0, 1500.0, cam_dist);
         albedo = mix(splat, base, far_fade);
 
         // ---- Detail normal mapping ----
@@ -1303,15 +1492,36 @@ void main() {
         // spaced verts whose interpolated N makes per-texel normals
         // shimmer (the old faceted-overlay artifact) — let the band
         // colour carry the distance.
-        #define MAT_N(i) (texture(u_normal[i], uvm).xyz * 2.0 - 1.0)
+        // Anti-tile normal: same rotated-second-sample trick. The
+        // rotated tangent-space normal needs its XY counter-rotated so
+        // the bump direction stays consistent with the world-aligned
+        // tangent frame (otherwise the lighting would visibly swirl
+        // across the rotation transition).
+        mat2 N_rot_back = at_blend > 0.001
+            ? mat2(cos(-at_a), -sin(-at_a), sin(-at_a), cos(-at_a))
+            : mat2(1.0);
+        #define MAT_N_STRICT(i) (texture(u_normal[i], uvm).xyz * 2.0 - 1.0)
+        #define MAT_N_ROT(i)    vec3(N_rot_back * \
+            (texture(u_normal[i], uvm_r).xy * 2.0 - 1.0), \
+            texture(u_normal[i], uvm_r).z * 2.0 - 1.0)
+        #define MAT_N(i) mix(MAT_N_STRICT(i), MAT_N_ROT(i), at_blend)
         vec3 nm = MAT_N(kMatSand);
-        nm = mix(nm, MAT_N(kMatGrass), t_sand);
+        // Same un-rotated treatment for the rocky-rugged normal: the
+        // tess-side displacement uses the unrotated height-map UV, so
+        // the normal map MUST match or lit highlights drift off the
+        // displaced bumps.
+        vec3 rocky_strict_n = texture(u_normal[12], uvm).xyz * 2.0 - 1.0;
+        vec3 grass_nm = mix(rocky_strict_n,
+                            MAT_N(kMatGrass), _grass_present);
+        nm = mix(nm, grass_nm, t_sand);
         nm = mix(nm, MAT_N(kMatDirt),  t_dirt);
         nm = mix(nm, MAT_N(kMatRock),  t_rock);
         nm = mix(nm, MAT_N(kMatSnow),  t_snow);
         nm = mix(nm, MAT_N(kMatRock),  steep);
         nm = mix(nm, MAT_N(kMatSand),  beach);   // sand normal at waterline
         #undef MAT_N
+        #undef MAT_N_ROT
+        #undef MAT_N_STRICT
 
         // ---- Shore-following beach ripples ----
         // Real sand ripples, but the phase is HEIGHT ABOVE WATER
@@ -1365,11 +1575,60 @@ void main() {
             nm = normalize(nm);
         }
 
-        float nf = (1.0 - smoothstep(70.0, 180.0, cam_dist)) *
+        // Splat-normal fade now 250-900 m (was 200-650). Past 900 m
+        // the LOD-N coarse mesh shimmers if per-texel normals push it,
+        // so still fades fully there -- but the distance-active FBM
+        // detail below kicks in starting at 200 m to ADD relief that
+        // grows with distance and compensates for the lost splat
+        // texture detail.
+        float nf = (1.0 - smoothstep(250.0, 900.0, cam_dist)) *
                    clamp(scene.spom_params.w, 0.0, 1.0) * g_str;
         // Tt/Bt were built above for the parallax march — reuse them.
         vec3  Nt = normalize(Tt * nm.x + Bt * nm.y + N * max(nm.z, 0.2));
         N = normalize(mix(N, Nt, nf));
+
+        // Distance-active procedural FBM detail. Strengthens with
+        // camera distance to compensate for the splat-texture detail
+        // fading out at the same range. Two scales added: ~5 m for
+        // erosion gullies + ~1.5 m for rock striations. The world-
+        // gradient is folded into the shading normal so distant
+        // surfaces get crinkled relief, and a ridge term darkens the
+        // albedo in the cavities so the eye reads "eroded rocky" not
+        // "flat coloured".
+        // Start gentler at 250 m (was 150) and cap the cavity-darken
+        // tighter (was 0.55..1.0 -> 0.85..1.0). The aggressive setting
+        // produced visible black blobs on flat far terrain when tess
+        // was off (more far terrain visible -> more pixels qualifying
+        // for the cavity darken, stacking with shadow + AO to near-
+        // black). Normal amplitude also reduced 0.55 -> 0.35 to avoid
+        // grazing-angle pitch-black patches.
+        // Additionally GATED to above-water pixels: underwater terrain
+        // visible through the transparent water plane would otherwise
+        // get the cavity-darken stacked on top of the water tint and
+        // read as dark blotches on the lake floor.
+        float _wtr_lvl_far = scene._scene_pad[0].y;
+        float _wtr_on_far  = scene._scene_pad[0].x;
+        float above_water = (_wtr_on_far > 0.5)
+            ? smoothstep(_wtr_lvl_far - 0.20, _wtr_lvl_far + 0.40, vWorldPos.y)
+            : 1.0;
+        float dd_w = smoothstep(250.0, 700.0, cam_dist) * above_water;
+        if (dd_w > 0.001) {
+            vec3 dn1 = terrain_detail_fbm(vWorldPos.xz, 0.18, 4);
+            vec3 dn2 = terrain_detail_fbm(vWorldPos.xz, 0.65, 3);
+            // Floor N.y so the resulting vec3 can never collapse toward
+            // (0,0,0) (which would NaN-out the normalize). The earlier
+            // normal-mapping blend can drive N.y arbitrarily close to 0
+            // on grazing facets; the final N.y = max(N.y, 0.18) clamp
+            // below runs AFTER this block so it's not enough on its own.
+            float dn_ny = max(N.y, 0.05);
+            vec3 dN = normalize(vec3(
+                N.x - (dn1.y + 0.45 * dn2.y) * 0.35 * dd_w,
+                dn_ny,
+                N.z - (dn1.z + 0.45 * dn2.z) * 0.35 * dd_w));
+            N = normalize(mix(N, dN, dd_w));
+            float cavity = smoothstep(-0.6, 0.4, dn1.x);
+            albedo *= mix(1.0, 0.85 + 0.15 * cavity, dd_w);
+        }
         // Up-bias floor so terrain never self-shadows to black under the
         // RT sun query (hard-won fix — do not remove).
         N.y = max(N.y, 0.18);
@@ -1911,6 +2170,58 @@ void main() {
         float lit_c = clamp(1.0 - shadow, 0.0, 1.0);
         lit_c = lit_c * lit_c * (3.0 - 2.0 * lit_c);
         shadow = 1.0 - lit_c;
+
+        // Grass-cast shadow on terrain: walk the grass eligibility mask
+        // (binding 13) along the sun XZ direction for a few short steps,
+        // accumulating presence as occlusion. Approximates the directional
+        // soft shadow that an overhead grass layer would cast on the
+        // ground without firing any rays. Cheap (N texture taps, gated
+        // on the master toggle + strength). Only on terrain pixels.
+        // Above-water gate: don't cast grass shadow onto lake-floor
+        // pixels. The grass-eligibility mask still reads 1 in those
+        // XZ cells (it doesn't know about water), and the resulting
+        // shadow stacked with the see-through water tint reads as
+        // black blotches when looking through the lake at a sandy
+        // bottom near a grassy shore.
+        float _wtr_lvl_gs = scene._scene_pad[0].y;
+        float _wtr_on_gs  = scene._scene_pad[0].x;
+        bool above_water_gs = (_wtr_on_gs < 0.5) ||
+                              (vWorldPos.y > _wtr_lvl_gs + 0.05);
+        if (is_terrain_pre &&
+            above_water_gs &&
+            scene.grass_shadow_on_terrain_params.w > 0.5 &&
+            scene.grass_shadow_on_terrain_params.x > 0.001) {
+            vec2  sun_xz = scene.sun_direction.xz;
+            float sun_xz_len = length(sun_xz);
+            if (sun_xz_len > 0.05) {
+                sun_xz /= sun_xz_len;
+                int   gs_N = int(scene.grass_shadow_on_terrain_params.y);
+                float gs_reach = scene.grass_shadow_on_terrain_params.z;
+                float gs_str   = scene.grass_shadow_on_terrain_params.x;
+                // Heightmap is 2048 m square, centered at origin (matches
+                // kHeightmapSide in terrain_raymarch.frag / water.frag).
+                const float kGsSide = 2048.0;
+                float gs_shadow = 0.0;
+                for (int gi = 1; gi <= 8; ++gi) {
+                    if (gi > gs_N) break;
+                    float gd = gs_reach * (float(gi) / float(gs_N));
+                    vec2 sxz = vWorldPos.xz + sun_xz * gd;
+                    vec2 gs_uv = (sxz / kGsSide) + vec2(0.5);
+                    if (gs_uv.x < 0.0 || gs_uv.x > 1.0 ||
+                        gs_uv.y < 0.0 || gs_uv.y > 1.0) continue;
+                    float pres = textureLod(u_grass_mask, gs_uv, 0.0).r;
+                    // Distance falloff: near grass shades stronger,
+                    // far grass falls off (matches the raymarch path).
+                    float fall = 1.0 - smoothstep(0.0, 1.0, gd / gs_reach);
+                    gs_shadow = max(gs_shadow, pres * fall);
+                }
+                // Apply only where the receiver isn't already deeply
+                // shadowed -- keeps the term from doubling-up on RT
+                // shadow castles + grass shadow.
+                float gs_term = gs_shadow * gs_str * (1.0 - shadow);
+                shadow = clamp(shadow + gs_term, 0.0, 1.0);
+            }
+        }
     }
 
     vec3 direct = albedo * scene.sun_color.rgb * scene.sun_color.a *
@@ -1990,13 +2301,16 @@ void main() {
     float ao = 1.0;
     int ao_mode = scene.rt_flags2.w;
     if (ao_mode > 0 && scene.rt_flags.z > 0) {
-        // mode 1 caps to 2 samples; mode 2 honors the slider.
+        // mode 1 caps to 2 samples; mode 2 honors the slider; mode 3
+        // (HBAO) honors the slider as the direction count.
         int requested = (ao_mode == 1) ? min(scene.rt_flags.z, 2)
                                        : scene.rt_flags.z;
         int N_ao = lod_samples(requested, cam_dist);
-        // mode 1 halves the search radius вЂ” bias toward contact AO rather
-        // than ambient occlusion of the whole hemisphere.
-        float ao_radius = scene.rt_params.y * (ao_mode == 1 ? 0.5 : 1.0);
+        // mode 1 halves the search radius -- bias toward contact AO.
+        // mode 3 also uses a tighter radius (0.6x) so the horizon-angle
+        // search focuses on near-surface crevices the binary RTAO misses.
+        float ao_radius = scene.rt_params.y *
+            (ao_mode == 1 ? 0.5 : (ao_mode == 3 ? 0.6 : 1.0));
         // Distance-scaled origin lift for terrain вЂ” pushes the AO ray's
         // origin above the BLAS detail that the rasterised LOD-1+ raster
         // sits below. Without this, AO rays from the under-shooting
@@ -2031,6 +2345,74 @@ void main() {
         float pp_phi_a = rand(seed_base + uvec3(0, 99u, 1u)) * 6.28318530718;
         float pp_c_a = cos(pp_phi_a);
         float pp_s_a = sin(pp_phi_a);
+        if (ao_mode == 3) {
+            // HBAO branch -- horizon-angle accumulation. For each of
+            // N_ao azimuth directions in the tangent plane, march a few
+            // taps at increasing inclination and keep the steepest
+            // closest-hit angle as the horizon. The unoccluded fraction
+            // per direction is (1 - sin(horizon)); averaging across
+            // directions gives a smoother contact-AO signal than the
+            // binary occluded/not-occluded RTAO test, especially in
+            // tight crevices (cube-cube contact lines, terrain creases)
+            // where the binary RTAO either records every ray as a hit
+            // (saturates) or misses thin features entirely.
+            //
+            // Cost: K taps per direction * N_ao directions inline rays;
+            // we hold K=3 (one ray per inclination band) so total rays
+            // = 3*N_dir. Cap the direction count at 8 (24 rays) so the
+            // Ultra/Insane RTAO sample-count presets (16/32) don't
+            // explode HBAO into 48-96 rays per pixel. The horizon-
+            // angle average converges fast in azimuth (the steepest
+            // hit dominates), so 8 directions is the visual quality
+            // knee; more just costs perf without changing the look.
+            const int  kHbaoSteps = 3;
+            const int  kHbaoMaxDirs = 8;
+            int N_dir = min(N_ao, kHbaoMaxDirs);
+            // Inclination bands: low / mid / high above the tangent.
+            // sin(angle) values pick where the ray points; cosine band
+            // gives the horizontal component along the azimuth.
+            const float kSinBand[3] = float[3](0.30, 0.55, 0.80);
+            const float kCosBand[3] = float[3](0.9539, 0.8351, 0.6000);
+            float horizon_sum = 0.0;
+            int   dir_count   = 0;
+            for (int i = 0; i < N_dir; ++i) {
+                // Even azimuth distribution + per-pixel rotation. Using
+                // the Vogel-disk x/y as the azimuth seed reuses the
+                // existing table without extra trig.
+                vec2  v   = kVogelDisk[i & 31];
+                float vx  = pp_c_a * v.x - pp_s_a * v.y;
+                float vy  = pp_s_a * v.x + pp_c_a * v.y;
+                vec2  az  = normalize(vx * vx + vy * vy > 1e-6
+                                       ? vec2(vx, vy) : vec2(1.0, 0.0));
+                vec3 az_dir = az.x * ao_tan + az.y * ao_bit;
+                float best_sin = 0.0;  // horizon = 0 -> fully visible
+                for (int k = 0; k < kHbaoSteps; ++k) {
+                    vec3 d = kCosBand[k] * az_dir + kSinBand[k] * N;
+                    // closest_hit gives the distance; convert to a
+                    // tangent-plane horizon-angle estimate. Closer hits
+                    // raise the horizon more (steeper sin).
+                    float t_hit;
+                    if (closest_hit(origin_ao, d, ao_radius, t_hit)) {
+                        // Inverse-distance-weighted horizon sin: a hit
+                        // at t=0 reads as sin=1 (fully occluded); at
+                        // t=ao_radius it reads as sin=0 (no contribution).
+                        float w = 1.0 - clamp(t_hit / ao_radius, 0.0, 1.0);
+                        // Blend the inclination band with the hit
+                        // proximity so a near-tangent occluder produces
+                        // a strong contact-AO signal even if its band
+                        // is shallow.
+                        float this_sin = mix(kSinBand[k], 1.0, w);
+                        best_sin = max(best_sin, this_sin);
+                    }
+                }
+                horizon_sum += (1.0 - best_sin);
+                ++dir_count;
+            }
+            taken = max(dir_count, 1);
+            // Repurpose `occluded` as (1 - avg_visibility) so the shared
+            // shaping/floor code below works for both branches.
+            occluded = float(taken) - horizon_sum;
+        } else {
         for (int i = 0; i < N_ao; ++i) {
             float u1 = rand(seed_base + uvec3(i, 7u, 53u));
             float r_h = sqrt(u1);
@@ -2041,6 +2423,7 @@ void main() {
             vec3 d = (r_h * vx) * ao_tan + y * N + (r_h * vy) * ao_bit;
             if (any_hit(origin_ao, d, ao_radius)) occluded += 1.0;
             ++taken;
+        }
         }
         // Two-step shaping to control corner overlap-darkness:
         //   1. sqrt curve on raw AO вЂ” compresses the [0..1] range so the
@@ -2102,7 +2485,12 @@ void main() {
     // pitch black. Fire 4 hemisphere rays around +Y with the terrain
     // BLAS masked out (so terrain doesn't self-occlude). Distance-LOD'd
     // to near pixels — far terrain doesn't matter for interior look.
-    if (is_terrain_pre && scene.rt_flags.x != 0 && cam_dist < 50.0) {
+    // Gate also on gi_strength (rt_params2.x) — sky_vis output feeds
+    // the ambient term that's later multiplied by gi_strength. When GI
+    // is off the result is multiplied by 0 anyway; firing 4 BVH probe
+    // rays per terrain pixel was pure waste.
+    if (is_terrain_pre && scene.rt_flags.x != 0 &&
+        scene.rt_params2.x > 1e-4 && cam_dist < 50.0) {
         const int kProbeN = 4;
         const uint kProbeMask = 0xFDu;        // skip terrain BLAS (bit 0x02)
         vec3 probe_origin = vWorldPos + vec3(0.0, 0.10, 0.0);
@@ -2403,37 +2791,77 @@ void main() {
     }
     vec3 final = direct + indirect + vEmissive.rgb;
 
-    // Atmospheric perspective for terrain. Distant ground fades toward
-    // the sky tint along the view direction вЂ” the standard "real
-    // mountains" look. Onset starts at 200m and reaches 75% blend at
-    // 1500m; never fully hides the silhouette so the scene retains
-    // depth. Cheaper than volumetric fog and visually indistinguishable
-    // for clear-day weather.
-    if (is_terrain_pre) {
-        // P6: early-out before computing view_dir + sky atmospheric
-        // sample (which is ~12 ALU + 1 sqrt + a normalize). For close
-        // terrain (cam_dist < 250 m) or when the user has fog disabled
-        // (terrain_params.x ≈ 0), the fog contribution rounds to zero
-        // and the entire block is wasted. Saves the cost on ~half of
-        // terrain pixels (everything indoors / castle-area / nearby
-        // hills) plus 100% of pixels when the slider is off.
-        float fog_strength = clamp(scene.terrain_params.x, 0.0, 1.0);
-        if (cam_dist > 250.0 && fog_strength > 1e-3) {
-            vec3 view_dir = normalize(vWorldPos - scene.camera_pos.xyz);
-            // sample_sky_atmosphere: no sun halo. The halo is fine for
-            // the actual sky pixels (compose pass / GI rays), but
-            // applying it to FOG made distant terrain near the sun
-            // direction look like glowing white blobs.
-            vec3 fog_color = sample_sky_atmosphere(view_dir);
-            // 95% sky by ~1.3km — both edges (corner ray reaches ~2km
-            // of world at 80° FOV / far=1500m) AND centre (clipped at
-            // 1500m hard) are deep into fog before the cut, so the
-            // asymmetric visible disc is invisible.
-            float fog_t = clamp((cam_dist - 250.0) / 1100.0, 0.0, 0.95);
-            fog_t = fog_t * fog_t * (3.0 - 2.0 * fog_t);
-            fog_t *= fog_strength;
-            final = mix(final, fog_color, fog_t);
+    // Realistic atmospheric distance fog. Was a terrain-only sky-tint
+    // mix; now applies to ALL pixels (terrain + brushes + dyn props)
+    // and uses the user-tunable distance_fog_* slots from the scene
+    // UBO so the menu's fog sliders actually drive what you see.
+    //   distance_fog_color (_scene_pad[17]): .rgb base fog tint,
+    //     .a master strength (0 = disabled).
+    //   distance_fog_params (_scene_pad[18]):
+    //     .x density (exp^2 falloff per metre),
+    //     .y start distance (no fog before this),
+    //     .z height_top (>0 = fog density falls off above this height),
+    //     .w max alpha (clamp on the fog amount).
+    // Falls back to the previous sky-atmosphere mix at strength 0 so
+    // the scene never loses depth cues even if the user zeroes the
+    // fog slider.
+    {
+        vec4 dfog_col  = scene._scene_pad[17];
+        vec4 dfog_par  = scene._scene_pad[18];
+        vec3 view_dir  = normalize(vWorldPos - scene.camera_pos.xyz);
+        float fog_t    = 0.0;
+        vec3  fog_rgb  = dfog_col.rgb;
+        // Realistic exp^2 atmospheric fog when the master strength is on.
+        if (dfog_col.a > 1e-3) {
+            float density  = max(0.0, dfog_par.x);
+            float start_d  = max(0.0, dfog_par.y);
+            float h_top    = dfog_par.z;
+            float max_a    = clamp(dfog_par.w, 0.0, 1.0);
+            float d_raw    = max(0.0, cam_dist - start_d);
+            float dx       = d_raw * density;
+            float fog      = 1.0 - exp(-dx * dx);
+            // Height fog: density thins out above height_top so peaks
+            // poke out of the layer. h_top <= 0 disables (uniform fog).
+            if (h_top > 0.5) {
+                float h_w = 1.0 - smoothstep(0.0, h_top, vWorldPos.y);
+                fog *= h_w;
+            }
+            fog_t = clamp(fog * dfog_col.a, 0.0, max_a);
+            // Mie scattering: warm forward-scatter halo toward the sun.
+            // The fog tint shifts toward sun_color where the view direction
+            // is aligned with the sun (anisotropic forward scattering).
+            // Henyey-Greenstein approximation with g=0.76.
+            vec3  Lf = scene.sun_direction.xyz;
+            float mu  = clamp(dot(view_dir, -Lf), -1.0, 1.0);
+            const float g  = 0.76;
+            const float g2 = g * g;
+            float hg = (1.0 - g2) / (12.566 *
+                       pow(max(0.0001, 1.0 + g2 - 2.0 * g * mu), 1.5));
+            // Normalised so isotropic = 1. hg peaks ~10 at forward.
+            float mie = clamp(hg * 0.40, 0.0, 1.5);
+            vec3  sun_tint = scene.sun_color.rgb * scene.sun_color.a;
+            fog_rgb = mix(dfog_col.rgb,
+                          dfog_col.rgb * 0.7 + sun_tint * 0.55,
+                          clamp(mie, 0.0, 1.0));
         }
+        // Aerial-perspective fallback / overlay: distant terrain always
+        // gets some sky-tinted haze even with the user fog disabled,
+        // so silhouettes don't pop in flatly at 1.5 km. terrain_params.x
+        // is the legacy slider; keep it as the overlay strength.
+        float legacy_fog = clamp(scene.terrain_params.x, 0.0, 1.0);
+        if (is_terrain_pre && cam_dist > 250.0 && legacy_fog > 1e-3) {
+            vec3 sky_col = sample_sky_atmosphere(view_dir);
+            float fl = clamp((cam_dist - 250.0) / 1100.0, 0.0, 0.95);
+            fl = fl * fl * (3.0 - 2.0 * fl) * legacy_fog;
+            // Take the MAX so the realistic fog wins where it's
+            // active, but legacy aerial perspective shows on its own
+            // if the master fog is off.
+            if (fl > fog_t) {
+                fog_t   = fl;
+                fog_rgb = sky_col;
+            }
+        }
+        if (fog_t > 1e-4) final = mix(final, fog_rgb, fog_t);
     }
 
     outColor = vec4(final, 1.0);

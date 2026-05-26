@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 
 namespace qlike {
 
@@ -287,6 +288,93 @@ void VulkanEngine::build_hud_ui() {
     }
     ImGui::End();
 
+    // EDIT MODE banner — centered top, bright orange, impossible to
+    // miss. Earlier issue: user pressed E by accident (next to D walk
+    // key) and was in edit mode without realizing; left-click then
+    // sculpted terrain instead of firing. With this banner the state
+    // is always obvious.
+    if (terrain_edit_mode_) {
+        ImGuiIO& io_eb = ImGui::GetIO();
+        ImDrawList* dl_eb = ImGui::GetForegroundDrawList();
+        const char* msg = "EDIT MODE  —  press E to exit";
+        ImVec2 sz = ImGui::CalcTextSize(msg);
+        float pad_x = 12.0f, pad_y = 6.0f;
+        ImVec2 c(io_eb.DisplaySize.x * 0.5f, 24.0f);
+        ImVec2 a(c.x - sz.x * 0.5f - pad_x, c.y - sz.y * 0.5f - pad_y);
+        ImVec2 b(c.x + sz.x * 0.5f + pad_x, c.y + sz.y * 0.5f + pad_y);
+        dl_eb->AddRectFilled(a, b, IM_COL32(230, 110, 30, 220), 4.0f);
+        dl_eb->AddText(ImVec2(c.x - sz.x * 0.5f, c.y - sz.y * 0.5f),
+                       IM_COL32(255, 255, 255, 255), msg);
+    }
+
+    // Last-target damage indicator — industry-standard FPS placement:
+    // a single bar at TOP-CENTER showing the most-recently-hit plane's
+    // remaining health. Fades out 3 s after the last hit. Bars float-
+    // ing above each plane (the previous approach) cluttered the view
+    // and overlapped the plane silhouette itself; a single fixed-
+    // position bar at top of HUD is what Halo / Battlefield / Destiny
+    // use for "you just damaged a target."
+    if (last_target_hud_ttl_ > 0.0f && last_target_plane_hp_ >= 0) {
+        ImGuiIO& io_pl = ImGui::GetIO();
+        ImDrawList* dl_pl = ImGui::GetForegroundDrawList();
+        const float W = io_pl.DisplaySize.x;
+        const float fade = glm::clamp(last_target_hud_ttl_ / 0.5f, 0.0f, 1.0f);
+        const float bar_w = 220.0f;
+        const float bar_h = 10.0f;
+        const float pad   = 2.0f;
+        const float cx = W * 0.5f;
+        const float cy = 56.0f;       // below the EDIT MODE banner
+        const float a0 = cx - bar_w * 0.5f;
+        const float b0 = cx + bar_w * 0.5f;
+        const float a1 = cy - bar_h * 0.5f;
+        const float b1 = cy + bar_h * 0.5f;
+        const int   alpha_bg = int(200.0f * fade);
+        const int   alpha_fg = int(245.0f * fade);
+        dl_pl->AddRectFilled(ImVec2(a0 - pad, a1 - pad),
+                              ImVec2(b0 + pad, b1 + pad),
+                              IM_COL32(0, 0, 0, alpha_bg), 2.0f);
+        // Defensive max(1,...) on the denominator. last_target_plane_hp_max_
+        // defaults to 3 and combat.cpp always rewrites it on every hit, but
+        // a future caller (or a load-from-savefile path) that zeros the max
+        // would otherwise divide-by-zero and produce NaN/inf alpha here.
+        const int max_hp = std::max(1, last_target_plane_hp_max_);
+        const float frac = glm::clamp(float(last_target_plane_hp_) /
+                                       float(max_hp), 0.0f, 1.0f);
+        ImU32 col;
+        if (frac > 0.66f)      col = IM_COL32( 80, 220,  80, alpha_fg);
+        else if (frac > 0.33f) col = IM_COL32(240, 200,  50, alpha_fg);
+        else                   col = IM_COL32(230,  70,  60, alpha_fg);
+        dl_pl->AddRectFilled(ImVec2(a0, a1),
+                              ImVec2(a0 + bar_w * frac, b1),
+                              col, 2.0f);
+        // Label centred over the bar, "JET  hp/max".
+        char tlbl[24];
+        snprintf(tlbl, sizeof(tlbl), "JET   %d / %d",
+                 last_target_plane_hp_, last_target_plane_hp_max_);
+        ImVec2 ts = ImGui::CalcTextSize(tlbl);
+        dl_pl->AddText(ImVec2(cx - ts.x * 0.5f, cy - bar_h * 0.5f - 16.0f),
+                       IM_COL32(255, 255, 255, alpha_fg), tlbl);
+        // Decay outside the per-frame stats push (frame dt isn't trivially
+        // available here; do it from the engine tick in vk_engine.cpp).
+    }
+
+    // Kill-flash fullscreen overlay (white, fades over kKillFlashDuration).
+    // Painted BEFORE the crosshair so the crosshair stays readable on the
+    // brightest frame.
+    if (kill_flash_t_ > 0.0f) {
+        ImGuiIO& io_kf = ImGui::GetIO();
+        ImDrawList* dl_kf = ImGui::GetForegroundDrawList();
+        const float f = glm::clamp(kill_flash_t_ / kKillFlashDuration,
+                                    0.0f, 1.0f);
+        // Ease the alpha curve so the spike is sharp and the fade gentle.
+        const float a = f * f;
+        const int   ia = int(220.0f * a);
+        dl_kf->AddRectFilled(ImVec2(0, 0),
+                              ImVec2(io_kf.DisplaySize.x,
+                                     io_kf.DisplaySize.y),
+                              IM_COL32(255, 240, 220, ia));
+    }
+
     // Crosshair: small dot + tick marks at screen center.
     ImGuiIO& io = ImGui::GetIO();
     ImVec2 cen(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
@@ -430,12 +518,17 @@ void VulkanEngine::build_menu_ui() {
         if (ImGui::Button("Perf"))    apply_upscale(0.50f, true,  1.40f);
         ImGui::TextDisabled("Quality/Balanced/Perf use TAAU + extra sharpen.");
 
-        // AO mode combo.
+        // AO mode combo. HBAO (mode 3) folds a horizon-angle formula into
+        // the inline-ray loop -- each AO direction marches multiple short
+        // taps and keeps the steepest occluder rather than a binary hit
+        // test, which captures crevice / contact shadows the binary RTAO
+        // misses without paying the full RTAO sample-count cost.
         const char* kAoLabels[] = { "off", "GTAO (screen-space, fast)",
-                                    "RTAO (true ray-traced, slow)" };
-        int ao = std::clamp(rt_.ao_mode, 0, 2);
+                                    "RTAO (true ray-traced, slow)",
+                                    "HBAO (horizon-based, contact AO)" };
+        int ao = std::clamp(rt_.ao_mode, 0, 3);
         if (ImGui::BeginCombo("AO mode", kAoLabels[ao])) {
-            for (int i = 0; i < 3; ++i) {
+            for (int i = 0; i < 4; ++i) {
                 bool is_selected = (ao == i);
                 if (ImGui::Selectable(kAoLabels[i], is_selected)) {
                     rt_.ao_mode = i;
@@ -503,8 +596,39 @@ void VulkanEngine::build_menu_ui() {
             const int values[] = { 512, 1024, 2048, 4096, 8192 };
             rt_.shadow_map_resolution = values[res_idx];
         }
+        // Extended upper bound to 2000 m for the 1500 m visible-distance
+        // setup -- at the previous 400 m cap the single ortho cascade was
+        // sampling at <1 texel/m past 400 m, giving heavy aliasing on
+        // distant ridge shadows. The texels-per-metre is W/(2*half), so
+        // at 2000 m and a 4k shadow map the ratio is ~1 texel/m which
+        // matches the terrain LOD detail past 800 m. Below 400 m the
+        // slider behaves identically to before.
         ImGui::SliderFloat("shadow map world size (m)",
-                            &rt_.shadow_map_world_half, 30.0f, 400.0f);
+                            &rt_.shadow_map_world_half, 30.0f, 2000.0f);
+        {
+            // Texel density warning -- past ~800 m world half at a 1024
+            // shadow map the per-metre resolution drops below 1 texel/m
+            // and ridge shadows alias. Surface a live readout + a soft
+            // hint to bump the resolution combo when the slider goes
+            // wide. Number stays as a tooltip so the layout doesn't
+            // shift on every slider tick.
+            const float texels_per_m =
+                static_cast<float>(rt_.shadow_map_resolution) /
+                (2.0f * std::max(1.0f, rt_.shadow_map_world_half));
+            if (rt_.shadow_map_world_half > 800.0f &&
+                rt_.shadow_map_resolution < 4096) {
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                    "  ~%.2f texels/m -- bump resolution to 4096+ to "
+                    "avoid ridge aliasing", texels_per_m);
+            } else if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Texel density: %.2f texels/m "
+                    "(resolution %d / (2 x %.0f m)).\n"
+                    "Below ~1 texel/m distant ridges alias -- raise "
+                    "resolution or lower the world size.",
+                    texels_per_m, rt_.shadow_map_resolution,
+                    rt_.shadow_map_world_half);
+            }
+        }
         ImGui::Checkbox("debug overlay (frustum + bake bounds)",
                          &rt_.shadow_debug_overlay);
 
@@ -616,7 +740,13 @@ void VulkanEngine::build_menu_ui() {
         // is the default; >1 looks deliberately punchy.
         ImGui::SliderFloat("post-TAA sharpening", &rt_.compose_sharpen_strength, 0.0f, 2.0f);
         ImGui::SliderFloat("sun shafts (god rays)", &rt_.sun_shaft_intensity, 0.0f, 2.0f);
-        ImGui::Checkbox("SVGF GI denoiser (Session 2 — temporal accum)",
+        // 4a-deep: enables the variance-moments temporal pass plus the
+        // 3-pass a-trous spatial filter. Off by default (perf cost is
+        // ~1.5 ms at 1080p); when on, TAA's own single-pass spatial is
+        // suppressed (engine zeroes spatial_strength on the TAA UBO
+        // when this checkbox is set) so the two filters don't
+        // double-blur.
+        ImGui::Checkbox("SVGF GI denoiser (4a-deep: moments + 3-pass a-trous)",
                         &rt_.svgf_enabled);
 
         ImGui::SeparatorText("Bloom (compose-pass spiral-tap)");
@@ -904,13 +1034,130 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SeparatorText("LOD distances");
         ImGui::SliderFloat("Terrain detail (multiplier)",
                             &rt_.terrain_lod_scale, 0.5f, 4.0f, "%.2fx");
-        ImGui::SliderFloat("LOD 0->1 (m)", &rt_.terrain_lod1,  20.0f, 1000.0f);
-        ImGui::SliderFloat("LOD 1->2 (m)", &rt_.terrain_lod2,  60.0f, 2000.0f);
-        ImGui::SliderFloat("LOD 2->3 (m)", &rt_.terrain_lod3, 120.0f, 4000.0f);
-        if (rt_.terrain_lod2 < rt_.terrain_lod1 + 20.0f)
-            rt_.terrain_lod2 = rt_.terrain_lod1 + 20.0f;
-        if (rt_.terrain_lod3 < rt_.terrain_lod2 + 20.0f)
-            rt_.terrain_lod3 = rt_.terrain_lod2 + 20.0f;
+        if (ImGui::CollapsingHeader("Terrain LOD")) {
+            ImGui::TextDisabled(
+                "Each LOD is shown as the distance RANGE it covers + the\n"
+                "MESH DENSITY at that LOD (1 = baseline heightmap; 1/N = N\n"
+                "times sparser; LOD 0 'N x denser' via the Near density\n"
+                "slider below). Drag the end-of-LOD distance to widen or\n"
+                "narrow that band. Morph blend only covers LOD 0 -> 1.");
+            bool any_stride_changed = false;
+            for (int i = 0; i < kTerrainLodCount; ++i) {
+                ImGui::PushID(i);
+                // Display the BAND for each LOD: start = previous LOD's
+                // end (or 0 for LOD 0), end = this LOD's distance.
+                float band_start = (i == 0) ? 0.0f
+                                            : rt_.terrain_lod_distance[i - 1];
+                // For the final LOD show "(farthest)" instead of an
+                // endpoint -- it has no "leaves at" distance.
+                if (i < kTerrainLodCount - 1) {
+                    ImGui::Text("LOD %d: %.0f m -> %.0f m", i, band_start,
+                                 rt_.terrain_lod_distance[i]);
+                } else {
+                    ImGui::Text("LOD %d: %.0f m -> (farthest)", i, band_start);
+                }
+                // LOD 0 = the near band. Density is the chunk VBO
+                // supersample slider (terrain_near_density). Stride 1
+                // is enforced by the renderer at LOD 0 (the baked IBO
+                // is always used), so we show the near-density slider
+                // here instead of a no-op stride.
+                if (i == 0) {
+                    int prev_near = rt_.terrain_near_density;
+                    ImGui::SliderInt("density (1 = baseline, N = N x denser)",
+                                      &rt_.terrain_near_density, 1, 8);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Chunk VBO supersample on near chunks. 1 = baseline\n"
+                            "(one vert per heightmap cell). 2/4/8 = N x N more\n"
+                            "verts per cell via bilinear sampling. Only chunks\n"
+                            "inside the Near density radius pay the cost.");
+                    }
+                    if (rt_.terrain_near_density != prev_near) {
+                        terrain_density_dirty_ = true;
+                    }
+                } else {
+                    // LODs 1..7: density expressed inversely as "1 / N"
+                    // where N is the stride. Slider drags map to the
+                    // nearest stride in the discrete ladder 1/2/4/8/...
+                    // so user input is always a sensible density.
+                    int prev_stride = rt_.terrain_lod_stride[i];
+                    char density_label[64];
+                    std::snprintf(density_label, sizeof(density_label),
+                                   "density 1/%d", rt_.terrain_lod_stride[i]);
+                    ImGui::SliderInt(density_label,
+                                      &rt_.terrain_lod_stride[i], 1, 256);
+                    if (rt_.terrain_lod_stride[i] < 1) rt_.terrain_lod_stride[i] = 1;
+                    if (rt_.terrain_lod_stride[i] != prev_stride)
+                        any_stride_changed = true;
+                }
+                // The "end" distance slider for this LOD band, except
+                // for the final one (no endpoint).
+                if (i < kTerrainLodCount - 1) {
+                    float vmax = (i == 0) ? 600.0f
+                                          : std::max(rt_.terrain_lod_distance[i] * 4.0f,
+                                                     1500.0f * static_cast<float>(i + 1));
+                    ImGui::SliderFloat("end (m)",
+                                        &rt_.terrain_lod_distance[i],
+                                        10.0f, vmax, "%.0f");
+                }
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+            // Monotone-clamp the distance ladder so a slider can't
+            // overtake its neighbours -- the picker assumes strict
+            // ascending order. Walk forward then back so dragging
+            // either way always lands on a valid ladder.
+            for (int i = 1; i < kTerrainLodCount - 1; ++i) {
+                if (rt_.terrain_lod_distance[i] <
+                    rt_.terrain_lod_distance[i - 1] + 10.0f) {
+                    rt_.terrain_lod_distance[i] =
+                        rt_.terrain_lod_distance[i - 1] + 10.0f;
+                }
+            }
+            if (any_stride_changed) {
+                // Defer the IBO re-bake to the main loop's safe-rebuild
+                // block (drains the GPU once). A drag will set the flag
+                // every frame the user moves a slider; the rebuild
+                // itself runs once between frames.
+                terrain_lod_dirty_ = true;
+            }
+            if (ImGui::Button("Reset LOD to defaults")) {
+                // Keep these in sync with the defaults declared in
+                // vk_engine.h Runtime::terrain_lod_distance / _stride.
+                // Far thresholds are pushed out so the un-morphed pops
+                // at LOD2..7 are fog-masked / sub-pixel.
+                const float def_d[kTerrainLodCount - 1] = {
+                    80.0f, 250.0f, 500.0f, 900.0f, 1400.0f, 2000.0f, 2700.0f
+                };
+                const int def_s[kTerrainLodCount] = {
+                    1, 2, 4, 8, 16, 32, 64, 128
+                };
+                for (int i = 0; i < kTerrainLodCount - 1; ++i)
+                    rt_.terrain_lod_distance[i] = def_d[i];
+                for (int i = 0; i < kTerrainLodCount; ++i)
+                    rt_.terrain_lod_stride[i] = def_s[i];
+                terrain_lod_dirty_ = true;
+            }
+
+            // Density slider now lives in the LOD 0 row above; only the
+            // radius needs its own slider down here.
+            ImGui::SeparatorText("Near-camera densification");
+            float prev_near_radius = rt_.terrain_near_density_radius_m;
+            ImGui::SliderFloat("Near density radius (m)",
+                                &rt_.terrain_near_density_radius_m,
+                                0.0f, 1000.0f, "%.0f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "Chunks whose centre is inside this radius (camera XZ)\n"
+                    "get the LOD 0 density (above) applied to their VBO via\n"
+                    "bilinear supersample. Far chunks stay at baseline.\n"
+                    "0 m = effectively disable. Each rebuild costs a VBO\n"
+                    "upload; main loop throttles to 2 chunks/frame.");
+            }
+            if (rt_.terrain_near_density_radius_m != prev_near_radius) {
+                terrain_density_dirty_ = true;
+            }
+        }
 
         ImGui::SeparatorText("Near tessellation density (live)");
         ImGui::SliderFloat("Tess max subdivision",
@@ -947,7 +1194,25 @@ void VulkanEngine::build_menu_ui() {
         ImGui::TextDisabled(
             "Per-pixel parallax of the eroded rock height — the FINE\n"
             "half. Pair with Rock relief above + Material strength > 0.\n"
-            "Only on rocky pixels, ramps to 0 by ~90 m (LOD). 0 = off.");
+            "Only on rocky pixels, ramps to 0 by Disp far m below.");
+        ImGui::SliderFloat("Disp amplitude (m)",
+                           &rt_.terrain_disp_amp, 0.0f, 1.0f, "%.2f");
+        ImGui::TextDisabled(
+            "Vertex displacement amplitude in metres for the rocky-grass\n"
+            "band material. Drives the tessellated near-terrain mesh.\n"
+            "Too high + low tess = spikes; raise Disp smooth to mitigate.");
+        ImGui::SliderFloat("Disp smooth (mip bias)",
+                           &rt_.terrain_disp_smooth_mip, 0.0f, 6.0f, "%.1f");
+        ImGui::TextDisabled(
+            "Smoothing pass on the displacement height sample.\n"
+            "0 = crisp LOD0 (max spike risk if amp high), +N = blur\n"
+            "by N mip levels. Per-pixel SPOM still uses crisp LOD0.");
+        ImGui::SliderFloat("POM far distance (m)",
+                           &rt_.terrain_pom_far_m, 50.0f, 600.0f, "%.0f");
+        ImGui::TextDisabled(
+            "Distance beyond which per-pixel parallax stops being\n"
+            "raymarched. Was hardcoded 220 m. Higher = more detail far,\n"
+            "lower = perf.");
         if (rt_.terrain_tess_far_m < rt_.terrain_tess_near_m + 5.0f)
             rt_.terrain_tess_far_m = rt_.terrain_tess_near_m + 5.0f;
 
@@ -961,6 +1226,17 @@ void VulkanEngine::build_menu_ui() {
                            &rt_.ground_mat_tile_m, 0.5f, 12.0f, "%.2f");
         ImGui::SliderFloat("Detail normal strength",
                            &rt_.ground_mat_normal, 0.0f, 1.0f, "%.2f");
+        ImGui::Checkbox("Anti-tile sampling",
+                        &rt_.terrain_antitile);
+        ImGui::TextDisabled(
+            "Blends a second rotated/offset sample of each ground\n"
+            "material weighted by a low-frequency noise mask. Cuts the\n"
+            "visible grid repeat on terrain at the cost of ~1 extra\n"
+            "texture tap per channel. Tess + SPOM UVs stay strict so\n"
+            "geometry and per-pixel relief remain aligned.");
+        ImGui::SliderFloat("Anti-tile blend strength",
+                           &rt_.terrain_antitile_strength,
+                           0.0f, 1.0f, "%.2f");
 
         ImGui::SeparatorText("Shading");
         ImGui::SliderFloat("atmospheric fog",  &rt_.terrain_fog_strength,    0.0f, 1.5f);
@@ -1105,7 +1381,7 @@ void VulkanEngine::build_menu_ui() {
             ImGui::SliderFloat("shore distance (m)",
                                &rt_.grass_shore_distance, 0.1f, 20.0f, "%.1f");
             ImGui::Separator();
-            ImGui::TextUnformatted("Grass shadow on terrain");
+            ImGui::TextUnformatted("Grass shadow on terrain (raymarched)");
             ImGui::SliderFloat("shadow strength",
                                &rt_.grass_shadow_strength,
                                0.0f, 1.0f, "%.2f");
@@ -1114,6 +1390,35 @@ void VulkanEngine::build_menu_ui() {
             ImGui::SliderFloat("shadow reach (m)",
                                &rt_.grass_shadow_max_dist,
                                0.2f, 5.0f, "%.1f");
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Grass shadow on terrain (rasterised)");
+            ImGui::Checkbox("enabled##gst",
+                            &rt_.grass_shadow_on_terrain);
+            ImGui::TextDisabled(
+                "Walks the grass eligibility mask along the sun XZ for\n"
+                "a few short steps and accumulates occlusion as the\n"
+                "ground 'in the shade' of overhead blades. Cheap (no\n"
+                "ray query), works on the standard chunked terrain.");
+            ImGui::SliderFloat("strength##gst",
+                               &rt_.grass_shadow_on_terrain_strength,
+                               0.0f, 1.0f, "%.2f");
+            ImGui::SliderInt  ("samples##gst",
+                               &rt_.grass_shadow_on_terrain_samples, 1, 8);
+            ImGui::SliderFloat("reach (m)##gst",
+                               &rt_.grass_shadow_on_terrain_dist,
+                               0.2f, 6.0f, "%.1f");
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Side-lit blade shading");
+            ImGui::Checkbox("side-lit enabled",
+                            &rt_.grass_side_lit_enabled);
+            ImGui::SliderFloat("side-lit strength",
+                               &rt_.grass_side_lit_strength,
+                               0.0f, 1.0f, "%.2f");
+            ImGui::TextDisabled(
+                "Sun-side of each blade brightens, away-side darkens.\n"
+                "Strength=0 restores the engine-default flat-tint look.");
         }
 
         ImGui::EndTabItem();
