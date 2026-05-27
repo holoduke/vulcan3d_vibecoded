@@ -266,8 +266,15 @@ vec3 sample_sky(vec3 dir) {
     // Procedural overlay scales down hard when the source is already HDR —
     // a faint shimmer at the matched sun direction, not a full disc.
     float overlay = is_hdr ? 0.10 : 1.0;
-    float halo = pow(sd, 32.0) * 0.5
-               + pow(sd, 8.0)  * 0.10;
+    // pow(sd,32) = ((sd^2)^2)^2)^2)^2 ; pow(sd,8) = ((sd^2)^2)^2 — 5 squarings
+    // total instead of two exp/log pairs. sd is the same input so the chain
+    // shares the lower powers.
+    float sd2  = sd * sd;
+    float sd4  = sd2 * sd2;
+    float sd8  = sd4 * sd4;
+    float sd16 = sd8 * sd8;
+    float sd32 = sd16 * sd16;
+    float halo = sd32 * 0.5 + sd8 * 0.10;
     sky += pc.sun_color.rgb * pc.sun_color.a * halo * overlay;
     float disc = smoothstep(0.99975, 0.99995, sd);
     sky += pc.sun_color.rgb * pc.sun_color.a * disc * (is_hdr ? 1.0 : 40.0);

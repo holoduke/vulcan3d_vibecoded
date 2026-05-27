@@ -120,7 +120,9 @@ void main() {
     // jitter can hit this); without the guard the blade goes black.
     vec3 V = normalize(scene.camera_pos.xyz - vWorldPos + vec3(1e-5));
     float view_dot_l = max(dot(-V, L), 0.0);
-    float backlit = pow(view_dot_l, 4.0) * (1.0 - n_dot_l) * vHeightRatio;
+    // pow(view_dot_l, 4) = (vdl*vdl)^2 — two squarings instead of exp/log.
+    float vdl2    = view_dot_l * view_dot_l;
+    float backlit = vdl2 * vdl2 * (1.0 - n_dot_l) * vHeightRatio;
     vec3  trans   = vec3(0.95, 1.05, 0.55) *
                     backlit * 0.30 * scene.sun_color.a;
 

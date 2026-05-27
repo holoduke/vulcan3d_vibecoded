@@ -1,4 +1,4 @@
-﻿// World-side state: level + meshes + skybox + texture array + viewmodel +
+// World-side state: level + meshes + skybox + texture array + viewmodel +
 // dyn-prop spawning + the per-frame `render_world` raster pass that drives
 // every cube/cylinder draw the engine emits. Lives here because all of these
 // touch `world_`, `dyn_props_`, `physics_`, the TLAS instance cache (via
@@ -3079,7 +3079,7 @@ void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,
         pc.color = color;
         pc.emissive = glm::vec4(emissive, full_emissive ? 1.0f : 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           kPushConstantStages,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, m.index_count, 1, 0, 0, 0);
     };
@@ -3158,10 +3158,14 @@ void VulkanEngine::rebuild_dyn_render_cache() {
         if (slot_matches && !physics_->is_body_active_h(handle)) {
             // Sleeping РІвЂ вЂ™ no motion this frame. Drag prev_world forward.
             dr.prev_world = dr.world;
+            // Sleeping bodies: prev_model trails the cached model so
+            // motion-vec emit stays zero. (model itself is unchanged.)
+            dr.prev_model = dr.model;
             continue;
         }
-        // Capture the prior world before we overwrite it.
+        // Capture the prior world AND model before we overwrite them.
         glm::mat4 captured_prev = slot_matches ? dr.world : glm::mat4(1.0f);
+        glm::mat4 captured_prev_model = slot_matches ? dr.model : glm::mat4(1.0f);
         if (!physics_->get_body_world_matrix_h(handle, dr.world)) {
             dr.valid = false;
             dr.body_id = 0;
@@ -3170,20 +3174,23 @@ void VulkanEngine::rebuild_dyn_render_cache() {
         if (!slot_matches) captured_prev = dr.world;
         dr.prev_world = captured_prev;
         // World-space AABB of an axis-aligned local box under an affine
-        // transform: extent = |R| * he, where R is the rotation/scale 3x3.
-        // Saves ~120 mul + 24 min/max per body vs the 8-corner loop and
-        // is exact for any non-shearing transform (which is all we feed
-        // here вЂ” Jolt rigid bodies are rigid).
-        const glm::vec3 he = dyn_props_[i].full_size * 0.5f;
-        const glm::mat3 R(dr.world);
-        const glm::vec3 ext = glm::abs(R[0]) * he.x +
-                              glm::abs(R[1]) * he.y +
-                              glm::abs(R[2]) * he.z;
-        const glm::vec3 ctr(dr.world[3]);
-        dr.valid    = true;
-        dr.body_id  = body;
-        dr.aabb_min = ctr - ext;
-        dr.aabb_max = ctr + ext;
+        // transform. Shared helper -- exact for any non-shearing transform
+        // (which is all Jolt rigid bodies produce).
+        world_aabb_of_box(dr.world, dyn_props_[i].full_size * 0.5f,
+                          dr.aabb_min, dr.aabb_max);
+        dr.valid   = true;
+        dr.body_id = body;
+        // Bake `world * scale(full_size)` once per frame. Was done
+        // per-draw in 4 sites (depth pass, shadow_lr pass, color pass,
+        // TLAS writer); ~60 boxes * 4 sites = ~240 mat4 muls/frame
+        // collapsed to ~60. The scale matrix itself is a 9-mul build
+        // we now do once per body instead of per-pass.
+        const glm::mat4 scale_m = glm::scale(glm::mat4(1.0f),
+                                              dyn_props_[i].full_size);
+        dr.model      = dr.world * scale_m;
+        // First-frame-of-slot guard mirrors captured_prev above: keep
+        // motion-vec emit zero by holding prev_model == model.
+        dr.prev_model = slot_matches ? captured_prev_model : dr.model;
     }
 }
 
@@ -3220,17 +3227,8 @@ void VulkanEngine::rebuild_tick_aabbs() {
             slot.body_id = 0;   // mark invalid
             continue;
         }
-        glm::vec3 he = dp.full_size * 0.5f;
-        glm::vec3 mn(std::numeric_limits<float>::max());
-        glm::vec3 mx(std::numeric_limits<float>::lowest());
-        for (int i = 0; i < 8; ++i) {
-            glm::vec4 c((i & 1) ? he.x : -he.x,
-                        (i & 2) ? he.y : -he.y,
-                        (i & 4) ? he.z : -he.z, 1.0f);
-            glm::vec3 wc(m * c);
-            mn = glm::min(mn, wc);
-            mx = glm::max(mx, wc);
-        }
+        glm::vec3 mn, mx;
+        world_aabb_of_box(m, dp.full_size * 0.5f, mn, mx);
         slot.aabb = {mn, mx};
         slot.body_id = dp.body_id;
         tick_aabbs_.push_back(slot.aabb);
@@ -3348,6 +3346,10 @@ VulkanEngine::FrameView VulkanEngine::compute_frame_view() {
     }
     fv.vp = fv.proj * fv.view;
     fv.inv_vp = glm::inverse(fv.vp);
+    // Hoisted once-per-frame: inv_view (draw_viewmodel) + frustum (3
+    // render passes used to each call extract_frustum on the same vp).
+    fv.inv_view = glm::inverse(fv.view);
+    fv.frustum = extract_frustum(fv.vp);
     return fv;
 }
 
@@ -3407,7 +3409,7 @@ void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
         rt_.terrain_raymarch_fog_godrays ? 1.0f : 0.0f,
         rt_.water_rt_reflections ? 1.0f : 0.0f);
     vkCmdPushConstants(cmd, pipeline_layout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                       kPushConstantStages,
                        0, sizeof(PushConstants), &pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 }
@@ -3434,7 +3436,7 @@ void VulkanEngine::render_terrain_raymarch_compose(VkCommandBuffer cmd) {
                          static_cast<float>(tr_lr_extent_.height),
                          0.0f);
     vkCmdPushConstants(cmd, pipeline_layout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                       kPushConstantStages,
                        0, sizeof(PushConstants), &pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 }
@@ -3469,7 +3471,7 @@ void VulkanEngine::render_grass_raymarch(VkCommandBuffer cmd) {
                                  static_cast<float>(frame_number_) * 0.016f,
                                  0.0f);
     vkCmdPushConstants(cmd, pipeline_layout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                       kPushConstantStages,
                        0, sizeof(PushConstants), &pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 }
@@ -3479,7 +3481,9 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
     // the color pass so depth-EQUAL/LESS_OR_EQUAL stays correct.
     const FrameView& fv = current_frame_view_;
     const glm::mat4& vp = fv.vp;
-    Frustum frustum = extract_frustum(vp);
+    // Frustum hoisted into FrameView: was extract_frustum(vp) per pass
+    // (3 callers all on the same vp); now shared.
+    const Frustum& frustum = fv.frustum;
 
     VkViewport vp_state{};
     vp_state.x = 0.0f; vp_state.y = 0.0f;
@@ -3503,7 +3507,7 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         pc.mvp = vp * model;
         pc.model = model;
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           kPushConstantStages,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     };
@@ -3540,8 +3544,9 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
                                                             : DynRender{};
         if (!dr.valid) continue;
         if (!aabb_visible(frustum, dr.aabb_min, dr.aabb_max)) continue;
-        glm::mat4 model = dr.world * glm::scale(glm::mat4(1.0f), dyn_props_[i].full_size);
-        push_depth(model);
+        // dr.model = dr.world * scale(full_size), baked in
+        // rebuild_dyn_render_cache (was per-draw glm::scale here).
+        push_depth(dr.model);
     }
     // Terrain: distance-LOD per chunk. Pre-pass and color pass MUST
     // pick the same LOD AND morph factor per chunk so the rasterised
@@ -3554,10 +3559,6 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         // the color pass, and rasterised chunk depths from the prime
         // would wrongly occlude that with stale heightfield depths.
         glm::vec3 cam = player_.eye_position();
-        const VkShaderStageFlags kPcStages =
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
-            VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-            VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
         const bool tess_on = rt_.terrain_tessellation_enabled &&
                              terrain_tess_depth_pipeline_ != VK_NULL_HANDLE;
         const float tess_r2 = rt_.terrain_tess_range * rt_.terrain_tess_range;
@@ -3606,7 +3607,7 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
                                             rt_.terrain_grass_line_scale,
                                             rt_.terrain_disp_amp,
                                             rt_.terrain_disp_smooth_mip);
-                vkCmdPushConstants(cmd, pipeline_layout_, kPcStages,
+                vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
                                    0, sizeof(PushConstants), &pc);
                 vkCmdDrawIndexed(cmd, c.index_count_lod[0], 1, 0, 0, 0);
             }
@@ -3643,7 +3644,7 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
                                         rt_.terrain_grass_line_scale,
                                         rt_.terrain_disp_amp,
                                         rt_.terrain_disp_smooth_mip);
-            vkCmdPushConstants(cmd, pipeline_layout_, kPcStages,
+            vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
                                0, sizeof(PushConstants), &pc);
             vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
         }
@@ -3663,7 +3664,8 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
 void VulkanEngine::render_world_shadow_lr_pass(VkCommandBuffer cmd) {
     const FrameView& fv = current_frame_view_;
     const glm::mat4& vp = fv.vp;
-    Frustum frustum = extract_frustum(vp);
+    // Shared FrameView frustum (same vp as the depth + color passes).
+    const Frustum& frustum = fv.frustum;
 
     VkViewport vp_state{};
     vp_state.x = 0.0f; vp_state.y = 0.0f;
@@ -3687,10 +3689,7 @@ void VulkanEngine::render_world_shadow_lr_pass(VkCommandBuffer cmd) {
         pc.mvp = vp * model;
         pc.model = model;
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT |
-                           VK_SHADER_STAGE_FRAGMENT_BIT |
-                           VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                           VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           kPushConstantStages,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     };
@@ -3705,9 +3704,8 @@ void VulkanEngine::render_world_shadow_lr_pass(VkCommandBuffer cmd) {
                                                             : DynRender{};
         if (!dr.valid) continue;
         if (!aabb_visible(frustum, dr.aabb_min, dr.aabb_max)) continue;
-        glm::mat4 model = dr.world * glm::scale(glm::mat4(1.0f),
-                                                dyn_props_[i].full_size);
-        push(model);
+        // dr.model = dr.world * scale(full_size), baked once per frame.
+        push(dr.model);
     }
 }
 
@@ -3717,7 +3715,8 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     last_view_proj_ = fv.vp;
     last_inv_view_proj_ = fv.inv_vp;
     const glm::mat4& vp = last_view_proj_;
-    Frustum frustum = extract_frustum(vp);
+    // Shared FrameView frustum -- same vp as depth + shadow_lr passes.
+    const Frustum& frustum = fv.frustum;
 
     VkViewport vp_state{};
     vp_state.x = 0.0f; vp_state.y = 0.0f;
@@ -3762,7 +3761,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             pc.tex_params = glm::vec4(-1.0f, -1.0f, uv_scale, 0.0f);
         }
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           kPushConstantStages,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     };
@@ -3790,7 +3789,10 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             glm::vec3 d(ctr.x - cam.x, 0.0f, ctr.z - cam.z);
             return (d.x * d.x + d.z * d.z) < tess_r2;
         };
-        auto fill_pc = [&](const TerrainChunk& c, float morph) {
+        // The chunk parameter is unused by this lambda -- the morph factor
+        // is the only per-chunk value pushed via PC here (XZ origin/size are
+        // handled by the tessellated near-chunk path, not this CD-LOD one).
+        auto fill_pc = [&](const TerrainChunk& /*c*/, float morph) {
             PushConstants pc{};
             pc.mvp = vp;
             pc.model = glm::mat4(1.0f);
@@ -3813,10 +3815,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                                         rt_.terrain_disp_amp,
                                         rt_.terrain_disp_smooth_mip);
             vkCmdPushConstants(cmd, pipeline_layout_,
-                               VK_SHADER_STAGE_VERTEX_BIT |
-                               VK_SHADER_STAGE_FRAGMENT_BIT |
-                               VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                               VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                               kPushConstantStages,
                                0, sizeof(PushConstants), &pc);
         };
 
@@ -3864,10 +3863,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                                             rt_.terrain_disp_amp,
                                             rt_.terrain_disp_smooth_mip);
                 vkCmdPushConstants(cmd, pipeline_layout_,
-                                   VK_SHADER_STAGE_VERTEX_BIT |
-                                   VK_SHADER_STAGE_FRAGMENT_BIT |
-                                   VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                                   VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                                   kPushConstantStages,
                                    0, sizeof(PushConstants), &pc);
                 vkCmdDrawIndexed(cmd, c.index_count_lod[0], 1, 0, 0, 0);
             }
@@ -3920,7 +3916,9 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrain_raymarch_pipeline_);
         PushConstants pc{};
         pc.mvp = vp;
-        pc.model = glm::inverse(vp);   // frag reconstructs world ray from NDC
+        // Reuse cached inverse from FrameView (was glm::inverse(vp) each
+        // time -- same matrix as fv.inv_vp computed once in compute_frame_view).
+        pc.model = fv.inv_vp;          // frag reconstructs world ray from NDC
         pc.prev_mvp = prev_vp;
         // .xy = plateau centre, .z = plateau half-extent, .w = plateau
         // height. Shader's terrainM blends FBM toward the plateau
@@ -3960,7 +3958,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             rt_.terrain_raymarch_fog_godrays ? 1.0f : 0.0f,
             rt_.water_rt_reflections ? 1.0f : 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           kPushConstantStages,
                            0, sizeof(PushConstants), &pc);
         // 3 verts, 1 instance вЂ” gl_VertexIndex 0..2 covers the screen.
         vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -3984,7 +3982,8 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                           terrain_water_pipeline_);
         PushConstants pc{};
         pc.mvp = vp;
-        pc.model = glm::inverse(vp);   // frag reconstructs the view ray
+        // Reuse cached inverse (was a per-frame glm::inverse(vp) here).
+        pc.model = fv.inv_vp;          // frag reconstructs the view ray
         pc.prev_mvp = prev_vp;
         // .x = water level → water.vert lifts the plane to it; the frag
         // still reads scene.water_params.y for the shaded surface.
@@ -4005,9 +4004,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             rt_.terrain_raymarch_fog_godrays ? 1.0f : 0.0f,
             rt_.water_rt_reflections ? 1.0f : 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
-                           VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                           VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           kPushConstantStages,
                            0, sizeof(PushConstants), &pc);
         // Push the water plane slightly farther in NDC than coplanar
         // terrain so depth-test ties go to the terrain. Constant 16 +
@@ -4038,9 +4035,9 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         for (const auto& f : spacejet_flights_) {
             // Asset's nose points -Z in glTF space; we need it pointing
             // along the heading direction +Z(rotated). Yaw value
-            // (heading + ПЂ) flips so rotY puts -Z in line with fwd.
-            const float yaw_now  = f.heading      + 3.14159265f;
-            const float yaw_prev = f.prev_heading + 3.14159265f;
+            // (heading + pi) flips so rotY puts -Z in line with fwd.
+            const float yaw_now  = f.heading      + kPi;
+            const float yaw_prev = f.prev_heading + kPi;
             // Bank roll proportional to turn rate вЂ” banked-into-the-turn
             // look. Cap at В±35В° so even tight turns stay readable.
             const float bank_now  = glm::clamp(-f.turn_rate * 4.0f,
@@ -4085,10 +4082,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                 pc.emissive = hit_emissive;
                 pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
                 vkCmdPushConstants(cmd, pipeline_layout_,
-                                   VK_SHADER_STAGE_VERTEX_BIT |
-                                     VK_SHADER_STAGE_FRAGMENT_BIT |
-                                     VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                                     VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                                   kPushConstantStages,
                                    0, sizeof(PushConstants), &pc);
                 vkCmdDrawIndexed(cmd, sm.mesh.index_count, 1, 0, 0, 0);
             }
@@ -4134,7 +4128,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         float t = static_cast<float>(frame_number_) * 0.016f;
         gpc.grass_params = glm::vec4(rt_.grass_distance, rt_.grass_wind, t, 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           kPushConstantStages,
                            0, sizeof(PushConstants), &gpc);
         // Density slider goes 0..4. We map (density / 4.0) onto the
         // [0, total_placed] range so density=1.0 gives 25% of the
@@ -4171,13 +4165,13 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                                                             : DynRender{};
         if (!dr.valid) continue;
         if (!aabb_visible(frustum, dr.aabb_min, dr.aabb_max)) { ++culled_dyn; continue; }
-        const glm::mat4 scale_m = glm::scale(glm::mat4(1.0f), dyn_props_[i].full_size);
-        glm::mat4 model = dr.world * scale_m;
-        glm::mat4 prev_model = dr.prev_world * scale_m;
+        // dr.model / dr.prev_model: world * scale(full_size) baked once
+        // per frame in rebuild_dyn_render_cache. Was per-draw glm::scale
+        // + 2 mat4 muls here (and again in depth/shadow/TLAS sites).
         glm::vec4 dyn_base = tex_on
             ? dyn_props_[i].color
             : dyn_props_[i].fallback_color;
-        draw_brush(model, prev_model, dyn_base, glm::vec3(0.0f), false,
+        draw_brush(dr.model, dr.prev_model, dyn_base, glm::vec3(0.0f), false,
                    dyn_props_[i].tex_albedo, dyn_props_[i].tex_normal,
                    dyn_props_[i].uv_scale, /*object_space=*/true);
         ++drawn_dyn;
@@ -4205,10 +4199,17 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdBindIndexBuffer(cmd, cylinder_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
         for (const auto& p : projectiles_) {
             glm::mat4 world;
-            if (!physics_->get_body_world_matrix(p.body_id, world)) continue;
+            // _h handle path skips the unordered_map.find that the
+            // id-keyed overload does (rebuild_tlas already uses _h here).
+            if (!physics_->get_body_world_matrix_h(p.jolt_handle, world)) continue;
             glm::vec3 pos(world[3]);
-            glm::vec3 vel = physics_->get_linear_velocity(p.body_id);
-            glm::vec3 dir = glm::length(vel) > 1e-3f ? glm::normalize(vel) : p.initial_dir;
+            glm::vec3 vel = physics_->get_linear_velocity_h(p.jolt_handle);
+            // Single sqrt for both length-test + normalize (was length()
+            // then normalize() which is another sqrt internally).
+            float v_len2 = glm::dot(vel, vel);
+            glm::vec3 dir = v_len2 > 1e-6f
+                ? vel * (1.0f / std::sqrt(v_len2))
+                : p.initial_dir;
             glm::mat4 model = align_local_y_to(pos, dir) *
                               glm::scale(glm::mat4(1.0f),
                                          glm::vec3(p.radius, p.half_length, p.radius));
@@ -4220,7 +4221,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             pc.color = p.color;
             pc.emissive = glm::vec4(p.emissive, 1.0f);  // full_emissive
             vkCmdPushConstants(cmd, pipeline_layout_,
-                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                               kPushConstantStages,
                                0, sizeof(PushConstants), &pc);
             vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
         }
@@ -4245,7 +4246,9 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // Viewmodel: rendered last so it overdraws world geometry only when its
     // depth wins. Its depth values are tiny (close to camera), so it sits in
     // front of everything in practice.
-    draw_viewmodel(cmd, vp, glm::inverse(fv.view));
+    // fv.inv_view is cached in compute_frame_view (was a per-frame
+    // glm::inverse(fv.view) here -- a full 4x4 mat inverse is ~80 fmuls).
+    draw_viewmodel(cmd, vp, fv.inv_view);
 
     last_draw_static_ = drawn_static;
     last_draw_dyn_    = drawn_dyn;

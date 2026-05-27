@@ -11,10 +11,12 @@ namespace qlike {
 // One uploaded 2D texture: device-local image + view + the VMA allocation
 // that backs it. Sampler is shared across textures and owned elsewhere.
 struct Texture2D {
-    VkImage       image = VK_NULL_HANDLE;
-    VmaAllocation alloc = nullptr;
-    VkImageView   view  = VK_NULL_HANDLE;
-    bool          ok    = false;
+    VkImage       image  = VK_NULL_HANDLE;
+    VmaAllocation alloc  = nullptr;
+    VkImageView   view   = VK_NULL_HANDLE;
+    int           width  = 0;
+    int           height = 0;
+    bool          ok     = false;
 };
 
 // Load + upload an image file (JPG/PNG via stb_image) as a 2D Vulkan

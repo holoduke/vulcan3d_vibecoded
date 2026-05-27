@@ -45,17 +45,7 @@ void VulkanEngine::apply_player_pushes(glm::vec3 pre_velocity) {
         } else {
             glm::mat4 m;
             if (!physics_->get_body_world_matrix(dp.body_id, m)) continue;
-            glm::vec3 he = dp.full_size * 0.5f;
-            b_min = glm::vec3(std::numeric_limits<float>::max());
-            b_max = glm::vec3(std::numeric_limits<float>::lowest());
-            for (int j = 0; j < 8; ++j) {
-                glm::vec4 c((j & 1) ? he.x : -he.x,
-                            (j & 2) ? he.y : -he.y,
-                            (j & 4) ? he.z : -he.z, 1.0f);
-                glm::vec3 wc(m * c);
-                b_min = glm::min(b_min, wc);
-                b_max = glm::max(b_max, wc);
-            }
+            world_aabb_of_box(m, dp.full_size * 0.5f, b_min, b_max);
         }
 
         bool overlap = p_max.x > b_min.x && p_min.x < b_max.x &&
@@ -91,20 +81,9 @@ void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
 
     // Orientation: rotate the local +Y axis (cylinder mesh + Jolt cylinder both
     // align along Y) onto the firing direction so the bullet visually points
-    // along its motion.
-    glm::quat orient;
-    {
-        glm::vec3 from(0.0f, 1.0f, 0.0f);
-        float dotp = glm::dot(from, dir);
-        if (dotp > 0.99999f) {
-            orient = glm::quat(1, 0, 0, 0);
-        } else if (dotp < -0.99999f) {
-            orient = glm::angleAxis(3.14159265f, glm::vec3(1, 0, 0));
-        } else {
-            glm::vec3 axis = glm::normalize(glm::cross(from, dir));
-            orient = glm::angleAxis(std::acos(dotp), axis);
-        }
-    }
+    // along its motion. Shared helper — same code align_local_y_to uses for
+    // the per-frame render matrix.
+    glm::quat orient = align_local_y_to_quat(dir);
 
     // Muzzle: a short distance ahead of the eye so the bullet is immediately
     // visible and doesn't spawn inside the player capsule.
@@ -479,7 +458,7 @@ void VulkanEngine::draw_decals(VkCommandBuffer cmd, const glm::mat4& vp) {
         pc.emissive = glm::vec4(0.0f);
         pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           kPushConstantStages,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
     }
@@ -506,7 +485,7 @@ void VulkanEngine::draw_spark_trails(VkCommandBuffer cmd, const glm::mat4& vp) {
         pc.color = glm::vec4(glm::min(emissive, glm::vec3(1.0f)), 1.0f);
         pc.emissive = glm::vec4(emissive, 1.0f);    // full_emissive
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           kPushConstantStages,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
     };
@@ -573,7 +552,7 @@ void VulkanEngine::draw_shadow_debug(VkCommandBuffer cmd, const glm::mat4& vp) {
         pc.color = glm::vec4(glm::min(emissive, glm::vec3(1.0f)), 1.0f);
         pc.emissive = glm::vec4(emissive, 1.0f);  // .a > 0 → skip lighting in cube.frag
         vkCmdPushConstants(cmd, pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                           kPushConstantStages,
                            0, sizeof(PushConstants), &pc);
         vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
     };
@@ -753,28 +732,6 @@ void VulkanEngine::update_particles(float dt) {
         } else {
             ++it;
         }
-    }
-}
-
-void VulkanEngine::try_fire_hitscan(glm::vec3 origin, glm::vec3 direction) {
-    if (!physics_) return;
-    auto hit = physics_->raycast(origin, glm::normalize(direction), 200.0f);
-    if (!hit.hit) {
-        log::infof("[shoot] miss origin=(%.2f,%.2f,%.2f) dir=(%.2f,%.2f,%.2f)",
-                   origin.x, origin.y, origin.z, direction.x, direction.y, direction.z);
-        return;
-    }
-    if (hit.dynamic && hit.body_id != 0) {
-        // ~3 kg·m/s impulse along ray + a bit upward for satisfying flips.
-        glm::vec3 imp = direction * 6.0f + glm::vec3(0.0f, 2.5f, 0.0f);
-        physics_->apply_impulse(hit.body_id, imp);
-        ++score_;
-        log::infof("[shoot] HIT dyn body=%u dist=%.2f pos=(%.2f,%.2f,%.2f) score=%d",
-                   hit.body_id, hit.distance,
-                   hit.position.x, hit.position.y, hit.position.z, score_);
-    } else {
-        log::infof("[shoot] static dist=%.2f pos=(%.2f,%.2f,%.2f)",
-                   hit.distance, hit.position.x, hit.position.y, hit.position.z);
     }
 }
 

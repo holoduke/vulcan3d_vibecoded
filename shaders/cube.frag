@@ -1259,6 +1259,11 @@ void main() {
         vec3 Tt = normalize(vec3(1.0, 0.0, 0.0) - N * N.x);
         vec3 Bt = cross(N, Tt);
         float pom_str = clamp(vTexParams.x, 0.0, 1.0);
+        // Camera-to-fragment view direction is identical for both POM
+        // branches below (grass POM + rock POM) — was being normalised
+        // twice per pixel. Hoist once; both inner gates still early-out
+        // before any other work when their weight is below threshold.
+        vec3 V_pom = normalize(scene.camera_pos.xyz - vWorldPos);
         // GRASS-BAND SPOM: extra parallax march driven by the rocky-
         // rugged-terrain height map (u_height[5]) so the new texture's
         // micro-relief actually displaces pixels on the grass-band
@@ -1279,8 +1284,7 @@ void main() {
         float pom_grass_w = pom_str * grass_w_band *
                             (1.0 - smoothstep(60.0, max(70.0, scene.terrain_disp_params.z), cam_dist));
         if (pom_grass_w > 0.02) {
-            vec3 Vw = normalize(scene.camera_pos.xyz - vWorldPos);
-            vec3 Vt = vec3(dot(Vw, Tt), dot(Vw, Bt), dot(Vw, N));
+            vec3 Vt = vec3(dot(V_pom, Tt), dot(V_pom, Bt), dot(V_pom, N));
             Vt.z = max(abs(Vt.z), 0.20);
             int   steps = int(mix(10.0, 22.0, pom_grass_w));
             float layer = 1.0 / float(steps);
@@ -1321,8 +1325,7 @@ void main() {
         float pom_w = pom_str * rockiness *
                       (1.0 - smoothstep(35.0, 90.0, cam_dist));
         if (pom_w > 0.01) {
-            vec3 Vw = normalize(scene.camera_pos.xyz - vWorldPos);
-            vec3 Vt = vec3(dot(Vw, Tt), dot(Vw, Bt), dot(Vw, N));
+            vec3 Vt = vec3(dot(V_pom, Tt), dot(V_pom, Bt), dot(V_pom, N));
             Vt.z = max(abs(Vt.z), 0.20);
             int   steps = int(mix(16.0, 40.0, pom_w));
             float layer = 1.0 / float(steps);
@@ -2835,8 +2838,10 @@ void main() {
             float mu  = clamp(dot(view_dir, -Lf), -1.0, 1.0);
             const float g  = 0.76;
             const float g2 = g * g;
-            float hg = (1.0 - g2) / (12.566 *
-                       pow(max(0.0001, 1.0 + g2 - 2.0 * g * mu), 1.5));
+            // pow(x, 1.5) = x * sqrt(x) — one mul + one sqrt is much cheaper
+            // than exp/log pair pow() takes for a fractional exponent.
+            float hg_d = max(0.0001, 1.0 + g2 - 2.0 * g * mu);
+            float hg = (1.0 - g2) / (12.566 * hg_d * sqrt(hg_d));
             // Normalised so isotropic = 1. hg peaks ~10 at forward.
             float mie = clamp(hg * 0.40, 0.0, 1.5);
             vec3  sun_tint = scene.sun_color.rgb * scene.sun_color.a;

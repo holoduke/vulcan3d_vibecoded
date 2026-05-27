@@ -956,9 +956,9 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
             (radius / std::max(dist, 0.001f)) < kMinAngularSize) {
             continue;
         }
-        const glm::mat4 scale_m = glm::scale(glm::mat4(1.0f), dyn_props_[i].full_size);
-        glm::mat4 m = dr.world * scale_m;
-        glm::mat4 prev_m = dr.prev_world * scale_m;
+        // dr.model / dr.prev_model: world * scale(full_size) baked once
+        // per frame in rebuild_dyn_render_cache (was per-draw glm::scale
+        // + 2 mat4 muls here).
         glm::vec4 tex = tex_on
             ? glm::vec4(static_cast<float>(dyn_props_[i].tex_albedo),
                         static_cast<float>(dyn_props_[i].tex_normal),
@@ -967,8 +967,8 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         glm::vec4 dyn_base = tex_on
             ? dyn_props_[i].color
             : dyn_props_[i].fallback_color;
-        write_instance(m, prev_m, dyn_base, glm::vec3(0.0f), false,
-                       blas_device_address_, tex);
+        write_instance(dr.model, dr.prev_model, dyn_base, glm::vec3(0.0f),
+                       false, blas_device_address_, tex);
     }
     // Sparks are intentionally NOT added to the TLAS. With kMaxParticles=384
     // and high fire rates, including them costs ~hundreds of instance writes
@@ -982,7 +982,12 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         if (!physics_->get_body_world_matrix_h(p.jolt_handle, world)) continue;
         glm::vec3 pos(world[3]);
         glm::vec3 vel = physics_->get_linear_velocity_h(p.jolt_handle);
-        glm::vec3 dir = glm::length(vel) > 1e-3f ? glm::normalize(vel) : p.initial_dir;
+        // Single sqrt for both length-test + normalize (was length()
+        // then normalize() which is another sqrt internally).
+        float v_len2 = glm::dot(vel, vel);
+        glm::vec3 dir = v_len2 > 1e-6f
+            ? vel * (1.0f / std::sqrt(v_len2))
+            : p.initial_dir;
         glm::mat4 align = align_local_y_to(pos, dir);
         glm::mat4 scale_m = glm::scale(glm::mat4(1.0f),
                                        glm::vec3(p.radius, p.half_length, p.radius));

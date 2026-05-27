@@ -79,6 +79,95 @@ namespace qlike {
 VulkanEngine::VulkanEngine() = default;
 VulkanEngine::~VulkanEngine() { shutdown(); }
 
+void VulkanEngine::ensure_loader_bg_loaded_() {
+    if (loader_bg_tried_) return;
+    loader_bg_tried_ = true;
+    // Probe a few roots so the engine finds the asset whether the cwd
+    // is the project root or `build/`.
+    const char* roots[] = {
+        "assets/loader/loading_bg.jpg",
+        "../assets/loader/loading_bg.jpg",
+        "../../assets/loader/loading_bg.jpg",
+    };
+    std::string path;
+    for (const char* r : roots) {
+        std::ifstream f(r);
+        if (f.good()) { path = r; break; }
+    }
+    if (path.empty()) {
+        log::warnf("[loader] background image missing on all probe paths");
+        return;
+    }
+    Texture2D r = upload_texture_from_file(
+        device_, allocator_, graphics_queue_, graphics_queue_family_,
+        path, VK_FORMAT_R8G8B8A8_SRGB);
+    if (!r.ok) {
+        log::warnf("[loader] failed to load %s", path.c_str());
+        return;
+    }
+    // Free the sampler view -- we only need the raw image for
+    // vkCmdBlitImage. Saves a tiny bit of memory and keeps the
+    // descriptor pool budget intact.
+    if (r.view) vkDestroyImageView(device_, r.view, nullptr);
+    loader_bg_image_  = r.image;
+    loader_bg_alloc_  = r.alloc;
+    loader_bg_extent_ = { static_cast<uint32_t>(r.width),
+                          static_cast<uint32_t>(r.height) };
+    // Transition once from SHADER_READ_ONLY_OPTIMAL (where upload
+    // leaves it) -> TRANSFER_SRC_OPTIMAL so the per-frame blit's
+    // src layout matches. The image lives in this layout forever
+    // since the loader is the only consumer.
+    VkCommandPool cp{};
+    VkCommandPoolCreateInfo cpi{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = graphics_queue_family_,
+    };
+    vkCreateCommandPool(device_, &cpi, nullptr, &cp);
+    VkCommandBuffer cmd{};
+    VkCommandBufferAllocateInfo cai{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .commandPool = cp,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    vkAllocateCommandBuffers(device_, &cai, &cmd);
+    VkCommandBufferBeginInfo bi{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = nullptr,
+    };
+    vkBeginCommandBuffer(cmd, &bi);
+    vkinit::transition_image(cmd, loader_bg_image_,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = nullptr,
+        .waitSemaphoreCount = 0, .pWaitSemaphores = nullptr,
+        .pWaitDstStageMask = nullptr,
+        .commandBufferCount = 1, .pCommandBuffers = &cmd,
+        .signalSemaphoreCount = 0, .pSignalSemaphores = nullptr,
+    };
+    vkQueueSubmit(graphics_queue_, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphics_queue_);
+    vkDestroyCommandPool(device_, cp, nullptr);
+    log::infof("[loader] background loaded (%ux%u) from %s",
+                loader_bg_extent_.width, loader_bg_extent_.height, path.c_str());
+}
+
+void VulkanEngine::destroy_loader_bg_() {
+    if (loader_bg_image_) {
+        vmaDestroyImage(allocator_, loader_bg_image_, loader_bg_alloc_);
+        loader_bg_image_ = VK_NULL_HANDLE;
+        loader_bg_alloc_ = nullptr;
+    }
+}
+
 void VulkanEngine::present_loader_frame(const char* label, float progress) {
     if (!device_ || !swapchain_ || swapchain_images_.empty()) return;
 
@@ -117,10 +206,49 @@ void VulkanEngine::present_loader_frame(const char* label, float progress) {
     QLIKE_VK_CHECK(vkBeginCommandBuffer(frame.command_buffer, &bi),
                    "loader: vkBeginCommandBuffer");
 
-    vkinit::transition_image(frame.command_buffer,
-                              swapchain_images_[img_idx],
-                              VK_IMAGE_LAYOUT_UNDEFINED,
-                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    // Try to load the background image on the first call. Cached
+    // across all subsequent loader frames.
+    ensure_loader_bg_loaded_();
+
+    // Blit path: if we have a background image, copy it to the
+    // swapchain (stretched to fit) BEFORE the render pass begins.
+    // vkCmdBlitImage runs without any graphics pipeline -- perfect
+    // for the loader screen which fires before pipelines exist.
+    // Falls back to the cleared navy + radial vignette if the asset
+    // is missing.
+    bool used_bg = (loader_bg_image_ != VK_NULL_HANDLE);
+    if (used_bg) {
+        vkinit::transition_image(frame.command_buffer,
+                                  swapchain_images_[img_idx],
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.layerCount = 1;
+        blit.srcOffsets[1] = {
+            static_cast<int32_t>(loader_bg_extent_.width),
+            static_cast<int32_t>(loader_bg_extent_.height), 1 };
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.layerCount = 1;
+        blit.dstOffsets[1] = {
+            static_cast<int32_t>(swapchain_extent_.width),
+            static_cast<int32_t>(swapchain_extent_.height), 1 };
+        vkCmdBlitImage(frame.command_buffer,
+                        loader_bg_image_,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        swapchain_images_[img_idx],
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        1, &blit, VK_FILTER_LINEAR);
+        vkinit::transition_image(frame.command_buffer,
+                                  swapchain_images_[img_idx],
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    } else {
+        vkinit::transition_image(frame.command_buffer,
+                                  swapchain_images_[img_idx],
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
 
     VkClearValue clear_bg{};
     clear_bg.color = { { 0.020f, 0.025f, 0.040f, 1.0f } };  // deep navy
@@ -160,14 +288,15 @@ void VulkanEngine::present_loader_frame(const char* label, float progress) {
     int W = static_cast<int>(swapchain_extent_.width);
     int H = static_cast<int>(swapchain_extent_.height);
 
-    // ---- Background gradient: dim radial vignette from centre ----
-    // Built with concentric darker bands so the centre reads as the
-    // focal point. Cheap (~10 quads).
-    {
-        int cx = W / 2, cy = H / 2;
+    // Background gradient: dim radial vignette from centre. Skipped
+    // entirely when a loader BG image was blit'd into the swapchain
+    // above -- the rects would just cover the image otherwise. The
+    // text + progress overlay below still draws on top so the user
+    // can see the loading state on either background.
+    if (!used_bg) {
         for (int b = 0; b < 8; ++b) {
             float t = float(b) / 8.0f;
-            float d = 0.020f - 0.010f * t;       // fade to near-black at edges
+            float d = 0.020f - 0.010f * t;
             int pad = static_cast<int>(t * std::max(W, H) * 0.5f);
             clear_rect(pad, pad, W - 2 * pad, H - 2 * pad, d, d * 1.1f, d * 1.4f);
         }
@@ -1501,7 +1630,7 @@ void VulkanEngine::run(const RunOptions& opts) {
             player_.position  = glm::vec3(R * std::sin(ang),
                                           23.0f,
                                           R * std::cos(ang));
-            player_.yaw       = ang + 3.14159265f * 0.5f;   // tangent (CCW)
+            player_.yaw       = ang + kHalfPi;              // tangent (CCW)
             player_.pitch     = 0.0f;
             in.mouse_dx = 0.0;
             in.mouse_dy = 0.0;
@@ -1554,7 +1683,7 @@ void VulkanEngine::run(const RunOptions& opts) {
                 "Raise", "Lower", "Smooth", "Flatten",
                 "GrassAdd", "GrassRemove", "Erode", "ErodeSmooth"
             };
-            log::infof("[terrain] brush mode → %s (%s)",
+            log::infof("[terrain] brush mode -> %s (%s)",
                        kModeNames[m], bm_next_edge ? "R" : "Q");
         }
         if (menu_edge) {
@@ -1575,7 +1704,7 @@ void VulkanEngine::run(const RunOptions& opts) {
             float dy = static_cast<float>(in.mouse_dy);
             player_.yaw   += dx * game::Player::kMouseSensitivity;
             player_.pitch -= dy * game::Player::kMouseSensitivity;
-            constexpr float kHalfPi = 1.57079632679f;
+            // kHalfPi from engine/vk_engine/internal.h.
             constexpr float kPitchCap = kHalfPi - 0.01f;
             if (player_.pitch >  kPitchCap) player_.pitch =  kPitchCap;
             if (player_.pitch < -kPitchCap) player_.pitch = -kPitchCap;
@@ -2165,6 +2294,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_fsr3",   [&]{ destroy_fsr3(); });
     guarded("destroy_restir", [&]{ destroy_restir(); });
     guarded("destroy_imgui",  [&]{ destroy_imgui(); });
+    guarded("destroy_loader_bg", [&]{ destroy_loader_bg_(); });
     guarded("destroy_viewmodel", [&]{ destroy_viewmodel(); });
     guarded("destroy_spacejet",  [&]{ destroy_spacejet(); });
     // Reverse of init order: compose first (samples bloom + TAA history),

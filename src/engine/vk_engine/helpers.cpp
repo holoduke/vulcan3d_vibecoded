@@ -86,22 +86,24 @@ glm::vec3 spark_blackbody(float t) {
     else                return glm::mix(c2, c3, (t - 0.66f) / 0.34f);
 }
 
+// Quaternion-only "rotate local +Y to dir" — used by both the matrix
+// form below and by combat.cpp::fire_projectile where Jolt wants an
+// orientation, not a full transform.
+glm::quat align_local_y_to_quat(glm::vec3 dir) {
+    const glm::vec3 from(0.0f, 1.0f, 0.0f);
+    float dotp = glm::dot(from, dir);
+    if (dotp > 0.99999f)  return glm::quat(1, 0, 0, 0);
+    if (dotp < -0.99999f) return glm::angleAxis(kPi, glm::vec3(1, 0, 0));
+    glm::vec3 axis = glm::normalize(glm::cross(from, dir));
+    return glm::angleAxis(std::acos(dotp), axis);
+}
+
 // Rotate the local +Y axis to point along `dir`, then translate to `pos`.
 // Used to align the cylinder bullet mesh to its current velocity vector each
 // frame — keeps the visual following the actual (gravity-bent) trajectory.
 glm::mat4 align_local_y_to(glm::vec3 pos, glm::vec3 dir) {
-    glm::vec3 from(0.0f, 1.0f, 0.0f);
-    float dotp = glm::dot(from, dir);
-    glm::quat q;
-    if (dotp > 0.99999f) {
-        q = glm::quat(1, 0, 0, 0);
-    } else if (dotp < -0.99999f) {
-        q = glm::angleAxis(3.14159265f, glm::vec3(1, 0, 0));
-    } else {
-        glm::vec3 axis = glm::normalize(glm::cross(from, dir));
-        q = glm::angleAxis(std::acos(dotp), axis);
-    }
-    return glm::translate(glm::mat4(1.0f), pos) * glm::mat4_cast(q);
+    return glm::translate(glm::mat4(1.0f), pos) *
+           glm::mat4_cast(align_local_y_to_quat(dir));
 }
 
 // Smoothstep snap-back + half-sine spring-forward used by the viewmodel

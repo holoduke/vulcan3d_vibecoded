@@ -1140,8 +1140,13 @@ float calcShadow(vec3 pos, vec3 sunDir) {
     // useful step size we'd take next anyway). Saves 1 FBM call per
     // shadowed pixel — shadow pixels are most of the screen so the
     // sum is meaningful.
-    float min_step_init = mix(0.5, 4.0, smoothstep(100.0, 500.0, recv_dist));
-    float t   = max(0.5, min_step_init);
+    // min_step is a function of recv_dist only — loop-invariant. Hoist out
+    // of the per-iteration body (was being recomputed up to kSteps times,
+    // each call a mix+smoothstep). Single value used both for the start
+    // offset and the clamp inside the loop — the two callsites computed
+    // the same number, so collapse to one.
+    float min_step = mix(0.5, 4.0, smoothstep(100.0, 500.0, recv_dist));
+    float t   = max(0.5, min_step);
     for (int i = 0; i < kSteps; ++i) {
         vec3 p = pos + t * sunDir;
         // Coarse FBM (same user octaves, no sculpt-delta tap).
@@ -1156,8 +1161,8 @@ float calcShadow(vec3 pos, vec3 sunDir) {
         // Bigger min-step and lower hard-cap at distance — same logic
         // as the primary march. Combined with the receiver-distance
         // step budget above, distant shadow contributions converge in
-        // 4 jumps instead of crawling 24+ tiny steps.
-        float min_step = mix(0.5, 4.0, smoothstep(100.0, 500.0, recv_dist));
+        // 4 jumps instead of crawling 24+ tiny steps. min_step hoisted
+        // above the loop (loop-invariant).
         t += clamp(h, min_step, 100.0);
         if (t > 800.0 || res < 0.001) break;
     }
@@ -1505,7 +1510,10 @@ vec3 pm_get_flow_rate(vec2 wp, float water_y, float ray_t) {
 
     // Foam amount — concentrates where flow is fast over shallow
     // water (rapids/eddies). P_Malin's exact mapping.
-    float foam = abs(length(flow)) * 0.5;
+    // flow_len was already computed above; after `flow *= slow` the new
+    // length is flow_len * slow. Skips a second length() (sqrt+dot) per
+    // pixel. abs() of a non-negative length was a no-op — dropped.
+    float foam = flow_len * slow * 0.5;
     foam += clamp(foam - 0.4, 0.0, 1.0);
     foam = 1.0 - pow(max(0.0, d_c), foam * 0.35);
 
@@ -1549,26 +1557,25 @@ vec3 lakeWaterNormal(vec2 worldXZ, float uv_scale, float strength,
     // 3-octave FBM with time as a phase offset across octaves so the
     // surface evolves smoothly over time without UV advection.
     // Centred-FD normal extraction — sample 4 neighbours of p.
-    float dx_step = 0.05;
-    float n_xp = noise2(p + vec2(dx_step, 0.0) +
-                        vec2(t * 0.07,  t * 0.04));
-    float n_xn = noise2(p - vec2(dx_step, 0.0) +
-                        vec2(t * 0.07,  t * 0.04));
-    float n_zp = noise2(p + vec2(0.0, dx_step) +
-                        vec2(t * 0.07,  t * 0.04));
-    float n_zn = noise2(p - vec2(0.0, dx_step) +
-                        vec2(t * 0.07,  t * 0.04));
+    const float dx_step = 0.05;
+    const float inv_2_dx = 1.0 / (2.0 * 0.05);   // 1/(2*dx_step), folded
+    // Octave-1 + octave-2 time offsets are loop-invariants — compute once
+    // (was: 4 + 4 redundant vec2(t*a, t*b) builds in the noise calls).
+    vec2 t_off_1 = vec2(t * 0.07,  t * 0.04);
+    vec2 t_off_2 = vec2(t * 0.13, -t * 0.09);
+    vec2 p_o1 = p + t_off_1;
+    vec2 p_o2 = p * 2.7 + t_off_2;
+    float n_xp = noise2(p_o1 + vec2(dx_step, 0.0));
+    float n_xn = noise2(p_o1 - vec2(dx_step, 0.0));
+    float n_zp = noise2(p_o1 + vec2(0.0, dx_step));
+    float n_zn = noise2(p_o1 - vec2(0.0, dx_step));
     // Add a second octave (higher freq) for ripple texture.
-    n_xp += 0.5 * noise2(p * 2.7 + vec2(dx_step, 0.0) +
-                         vec2(t * 0.13, -t * 0.09));
-    n_xn += 0.5 * noise2(p * 2.7 - vec2(dx_step, 0.0) +
-                         vec2(t * 0.13, -t * 0.09));
-    n_zp += 0.5 * noise2(p * 2.7 + vec2(0.0, dx_step) +
-                         vec2(t * 0.13, -t * 0.09));
-    n_zn += 0.5 * noise2(p * 2.7 - vec2(0.0, dx_step) +
-                         vec2(t * 0.13, -t * 0.09));
-    float dx = (n_xp - n_xn) * (0.5 / dx_step);
-    float dz = (n_zp - n_zn) * (0.5 / dx_step);
+    n_xp += 0.5 * noise2(p_o2 + vec2(dx_step, 0.0));
+    n_xn += 0.5 * noise2(p_o2 - vec2(dx_step, 0.0));
+    n_zp += 0.5 * noise2(p_o2 + vec2(0.0, dx_step));
+    n_zn += 0.5 * noise2(p_o2 - vec2(0.0, dx_step));
+    float dx = (n_xp - n_xn) * inv_2_dx;
+    float dz = (n_zp - n_zn) * inv_2_dx;
     return normalize(vec3(-dx * strength * bump_w,
                            1.0,
                           -dz * strength * bump_w));
@@ -1786,7 +1793,9 @@ void main() {
         sky_refl = mix(sky_refl, cHaze, hb * 0.65);
         sky_refl = mix(sky_refl, scene.sky_color.rgb, 0.22);
         // pow(x, 60) ≈ pow(x, 64) = 6 squarings; visually identical
-        // for a sun-halo lobe at this exponent.
+        // for a sun-halo lobe at this exponent. Reuses sh2/sh4 below for
+        // the broad-glow term (was redundantly recomputing sg2 = sh1*sh1
+        // → sg4 = sg2*sg2 right after this block — same values).
         float sh1 = max(dot(refl, sunDirW), 0.0);
         float sh2 = sh1 * sh1; float sh4 = sh2 * sh2;
         float sh8 = sh4 * sh4; float sh16 = sh8 * sh8;
@@ -1795,8 +1804,7 @@ void main() {
         // Broad, soft sun glow (≈pow(.,4)) on top of the tight halo —
         // gives the wide specular sheet that made the old reflection
         // read as "lit water" rather than a flat gradient.
-        float sg2 = sh1 * sh1; float sg4 = sg2 * sg2;
-        sky_refl += scene.sun_color.rgb * scene.sun_color.a * sg4 * 0.30;
+        sky_refl += scene.sun_color.rgb * scene.sun_color.a * sh4 * 0.30;
 
         vec3 reflCol = sky_refl;
         // RT-style FBM-march reflection вЂ” picks up the actual mountain

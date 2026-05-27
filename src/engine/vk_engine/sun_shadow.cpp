@@ -336,9 +336,8 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
                                                             : DynRender{};
         if (!dr.valid) continue;
         if (!aabb_visible(light_frustum, dr.aabb_min, dr.aabb_max)) continue;
-        glm::mat4 model = dr.world * glm::scale(glm::mat4(1.0f),
-                                                 dyn_props_[i].full_size);
-        push_shadow(model);
+        // dr.model = dr.world * scale(full_size), baked once per frame.
+        push_shadow(dr.model);
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     }
 

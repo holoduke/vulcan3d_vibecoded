@@ -116,6 +116,17 @@ private:
     // FrameData ring as the main render loop so it consumes one frame
     // index per call. `progress` is clamped to [0,1].
     void present_loader_frame(const char* label, float progress);
+    // Loader background image (assets/loader/loading_bg.jpg). Loaded
+    // on demand at the first present_loader_frame call and reused
+    // for every subsequent loader frame. Blit'd to the swapchain with
+    // vkCmdBlitImage (no pipeline needed -- the loader runs BEFORE
+    // any graphics pipeline exists). Torn down at engine shutdown.
+    VkImage         loader_bg_image_  = VK_NULL_HANDLE;
+    VmaAllocation   loader_bg_alloc_  = nullptr;
+    VkExtent2D      loader_bg_extent_ = {0, 0};
+    bool            loader_bg_tried_  = false;
+    void ensure_loader_bg_loaded_();
+    void destroy_loader_bg_();
     void init_readback_buffer();
     void destroy_readback_buffer();
     void init_pipeline();
@@ -848,6 +859,13 @@ private:
         // `world` value before each frame's recompute; equals `world` for
         // sleeping bodies (no motion) and for newly-created slots (no prior).
         glm::mat4 prev_world{1.0f};
+        // Cached `world * scale(full_size)` and `prev_world * scale(...)`.
+        // Hoisted out of the per-pass draw loops: render_world_depth_pass,
+        // render_world_shadow_lr_pass, render_world (color) and rebuild_tlas
+        // all need this and were each computing it from scratch -- 4-5
+        // mat4 multiplies per dyn prop per frame become 1 (in rebuild_dyn_render_cache).
+        glm::mat4 model{1.0f};
+        glm::mat4 prev_model{1.0f};
         glm::vec3 aabb_min{0.0f};
         glm::vec3 aabb_max{0.0f};
     };
@@ -862,7 +880,6 @@ private:
     static constexpr float kMuzzleFlashDuration = 0.07f;   // ~4 frames @ 60fps
     static constexpr float kRecoilDuration      = 0.14f;   // total kick-then-return
     static constexpr float kRecoilStroke        = 0.05f;   // m of pull-back
-    void try_fire_hitscan(glm::vec3 origin, glm::vec3 direction);
 
     // After the player's tick: push any dynamic box the player is in contact
     // with. `pre_velocity` is the player's velocity *before* slide_move
@@ -1249,6 +1266,15 @@ private:
         glm::mat4 proj{1.0f};
         glm::mat4 vp{1.0f};
         glm::mat4 inv_vp{1.0f};
+        // Cached glm::inverse(view) -- draw_viewmodel needs it and
+        // recomputing once per frame is wasteful (the value is purely
+        // a function of the same camera state we already captured).
+        glm::mat4 inv_view{1.0f};
+        // Frustum derived from vp. Extracted once and reused by
+        // render_world_depth_pass / render_world_shadow_lr_pass /
+        // render_world (3x same vp). Each extract is 6 plane normalise
+        // sqrts + a mat4 transpose; not free at 240+ fps.
+        Frustum frustum{};
     };
     FrameView current_frame_view_{};
     FrameView compute_frame_view();

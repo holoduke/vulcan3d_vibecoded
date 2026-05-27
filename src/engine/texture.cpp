@@ -353,6 +353,8 @@ Texture2D upload_texture_from_file(VkDevice device, VmaAllocator alloc,
     }
     Texture2D r = upload_rgba8_core(device, alloc, queue, qf, pixels,
                                     w, h, format, path.c_str());
+    r.width  = w;
+    r.height = h;
     stbi_image_free(pixels);
     (void)from_cache;
     return r;

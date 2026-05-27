@@ -45,6 +45,23 @@ inline bool vk_validation_enabled() {
 // Path of the autosaved settings file relative to CWD.
 inline constexpr const char* kSettingsPath = "qlike_settings.cfg";
 
+// Pi constants used by several engine sections. Float-precision; matches the
+// literal `3.14159265f` previously scattered across combat / world / helpers.
+inline constexpr float kPi     = 3.14159265358979f;
+inline constexpr float kHalfPi = 1.57079632679490f;
+inline constexpr float kTwoPi  = 6.28318530717958f;
+
+// Stage flags used for every vkCmdPushConstants call against pipeline_layout_.
+// The PushConstants struct is consumed by the vertex, fragment, tessellation-
+// control AND tessellation-evaluation stages (see init_pipeline). Same bit
+// pattern was previously inlined at 16+ call sites; lifting it removes both
+// the line-noise and the per-site mismatch risk.
+inline constexpr VkShaderStageFlags kPushConstantStages =
+    VK_SHADER_STAGE_VERTEX_BIT |
+    VK_SHADER_STAGE_FRAGMENT_BIT |
+    VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+    VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+
 // ---- Shared push-constant + UBO layouts ----
 
 // Per-draw push constants for the cube/cylinder raster pipeline. The depth
@@ -350,6 +367,27 @@ glm::vec3 spark_blackbody(float t);
 // Used by projectile + spark trail rendering to align the cylinder mesh
 // to its current velocity vector.
 glm::mat4 align_local_y_to(glm::vec3 pos, glm::vec3 dir);
+
+// Quaternion-only counterpart of align_local_y_to — used at Jolt body
+// spawn time where the engine needs an orientation, not a full transform.
+glm::quat align_local_y_to_quat(glm::vec3 dir);
+
+// Compute the world-space AABB of an axis-aligned local box (half-extents
+// `he`, centred at the local origin) under a rigid/non-shearing transform
+// `m`. Closed-form alternative to the 8-corner loop: extent = |R| * he
+// where R is the rotation/scale 3x3 — saves ~120 mul + 24 min/max per call
+// and is exact for any rotation-and-scale transform (which is everything
+// Jolt produces for rigid bodies).
+inline void world_aabb_of_box(const glm::mat4& m, const glm::vec3& he,
+                              glm::vec3& out_min, glm::vec3& out_max) {
+    const glm::mat3 R(m);
+    const glm::vec3 ext = glm::abs(R[0]) * he.x +
+                          glm::abs(R[1]) * he.y +
+                          glm::abs(R[2]) * he.z;
+    const glm::vec3 ctr(m[3]);
+    out_min = ctr - ext;
+    out_max = ctr + ext;
+}
 
 // Smoothstep-ish curve for viewmodel recoil offset given how much of the
 // recoil-stroke duration has already elapsed.
