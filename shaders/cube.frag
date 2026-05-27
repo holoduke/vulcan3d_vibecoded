@@ -1709,16 +1709,28 @@ void main() {
                     return;
                 }
                 // Write the recessed surface depth so the relief occludes
-                // correctly and silhouettes against the depth buffer.
+                // correctly and silhouettes against the depth buffer — but
+                // only on WALLS (axis 0/2). On axis-1 (top/ground-facing)
+                // SPOM surfaces — e.g. the stylized-grass band on a brush —
+                // pushing depth inward (downward) z-fights with abutting
+                // floor/terrain geometry, the same failure the floor
+                // shading-pos guard and the silhouette gate avoid (#198).
+                // Horizontal SPOM faces keep the rasterised depth and just
+                // take the UV shift below.
                 // proj*view = mvp * inverse(model) maps the recessed WORLD
                 // point to clip space; z/w is the Vulkan window depth
-                // directly. inverse(model) is a per-pixel mat4 inverse but
-                // runs only on non-silhouette SPOM wall pixels. Clamp ≥ the
-                // rasterised depth to honour layout(depth_greater) (the
-                // displacement is inward-only, so this only ever pushes
-                // depth farther — the clamp guards float error at the face).
-                vec4 rc = (pc.mvp * inverse(pc.model)) * vec4(spom_recessed, 1.0);
-                gl_FragDepth = max(gl_FragCoord.z, rc.z / rc.w);
+                // directly (the build defines GLM_FORCE_DEPTH_ZERO_TO_ONE,
+                // so NDC z is already [0,1] — no *0.5+0.5). inverse(model)
+                // is a per-pixel mat4 inverse but runs only on non-
+                // silhouette SPOM wall pixels. Clamp ≥ the rasterised depth
+                // to honour layout(depth_greater) (displacement is inward-
+                // only, so this only pushes depth farther — clamp guards
+                // float error at the face).
+                if (axis != 1) {
+                    vec4 rc = (pc.mvp * inverse(pc.model)) *
+                              vec4(spom_recessed, 1.0);
+                    gl_FragDepth = max(gl_FragCoord.z, rc.z / rc.w);
+                }
             } else if (spom_disc) {
                 // ---- Legacy SPOM: ray-query seam probe (original path) ----
                 //

@@ -689,7 +689,7 @@ void VulkanEngine::load_settings() {
             // the if/else-if chain below — adding one more `else if`
             // there exceeds MSVC's nested-block limit (C1061).
             if (key == "spom_strength")              { rt_.spom_strength              = std::stof(val); ++loaded; continue; }
-            if (key == "spom_mode")                  { rt_.spom_mode                  = std::stoi(val); ++loaded; continue; }
+            if (key == "spom_mode")                  { int m = std::stoi(val); rt_.spom_mode = m < 0 ? 0 : (m > 1 ? 1 : m); ++loaded; continue; }
             // Near-terrain tessellation — flat fast-path (NOT the else-if
             // chain below; one more `else if` there hits C1061).
             if (key == "terrain_tessellation_enabled") { rt_.terrain_tessellation_enabled = std::stoi(val) != 0; ++loaded; continue; }
