@@ -1932,6 +1932,18 @@ private:
         // (textures render flat). Floors are gated out of SPOM in
         // height_idx_for_albedo regardless of this value (#198).
         float spom_strength = 1.0f;
+        // Wall displacement technique on SPOM-eligible materials.
+        //   0 = legacy SPOM  — per-pixel height-march + rayQueryEXT seam
+        //       probe for silhouettes (the original path; heavy, and its
+        //       outer-corner silhouette falls back to flat — see cube.frag).
+        //   1 = SSDM (depth) — same height-march but writes the recessed
+        //       surface depth to gl_FragDepth so occlusion/silhouettes come
+        //       from the depth buffer; NO per-pixel ray query. Cheaper and
+        //       gives a real relief silhouette. Inward-only (layout
+        //       depth_greater), so valleys recede rather than bricks poking
+        //       out. Default. Threaded to cube.frag via the reserved
+        //       grass_side_lit_params.z UBO slot.
+        int spom_mode = 1;
         // Heightmap resolution multiplier (per-axis). 1 = baseline
         // 2048×2048 cells at 1m. 2 = 4096×4096 at 0.5m (16× more
         // samples total, ~600MB extra mesh memory). 4 = 8192×8192

@@ -580,6 +580,15 @@ void VulkanEngine::build_menu_ui() {
         // bricks. At 0 the SPOM march is short-circuited entirely so
         // there's no GPU cost for users who want flat textures.
         ImGui::SliderFloat("SPOM strength", &rt_.spom_strength, 0.0f, 2.5f, "%.2f");
+        // Displacement technique on castle walls. Legacy SPOM = original
+        // per-pixel march + ray-query silhouette probe (heavy, flat-ish
+        // corners). SSDM = same march but writes recessed depth to
+        // gl_FragDepth for a real relief silhouette with no ray query
+        // (cheaper). Both honour the strength slider above.
+        const char* spom_mode_labels[] = { "Legacy SPOM (ray-query)",
+                                            "SSDM (depth-override)" };
+        ImGui::Combo("Wall displacement", &rt_.spom_mode, spom_mode_labels,
+                     IM_ARRAYSIZE(spom_mode_labels));
 
         ImGui::SeparatorText("Sun shadow map (grass receiver)");
         // Resolution dropdown — apply triggers a vkDeviceWaitIdle + image
