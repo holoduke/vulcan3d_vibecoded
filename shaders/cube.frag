@@ -325,9 +325,17 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
              out vec3 out_T, out vec3 out_B, out vec3 out_face_n,
              out bool out_overhang_disc,
              out vec3 out_displaced_pos,
+             out vec3 out_recessed_pos,
              out vec2 out_uv0) {
     out_overhang_disc = false;
     out_displaced_pos = vWorldPos;
+    // Recessed surface point used by the SSDM depth-override path: the
+    // lateral parallax offset PLUS the inward (-face_n) push down to the
+    // height the ray actually hit. Kept separate from out_displaced_pos
+    // (which intentionally omits the inward push to avoid RT self-
+    // occlusion — see the note where it's assigned below). Initialised to
+    // the rasterised point so every early-return leaves depth unchanged.
+    out_recessed_pos = vWorldPos;
     vec3 absN = abs(N);
     int axis;
     vec2 uv0;
@@ -499,6 +507,16 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     // angles (visible self-shadow at brick edges) without the
     // self-occlusion bug.
     out_displaced_pos = vWorldPos + T * d_T + Bb * d_B;
+    // Recessed point for SSDM: same lateral shift, plus the inward push
+    // along the inward face normal by the world-space depth the ray hit.
+    // The height field's full thickness along the normal is
+    // (kHeightScale * depth_w) world units (the P vector was scaled by the
+    // same factor); final_layer is the [0,1] fraction of that thickness at
+    // the hit. Pushing INTO the surface (-face_n) keeps the displacement
+    // inward-only, matching cube.frag's `layout(depth_greater)` contract
+    // so gl_FragDepth writes never go nearer than the rasterised face.
+    float depth_world = final_layer * kHeightScale * depth_w;
+    out_recessed_pos  = out_displaced_pos - face_n * depth_world;
     return final_uv;
 }
 
@@ -1658,37 +1676,67 @@ void main() {
             int axis;
             vec3 spom_T, spom_B, spom_face_n;
             bool spom_disc;
-            vec3 spom_world;
+            vec3 spom_world;     // lateral-only (RT origin; no inward push)
+            vec3 spom_recessed;  // lateral + inward (SSDM depth-override)
             vec2 spom_uv0;
             vec2 spom_uv_off = spom_uv(sample_pos, proj_n, face_size, scale,
                                         spom_h_idx,
                                         axis, spom_T, spom_B, spom_face_n,
-                                        spom_disc, spom_world, spom_uv0);
-            // Silhouette overhang resolution.
-            //
-            // Two competing visual goals:
-            //   - At true OUTER corners (sky/scene behind), we want the
-            //     "bricks bumped past the geometric edge" trick: write
-            //     outColor=0 + depth=1 → compose substitutes sky, the
-            //     silhouette reads as bumpy bricks not a flat clipped
-            //     edge (the "S" in SPOM).
-            //   - At packed INNER seams (wall↔tower, gate↔wall) the
-            //     adjacent brush fills the gap. The sky substitution
-            //     punched a black/sky pane through the joint. The 25 %
-            //     pad in spom_uv() catches most of these but tightly-
-            //     packed brushwork still triggers it.
-            //
-            // Distinguishing the two: cast a SHORT ray query from
-            // vWorldPos along the parallax-extension direction
-            // (vWorldPos → spom_world). If anything is within ~30 cm
-            // we're at an inner seam → flat fallback. Otherwise it's
-            // a true outer corner → silhouette extension.
-            //
-            // 1 ray per silhouette pixel. Silhouette pixels are a small
-            // % of the screen (only at brush edges) so the cost is
-            // bounded; a few thousand extra rays per frame is well
-            // under any GPU-budget concern.
-            if (spom_disc) {
+                                        spom_disc, spom_world, spom_recessed,
+                                        spom_uv0);
+            // Wall displacement mode (UI "Wall displacement"): carried in
+            // the reserved grass_side_lit_params.z slot. 0 = legacy SPOM
+            // (ray-query seam probe), 1 = SSDM depth-override relief.
+            int spom_mode = int(scene.grass_side_lit_params.z + 0.5);
+            // Silhouette resolution — two techniques, chosen by spom_mode.
+            if (spom_mode == 1) {
+                // ---- SSDM: depth-override relief ----
+                //
+                // The march already walked the view ray into the brick
+                // height field. spom_disc is set when that ray crossed the
+                // brush's side face (the visible point sits past the
+                // geometric edge) — i.e. a real relief silhouette. We don't
+                // try to distinguish inner seams from outer corners with a
+                // ray query here: instead the recessed surface DEPTH is
+                // written below, so an abutting neighbour brush (which
+                // writes its own, nearer depth + colour) naturally fills any
+                // shared-edge pixel. Only genuine outer edges with nothing
+                // behind them fall through to the sky.
+                if (spom_disc) {
+                    // Relief silhouette — discard to sky. compose's sky
+                    // branch (depth >= 0.99999) paints the pixel. No
+                    // per-pixel ray query (that was the legacy cost).
+                    outColor     = vec4(0.0);
+                    outMotion    = vec2(0.0);
+                    gl_FragDepth = 1.0;
+                    return;
+                }
+                // Write the recessed surface depth so the relief occludes
+                // correctly and silhouettes against the depth buffer — but
+                // only on WALLS (axis 0/2). On axis-1 (top/ground-facing)
+                // SPOM surfaces — e.g. the stylized-grass band on a brush —
+                // pushing depth inward (downward) z-fights with abutting
+                // floor/terrain geometry, the same failure the floor
+                // shading-pos guard and the silhouette gate avoid (#198).
+                // Horizontal SPOM faces keep the rasterised depth and just
+                // take the UV shift below.
+                // proj*view = mvp * inverse(model) maps the recessed WORLD
+                // point to clip space; z/w is the Vulkan window depth
+                // directly (the build defines GLM_FORCE_DEPTH_ZERO_TO_ONE,
+                // so NDC z is already [0,1] — no *0.5+0.5). inverse(model)
+                // is a per-pixel mat4 inverse but runs only on non-
+                // silhouette SPOM wall pixels. Clamp ≥ the rasterised depth
+                // to honour layout(depth_greater) (displacement is inward-
+                // only, so this only pushes depth farther — clamp guards
+                // float error at the face).
+                if (axis != 1) {
+                    vec4 rc = (pc.mvp * inverse(pc.model)) *
+                              vec4(spom_recessed, 1.0);
+                    gl_FragDepth = max(gl_FragCoord.z, rc.z / rc.w);
+                }
+            } else if (spom_disc) {
+                // ---- Legacy SPOM: ray-query seam probe (original path) ----
+                //
                 // Reworked seam ray (trade-off, not a clean fix). Old
                 // version fired the ray purely laterally along this
                 // wall's tangent plane — at coplanar wall segments

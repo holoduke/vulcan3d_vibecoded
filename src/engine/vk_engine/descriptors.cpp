@@ -508,11 +508,16 @@ void VulkanEngine::update_scene_ubo() {
                                        1, 8)),
         std::max(0.1f, rt_.grass_shadow_on_terrain_dist),
         rt_.grass_shadow_on_terrain ? 1.0f : 0.0f);
-    // Side-lit grass shading.
+    // Side-lit grass shading. .z is reused (was reserved) as the
+    // cube.frag wall-displacement mode: 0 = legacy SPOM, 1 = SSDM
+    // depth-override relief. grass.frag / grass_raymarch.frag only read
+    // .x/.y, so .z is free to carry this cross-cutting toggle without
+    // growing the UBO (cube.frag declares the struct only through
+    // grass_side_lit_params, so a true append would land on water_params).
     data.grass_side_lit_params = glm::vec4(
         glm::clamp(rt_.grass_side_lit_strength, 0.0f, 1.0f),
         rt_.grass_side_lit_enabled ? 1.0f : 0.0f,
-        0.0f, 0.0f);
+        static_cast<float>(rt_.spom_mode), 0.0f);
     // Ocean / water plane params. Time is derived from frame number
     // at a nominal 60 Hz — exact wall-clock isn't needed for waves
     // and avoids threading a real timer here.
