@@ -585,7 +585,13 @@ void VulkanEngine::build_menu_ui() {
         // corners). SSDM = same march but writes recessed depth to
         // gl_FragDepth for a real relief silhouette with no ray query
         // (cheaper). Both honour the strength slider above.
-        const char* spom_mode_labels[] = { "Legacy SPOM (ray-query)",
+        // 0 = Flat (no parallax at all -- bricks look painted on);
+        // 1 = Legacy SPOM (ray-query silhouette resolution);
+        // 2 = SSDM (depth-override silhouette + recessed depth write).
+        // Flat is included so the user can A/B against either technique
+        // and see how much relief either is adding.
+        const char* spom_mode_labels[] = { "Flat (no parallax)",
+                                            "SPOM (ray-query)",
                                             "SSDM (depth-override)" };
         ImGui::Combo("Wall displacement", &rt_.spom_mode, spom_mode_labels,
                      IM_ARRAYSIZE(spom_mode_labels));
@@ -898,7 +904,7 @@ void VulkanEngine::build_menu_ui() {
         ImGui::TextDisabled("Live toggle. OFF = plain CD-LOD mesh (no\n"
                              "subdivision/displacement near the camera).");
         ImGui::SliderFloat("Tessellation range (m)",
-                           &rt_.terrain_tess_range, 30.0f, 250.0f, "%.0f");
+                           &rt_.terrain_tess_range, 5.0f, 250.0f, "%.0f");
         ImGui::Checkbox("Wireframe (show triangles / mesh density)",
                          &rt_.terrain_wireframe);
         }   // end FBM / mesh renderer split

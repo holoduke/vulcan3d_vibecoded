@@ -1650,6 +1650,13 @@ void VulkanEngine::init_world() {
         for (auto& b : world_.brushes) b.center.y += hp.plateau_height;
         for (auto& a : world_.aabbs)   { a.min.y += hp.plateau_height;
                                           a.max.y += hp.plateau_height; }
+        // render_aabbs are the same shape as aabbs (some SPOM walls are
+        // inflated by kShellInflation -- see level.cpp::to_render_aabb)
+        // so they need the SAME plateau lift. Skipping this would leave
+        // SPOM wall frustum culls at y=0 while the geometry sits at
+        // y=plateau_height -> all walls culled out at most camera angles.
+        for (auto& a : world_.render_aabbs) { a.min.y += hp.plateau_height;
+                                              a.max.y += hp.plateau_height; }
         // Lift player's default spawn point above the new ground.
         player_.position.y += hp.plateau_height;
 
@@ -3534,7 +3541,7 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
     };
     for (size_t i = 0; i < world_.brushes.size(); ++i) {
         const auto& b = world_.brushes[i];
-        const auto& a = world_.aabbs[i];
+        const auto& a = world_.render_aabbs[i];
         if (!aabb_visible(frustum, a.min, a.max)) continue;
         if (is_spom_albedo(b.tex_albedo)) continue;
         push_depth(static_brush_models_[i]);    // pre-baked, see init_world
@@ -3695,7 +3702,7 @@ void VulkanEngine::render_world_shadow_lr_pass(VkCommandBuffer cmd) {
     };
 
     for (size_t i = 0; i < world_.brushes.size(); ++i) {
-        const auto& a = world_.aabbs[i];
+        const auto& a = world_.render_aabbs[i];
         if (!aabb_visible(frustum, a.min, a.max)) continue;
         push(static_brush_models_[i]);
     }
@@ -4151,7 +4158,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     }
     for (size_t i = 0; i < world_.brushes.size(); ++i) {
         const auto& b = world_.brushes[i];
-        const auto& a = world_.aabbs[i];
+        const auto& a = world_.render_aabbs[i];
         if (!aabb_visible(frustum, a.min, a.max)) { ++culled_static; continue; }
         const glm::mat4& model = static_brush_models_[i];   // pre-baked, see init_world
         glm::vec4 brush_base = tex_on ? b.color : b.fallback_color;
@@ -4176,6 +4183,19 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                    dyn_props_[i].uv_scale, /*object_space=*/true);
         ++drawn_dyn;
     }
+
+    // SPOM silhouette shell pass DISABLED. Iterations explored:
+    //   1. cube.vert per-face extrusion (offset bug on walls)
+    //   2. Paper SSDM screen-space remap (paper assumes outward bumps;
+    //      our inward-recessed bricks give barely-visible extension)
+    //   3. Shell mesh, normal-push only (corner gaps show sky)
+    //   4. Shell mesh + lateral push (corners fill but shell overdraws
+    //      walls with simpler N·L lighting → "weird shadows")
+    // Real dramatic silhouette extension requires either stencil-based
+    // masking (touches every depth-aware pipeline) or re-authored
+    // outward-bump height maps. Leaving render_shell_pass / shell
+    // pipeline in the codebase so re-enabling is one-line.
+    // render_shell_pass(cmd);
 
     // Bullet-impact decals РІР‚вЂќ drawn AFTER static + dyn brushes so they sit
     // on top of the wall textures, BEFORE sparks so the spark glow
@@ -4249,6 +4269,15 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // fv.inv_view is cached in compute_frame_view (was a per-frame
     // glm::inverse(fv.view) here -- a full 4x4 mat inverse is ~80 fmuls).
     draw_viewmodel(cmd, vp, fv.inv_view);
+
+    // Voxel buildings (Session A) — drawn last of all because the voxel
+    // pipeline has its own layout / descriptor set; nothing else in
+    // render_world should run after it without rebinding pipeline_.
+    // The viewmodel sits in front of everything so it always wins the
+    // depth test against the 100 m-distant voxel tower regardless of
+    // draw order. Brick-DDA ray-march into scene_color + motion_vec +
+    // gl_FragDepth.
+    render_voxels(cmd);
 
     last_draw_static_ = drawn_static;
     last_draw_dyn_    = drawn_dyn;

@@ -5,8 +5,45 @@
 namespace qlike::game {
 
 namespace {
+// World-space inflation applied to SPOM-wall brush AABBs to cover the
+// shell-mapping extrusion done by cube.vert (kShellThickness = 0.04 m
+// along each face normal, gated to SPOM wall materials). Frustum culls
+// using the raw size would clip wall edges at screen-side as the
+// extruded geometry crosses the frustum plane a few cm earlier than
+// the un-extruded box. Match the cube.vert constant exactly + a tiny
+// safety margin for the bumpy brick silhouette extension.
+//
+// Applied ONLY to Level::render_aabbs. Level::aabbs stays tight so the
+// player collision boxes match the un-extruded wall -- inflating the
+// collision AABB would push the player back 5 cm from every wall,
+// which reads as "I can't walk up to the wall."
+constexpr float kShellInflation = 0.05f;
+
+// SPOM wall materials -- mirrors height_idx_for_albedo() in cube.frag.
+// Keep in sync; the extrusion gate in cube.vert uses the same list.
+bool is_spom_wall_albedo(int tex_albedo) {
+    return tex_albedo == 1 || tex_albedo == 4;
+}
+
+// Tight, physics-accurate AABB. Used for collision.
 collision::AABB to_aabb(const Brush& b) {
-    return { b.center - b.size * 0.5f, b.center + b.size * 0.5f };
+    glm::vec3 half = b.size * 0.5f;
+    return { b.center - half, b.center + half };
+}
+
+// Render-cull AABB. Inflated for SPOM wall brushes so the frustum cull
+// doesn't clip the cube.vert shell extrusion at the screen edge.
+collision::AABB to_render_aabb(const Brush& b) {
+    glm::vec3 half = b.size * 0.5f;
+    if (is_spom_wall_albedo(b.tex_albedo)) {
+        // Walls extrude along their face normal only, but cheaper to
+        // pad all 3 axes than to track which faces are walls vs floors
+        // here -- the world-space cost is 5 cm on a 22 m wall
+        // (< 0.25 % overshoot, no measurable frustum-cull regression
+        // in the castle scene).
+        half += glm::vec3(kShellInflation);
+    }
+    return { b.center - half, b.center + half };
 }
 
 // Sentinel for "no separate fallback" — substitutes `rgb` so brushes added
@@ -23,6 +60,7 @@ void add(Level& lv, glm::vec3 center, glm::vec3 size, glm::vec3 rgb,
              glm::vec4(fb, 1.0f) };
     lv.brushes.push_back(b);
     lv.aabbs.push_back(to_aabb(b));
+    lv.render_aabbs.push_back(to_render_aabb(b));
 }
 
 void add_lamp(Level& lv, glm::vec3 center, glm::vec3 size, glm::vec3 rgb,
@@ -33,6 +71,7 @@ void add_lamp(Level& lv, glm::vec3 center, glm::vec3 size, glm::vec3 rgb,
              -1, -1, 1.0f, glm::vec4(rgb, 1.0f) };
     lv.brushes.push_back(b);
     lv.aabbs.push_back(to_aabb(b));
+    lv.render_aabbs.push_back(to_render_aabb(b));
 }
 
 void add_lantern(Level& lv, glm::vec3 base) {

@@ -290,7 +290,10 @@ add_library(qlike_engine STATIC
     src/engine/vk_engine/screenshot.cpp
     src/engine/vk_engine/setup.cpp
     src/engine/vk_engine/svgf.cpp
+    src/engine/vk_engine/ssdm.cpp
+    src/engine/vk_engine/voxel.cpp
     src/engine/vk_engine/world.cpp
+    src/engine/voxel/voxel_world.cpp
     src/engine/vk_ui.cpp
     src/engine/vk_pipelines.cpp
     src/engine/mesh.cpp

@@ -31,6 +31,12 @@ struct Brush {
 struct Level {
     std::vector<Brush> brushes;
     std::vector<collision::AABB> aabbs;  // mirrored from brushes for collision
+    // Render-cull AABBs. Identical to `aabbs` for most brushes, but
+    // SPOM-wall brushes carry a small per-axis inflation to cover the
+    // shell-mapping extrusion done in cube.vert (kShellThickness =
+    // 0.04 m along each face normal). MUST NOT be used for physics --
+    // inflating the collision box would push the player off the wall.
+    std::vector<collision::AABB> render_aabbs;
 };
 
 // Built-in starter level: floor + four walls + a few obstacle cubes.

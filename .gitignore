@@ -48,6 +48,10 @@ assets/tex/**/*.png
 shot*.png
 shot*.ppm
 shot*.jpg
+shell_*.png
+ssdm_*.png
+voxb_*.png
+qlike_settings.cfg.bak
 
 assets/level1_heights.bin
 qlike_imgui.ini

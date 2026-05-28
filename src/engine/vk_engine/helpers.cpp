@@ -32,7 +32,8 @@ static_assert(sizeof(PushConstants) == 256, "push constant layout");
 //     → 4912 (terrain_disp_params, rocky-grass disp amp/smooth/POM far).
 //     → 4960 (terrain_antitile_params + grass_shadow_on_terrain_params +
 //             grass_side_lit_params, 3 vec4 trailing batch).
-static_assert(sizeof(SceneUBO) == 4960, "scene ubo layout");
+//     → 5008 (voxel_origin + voxel_dims + voxel_grid, Session B voxel RT).
+static_assert(sizeof(SceneUBO) == 5008, "scene ubo layout");
 
 RtFuncs g_rt;
 

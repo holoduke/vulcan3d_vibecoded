@@ -365,8 +365,14 @@ Texture2D upload_texture_from_pixels(VkDevice device, VmaAllocator alloc,
                                      const unsigned char* pixels,
                                      int w, int h, VkFormat format,
                                      const char* label) {
-    return upload_rgba8_core(device, alloc, queue, qf, pixels, w, h,
-                             format, label ? label : "<pixels>");
+    Texture2D r = upload_rgba8_core(device, alloc, queue, qf, pixels, w, h,
+                                    format, label ? label : "<pixels>");
+    // Mirror upload_texture_from_file: callers (loader BG, procedural
+    // splat) read .width / .height to drive blits and aspect-ratio
+    // math, and upload_rgba8_core leaves them zero.
+    r.width  = w;
+    r.height = h;
+    return r;
 }
 
 void destroy_texture_2d(VkDevice device, VmaAllocator alloc, Texture2D& t) {

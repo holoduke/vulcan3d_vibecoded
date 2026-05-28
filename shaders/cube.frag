@@ -2,16 +2,23 @@
 #extension GL_EXT_ray_query : require
 #extension GL_ARB_conservative_depth : require
 
-// Conservative depth: promise the driver that any gl_FragDepth write here
-// will be ≥ gl_FragCoord.z. The unconditional `gl_FragDepth = gl_FragCoord.z`
-// at the top of main() satisfies "equal", and the SPOM silhouette path
-// writes 1.0 (sky/far) which is also "greater". With this qualifier in
-// place, hardware early-Z stays enabled even though the shader writes
-// depth — the depth pre-pass's z-buffer can reject occluded fragments
-// before the heavy cube.frag body (RT shadow PCSS + GI bounces + AO +
-// SPOM + muzzle flash light) runs. This was the single biggest GPU win
-// found by the latest perf review: cube.frag was running on every
-// fragment that the depth pre-pass should have culled.
+// Conservative depth KEPT despite shell-mapping silhouette.
+//
+// cube.vert now extrudes SPOM wall faces outward by kShellThickness
+// (4 cm) along their per-face normals; the raster face is therefore
+// at the OUTER edge of the brick shell band. The SSDM block below
+// either:
+//   * Discards (gl_FragDepth = 1.0, the far plane -- ALWAYS > raster)
+//     when the parallax-march brick top doesn't reach this fragment
+//     -- this is the silhouette path, sky shows past the brush.
+//   * Writes the parallax-hit surface depth, which lies AT or INSIDE
+//     the raster face (the march walks inward from the raster peak),
+//     so the depth is ALWAYS >= gl_FragCoord.z.
+// Both branches honour `depth_greater`, so the driver can keep early-Z
+// on cube.frag enabled -- the single biggest GPU win found by the last
+// perf review (cube.frag was running on every fragment that the depth
+// pre-pass should have culled). The user opted in to shell-mapping
+// silhouette but we don't have to pay 0.5-1 ms of early-Z loss for it.
 layout(depth_greater) out float gl_FragDepth;
 
 layout(location = 0) in vec3 vNormal;
@@ -29,6 +36,17 @@ layout(location = 5) flat in vec4 vTexParams;  // x: albedo idx, y: normal idx,
 layout(location = 6) in vec3 vObjectPos;
 layout(location = 7) in vec3 vObjectNormal;
 layout(location = 8) in vec4 vPrevClip;  // prev_view_proj Г— prev_model Г— local_pos
+// Pre-extrusion shell base. For SPOM wall brushes cube.vert pushes the
+// rasterised vertex out by kShellThickness along the per-face normal;
+// vShellBase carries the original (un-extruded) world position. The
+// SSDM block uses dot(vWorldPos - vShellBase, geometric_normal) to read
+// the shell thickness at this fragment (constant under uniform
+// extrusion -- gives us a "how much shell band exists here" scalar so
+// the parallax-march hit can be classified brick vs sky). For non-
+// extruded fragments (floors, terrain, non-SPOM brushes, dyn props)
+// vShellBase == vWorldPos, the dot product is 0, and the shell test is
+// a no-op.
+layout(location = 9) in vec3 vShellBase;
 layout(location = 0) out vec4 outColor;
 // Per-pixel screen-space motion vector вЂ” current_uv minus prev_uv. Dynamic
 // surfaces get correct reprojection because cube.vert applied prev_model
@@ -113,6 +131,13 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     // cube.frag carries the field so the UBO layout stays aligned.
     //   .x = strength, .y = master toggle.
     vec4  grass_side_lit_params;
+    // Voxel building (Session B). voxel_origin.w = enabled gate.
+    //   voxel_origin.xyz = world origin, .w = enabled (0/1)
+    //   voxel_dims.xyz   = world extent (m), .w = voxel size (m)
+    //   voxel_grid.xyz   = brick grid dims, .w = brick size (m)
+    vec4  voxel_origin;
+    vec4  voxel_dims;
+    vec4  voxel_grid;
 } scene;
 
 // Half-rate shadow producer output, sampled when terrain_local_info.z
@@ -157,6 +182,21 @@ struct Material {
 layout(set = 0, binding = 2, std430) readonly buffer Materials {
     Material materials[];
 };
+
+// ---- Voxel building (Session B) ----
+// Brick atlas + shape directory shared with voxel.frag. cube.frag's
+// inline-RT shadow + GI rays DDA-march these to occlude / colour-bleed
+// the procedural voxel tower. Layout MUST match voxel_world.h /
+// voxel.frag exactly.
+struct VoxBrick { uint occ[128]; uint pal[1024]; };
+layout(set = 0, binding = 24, std430) readonly buffer VoxBrickAtlas {
+    VoxBrick vox_bricks[];
+};
+layout(set = 0, binding = 25, std430) readonly buffer VoxShapeDir {
+    uvec4 vox_hdr;       // xyz = brick dims (mirrors scene.voxel_grid)
+    uint  vox_entries[];
+};
+const uint kVoxEmpty = 0xFFFFFFFFu;
 
 // Bound texture arrays (must match kTextureCount on the C++ side).
 const int kTextureCount = 13;     // +1 for kTexProcGrass (slot 12)
@@ -493,6 +533,11 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     // typical 1-cm parallax displacement without producing a visible
     // shelf at the geometric edge. The improved seam ray below catches
     // the extra silhouette pixels the tighter pad creates.
+    // Restored to 0.15. Tightening to 0.05 made silhouettes fire so
+    // eagerly that increasing the SPOM strength slider shrank the
+    // whole wall outline (every edge pixel discarded to sky). 0.15
+    // is the balanced value: silhouettes only fire on real outer-
+    // corner overshoots, not on at-normal parallax shifts.
     float pad = 0.15;
     if (axis != 1 &&
         (abs(vis_T) > ext_T * (1.0 + pad) ||
@@ -695,6 +740,13 @@ const vec2 kVogelDisk[32] = vec2[32](
     vec2( 0.540838, -0.841127)
 );
 
+// Forward decls — voxel any-hit + raw DDA (defined with the DDA block
+// further down). Let the shadow / AO / blocker-search helpers below fold
+// the voxel tower into their result without reordering the whole file.
+bool voxel_any_hit(vec3 origin_w, vec3 dir_w, float t_max);
+bool vox_march(vec3 origin_w, vec3 dir_w, float t_max,
+               out float out_t, out uint out_pal);
+
 // Shadow + AO test. Cull-mask 0x01 picks up only instances marked as
 // shadow-casters (bit 0). Sparks and projectiles are flagged 0xFE on the
 // host вЂ” they're tiny visual effects whose hard shadow streaks looked wrong
@@ -706,8 +758,9 @@ bool any_hit(vec3 origin, vec3 dir, float t_max) {
                           gl_RayFlagsOpaqueEXT,
                           0x01, origin, 0.001, dir, t_max);
     while (rayQueryProceedEXT(rq)) {}
-    return rayQueryGetIntersectionTypeEXT(rq, true) ==
-           gl_RayQueryCommittedIntersectionTriangleEXT;
+    if (rayQueryGetIntersectionTypeEXT(rq, true) ==
+        gl_RayQueryCommittedIntersectionTriangleEXT) return true;
+    return voxel_any_hit(origin, dir, t_max);
 }
 
 // Shadow-ray variant for TERRAIN receivers. Uses cull-mask 0x02 which
@@ -723,8 +776,9 @@ bool any_hit_no_terrain(vec3 origin, vec3 dir, float t_max) {
                           gl_RayFlagsOpaqueEXT,
                           0x02, origin, 0.001, dir, t_max);
     while (rayQueryProceedEXT(rq)) {}
-    return rayQueryGetIntersectionTypeEXT(rq, true) ==
-           gl_RayQueryCommittedIntersectionTriangleEXT;
+    if (rayQueryGetIntersectionTypeEXT(rq, true) ==
+        gl_RayQueryCommittedIntersectionTriangleEXT) return true;
+    return voxel_any_hit(origin, dir, t_max);
 }
 
 // Closest-hit variant of the terrain-receivers shadow query — used
@@ -735,12 +789,15 @@ bool closest_hit_no_terrain(vec3 origin, vec3 dir, float t_max,
     rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
                           0x02, origin, 0.001, dir, t_max);
     while (rayQueryProceedEXT(rq)) {}
-    if (rayQueryGetIntersectionTypeEXT(rq, true) !=
-        gl_RayQueryCommittedIntersectionTriangleEXT) {
-        return false;
+    bool tlas = rayQueryGetIntersectionTypeEXT(rq, true) ==
+                gl_RayQueryCommittedIntersectionTriangleEXT;
+    float tt = tlas ? rayQueryGetIntersectionTEXT(rq, true) : t_max;
+    float vt; uint vpal;
+    if (vox_march(origin, dir, tt, vt, vpal) && (!tlas || vt < tt)) {
+        out_t = vt; return true;
     }
-    out_t = rayQueryGetIntersectionTEXT(rq, true);
-    return true;
+    if (tlas) { out_t = tt; return true; }
+    return false;
 }
 
 // Sky tint without the sun halo вЂ” for atmospheric fog where adding
@@ -780,8 +837,9 @@ bool any_hit_m(vec3 origin, vec3 dir, float t_max, uint mask) {
                           gl_RayFlagsOpaqueEXT,
                           mask, origin, 0.001, dir, t_max);
     while (rayQueryProceedEXT(rq)) {}
-    return rayQueryGetIntersectionTypeEXT(rq, true) ==
-           gl_RayQueryCommittedIntersectionTriangleEXT;
+    if (rayQueryGetIntersectionTypeEXT(rq, true) ==
+        gl_RayQueryCommittedIntersectionTriangleEXT) return true;
+    return voxel_any_hit(origin, dir, t_max);
 }
 bool closest_hit_m(vec3 origin, vec3 dir, float t_max, uint mask,
                    out float out_t) {
@@ -789,12 +847,19 @@ bool closest_hit_m(vec3 origin, vec3 dir, float t_max, uint mask,
     rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
                           mask, origin, 0.001, dir, t_max);
     while (rayQueryProceedEXT(rq)) {}
-    if (rayQueryGetIntersectionTypeEXT(rq, true) !=
-        gl_RayQueryCommittedIntersectionTriangleEXT) {
-        return false;
+    bool tlas = rayQueryGetIntersectionTypeEXT(rq, true) ==
+                gl_RayQueryCommittedIntersectionTriangleEXT;
+    float tt = tlas ? rayQueryGetIntersectionTEXT(rq, true) : t_max;
+    // Fold in the voxel tower so the PCSS blocker search detects it as an
+    // occluder — without this, terrain pixels shadowed only by the tower
+    // see hits==0 and short-circuit to "fully lit", skipping the penumbra
+    // loop where voxel_any_hit lives.
+    float vt; uint vpal;
+    if (vox_march(origin, dir, tt, vt, vpal) && (!tlas || vt < tt)) {
+        out_t = vt; return true;
     }
-    out_t = rayQueryGetIntersectionTEXT(rq, true);
-    return true;
+    if (tlas) { out_t = tt; return true; }
+    return false;
 }
 
 // Closest-hit ray cast. Returns true on hit, fills out_t.
@@ -804,12 +869,15 @@ bool closest_hit(vec3 origin, vec3 dir, float t_max,
     rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
                           0xFF, origin, 0.001, dir, t_max);
     while (rayQueryProceedEXT(rq)) {}
-    if (rayQueryGetIntersectionTypeEXT(rq, true) !=
-        gl_RayQueryCommittedIntersectionTriangleEXT) {
-        return false;
+    bool tlas = rayQueryGetIntersectionTypeEXT(rq, true) ==
+                gl_RayQueryCommittedIntersectionTriangleEXT;
+    float tt = tlas ? rayQueryGetIntersectionTEXT(rq, true) : t_max;
+    float vt; uint vpal;
+    if (vox_march(origin, dir, tt, vt, vpal) && (!tlas || vt < tt)) {
+        out_t = vt; return true;
     }
-    out_t = rayQueryGetIntersectionTEXT(rq, true);
-    return true;
+    if (tlas) { out_t = tt; return true; }
+    return false;
 }
 
 // Closest-hit + material lookup. Returns instance custom index AND
@@ -831,6 +899,126 @@ bool closest_hit_material(vec3 origin, vec3 dir, float t_max,
     out_inst = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
     out_prim = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
     return true;
+}
+
+// ---- Voxel building DDA (Session B) ----
+// Analytic intersection of a world-space ray against the single brickmap
+// voxel shape, used by the shadow + GI ray helpers below. Works in
+// shape-local space (translation-only transform). Mirrors voxel.frag's
+// two-level DDA: empty bricks are skipped a brick at a time; occupied
+// bricks are walked voxel-by-voxel. Whole feature is gated off when
+// scene.voxel_origin.w < 0.5 (no shape) → near-zero cost.
+bool vox_ray_aabb(vec3 lo, vec3 ld, vec3 bmin, vec3 bmax,
+                  out float t0, out float t1) {
+    vec3 invd = 1.0 / ld;
+    vec3 a = (bmin - lo) * invd;
+    vec3 b = (bmax - lo) * invd;
+    vec3 lov = min(a, b);
+    vec3 hiv = max(a, b);
+    t0 = max(max(lov.x, lov.y), lov.z);
+    t1 = min(min(hiv.x, hiv.y), hiv.z);
+    return t1 > max(t0, 0.0);
+}
+
+// Core DDA. Returns the palette index of the first voxel hit and its t
+// along `ld` (world units). want_closest is implicit — the march always
+// stops at the first solid voxel, which IS the closest hit for a convex
+// march from the entry point. Returns -1 (in out_pal) on miss.
+bool vox_march(vec3 origin_w, vec3 dir_w, float t_max,
+               out float out_t, out uint out_pal) {
+    out_t = t_max; out_pal = 0u;
+    if (scene.voxel_origin.w < 0.5) return false;       // disabled
+
+    vec3 lo = origin_w - scene.voxel_origin.xyz;        // shape-local origin
+    vec3 ld = dir_w;
+    float vs = scene.voxel_dims.w;
+    float bs = scene.voxel_grid.w;
+    ivec3 brick_dim = ivec3(scene.voxel_grid.xyz + 0.5);
+    ivec3 voxel_dim = brick_dim * 16;
+    vec3  shape_max = scene.voxel_dims.xyz;
+
+    float t0, t1;
+    if (!vox_ray_aabb(lo, ld, vec3(0.0), shape_max, t0, t1)) return false;
+    float t = max(t0, 0.0) + 1e-4;
+    if (t >= t_max) return false;
+
+    vec3  pe = lo + t * ld;
+    ivec3 vc = clamp(ivec3(floor(pe / vs)), ivec3(0), voxel_dim - ivec3(1));
+    ivec3 stp = ivec3(ld.x >= 0.0 ? 1 : -1,
+                      ld.y >= 0.0 ? 1 : -1,
+                      ld.z >= 0.0 ? 1 : -1);
+    vec3 abs_inv = vec3(
+        (abs(ld.x) > 1e-8) ? 1.0 / abs(ld.x) : 1e30,
+        (abs(ld.y) > 1e-8) ? 1.0 / abs(ld.y) : 1e30,
+        (abs(ld.z) > 1e-8) ? 1.0 / abs(ld.z) : 1e30);
+    vec3 tDelta = vs * abs_inv;
+    vec3 face = (vec3(vc) + max(vec3(stp), 0.0)) * vs;
+    vec3 tMax = vec3(
+        (ld.x != 0.0) ? (face.x - lo.x) / ld.x : 1e30,
+        (ld.y != 0.0) ? (face.y - lo.y) / ld.y : 1e30,
+        (ld.z != 0.0) ? (face.z - lo.z) / ld.z : 1e30);
+
+    int max_steps = (voxel_dim.x + voxel_dim.y + voxel_dim.z) + 32;
+    for (int i = 0; i < max_steps; ++i) {
+        if (t > t_max) return false;
+        if (any(lessThan(vc, ivec3(0))) ||
+            any(greaterThanEqual(vc, voxel_dim))) return false;
+
+        ivec3 bc = vc >> 4;
+        int   dir_i = (bc.z * brick_dim.y + bc.y) * brick_dim.x + bc.x;
+        uint  bp = vox_entries[dir_i];
+
+        if (bp == kVoxEmpty) {
+            // Skip the rest of this brick in one step.
+            vec3 brickFace = (vec3(bc) + max(vec3(stp), 0.0)) * bs;
+            vec3 bMax = vec3(
+                (ld.x != 0.0) ? (brickFace.x - lo.x) / ld.x : 1e30,
+                (ld.y != 0.0) ? (brickFace.y - lo.y) / ld.y : 1e30,
+                (ld.z != 0.0) ? (brickFace.z - lo.z) / ld.z : 1e30);
+            t = min(min(bMax.x, bMax.y), bMax.z) + 1e-4;
+            vec3 pn = lo + t * ld;
+            vc = ivec3(floor(pn / vs));
+            face = (vec3(vc) + max(vec3(stp), 0.0)) * vs;
+            tMax = vec3(
+                (ld.x != 0.0) ? (face.x - lo.x) / ld.x : 1e30,
+                (ld.y != 0.0) ? (face.y - lo.y) / ld.y : 1e30,
+                (ld.z != 0.0) ? (face.z - lo.z) / ld.z : 1e30);
+            continue;
+        }
+
+        ivec3 lv = vc & ivec3(15);
+        int   li = (lv.z * 256) + (lv.y * 16) + lv.x;
+        if ((vox_bricks[bp].occ[li >> 5] & (1u << (li & 31))) != 0u) {
+            int word = li >> 2;
+            int shift = (li & 3) * 8;
+            out_pal = (vox_bricks[bp].pal[word] >> shift) & 0xFFu;
+            out_t = t;
+            return true;
+        }
+
+        if (tMax.x < tMax.y && tMax.x < tMax.z) {
+            t = tMax.x; vc.x += stp.x; tMax.x += tDelta.x;
+        } else if (tMax.y < tMax.z) {
+            t = tMax.y; vc.y += stp.y; tMax.y += tDelta.y;
+        } else {
+            t = tMax.z; vc.z += stp.z; tMax.z += tDelta.z;
+        }
+    }
+    return false;
+}
+
+// Any-hit shadow test against the voxel shape.
+bool voxel_any_hit(vec3 origin_w, vec3 dir_w, float t_max) {
+    float t; uint pal;
+    return vox_march(origin_w, dir_w, t_max, t, pal);
+}
+
+// Palette → linear RGB. Mirrors the C++ palette in voxel.cpp's
+// update_voxel_camera_ubo (indices 1 = sandstone, 2 = wood accent).
+vec3 voxel_albedo(uint pal) {
+    if (pal == 1u) return vec3(0.95, 0.78, 0.45);
+    if (pal == 2u) return vec3(0.75, 0.30, 0.15);
+    return vec3(0.50);
 }
 
 // Sentinel for the merged-static BLAS instance вЂ” must match
@@ -1687,51 +1875,80 @@ void main() {
             // Wall displacement mode (UI "Wall displacement"): carried in
             // the reserved grass_side_lit_params.z slot. 0 = legacy SPOM
             // (ray-query seam probe), 1 = SSDM depth-override relief.
+            // 0 = Flat (no per-pixel parallax shift; bricks look
+            //     painted on with normal-mapped relief only),
+            // 1 = SPOM legacy (ray-query silhouette resolution),
+            // 2 = SSDM (depth-override silhouette + recessed depth).
             int spom_mode = int(scene.grass_side_lit_params.z + 0.5);
-            // Silhouette resolution — two techniques, chosen by spom_mode.
-            if (spom_mode == 1) {
-                // ---- SSDM: depth-override relief ----
+            if (spom_mode == 0) {
+                // Flat path: forget the parallax UV shift entirely.
+                // Bricks use the un-displaced sample point; silhouette
+                // is just the geometric edge (no sky-substitution).
+                spom_uv_off = spom_uv0;
+                spom_world  = vWorldPos;
+            } else
+            if (spom_mode == 2) {
+                // SSDM mode = shell-mapping silhouette + depth-override
+                // relief. cube.vert extruded wall verts outward by
+                // kShellThickness * spom_strength; cube.frag here marches
+                // the height map inward and discards pixels in the shell
+                // band where the brick at this lateral UV doesn't reach
+                // up far enough -- those discards produce the stepped
+                // per-brick silhouette past the brush corner.
                 //
-                // The march already walked the view ray into the brick
-                // height field. spom_disc is set when that ray crossed the
-                // brush's side face (the visible point sits past the
-                // geometric edge) — i.e. a real relief silhouette. We don't
-                // try to distinguish inner seams from outer corners with a
-                // ray query here: instead the recessed surface DEPTH is
-                // written below, so an abutting neighbour brush (which
-                // writes its own, nearer depth + colour) naturally fills any
-                // shared-edge pixel. Only genuine outer edges with nothing
-                // behind them fall through to the sky.
-                if (spom_disc) {
-                    // Relief silhouette — discard to sky. compose's sky
-                    // branch (depth >= 0.99999) paints the pixel. No
-                    // per-pixel ray query (that was the legacy cost).
-                    outColor     = vec4(0.0);
-                    outMotion    = vec2(0.0);
-                    gl_FragDepth = 1.0;
-                    return;
-                }
-                // Write the recessed surface depth so the relief occludes
-                // correctly and silhouettes against the depth buffer — but
-                // only on WALLS (axis 0/2). On axis-1 (top/ground-facing)
-                // SPOM surfaces — e.g. the stylized-grass band on a brush —
-                // pushing depth inward (downward) z-fights with abutting
-                // floor/terrain geometry, the same failure the floor
-                // shading-pos guard and the silhouette gate avoid (#198).
-                // Horizontal SPOM faces keep the rasterised depth and just
-                // take the UV shift below.
-                // proj*view = mvp * inverse(model) maps the recessed WORLD
-                // point to clip space; z/w is the Vulkan window depth
-                // directly (the build defines GLM_FORCE_DEPTH_ZERO_TO_ONE,
-                // so NDC z is already [0,1] — no *0.5+0.5). inverse(model)
-                // is a per-pixel mat4 inverse but runs only on non-
-                // silhouette SPOM wall pixels. Clamp ≥ the rasterised depth
-                // to honour layout(depth_greater) (displacement is inward-
-                // only, so this only pushes depth farther — clamp guards
-                // float error at the face).
-                if (axis != 1) {
+                // Floors (axis == 1) are excluded -- cube.vert leaves
+                // them un-extruded, so shell_offset would be 0 and the
+                // discard would wipe every brick crevice on the floor.
+                float ss_strength = max(0.0, scene.spom_params.x);
+                if (axis != 1 && ss_strength > 0.01) {
+                    // Only discard at TRUE BRUSH CORNERS — pixels past
+                    // the un-extruded brush bounds on TWO lateral axes
+                    // simultaneously. Face edges (past on only ONE
+                    // lateral axis) keep full wall rendering.
+                    //
+                    // Without this 2-axis gate, the discard fires along
+                    // every face edge in a band the full width of the
+                    // lateral push (~4cm) → wall looked perforated
+                    // along all edges. Brush corners (where two faces
+                    // meet) are the only places "real" silhouette
+                    // extension should produce sky-through-bricks.
+                    vec3  brush_center = pc.model[3].xyz;
+                    vec3  brush_half   = vec3(length(pc.model[0].xyz),
+                                              length(pc.model[1].xyz),
+                                              length(pc.model[2].xyz)) * 0.5;
+                    vec3  past          = max(vec3(0.0),
+                                              abs(vWorldPos - brush_center) - brush_half);
+                    // Mask the face-normal axis out (its "past" is the
+                    // outward extrusion, not silhouette-relevant).
+                    vec3  lateral_mask  = 1.0 - abs(proj_n);
+                    vec3  lateral_past  = past * lateral_mask;
+                    float num_past      = float(lateral_past.x > 0.001) +
+                                          float(lateral_past.y > 0.001) +
+                                          float(lateral_past.z > 0.001);
+
+                    float parallax_hit_depth = dot(vWorldPos - spom_recessed,
+                                                   spom_face_n);
+                    // Threshold = half of max parallax depth (= 2cm with
+                    // heightScale=4cm). Bricks at h>0.5 of the height
+                    // map keep their pixels at the corner; bricks at
+                    // h<0.5 (deeper crevices) discard → sky shows
+                    // between brick-top extensions. Yields stepped
+                    // silhouette with ~50% brick coverage at corners.
+                    // Tightening to 0.001 would make corners super
+                    // sparse (only the very brick-top peaks); loosening
+                    // to 0.04 would discard nothing.
+                    if (num_past >= 2.0 && parallax_hit_depth > 0.02) {
+                        outColor     = vec4(0.0);
+                        outMotion    = vec2(0.0);
+                        gl_FragDepth = 1.0;
+                        return;
+                    }
+                    // Brick reaches up to this fragment -- write
+                    // the parallax-hit depth so downstream passes
+                    // see the correct brick-top geometry.
+                    vec3 hit_world = vWorldPos - proj_n * parallax_hit_depth;
                     vec4 rc = (pc.mvp * inverse(pc.model)) *
-                              vec4(spom_recessed, 1.0);
+                              vec4(hit_world, 1.0);
                     gl_FragDepth = max(gl_FragCoord.z, rc.z / rc.w);
                 }
             } else if (spom_disc) {
@@ -2608,7 +2825,16 @@ void main() {
                     float t;
                     int idx;
                     int prim;
-                    if (!closest_hit_material(ray_origin, ray_dir, gi_radius, t, idx, prim)) {
+                    bool tlas_hit = closest_hit_material(ray_origin, ray_dir,
+                                                         gi_radius, t, idx, prim);
+                    // Voxel tower as a GI surface: march the brickmap and
+                    // keep whichever hit is nearer. The voxel albedo bleeds
+                    // its colour into the GI gather of nearby terrain/brushes.
+                    float vt; uint vpal;
+                    bool vox_hit = vox_march(ray_origin, ray_dir,
+                                             tlas_hit ? t : gi_radius, vt, vpal);
+                    bool use_vox = vox_hit && (!tlas_hit || vt < t);
+                    if (!tlas_hit && !vox_hit) {
                         path += throughput * sample_sky(ray_dir);
                         // First-bounce miss = the surface can see sky in
                         // this direction. Tracks "open vs enclosed" for the
@@ -2616,13 +2842,26 @@ void main() {
                         if (b == 0) ++sky_misses;
                         break;
                     }
-                    // Static-castle hit: 1 BLAS instance covers all brushes
-                    // вЂ” recover the per-brush material slot via primitive id.
-                    int mat_idx = (idx == kStaticBlasSentinel)
-                                    ? (prim / kCubeTrisPerBox)
-                                    : idx;
-                    Material m = materials[mat_idx];
-                    vec3 hit_pos = ray_origin + ray_dir * t;
+                    vec3 m_color;
+                    vec3 m_emissive;
+                    float hit_t;
+                    if (use_vox) {
+                        m_color    = voxel_albedo(vpal);
+                        m_emissive = vec3(0.0);
+                        hit_t      = vt;
+                    } else {
+                        // Static-castle hit: 1 BLAS instance covers all
+                        // brushes — recover the per-brush material slot via
+                        // primitive id.
+                        int mat_idx = (idx == kStaticBlasSentinel)
+                                        ? (prim / kCubeTrisPerBox)
+                                        : idx;
+                        Material m = materials[mat_idx];
+                        m_color    = m.color.rgb;
+                        m_emissive = m.emissive.rgb;
+                        hit_t      = t;
+                    }
+                    vec3 hit_pos = ray_origin + ray_dir * hit_t;
                     vec3 hit_n = -ray_dir;  // approximate outward normal
 
                     // *** GI bounce lighting *** вЂ” fires a shadow ray
@@ -2645,13 +2884,13 @@ void main() {
                             }
                         }
                     }
-                    path += throughput * (m.emissive.rgb +
-                                          m.color.rgb * hit_light);
+                    path += throughput * (m_emissive +
+                                          m_color * hit_light);
                     if (b + 1 >= N_bounces) break;
 
                     // Tint the path's throughput by the surface albedo and
                     // continue from the hit point in a new cosine-hemisphere.
-                    throughput *= m.color.rgb;
+                    throughput *= m_color;
                     ray_origin = hit_pos + hit_n * 0.01;
                     float br1 = rand(seed_base + uvec3(taken * 7 + b, 31u, 17u));
                     float br2 = rand(seed_base + uvec3(taken * 7 + b, 7u, 91u));

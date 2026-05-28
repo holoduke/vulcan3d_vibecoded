@@ -413,6 +413,8 @@ void VulkanEngine::recreate_swapchain() {
     if (taa_desc_pool_) recreate_taa_targets();
     // TAAU targets depend on swapchain_extent_; rebuild after swapchain change.
     if (taau_desc_pool_) recreate_taau_targets();
+    // SSDM disp image sizes to render_extent_; rebuild on swapchain change.
+    if (ssdm_disp_pipeline_) recreate_ssdm_targets();
     // Bloom mip 0 is sized to render_extent_/2; if we don't recreate it
     // alongside the swapchain, compose samples a stale-sized texture and
     // bloom appears offset against everything else. The compose desc-set's

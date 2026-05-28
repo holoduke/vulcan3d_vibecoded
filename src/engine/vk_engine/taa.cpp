@@ -192,7 +192,12 @@ void VulkanEngine::recreate_taa_targets() {
 
     make_image(scene_color_format_,
                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-               VK_IMAGE_USAGE_SAMPLED_BIT,
+               VK_IMAGE_USAGE_SAMPLED_BIT |
+               // SSDM Phase 4 blits the remapped image back into
+               // scene_color so downstream consumers (TAA, FSR, SVGF,
+               // compose) sample the displaced result without needing
+               // to rebind descriptor sets to a separate image.
+               VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                scene_color_image_, scene_color_alloc_, scene_color_view_);
     make_image(motion_vec_format_,
                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |

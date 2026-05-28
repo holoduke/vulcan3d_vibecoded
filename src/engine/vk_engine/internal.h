@@ -329,6 +329,17 @@ struct SceneUBO {
     //   .y = master toggle (0 / 1)
     //   .zw = reserved
     glm::vec4  grass_side_lit_params;
+    // Voxel building (Session B) — lets cube.frag's inline-RT shadow + GI
+    // rays intersect the brickmap voxel shape analytically (one shape for
+    // now; no AABB BLAS — the DDA *is* the intersection, so a HW BVH over a
+    // single box would add cost without benefit). Brick atlas + directory
+    // live at scene bindings 24 / 25.
+    //   voxel_origin.xyz = shape origin in world space, .w = enabled (0/1)
+    //   voxel_dims.xyz   = shape extent in world meters, .w = voxel size (m)
+    //   voxel_grid.xyz   = brick grid dims (float), .w = brick size (m)
+    glm::vec4  voxel_origin;
+    glm::vec4  voxel_dims;
+    glm::vec4  voxel_grid;
 };
 
 // ---- KHR ray tracing entry points ----

@@ -6,6 +6,7 @@
 // descriptor work (memcpy into a host-mapped UBO buffer).
 
 #include "engine/vk_engine/internal.h"
+#include "engine/voxel/voxel_world.h"
 
 #include <cmath>
 #include <cstring>
@@ -37,8 +38,9 @@ void VulkanEngine::init_descriptors() {
     VkDescriptorPoolSize sizes[] = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 },
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
-        // 2 originals (materials, prev_transforms) + 2 ReSTIR reservoirs.
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 },
+        // 2 originals (materials, prev_transforms) + 2 ReSTIR reservoirs
+        // + 2 voxel SSBOs (brick atlas + shape directory, bindings 24/25).
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6 },
         // SVGF GI denoiser storage images: 1 raw gi (binding 19) +
         // 2 history ping-pong (bindings 20, 21) +
         // 2 variance-moments ping-pong (bindings 22, 23 — 4a-deep).
@@ -80,7 +82,7 @@ void VulkanEngine::init_descriptors() {
     //              terrain_raymarch_scale < 1.
     //          15=ReSTIR reservoir SSBO (read prev), 16=write cur.
     //              Owned by restir.cpp; cube.frag's GI loop reads/writes.
-    VkDescriptorSetLayoutBinding bindings[24]{};
+    VkDescriptorSetLayoutBinding bindings[26]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -258,10 +260,23 @@ void VulkanEngine::init_descriptors() {
     bindings[23].descriptorCount = 1;
     bindings[23].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Bindings 24 / 25: voxel building brick atlas + shape directory
+    // (Session B). cube.frag's inline-RT shadow + GI rays DDA-march the
+    // brickmap to occlude / colour-bleed. Written from init_voxel() after
+    // the buffers exist (see voxel.cpp), not in write_scene_descriptors_once.
+    bindings[24].binding = 24;
+    bindings[24].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[24].descriptorCount = 1;
+    bindings[24].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[25].binding = 25;
+    bindings[25].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[25].descriptorCount = 1;
+    bindings[25].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 24, .pBindings = bindings,
+        .bindingCount = 26, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),
@@ -627,6 +642,27 @@ void VulkanEngine::update_scene_ubo() {
                 rt_.water_river_extinct_color,
                 std::max(0.0f, rt_.water_river_extinct_density));
         }
+    }
+
+    // Voxel building params for cube.frag's inline-RT shadow + GI rays.
+    // Filled from voxel shape 0 when the voxel world exists; .w of
+    // voxel_origin gates the whole feature off (zero shader cost) when
+    // there's no shape.
+    if (voxel_world_ && !voxel_world_->shapes().empty()) {
+        const auto& s = voxel_world_->shapes()[0];
+        data.voxel_origin = glm::vec4(s.origin_world, 1.0f);
+        data.voxel_dims   = glm::vec4(
+            s.dim_bricks[0] * voxel::kBrickSize,
+            s.dim_bricks[1] * voxel::kBrickSize,
+            s.dim_bricks[2] * voxel::kBrickSize,
+            voxel::kVoxelSize);
+        data.voxel_grid   = glm::vec4(
+            static_cast<float>(s.dim_bricks[0]),
+            static_cast<float>(s.dim_bricks[1]),
+            static_cast<float>(s.dim_bricks[2]),
+            voxel::kBrickSize);
+    } else {
+        data.voxel_origin = glm::vec4(0.0f);  // .w = 0 → disabled
     }
 
     VmaAllocationInfo ai{};

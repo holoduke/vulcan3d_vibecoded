@@ -25,6 +25,13 @@
 //
 #include "engine/vk_engine.h"
 #include "engine/vk_engine/internal.h"
+// Pulled in here (not in vk_engine.h) so the unique_ptr<voxel::VoxelWorld>
+// member's destructor can be generated in this TU where the type is
+// complete. Forward-declared in the header to keep its include surface tight.
+// Must be at file scope (NOT inside namespace qlike) so voxel_world.h's
+// `namespace qlike::voxel` resolves to the same fully-qualified name as
+// the forward decl in vk_engine.h.
+#include "engine/voxel/voxel_world.h"
 
 #include "engine/audio.h"
 
@@ -109,23 +116,30 @@ void VulkanEngine::ensure_loader_bg_loaded_() {
     // vkCmdBlitImage. Saves a tiny bit of memory and keeps the
     // descriptor pool budget intact.
     if (r.view) vkDestroyImageView(device_, r.view, nullptr);
-    loader_bg_image_  = r.image;
-    loader_bg_alloc_  = r.alloc;
-    loader_bg_extent_ = { static_cast<uint32_t>(r.width),
-                          static_cast<uint32_t>(r.height) };
     // Transition once from SHADER_READ_ONLY_OPTIMAL (where upload
     // leaves it) -> TRANSFER_SRC_OPTIMAL so the per-frame blit's
     // src layout matches. The image lives in this layout forever
     // since the loader is the only consumer.
-    VkCommandPool cp{};
+    //
+    // Don't assign to loader_bg_image_ until the transition succeeds.
+    // present_loader_frame() picks up the asset based on that handle
+    // and assumes the layout is TRANSFER_SRC_OPTIMAL; if pool create
+    // / cmd alloc / queue submit fail, we want present_loader_frame to
+    // fall through to the cleared-navy + vignette fallback instead of
+    // issuing a vkCmdBlitImage with the wrong source layout.
+    VkCommandPool cp = VK_NULL_HANDLE;
     VkCommandPoolCreateInfo cpi{
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .pNext = nullptr,
         .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
         .queueFamilyIndex = graphics_queue_family_,
     };
-    vkCreateCommandPool(device_, &cpi, nullptr, &cp);
-    VkCommandBuffer cmd{};
+    if (vkCreateCommandPool(device_, &cpi, nullptr, &cp) != VK_SUCCESS) {
+        log::warnf("[loader] cmd pool create failed; dropping bg image");
+        vmaDestroyImage(allocator_, r.image, r.alloc);
+        return;
+    }
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkCommandBufferAllocateInfo cai{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .pNext = nullptr,
@@ -133,7 +147,12 @@ void VulkanEngine::ensure_loader_bg_loaded_() {
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1,
     };
-    vkAllocateCommandBuffers(device_, &cai, &cmd);
+    if (vkAllocateCommandBuffers(device_, &cai, &cmd) != VK_SUCCESS) {
+        log::warnf("[loader] cmd alloc failed; dropping bg image");
+        vkDestroyCommandPool(device_, cp, nullptr);
+        vmaDestroyImage(allocator_, r.image, r.alloc);
+        return;
+    }
     VkCommandBufferBeginInfo bi{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .pNext = nullptr,
@@ -141,7 +160,7 @@ void VulkanEngine::ensure_loader_bg_loaded_() {
         .pInheritanceInfo = nullptr,
     };
     vkBeginCommandBuffer(cmd, &bi);
-    vkinit::transition_image(cmd, loader_bg_image_,
+    vkinit::transition_image(cmd, r.image,
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     vkEndCommandBuffer(cmd);
@@ -153,9 +172,20 @@ void VulkanEngine::ensure_loader_bg_loaded_() {
         .commandBufferCount = 1, .pCommandBuffers = &cmd,
         .signalSemaphoreCount = 0, .pSignalSemaphores = nullptr,
     };
-    vkQueueSubmit(graphics_queue_, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(graphics_queue_);
+    VkResult sub = vkQueueSubmit(graphics_queue_, 1, &si, VK_NULL_HANDLE);
+    if (sub == VK_SUCCESS) sub = vkQueueWaitIdle(graphics_queue_);
     vkDestroyCommandPool(device_, cp, nullptr);
+    if (sub != VK_SUCCESS) {
+        log::warnf("[loader] layout transition submit failed (%d); dropping bg image", int(sub));
+        vmaDestroyImage(allocator_, r.image, r.alloc);
+        return;
+    }
+    // Transition succeeded -- publish to engine state. destroy_loader_bg_()
+    // at shutdown owns the image from this point.
+    loader_bg_image_  = r.image;
+    loader_bg_alloc_  = r.alloc;
+    loader_bg_extent_ = { static_cast<uint32_t>(r.width),
+                          static_cast<uint32_t>(r.height) };
     log::infof("[loader] background loaded (%ux%u) from %s",
                 loader_bg_extent_.width, loader_bg_extent_.height, path.c_str());
 }
@@ -252,8 +282,13 @@ void VulkanEngine::present_loader_frame(const char* label, float progress) {
 
     VkClearValue clear_bg{};
     clear_bg.color = { { 0.020f, 0.025f, 0.040f, 1.0f } };  // deep navy
+    // When a BG image was just blit'd into the swapchain, we MUST use
+    // LOAD_OP_LOAD on the colour attachment, otherwise the rendering
+    // pass starts with LOAD_OP_CLEAR which wipes the blit'd image back
+    // to navy before the overlays draw -- "loader image is black".
     auto sw_color = vkinit::color_attachment_info(
-        swapchain_views_[img_idx], &clear_bg,
+        swapchain_views_[img_idx],
+        used_bg ? nullptr : &clear_bg,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingInfo ri{
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
@@ -551,6 +586,7 @@ void VulkanEngine::init() {
     }
     present_loader_frame("Compiling pipelines",   0.70f);
     init_pipeline();
+    init_voxel();
     init_terrain_pipelines();
     init_terrain_raymarch_pipeline();
     init_terrain_water_pipeline();
@@ -592,6 +628,10 @@ void VulkanEngine::init() {
     // live when compose's descriptor set is written.
     init_taa();
     init_taau();
+    // SSDM Phase 1: dedicated displacement-vector pass. Must run after
+    // init_taa() so render_extent_ is finalised (the disp image sizes to it)
+    // and before init_compose() in case future phases hook into compose.
+    init_ssdm();
     init_bloom();
     init_compose();
     // SVGF moments + 3-pass a-trous pipelines (4a-deep). Must run
@@ -982,6 +1022,17 @@ void VulkanEngine::draw(uint32_t img_index) {
     render_world(frame.command_buffer);
     vkCmdEndRendering(frame.command_buffer);
 
+    // ---------- Pass 1b: SSDM displacement vector ----------
+    // Runs BEFORE the post-world transition batch flips depth to
+    // SHADER_READ_ONLY -- SSDM needs depth still as a DEPTH_ATTACHMENT for
+    // its LESS_OR_EQUAL test against the main pass's rasterised walls.
+    // Self-managed image transitions on ssdm_disp_image_: SHADER_READ ->
+    // COLOR_ATTACHMENT for the pass, then back to SHADER_READ for Phase 2
+    // consumers. No effect downstream yet (Phase 1 only populates the
+    // image; the mip-pyramid + remap passes that consume it are Phases
+    // 2-4 still to land).
+    render_world_ssdm_disp(frame.command_buffer);
+
     // ---------- Pass 2: TAA into history_image_[history_write_slot_] ----------
     // Flip scene_color + depth into shader-read for TAA in one batched
     // barrier (was 2 calls + a dead motion_vec one). The motion_vec
@@ -989,11 +1040,20 @@ void VulkanEngine::draw(uint32_t img_index) {
     // saves a real cross-pass cache flush on the 16 MB RG16F surface.
     // Perf P1+P2.
     {
+        // Shell silhouette pass DISABLED — 7 iterations all produced
+        // different artifacts. With wide shell (12cm + lateral push),
+        // adjacent SPOM brushes fill gaps between them with dimly-lit
+        // shell bricks ("giant square shadow"). With narrow shell (4cm
+        // outward-only), extension is invisible at typical view distance.
+        // Fundamental incompatibility: inward-recessed bricks + don't
+        // change geometry + match cube.frag lighting + extend past
+        // corners are mutually exclusive without re-authored height maps
+        // or stencil masking. Dormant code in shaders/shell.{vert,frag}
+        // + ssdm.cpp::render_shell_pass.
         const vkinit::ImageTransition kPostWorld[] = {
             { scene_color_image_, VK_IMAGE_ASPECT_COLOR_BIT,
               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
-            // Motion vector is read by taa.frag (binding 4); flip it too.
             { motion_vec_image_, VK_IMAGE_ASPECT_COLOR_BIT,
               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
@@ -1003,6 +1063,16 @@ void VulkanEngine::draw(uint32_t img_index) {
         };
         vkinit::transition_images_batch(frame.command_buffer, kPostWorld, 3);
     }
+
+    // ---------- Pass 1c: SSDM compose remap (Phase 4) ----------
+    // DISABLED: Paper SSDM works for OUTWARD bumps; our SPOM bricks are
+    // INWARD-recessed so the screen-space barycenter at sky-adjacent
+    // pixels converges to ~0 and silhouette extension is not visible.
+    // Replaced with the dedicated shell-mesh pass (render_shell_pass)
+    // which actually draws extruded geometry past the brush edge and
+    // discards via parallax march. Shell pass runs INSIDE the main
+    // rendering scope (see render_world).
+    // compose_ssdm(frame.command_buffer);
 
     // ---------- Pass 1.5: SVGF deep denoise (4a-deep) ----------
     // Updates the per-pixel luminance moments (binding 22/23) by
@@ -2302,6 +2372,12 @@ void VulkanEngine::shutdown() {
     guarded("destroy_compose", [&]{ destroy_compose(); });
     guarded("destroy_bloom",   [&]{ destroy_bloom(); });
     guarded("destroy_taau",    [&]{ destroy_taau(); });
+    // SSDM owns its own pipeline + image; tear down before destroy_taa
+    // which removes the cube vert_module_/pipeline_layout_ it borrows.
+    // Actually those live on init_pipeline (destroyed in destroy_pipeline),
+    // not destroy_taa, but the ordering doesn't matter for SSDM's own
+    // resources — they're self-contained.
+    guarded("destroy_ssdm",    [&]{ destroy_ssdm(); });
     // SVGF passes own pipelines + descriptors that reference
     // linear_sampler_ (owned by TAA) and the SVGF storage image views
     // (owned by init_svgf_targets). Tear them down BEFORE destroy_taa
@@ -2336,6 +2412,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_terrain_water_pipeline", [&]{ destroy_terrain_water_pipeline(); });
     guarded("destroy_terrain_pipelines", [&]{ destroy_terrain_pipelines(); });
     guarded("destroy_sun_shadow_pipeline", [&]{ destroy_sun_shadow_pipeline(); });
+    guarded("destroy_voxel", [&]{ destroy_voxel(); });
     guarded("destroy_pipeline", [&]{ destroy_pipeline(); });
     guarded("destroy_grass", [&]{ destroy_grass(allocator_, grass_); });
     guarded("stop_terrain_shadow_worker", [&]{ stop_terrain_shadow_worker(); });

@@ -37,6 +37,8 @@ inline std::atomic<uint64_t> g_validation_error_count{0};
 
 class Window;
 
+namespace voxel { class VoxelWorld; }
+
 struct RunOptions {
     int max_frames = -1;
     std::string screenshot_path;
@@ -180,6 +182,41 @@ private:
     void init_taa();
     void destroy_taa();
     void recreate_taa_targets();
+    // SSDM = Screen-Space Displacement Mapping (Lobel 2008). Phase 1
+    // module: dedicated render pass that paints projected displacement
+    // vectors per SPOM-wall pixel into ssdm_disp_image_. See ssdm.cpp.
+    void init_ssdm();
+    void destroy_ssdm();
+    // Voxel buildings (Session A — visuals only). Builds a procedural
+    // tower 100 m north of the castle origin, stores it as a brickmap
+    // (16³ bricks of 0.1 m voxels), uploads brick atlas + shape directory
+    // as SSBOs, and ray-marches it during the world MRT pass. See
+    // src/engine/vk_engine/voxel.cpp + shaders/voxel.{vert,frag}.
+    void init_voxel();
+    void destroy_voxel();
+    void update_voxel_camera_ubo();
+    void render_voxels(VkCommandBuffer cmd);
+    void recreate_ssdm_targets();
+    void render_world_ssdm_disp(VkCommandBuffer cmd);
+    // Phase 2: blit-chain mip pyramid build on ssdm_disp_image_ levels
+    // 1..kSsdmMips-1. Called from render_world_ssdm_disp after the
+    // rasterised level 0 is written.
+    void build_ssdm_pyramid_a(VkCommandBuffer cmd);
+    // Phase 3: iterative barycenter refinement. Reads pyramid A, writes
+    // pyramid B (ssdm_pyrb_image_). One compute dispatch per mip from
+    // top (coarsest) to 0.
+    void refine_ssdm_pyramid_b(VkCommandBuffer cmd);
+    // Phase 4: compose remap. Samples scene_color at (uv + pyrB[0]) into
+    // ssdm_remap_image_, then blits back into scene_color so all
+    // downstream consumers see the SSDM-displaced result. Must run
+    // AFTER the post-world transition flips scene_color to SHADER_READ.
+    void compose_ssdm(VkCommandBuffer cmd);
+    // Shell silhouette pass — called from render_world() INSIDE the main
+    // rendering scope (so the existing scene_color + motion_vec + depth
+    // attachments are already bound). Iterates SPOM wall brushes and
+    // draws each with shell.vert (outward extrusion) + shell.frag
+    // (parallax march + discard).
+    void render_shell_pass(VkCommandBuffer cmd);
     void init_bloom();
     void destroy_bloom();
     void recreate_bloom_targets();
@@ -1340,6 +1377,73 @@ private:
 
     VkSampler    linear_sampler_ = VK_NULL_HANDLE;
 
+    // --- SSDM (Screen-Space Displacement Mapping, Lobel 2008) ---
+    // Phase 1 owns ssdm_disp_image_ (RG16F at render_extent_) and the
+    // ssdm_disp_pipeline_ that paints SPOM-wall pixels with their
+    // projected displacement vector. Subsequent phases build a mip
+    // pyramid + iterative barycenter refine + scene_color remap on top
+    // of this base. See src/engine/vk_engine/ssdm.cpp.
+    VkImage        ssdm_disp_image_         = VK_NULL_HANDLE;
+    VmaAllocation  ssdm_disp_alloc_         = nullptr;
+    // Level-0 view (Phase 1 render pass uses this so the rasteriser writes
+    // exclusively to mip 0). Single-mip subresourceRange.
+    VkImageView    ssdm_disp_view_          = VK_NULL_HANDLE;
+    // All-mip view (Phase 3 sampling reads). Covers levels 0..kSsdmMips-1.
+    VkImageView    ssdm_disp_pyramid_view_  = VK_NULL_HANDLE;
+    VkFormat       ssdm_disp_format_        = VK_FORMAT_R16G16_SFLOAT;
+    VkShaderModule ssdm_disp_frag_module_   = VK_NULL_HANDLE;
+    VkPipeline     ssdm_disp_pipeline_      = VK_NULL_HANDLE;
+
+    // SSDM pyramid B (barycenter outputs per mip). Same format/size as A.
+    // Phase 3's compute writes per-mip via per-mip storage views; phase 4
+    // samples level 0 to remap scene_color.
+    static constexpr uint32_t kSsdmMipsMax = 4;
+    VkImage        ssdm_pyrb_image_                       = VK_NULL_HANDLE;
+    VmaAllocation  ssdm_pyrb_alloc_                       = nullptr;
+    VkImageView    ssdm_pyrb_pyramid_view_                = VK_NULL_HANDLE;  // all mips, SAMPLED
+    VkImageView    ssdm_pyrb_mip_views_[kSsdmMipsMax]{};                       // per-mip, STORAGE
+
+    // Phase 3 compute pipeline: one set, layout has sampler-pyrA +
+    // sampler-pyrB(prev mip view) + storage-pyrB(current mip view).
+    VkShaderModule        ssdm_refine_comp_module_       = VK_NULL_HANDLE;
+    VkDescriptorSetLayout ssdm_refine_set_layout_        = VK_NULL_HANDLE;
+    VkPipelineLayout      ssdm_refine_pipeline_layout_   = VK_NULL_HANDLE;
+    VkPipeline            ssdm_refine_pipeline_          = VK_NULL_HANDLE;
+    VkDescriptorPool      ssdm_refine_desc_pool_         = VK_NULL_HANDLE;
+    // One set per mip level: each set's binding 2 (pyrB write) is the
+    // per-mip storage view for that level. Binding 1 (pyrB prev sampler)
+    // shares the all-mip view + textureLod(mip) in the shader.
+    VkDescriptorSet       ssdm_refine_desc_sets_[kSsdmMipsMax]{};
+
+    // Phase 4 compose: a temp image to hold the SSDM-remapped scene_color
+    // (we can't read+write scene_color in the same pass). Output gets
+    // blit-copied back into scene_color so downstream consumers don't
+    // have to know about SSDM.
+    VkImage               ssdm_remap_image_              = VK_NULL_HANDLE;
+    VmaAllocation         ssdm_remap_alloc_              = nullptr;
+    VkImageView           ssdm_remap_view_               = VK_NULL_HANDLE;
+    VkShaderModule        ssdm_compose_frag_module_      = VK_NULL_HANDLE;
+    VkDescriptorSetLayout ssdm_compose_set_layout_       = VK_NULL_HANDLE;
+    VkPipelineLayout      ssdm_compose_pipeline_layout_  = VK_NULL_HANDLE;
+    VkPipeline            ssdm_compose_pipeline_         = VK_NULL_HANDLE;
+    VkDescriptorPool      ssdm_compose_desc_pool_        = VK_NULL_HANDLE;
+    VkDescriptorSet       ssdm_compose_desc_set_         = VK_NULL_HANDLE;
+
+    // Shell pass: dedicated outward+lateral-extruded brush draw for SPOM
+    // silhouette extension. Runs as a SEPARATE render pass AFTER the
+    // post-world depth transition so shell.frag can sample the depth
+    // buffer and discard pixels where the main pass already drew a wall
+    // (avoids overdrawing with shell's simpler lighting). Shell pass
+    // writes scene_color + motion_vec (LOAD/STORE) with NO depth
+    // attachment (depth is read-only via the new sampler set).
+    VkShaderModule        shell_vert_module_              = VK_NULL_HANDLE;
+    VkShaderModule        shell_frag_module_              = VK_NULL_HANDLE;
+    VkPipeline            shell_pipeline_                 = VK_NULL_HANDLE;
+    VkPipelineLayout      shell_pipeline_layout_          = VK_NULL_HANDLE;
+    VkDescriptorSetLayout shell_depth_set_layout_         = VK_NULL_HANDLE;
+    VkDescriptorPool      shell_depth_desc_pool_          = VK_NULL_HANDLE;
+    VkDescriptorSet       shell_depth_desc_set_           = VK_NULL_HANDLE;
+
     VkDescriptorPool       taa_desc_pool_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout  taa_desc_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorSet        taa_desc_sets_[kHistorySlots]{ VK_NULL_HANDLE, VK_NULL_HANDLE };
@@ -2388,6 +2492,29 @@ private:
     RtSettings rt_last_saved_{};
     RtSettings rt_prev_frame_{};
     float      settings_dirty_timer_ = 0.0f;
+
+    // ---- Voxel buildings (Session A) ----
+    // CPU brickmap world (owns all bricks + shape directories).
+    std::unique_ptr<voxel::VoxelWorld> voxel_world_;
+    // GPU-side: brick atlas SSBO (all bricks for all shapes), shape
+    // directory SSBO (single shape for now), and the per-frame camera
+    // UBO. Pipeline + layout are fully self-contained (no overlap with
+    // scene_desc_set_). One descriptor set, three bindings:
+    //   0 = camera UBO, 1 = brick atlas, 2 = shape directory.
+    VkBuffer              voxel_atlas_buffer_      = VK_NULL_HANDLE;
+    VmaAllocation         voxel_atlas_alloc_       = nullptr;
+    VkBuffer              voxel_dir_buffer_        = VK_NULL_HANDLE;
+    VmaAllocation         voxel_dir_alloc_         = nullptr;
+    VkBuffer              voxel_camera_ubo_        = VK_NULL_HANDLE;
+    VmaAllocation         voxel_camera_alloc_      = nullptr;
+    void*                 voxel_camera_mapped_     = nullptr;
+    VkShaderModule        voxel_vert_module_       = VK_NULL_HANDLE;
+    VkShaderModule        voxel_frag_module_       = VK_NULL_HANDLE;
+    VkDescriptorSetLayout voxel_desc_set_layout_   = VK_NULL_HANDLE;
+    VkPipelineLayout      voxel_pipeline_layout_   = VK_NULL_HANDLE;
+    VkPipeline            voxel_pipeline_          = VK_NULL_HANDLE;
+    VkDescriptorPool      voxel_desc_pool_         = VK_NULL_HANDLE;
+    VkDescriptorSet       voxel_desc_set_          = VK_NULL_HANDLE;
 
     bool initialized_ = false;
     // Set when run() catches a DEVICE_LOST-class exception. shutdown() skips
