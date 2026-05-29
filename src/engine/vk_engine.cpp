@@ -1890,7 +1890,8 @@ void VulkanEngine::run(const RunOptions& opts) {
                 glm::vec3 pre_vel = player_.velocity;
                 bool was_on_ground = player_.on_ground;
                 game::update_player(player_, pin, tick_aabbs_, kFixedDt,
-                                     world_.aabbs.size());
+                                     world_.aabbs.size() +
+                                     voxel_collision_aabbs_.size());
                 // Terrain ground clamp. update_player collides only
                 // against AABBs; the heightfield isn't an AABB so the
                 // player would free-fall through it. We:
@@ -2008,6 +2009,10 @@ void VulkanEngine::run(const RunOptions& opts) {
                 }
             }
         }
+
+        // Voxel destruction: debounced heavy work (collapse + collision
+        // rebuild) once per frame, off the per-bullet impact path.
+        process_voxel_updates(frame_dt);
 
         // Recompute the sun shadow-map light view-proj before update_scene_ubo
         // so the matrix copied into the UBO this frame matches the geometry

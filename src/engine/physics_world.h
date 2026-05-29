@@ -34,6 +34,15 @@ public:
     struct StaticBox { glm::vec3 center; glm::vec3 half_extents; };
     void add_static_boxes(const StaticBox* boxes, size_t count);
 
+    // Voxel-building collision: replace the single static body that
+    // represents the destructible voxel shape with a fresh one built from
+    // `count` world-space boxes (one StaticCompoundShape → one Jolt body,
+    // so it never threatens the body cap regardless of box count). Pass
+    // count == 0 to just remove the existing body. Called at voxel init and
+    // rebuilt after every carve. Projectiles collide with this for
+    // shoot-to-destroy; the player uses the same boxes via game::collision.
+    void set_voxel_collision(const StaticBox* boxes, size_t count);
+
     // Add a procedural heightmap as a single Jolt HeightFieldShape static
     // body. `dim` is the cell count per side; `samples` must be of size
     // (dim+1) * (dim+1) and laid out row-major (x outer, z inner — matching

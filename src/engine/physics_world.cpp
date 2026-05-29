@@ -10,6 +10,7 @@
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
@@ -173,6 +174,8 @@ struct PhysicsWorld::Impl {
     ObjectVsBPFilterImpl obj_vs_bp;
     ObjectPairFilterImpl obj_pairs;
 
+    // Single static body for the destructible voxel shape (rebuilt on carve).
+    JPH::BodyID voxel_body;   // invalid until set_voxel_collision runs
     std::unordered_map<uint32_t, JPH::BodyID> ids;
     // Reverse lookup so raycast hits → user id is O(1) instead of a
     // linear walk over `ids`. Keyed on BodyID's internal index value
@@ -284,6 +287,70 @@ void PhysicsWorld::add_static_boxes(const StaticBox* boxes, size_t count) {
         bi.AddBodiesPrepare(ids.data(), static_cast<int>(ids.size()));
     bi.AddBodiesFinalize(ids.data(), static_cast<int>(ids.size()),
                           state, JPH::EActivation::DontActivate);
+}
+
+void PhysicsWorld::set_voxel_collision(const StaticBox* boxes, size_t count) {
+    JPH::BodyInterface& bi = impl_->system.GetBodyInterface();
+    // Tear down the previous voxel body.
+    if (!impl_->voxel_body.IsInvalid()) {
+        bi.RemoveBody(impl_->voxel_body);
+        bi.DestroyBody(impl_->voxel_body);
+        impl_->voxel_body = JPH::BodyID();
+    }
+    if (count == 0) return;
+
+    // Build each box shape, collect (shape, center). StaticCompoundShape
+    // needs >= 2 sub-shapes; for 0/1 we special-case.
+    std::vector<JPH::RefConst<JPH::Shape>> shapes;
+    std::vector<JPH::Vec3> centers;
+    shapes.reserve(count);
+    centers.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        glm::vec3 he = boxes[i].half_extents;
+        float min_he = std::min({he.x, he.y, he.z});
+        float cr = std::min(0.04f, std::max(0.001f, min_he * 0.4f));
+        JPH::BoxShapeSettings ss(JPH::Vec3(he.x, he.y, he.z), cr);
+        ss.SetEmbedded();
+        JPH::ShapeSettings::ShapeResult sr = ss.Create();
+        if (sr.HasError()) continue;
+        shapes.push_back(sr.Get());
+        centers.push_back(JPH::Vec3(boxes[i].center.x, boxes[i].center.y,
+                                    boxes[i].center.z));
+    }
+    if (shapes.empty()) return;
+
+    JPH::RefConst<JPH::Shape> final_shape;
+    if (shapes.size() == 1) {
+        // Single box: wrap nothing, place the body at the box center.
+        final_shape = shapes[0];
+        JPH::BodyCreationSettings bcs(final_shape, centers[0],
+                                      JPH::Quat::sIdentity(),
+                                      JPH::EMotionType::Static,
+                                      Layers::NON_MOVING);
+        if (JPH::Body* b = bi.CreateBody(bcs)) {
+            bi.AddBody(b->GetID(), JPH::EActivation::DontActivate);
+            impl_->voxel_body = b->GetID();
+        }
+        return;
+    }
+    JPH::StaticCompoundShapeSettings css;
+    css.SetEmbedded();
+    for (size_t i = 0; i < shapes.size(); ++i) {
+        css.AddShape(centers[i], JPH::Quat::sIdentity(), shapes[i]);
+    }
+    JPH::ShapeSettings::ShapeResult cr = css.Create();
+    if (cr.HasError()) {
+        log::errorf("[jolt] voxel compound shape: %s", cr.GetError().c_str());
+        return;
+    }
+    JPH::BodyCreationSettings bcs(cr.Get(), JPH::RVec3(0, 0, 0),
+                                  JPH::Quat::sIdentity(),
+                                  JPH::EMotionType::Static,
+                                  Layers::NON_MOVING);
+    if (JPH::Body* b = bi.CreateBody(bcs)) {
+        bi.AddBody(b->GetID(), JPH::EActivation::DontActivate);
+        impl_->voxel_body = b->GetID();
+    }
 }
 
 void PhysicsWorld::add_static_heightfield(const float* samples, int dim,

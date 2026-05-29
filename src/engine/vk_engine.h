@@ -2503,6 +2503,32 @@ private:
     //   0 = camera UBO, 1 = brick atlas, 2 = shape directory.
     VkBuffer              voxel_atlas_buffer_      = VK_NULL_HANDLE;
     VmaAllocation         voxel_atlas_alloc_       = nullptr;
+    // Host-mapped pointer into the brick atlas (Session C). Carves modify
+    // the CPU brick data then memcpy the changed bricks here + flush, so
+    // the hole appears next frame with no command-buffer round-trip. The
+    // atlas lives in device-local-host-visible (ReBAR) memory when available
+    // — 4 MB fits the guaranteed 256 MB BAR window, so GPU reads stay fast.
+    void*                 voxel_atlas_mapped_      = nullptr;
+    VkDeviceSize          voxel_atlas_bytes_       = 0;
+    // World-space solid boxes (player collision) + dirty-brick scratch.
+    std::vector<collision::AABB> voxel_collision_aabbs_;
+    // Carve at world `center`/`radius`: clears voxels and flushes ONLY the
+    // touched bricks to the GPU atlas (the hole appears instantly, cheap).
+    // The expensive structural-collapse + collision rebuild are NOT done
+    // here — they're deferred + debounced via process_voxel_updates so a
+    // burst of impacts doesn't stall the frame. Returns voxels removed.
+    int  apply_voxel_carve(glm::vec3 center, float radius);
+    // Once-per-frame: if a carve happened, run the debounced heavy work
+    // (collapse → debris → collision rebuild) at most ~5×/sec, off the
+    // bullet-impact hot path. dt in seconds.
+    void process_voxel_updates(float dt);
+    void rebuild_voxel_collision();
+    bool  voxel_update_pending_  = false;  // a carve happened, not yet settled
+    int   voxel_removed_accum_   = 0;      // voxels carved since last collapse
+    float voxel_collapse_cd_     = 0.0f;   // min time between collapse BFS runs
+    float voxel_collision_cd_    = 0.0f;   // min time between collision rebuilds
+    // Flush a single brick slot's payload to the host-mapped GPU atlas.
+    void  flush_voxel_brick_(uint32_t slot);
     VkBuffer              voxel_dir_buffer_        = VK_NULL_HANDLE;
     VmaAllocation         voxel_dir_alloc_         = nullptr;
     VkBuffer              voxel_camera_ubo_        = VK_NULL_HANDLE;

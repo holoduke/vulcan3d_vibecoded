@@ -3206,8 +3206,13 @@ void VulkanEngine::rebuild_tick_aabbs() {
     // rotated boxes we use the AABB of the rotated cube (over-approximation)
     // РІР‚вЂќ the player's collision is still solid against tilted falling crates.
     tick_aabbs_.clear();
-    tick_aabbs_.reserve(world_.aabbs.size() + dyn_props_.size());
+    tick_aabbs_.reserve(world_.aabbs.size() + voxel_collision_aabbs_.size() +
+                        dyn_props_.size());
     for (const auto& a : world_.aabbs) tick_aabbs_.push_back(a);
+    // Voxel-tower solid boxes count as STATIC geometry (auto step-up onto
+    // carved ledges works). Must stay in the static prefix — the caller
+    // passes static_count = world_.aabbs.size() + voxel_collision_aabbs_.size().
+    for (const auto& a : voxel_collision_aabbs_) tick_aabbs_.push_back(a);
     if (!physics_) return;
     if (dyn_tick_aabb_cache_.size() != dyn_props_.size()) {
         dyn_tick_aabb_cache_.resize(dyn_props_.size());

@@ -314,6 +314,13 @@ void VulkanEngine::update_projectiles(float dt) {
                                          : -it->initial_dir;
                 glm::vec3 saved_dir = it->initial_dir;
                 uint32_t  saved_body = it->body_id;
+                // CCD stops the bullet when its LEADING TIP touches the
+                // surface, so hit_pos (the body centre) sits ~half_length
+                // short of the actual contact point. Advance to the contact
+                // point (plus a little) so the carve sphere bites INTO the
+                // wall rather than carving air in front of it.
+                glm::vec3 carve_pos = hit_pos +
+                    saved_dir * (it->half_length + 0.2f);
 
                 // Order matters: remove the bullet body BEFORE the decal
                 // raycast so the ray doesn't hit the cylinder itself
@@ -321,7 +328,17 @@ void VulkanEngine::update_projectiles(float dt) {
                 // the decal BEFORE spawning sparks so the ray doesn't
                 // hit the freshly-spawned spark spheres either.
                 physics_->remove_body(saved_body);
-                spawn_impact_decal(hit_pos, saved_dir);
+                // Voxel destruction: carve a crater at the contact point.
+                // apply_voxel_carve no-ops unless carve_pos is on the tower,
+                // so it's safe to call for every impact. Skip the decal on
+                // a successful carve (the hole IS the mark).
+                int carved = apply_voxel_carve(carve_pos, 0.7f);
+                if (carved == 0) {
+                    spawn_impact_decal(hit_pos, saved_dir);
+                } else {
+                    // Debris: a few sparks kicked back along the surface.
+                    spawn_hit_particles(hit_pos, -saved_dir, saved_dir);
+                }
                 spawn_hit_particles(hit_pos, reflect, saved_dir);
                 if (audio_) {
                     audio_->play_at(ClipID::Impact, hit_pos, 0.8f, 0.10f, 0.08f);

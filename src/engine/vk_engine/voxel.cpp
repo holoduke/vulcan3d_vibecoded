@@ -17,6 +17,7 @@
 #include "engine/vk_pipelines.h"
 #include "engine/voxel/voxel_world.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -142,8 +143,30 @@ void VulkanEngine::init_voxel() {
 
     const VkDeviceSize atlas_bytes = static_cast<VkDeviceSize>(bricks.size()) *
                                      sizeof(voxel::BrickPayload);
-    create_device_ssbo(atlas_bytes, bricks.data(), "voxel brick atlas",
-                       voxel_atlas_buffer_, voxel_atlas_alloc_);
+    // Brick atlas is host-mapped (not staged) so carves can flush touched
+    // bricks directly — see voxel_atlas_mapped_. Device-local-host-visible
+    // (ReBAR) when available; 4 MB fits the guaranteed BAR window.
+    {
+        VkBufferCreateInfo bci{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .size = atlas_bytes,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+        };
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo ai{};
+        vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
+                                 &voxel_atlas_buffer_, &voxel_atlas_alloc_, &ai),
+                 "voxel brick atlas");
+        std::memcpy(ai.pMappedData, bricks.data(), static_cast<size_t>(atlas_bytes));
+        voxel_atlas_mapped_ = ai.pMappedData;
+        voxel_atlas_bytes_  = atlas_bytes;
+    }
 
     // Shape directory: header (uvec4 = dims) + entries[].
     // GLSL std430 lays this out tightly when the buffer is declared as
@@ -319,7 +342,138 @@ void VulkanEngine::init_voxel() {
         vkUpdateDescriptorSets(device_, 2, w, 0, nullptr);
     }
 
+    // ---- Session C: build collision (player AABBs + Jolt static body) ----
+    rebuild_voxel_collision();
+
     log::info("[voxel] init complete — tower live, 1 shape, 1 pipeline");
+}
+
+void VulkanEngine::rebuild_voxel_collision() {
+    if (!voxel_world_ || voxel_world_->shapes().empty()) return;
+    std::vector<voxel::CollisionBox> boxes;
+    voxel_world_->build_collision_boxes(0, boxes);
+
+    // Player kinematic collision (game::collision AABBs). Rebuilt wholesale;
+    // rebuild_tick_aabbs appends these to the static prefix each frame.
+    voxel_collision_aabbs_.clear();
+    voxel_collision_aabbs_.reserve(boxes.size());
+    for (const auto& b : boxes) {
+        voxel_collision_aabbs_.push_back(
+            collision::AABB{ b.center - b.half, b.center + b.half });
+    }
+
+    // Projectile collision: one Jolt StaticCompound body.
+    if (physics_) {
+        std::vector<PhysicsWorld::StaticBox> jb;
+        jb.reserve(boxes.size());
+        for (const auto& b : boxes) jb.push_back({ b.center, b.half });
+        physics_->set_voxel_collision(jb.data(), jb.size());
+    }
+}
+
+void VulkanEngine::flush_voxel_brick_(uint32_t slot) {
+    if (!voxel_atlas_mapped_) return;
+    const voxel::BrickPayload& bp = voxel_world_->brick(slot);
+    size_t off = static_cast<size_t>(slot) * sizeof(voxel::BrickPayload);
+    if (off + sizeof(voxel::BrickPayload) > voxel_atlas_bytes_) return;
+    std::memcpy(static_cast<char*>(voxel_atlas_mapped_) + off,
+                &bp, sizeof(voxel::BrickPayload));
+    // Flush just this brick's range (non-coherent memory). Cheap vs the
+    // whole-atlas flush we used to do every carve.
+    vmaFlushAllocation(allocator_, voxel_atlas_alloc_, off,
+                       sizeof(voxel::BrickPayload));
+}
+
+int VulkanEngine::apply_voxel_carve(glm::vec3 center, float radius) {
+    if (!voxel_world_ || voxel_world_->shapes().empty()) return 0;
+    // CHEAP path (runs per bullet impact): clear the sphere of voxels and
+    // push ONLY the touched bricks to the GPU so the hole shows instantly.
+    // The expensive collapse + collision rebuild are deferred to
+    // process_voxel_updates (debounced) so rapid fire never stalls a frame.
+    std::vector<uint32_t> dirty;
+    int removed = voxel_world_->carve_sphere(0, center, radius, dirty);
+    if (removed == 0) return 0;
+    for (uint32_t slot : dirty) flush_voxel_brick_(slot);
+    voxel_update_pending_ = true;
+    voxel_removed_accum_ += removed;
+    return removed;
+}
+
+void VulkanEngine::process_voxel_updates(float dt) {
+    if (!voxel_world_ || voxel_world_->shapes().empty()) return;
+    if (voxel_collapse_cd_  > 0.0f) voxel_collapse_cd_  -= dt;
+    if (voxel_collision_cd_ > 0.0f) voxel_collision_cd_ -= dt;
+    if (!voxel_update_pending_) return;
+
+    // Collapse (the ~20 ms BFS) only when enough has been carved to plausibly
+    // disconnect a chunk, and rate-limited — a single bullet hole never pays
+    // for it. A big cut (≥ ~3000 voxels of accumulated damage) triggers the
+    // structural check; the detached top falls as debris.
+    bool collapsed = false;
+    if (voxel_removed_accum_ >= 3000 && voxel_collapse_cd_ <= 0.0f) {
+        voxel_removed_accum_ = 0;
+        voxel_collapse_cd_   = 0.25f;
+        collapsed = true;
+
+        std::vector<uint32_t> dirty;
+        std::vector<voxel::CollisionBox> debris;
+        voxel_world_->collapse_unsupported(0, 8, debris, dirty);
+        for (uint32_t slot : dirty) flush_voxel_brick_(slot);
+
+    // Spawn the detached chunk as falling debris boxes (reuses dynamic-prop
+    // physics + rendering). Largest chunks first so the visible mass is
+    // preserved; the rest were already cleared from the shape.
+    if (physics_ && !debris.empty()) {
+        std::sort(debris.begin(), debris.end(),
+                  [](const voxel::CollisionBox& a, const voxel::CollisionBox& b) {
+                      return a.half.x * a.half.y * a.half.z >
+                             b.half.x * b.half.y * b.half.z;
+                  });
+        constexpr int kMaxDebris = 40;
+        int n = std::min((int)debris.size(), kMaxDebris);
+        for (int i = 0; i < n; ++i) {
+            glm::vec3 he = debris[i].half;
+            if (std::min({he.x, he.y, he.z}) < 0.05f) continue;
+            uint32_t id = physics_->add_dynamic_box(debris[i].center, he,
+                                                    glm::vec3(0.0f), 400.0f);
+            if (id == 0) continue;
+            DynamicProp p{};
+            p.body_id = id;
+            p.jolt_handle = physics_->handle_of(id);
+            p.full_size = he * 2.0f;
+            p.fallback_color = glm::vec4(0.62f, 0.50f, 0.36f, 1.0f);  // sandstone
+            p.color = glm::vec4(0.62f, 0.50f, 0.36f, 1.0f);
+            p.tex_albedo = -1; p.tex_normal = -1; p.uv_scale = 1.0f;
+            dyn_props_.push_back(p);
+            while (static_cast<int>(dyn_props_.size()) > kMaxDynProps) {
+                physics_->remove_body(dyn_props_.front().body_id);
+                dyn_props_.erase(dyn_props_.begin());
+            }
+        }
+            log::infof("[voxel] collapse: %d debris boxes spawned (of %zu)",
+                       n, debris.size());
+        }
+    }
+
+    // Collision rebuild (player AABBs + Jolt body): voxel_update_pending_ is
+    // the "collision is stale" flag, set by every carve. Rebuild on a slow
+    // cadence (continuous hole-poking shouldn't rebuild every frame), forced
+    // right after a collapse, and SKIPPED entirely while the player is far
+    // from the tower — shooting it from a distance never needs up-to-date
+    // physics solidity (the hole's VISUAL already updated in the carve). It
+    // catches up the moment they approach. Stays flagged dirty until then.
+    if (!voxel_update_pending_) return;
+    const auto& s0 = voxel_world_->shapes()[0];
+    glm::vec3 tower_c = s0.origin_world + 0.5f * glm::vec3(
+        s0.dim_bricks[0], s0.dim_bricks[1], s0.dim_bricks[2]) * voxel::kBrickSize;
+    glm::vec3 d = player_.eye_position() - tower_c;
+    const bool near_tower = glm::dot(d, d) < (45.0f * 45.0f);
+    if (collapsed) voxel_collision_cd_ = 0.0f;
+    if (near_tower && voxel_collision_cd_ <= 0.0f) {
+        rebuild_voxel_collision();
+        voxel_collision_cd_   = 0.5f;
+        voxel_update_pending_ = false;
+    }
 }
 
 void VulkanEngine::destroy_voxel() {
