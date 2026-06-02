@@ -128,8 +128,9 @@ void main() {
     // when moving, the spatial filter is the largest remaining blur
     // contributor. Fade it out for moving pixels — at 8+ px/frame
     // (a typical mouse turn) we drop spatial to ~25% of slider strength.
-    float spatial_falloff = mix(1.0, 0.25,
-                                smoothstep(0.5, 8.0, motion_pix));
+    // Same smoothstep is used for the alpha blend below — compute once.
+    float motion_factor = smoothstep(0.5, 8.0, motion_pix);
+    float spatial_falloff = mix(1.0, 0.25, motion_factor);
     float strength = clamp(taa.params.w, 0.0, 1.0) * spatial_falloff;
     // Below 0.02 the atrous result contributes <2% to the mix — visually
     // indistinguishable from cur_raw — but the filter still costs 50
@@ -172,7 +173,7 @@ void main() {
     // can't blur the current frame. The cost is a tiny pop of RT noise
     // when you start moving — much less objectionable than smear.
     float base_alpha = clamp(taa.params.x, 0.0, 0.98);
-    float alpha = mix(base_alpha, 0.0, smoothstep(0.5, 8.0, motion_pix));
+    float alpha = mix(base_alpha, 0.0, motion_factor);
     vec3 blended = mix(cur, hist_clamped, alpha);
 
     outColor = vec4(blended, 1.0);

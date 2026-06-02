@@ -543,7 +543,9 @@ void main() {
     // hash modulation breaks regularity without needing two separate
     // "young/old" colour vars.
     float h_above = max(0.0, p.y - terrainY);
-    float h_t     = clamp(h_above / 1.2, 0.0, 1.0);
+    // h_above is already ≥ 0 from the max above — the lower clamp is dead.
+    // Replace the div+clamp with a single mul + min.
+    float h_t     = min(h_above * (1.0 / 1.2), 1.0);
     float clump   = hash12(floor(p.xz * 0.5)) * 0.15;   // ±15% per-clump tint shift
     vec3 grassCol = mix(scene.grass_color_bottom.rgb,
                         scene.grass_color_top.rgb, h_t);
@@ -661,7 +663,7 @@ void main() {
     {
         float strength = scene.distance_fog_color.a;
         if (strength > 1e-3) {
-            float density   = scene.distance_fog_params.x;
+            float density   = clamp(scene.distance_fog_params.x, 0.0, 0.1);
             float start_d   = scene.distance_fog_params.y;
             float height_top = scene.distance_fog_params.z;
             float max_alpha  = scene.distance_fog_params.w;

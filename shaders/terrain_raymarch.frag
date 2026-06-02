@@ -374,7 +374,7 @@ float cellMaxHeight(vec2 wp) {
 float distanceFogAmount(vec3 p_world, vec3 cam) {
     float strength = scene.distance_fog_color.a;
     if (strength < 1e-3) return 0.0;
-    float density   = scene.distance_fog_params.x;
+    float density   = clamp(scene.distance_fog_params.x, 0.0, 0.1);
     float start_d   = scene.distance_fog_params.y;
     float height_top = scene.distance_fog_params.z;
     float max_alpha  = scene.distance_fog_params.w;
@@ -1496,12 +1496,15 @@ vec3 pm_get_flow_rate(vec2 wp, float water_y, float ray_t) {
     // Slow down BEHIND obstacles. dot(normalised_grad, -normalised_flow)
     // is +1 when flow runs into a rising bed → big slowdown; -1 when
     // the bed slopes away ahead → no slowdown. behind ∈ [0..1].
-    float grad_len = length(grad);
-    float flow_len = length(flow);
+    // Compare squared lengths to avoid two sqrt() in the guard; if
+    // both pass, use inversesqrt() to normalize and dot in one pass.
+    float grad_l2 = dot(grad, grad);
+    float flow_l2 = dot(flow, flow);
     float behind = 0.0;
-    if (grad_len > 1e-3 && flow_len > 1e-3) {
-        behind = 0.5 - dot(grad / grad_len,
-                            -flow / flow_len) * 0.5;
+    if (grad_l2 > 1e-6 && flow_l2 > 1e-6) {
+        float inv_g = inversesqrt(grad_l2);
+        float inv_f = inversesqrt(flow_l2);
+        behind = 0.5 - dot(grad * inv_g, -flow * inv_f) * 0.5;
     }
     float slow = clamp(d_c * 5.0, 0.0, 1.0);
     slow = mix(slow * 0.9 + 0.1, 1.0, behind * 0.9);
@@ -1510,9 +1513,11 @@ vec3 pm_get_flow_rate(vec2 wp, float water_y, float ray_t) {
 
     // Foam amount — concentrates where flow is fast over shallow
     // water (rapids/eddies). P_Malin's exact mapping.
-    // flow_len was already computed above; after `flow *= slow` the new
-    // length is flow_len * slow. Skips a second length() (sqrt+dot) per
-    // pixel. abs() of a non-negative length was a no-op — dropped.
+    // Recover the (pre-`flow *= slow`) length from the squared length
+    // computed above — one sqrt vs the previous length()+sqrt pair we
+    // already paid; behind-test now uses inversesqrt so flow_len wasn't
+    // computed there anymore.
+    float flow_len = sqrt(flow_l2);
     float foam = flow_len * slow * 0.5;
     foam += clamp(foam - 0.4, 0.0, 1.0);
     foam = 1.0 - pow(max(0.0, d_c), foam * 0.35);
@@ -1920,12 +1925,42 @@ void main() {
             vec3 r_ro = wpos + wnor * 0.05;
             float t_tlas;
             if (closest_hit_no_terrain(r_ro, refl, 200.0, t_tlas)) {
-                // Fake a vaguely-up normal weighted toward the
-                // reflection ray (no real RT normal without a hit-
-                // attribute pass). Good enough for water mirrors.
-                vec3 r_nor = normalize(mix(vec3(0.0, 1.0, 0.0),
-                                            -refl, 0.4));
-                float r_dif = max(dot(r_nor, sunDirW), 0.0);
+                // Face-normal heuristic: for axis-aligned voxel/brush
+                // geometry, the face a reflection ray hits is the one
+                // whose normal OPPOSES the ray's dominant axis. (A ray
+                // traveling +X enters the box's -X face → normal is -X.)
+                // Not exact for off-axis hits but the wavy water
+                // surface scatters reflection directions enough that
+                // adjacent pixels often hit different faces anyway —
+                // a stable approximate normal per pixel reads better
+                // than a noisy per-pixel exact normal.
+                //
+                // Earlier attempt (screen-space derivatives of hit_pos)
+                // failed here because adjacent water pixels have very
+                // different wave normals → different reflection rays →
+                // different hit positions, so dFdx(hit_pos) is huge in
+                // all directions and the smallest-variation heuristic
+                // is meaningless.
+                vec3 hit_pos = r_ro + refl * t_tlas;
+                vec3 ar = abs(refl);
+                vec3 r_nor;
+                if (ar.x > ar.y && ar.x > ar.z)
+                    r_nor = vec3(refl.x > 0.0 ? -1.0 : 1.0, 0.0, 0.0);
+                else if (ar.y > ar.z)
+                    r_nor = vec3(0.0, refl.y > 0.0 ? -1.0 : 1.0, 0.0);
+                else
+                    r_nor = vec3(0.0, 0.0, refl.z > 0.0 ? -1.0 : 1.0);
+
+                // Sun shadow at the hit: trace a sun ray from a small
+                // offset along the derived normal. Mask 0x01 = shadow
+                // casters (includes terrain + castle + dyn props), so
+                // both other voxels and the surrounding hills shadow
+                // this reflected fragment.
+                vec3  r_so = hit_pos + r_nor * 0.05;
+                float sun_vis = any_hit_shadow_caster(r_so, sunDirW,
+                                                     200.0) ? 0.0 : 1.0;
+
+                float r_dif = max(dot(r_nor, sunDirW), 0.0) * sun_vis;
                 float r_amb = 0.5 + 0.5 * r_nor.y;
                 vec3 stone = vec3(0.55, 0.52, 0.48);
                 vec3 r_col = stone * (r_dif * scene.sun_color.rgb *
@@ -2042,6 +2077,18 @@ void main() {
                     ? calcShadowMesh(wpos + wnor * 0.05, sunDirW)
                     : calcShadow(wpos + wnor * 0.05, sunDirW);
                 water_lit = min(water_lit, self_lit);
+            }
+            // Explicit TLAS shadow ray — catches voxel castle / brushes
+            // that may not be in the sun shadow map cascade (or whose
+            // bounds the cascade doesn't reach). Without this, the sun
+            // glint reflects off water even when a castle wall is
+            // directly between the water surface and the sun. Mask
+            // 0x01 includes everything that should cast a sun shadow.
+            if (water_lit > 0.05 && dot(wnor, sunDirW) > 0.05) {
+                if (any_hit_shadow_caster(wpos + wnor * 0.05,
+                                          sunDirW, 200.0)) {
+                    water_lit = 0.0;
+                }
             }
         }
 
@@ -2786,7 +2833,8 @@ void main() {
             // P16: exp2(-x * 1.4427) ≈ exp(-x), and exp2 is a single
             // hardware instruction on most archs vs exp's exp/log
             // pair. Hoisted constant 1.4427 = 1/ln(2).
-            float seg  = exp2(-sigma_e * dt * 1.44269504);
+            const float kLog2e = 1.44269504;   // log2(e) — converts exp() to exp2()
+            float seg  = exp2(-sigma_e * dt * kLog2e);
             vec3  Sint = (Lin - Lin * seg) / max(sigma_e, 1e-4);
             scatter += trans * Sint * sigma_e;   // re-multiply Пѓs because we factored Пѓe out
             trans   *= seg;

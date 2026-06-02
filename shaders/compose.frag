@@ -112,9 +112,9 @@ vec3 ghost_blob(vec2 uv, vec2 center, vec2 axis_norm,
     float dr2 = dot(d + ab, d + ab);
     float dg2 = dot(d,      d);
     float db2 = dot(d - ab, d - ab);
-    return vec3(exp(-dr2 * inv_r2),
-                exp(-dg2 * inv_r2),
-                exp(-db2 * inv_r2));
+    // Vectorize the three chromatic exp() into one vec3 call — the
+    // compiler emits a single SIMD exp instruction on most GPUs.
+    return exp(vec3(-dr2, -dg2, -db2) * inv_r2);
 }
 
 // Pseudo-lens-flare (John Chapman, 2017). Screen-space, no optical model:

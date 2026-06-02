@@ -186,15 +186,23 @@ void main() {
     // curved patch still meets the flat non-tessellated neighbours with
     // no crack.
     {
-        vec3 pn0 = normalize(tcNormal[0]);
-        vec3 pn1 = normalize(tcNormal[1]);
-        vec3 pn2 = normalize(tcNormal[2]);
-        vec3 q0 = p - dot(p - tcPos[0], pn0) * pn0;
-        vec3 q1 = p - dot(p - tcPos[1], pn1) * pn1;
-        vec3 q2 = p - dot(p - tcPos[2], pn2) * pn2;
-        vec3 pPhong = b.x * q0 + b.y * q1 + b.z * q2;
+        // Compute alpha first; bail out when the chunk-edge borderMask
+        // drives it to ~0 — saves 3 normalize + 3 dot + projection per
+        // border-edge vertex (a large fraction of the tessellated patch).
         float alpha = kTessSmooth * borderMask(p.xz);
-        vec3 pSmooth = mix(p, pPhong, alpha);
+        vec3 pSmooth;
+        if (alpha > 1e-4) {
+            vec3 pn0 = normalize(tcNormal[0]);
+            vec3 pn1 = normalize(tcNormal[1]);
+            vec3 pn2 = normalize(tcNormal[2]);
+            vec3 q0 = p - dot(p - tcPos[0], pn0) * pn0;
+            vec3 q1 = p - dot(p - tcPos[1], pn1) * pn1;
+            vec3 q2 = p - dot(p - tcPos[2], pn2) * pn2;
+            vec3 pPhong = b.x * q0 + b.y * q1 + b.z * q2;
+            pSmooth = mix(p, pPhong, alpha);
+        } else {
+            pSmooth = p;
+        }
         // BUMPS-UP-ONLY (same rule as the detail displacement): the sun
         // shadow is a ray-query against the un-tessellated terrain BLAS.
         // In concave areas Phong pulls the surface BELOW the base mesh →
@@ -331,7 +339,11 @@ void main() {
     // gradient so the SHADING normal follows the new vertex bumps
     // (otherwise the geometry would displace but lighting would still
     // come from the smooth base normal -> bumps look flat).
-    if (rk_w > 1e-4) {
+    // Was `rk_w > 1e-4` — fired even when contribution was sub-mm. The
+    // 4 textureLod fetches below are expensive; gate at 0.01 (contribution
+    // < 3 mm at typical amplitudes, visually indistinguishable but saves
+    // the fetches across a large fraction of the tessellated terrain).
+    if (rk_w > 0.01) {
         vec2 uvR = p.xz / kGroundTile;
         vec2 duvR = vec2(e / kGroundTile, 0.0);
         // Same mip-bias as the displacement so shading-normal gradient

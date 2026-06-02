@@ -54,6 +54,18 @@ public:
     // Engine-side body handle (cached BodyID). Storing this on each
     // dynamic prop / particle / projectile lets the read-only queries skip
     // the unordered_map lookup in physics_world.cpp. 0 = invalid.
+    //
+    // *** HOT PATH ADVISORY ***
+    // Any per-frame loop that touches multiple bodies (projectile update,
+    // dyn-prop pose cache, particle TTL pass, AABB rebuild, TLAS instance
+    // write) MUST cache `handle_of(id)` ONCE at spawn time and call only
+    // the `_h` variants below thereafter. The id-keyed overloads
+    // (get_body_world_matrix, get_linear_velocity, is_body_active,
+    // apply_impulse) walk an unordered_map per call — fine for one-shot
+    // queries, ruinous for combat where dozens of bodies are queried
+    // every frame. Canonical examples: Projectile::jolt_handle (see
+    // combat.cpp), DynamicProp::jolt_handle, Particle::jolt_handle —
+    // they're cached at spawn for exactly this reason.
     using BodyHandle = uint32_t;
     BodyHandle handle_of(uint32_t id) const;
     bool get_body_world_matrix_h(BodyHandle h, glm::mat4& out) const;

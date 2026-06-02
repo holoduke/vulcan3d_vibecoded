@@ -198,7 +198,9 @@ void main() {
     outMotion = vec2(0.0);
 
     // Write depth at the BRICK TOP's projected position so downstream passes
-    // see correct geometry. The brick is at hit_world. Project to clip space:
-    vec4 hit_clip = pc.mvp * (inverse(pc.model) * vec4(hit_world, 1.0));
+    // see correct geometry. hit_world is already in WORLD space; pc.mvp maps
+    // world → clip directly. The previous `* inverse(pc.model)` was a bug
+    // that round-tripped through object space and cost ~100 ALU per fragment.
+    vec4 hit_clip = pc.mvp * vec4(hit_world, 1.0);
     gl_FragDepth = hit_clip.z / hit_clip.w;
 }

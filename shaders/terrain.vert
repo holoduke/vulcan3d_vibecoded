@@ -88,11 +88,18 @@ void main() {
     // in pc.grass_params.z, mip bias in .w.
     float kRockyAmp = max(0.0, pc.grass_params.z);
     float kDispMip  = clamp(pc.grass_params.w, 0.0, 6.0);
-    if (kRockyAmp > 1e-4) {
+    // Distance fade — the rocky height texture only contributes
+    // meaningful displacement up close (sub-pixel amplitude past ~80 m).
+    // Skip the textureLod fetch entirely for far chunks; matches the
+    // tess path's distance-faded behaviour.
+    vec4 wp_pre = pc.model * vec4(pos, 1.0);
+    float dist_xz = length(wp_pre.xz - scene.camera_pos.xz);
+    float fade = 1.0 - smoothstep(60.0, 110.0, dist_xz);
+    if (kRockyAmp * fade > 1e-4) {
         float g_tile = max(scene.spom_params.z, 0.25);
         vec2 uvR = pos.xz / g_tile;
         float h0 = textureLod(u_height[5], uvR, kDispMip).r;
-        pos.y += h0 * kRockyAmp;
+        pos.y += h0 * kRockyAmp * fade;
     }
 
     gl_Position = pc.mvp * vec4(pos, 1.0);

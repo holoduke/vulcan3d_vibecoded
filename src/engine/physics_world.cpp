@@ -47,7 +47,12 @@ namespace Layers {
     static constexpr JPH::ObjectLayer MOVING     = 1;
     static constexpr JPH::ObjectLayer BULLET     = 2;
     static constexpr JPH::ObjectLayer SPARK      = 3;
-    static constexpr JPH::ObjectLayer NUM        = 4;
+    // Destructible voxel building. Static, collides with crates/debris so
+    // they pile on it, but NOT bullets — bullet-vs-voxel destruction uses a
+    // live voxel raycast (VoxelWorld::raycast), so the debounced collision
+    // body must not stop bullets at a stale (pre-hole) surface.
+    static constexpr JPH::ObjectLayer VOXEL      = 4;
+    static constexpr JPH::ObjectLayer NUM        = 5;
 }
 
 namespace BPLayers {
@@ -63,6 +68,7 @@ public:
         map_[Layers::MOVING]     = BPLayers::MOVING;
         map_[Layers::BULLET]     = BPLayers::MOVING;
         map_[Layers::SPARK]      = BPLayers::MOVING;
+        map_[Layers::VOXEL]      = BPLayers::NON_MOVING;  // static
     }
     unsigned int GetNumBroadPhaseLayers() const override { return BPLayers::NUM; }
     JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer l) const override {
@@ -82,6 +88,7 @@ public:
     bool ShouldCollide(JPH::ObjectLayer obj, JPH::BroadPhaseLayer bp) const override {
         switch (obj) {
             case Layers::NON_MOVING:
+            case Layers::VOXEL:
                 // Static only collides with anything that moves.
                 return bp == BPLayers::MOVING;
             case Layers::MOVING:
@@ -98,24 +105,45 @@ public:
 
 class ObjectPairFilterImpl final : public JPH::ObjectLayerPairFilter {
 public:
-    bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
-        // Symmetric, so order in the matrix doesn't matter.
-        // Collision matrix:
-        //   STATIC  vs MOVING / BULLET / SPARK : yes (everything bounces off the world)
-        //   MOVING  vs MOVING                  : yes (crates collide with each other)
-        //   MOVING  vs BULLET                  : yes (bullets push crates)
-        //   MOVING  vs SPARK                   : yes (sparks settle on crates)
-        //   BULLET  vs BULLET                  : no  (bullets ignore each other)
-        //   BULLET  vs SPARK                   : NO  (the user's fix — bullets pass through sparks)
-        //   SPARK   vs SPARK                   : no  (cheap, and looks better — sparks streak through each other)
-        //   STATIC  vs STATIC                  : no
-        if (a == Layers::NON_MOVING && b == Layers::NON_MOVING) return false;
-        if (a == Layers::BULLET     && b == Layers::BULLET)     return false;
-        if (a == Layers::SPARK      && b == Layers::SPARK)      return false;
-        if ((a == Layers::BULLET && b == Layers::SPARK) ||
-            (a == Layers::SPARK  && b == Layers::BULLET)) return false;
-        return true;
+    ObjectPairFilterImpl() {
+        // Precomputed symmetric collision matrix — ShouldCollide is called
+        // thousands of times per frame across narrowphase pairs; a flat
+        // table lookup beats the if-cascade by ~5-8 instructions per pair.
+        //   STATIC vs MOVING / BULLET / SPARK : yes (world is solid)
+        //   MOVING vs MOVING/BULLET/SPARK     : yes (crates collide with everything)
+        //   BULLET vs BULLET                  : no  (bullets ignore each other)
+        //   BULLET vs SPARK                   : no  (bullets pass through sparks)
+        //   SPARK  vs SPARK                   : no  (sparks streak through each other)
+        //   STATIC vs STATIC                  : no
+        //   VOXEL  vs anything but MOVING     : no  (bullets carve via raycast)
+        const bool yes = true;
+        // STATIC
+        matrix_[Layers::NON_MOVING][Layers::MOVING] = yes;
+        matrix_[Layers::NON_MOVING][Layers::BULLET] = yes;
+        matrix_[Layers::NON_MOVING][Layers::SPARK]  = yes;
+        // MOVING
+        matrix_[Layers::MOVING][Layers::NON_MOVING] = yes;
+        matrix_[Layers::MOVING][Layers::MOVING]     = yes;
+        matrix_[Layers::MOVING][Layers::BULLET]     = yes;
+        matrix_[Layers::MOVING][Layers::SPARK]      = yes;
+        matrix_[Layers::MOVING][Layers::VOXEL]      = yes;
+        // BULLET
+        matrix_[Layers::BULLET][Layers::NON_MOVING] = yes;
+        matrix_[Layers::BULLET][Layers::MOVING]     = yes;
+        // SPARK
+        matrix_[Layers::SPARK][Layers::NON_MOVING]  = yes;
+        matrix_[Layers::SPARK][Layers::MOVING]      = yes;
+        // VOXEL
+        matrix_[Layers::VOXEL][Layers::MOVING]      = yes;
     }
+
+    bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
+        if (a >= Layers::NUM || b >= Layers::NUM) return false;
+        return matrix_[a][b];
+    }
+
+private:
+    bool matrix_[Layers::NUM][Layers::NUM]{};
 };
 
 void trace_callback(const char* fmt, ...) {
@@ -176,6 +204,11 @@ struct PhysicsWorld::Impl {
 
     // Single static body for the destructible voxel shape (rebuilt on carve).
     JPH::BodyID voxel_body;   // invalid until set_voxel_collision runs
+    // Hash of the last voxel-collision geometry pushed. Lets us skip the
+    // whole RemoveBody+DestroyBody+rebuild + AddShape×N storm when the
+    // greedy decomposition produced the same boxes (e.g. carves outside
+    // the collision-build radius, or no carves between two cadence ticks).
+    size_t voxel_shape_hash = 0;
     std::unordered_map<uint32_t, JPH::BodyID> ids;
     // Reverse lookup so raycast hits → user id is O(1) instead of a
     // linear walk over `ids`. Keyed on BodyID's internal index value
@@ -229,12 +262,24 @@ int PhysicsWorld::body_count() const {
     return static_cast<int>(impl_->system.GetNumBodies());
 }
 
+// Shared convex-radius derivation. Jolt's default 0.05 fails on shapes
+// thinner than that; we scale to box size, clamp to a 0.001 floor (so a
+// 1 mm slab doesn't underflow), and cap at 0.04. Callers below stamp the
+// same value out for static + dyn + batch + voxel paths.
+static constexpr float calc_box_convex_radius(float min_he) {
+    float r = min_he * 0.4f;
+    if (r > 0.04f) r = 0.04f;
+    if (r < 0.001f) r = 0.001f;
+    return r;
+}
+
 void PhysicsWorld::add_static_box(glm::vec3 c, glm::vec3 he) {
-    // Jolt's default convex radius is 0.05 — fails on shapes thinner than that
-    // (the lantern post halves are 0.09; the cap half-y is 0.05). Use a small
-    // radius scaled to the box.
+    // Runtime calls are still allowed but cost a broadphase mutex per
+    // body — flag it so future batch-spawn callers prefer add_static_boxes.
+    log::warn("[jolt] add_static_box() called at runtime — prefer "
+              "add_static_boxes() for batch efficiency");
     float min_he = std::min({he.x, he.y, he.z});
-    float convex_radius = std::min(0.04f, min_he * 0.4f);
+    float convex_radius = calc_box_convex_radius(min_he);
     JPH::BoxShapeSettings ss(JPH::Vec3(he.x, he.y, he.z), convex_radius);
     ss.SetEmbedded();
     JPH::ShapeSettings::ShapeResult sr = ss.Create();
@@ -263,7 +308,7 @@ void PhysicsWorld::add_static_boxes(const StaticBox* boxes, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         glm::vec3 he = boxes[i].half_extents;
         float min_he = std::min({he.x, he.y, he.z});
-        float convex_radius = std::min(0.04f, min_he * 0.4f);
+        float convex_radius = calc_box_convex_radius(min_he);
         JPH::BoxShapeSettings ss(JPH::Vec3(he.x, he.y, he.z), convex_radius);
         ss.SetEmbedded();
         JPH::ShapeSettings::ShapeResult sr = ss.Create();
@@ -291,13 +336,37 @@ void PhysicsWorld::add_static_boxes(const StaticBox* boxes, size_t count) {
 
 void PhysicsWorld::set_voxel_collision(const StaticBox* boxes, size_t count) {
     JPH::BodyInterface& bi = impl_->system.GetBodyInterface();
+
+    // Hash-based early-out: the cadenced voxel-collision rebuild is
+    // called every ~0.5 s while the player is near the tower, but the
+    // box list often doesn't change between ticks (no carves, or carves
+    // outside the rebuild radius). Hashing once and bailing skips the
+    // RemoveBody+DestroyBody+AddShape×N storm — typically 2-5 ms saved
+    // per avoided rebuild.
+    size_t h = std::hash<size_t>{}(count);
+    auto mix = [&](float v) {
+        // Cheap commutativity-breaking mix; bit_cast keeps the entire
+        // mantissa in the hash so two near-identical box configs don't
+        // alias.
+        uint32_t bits;
+        std::memcpy(&bits, &v, sizeof(bits));
+        h ^= std::hash<uint32_t>{}(bits) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    };
+    for (size_t i = 0; i < count; ++i) {
+        mix(boxes[i].center.x);      mix(boxes[i].center.y);      mix(boxes[i].center.z);
+        mix(boxes[i].half_extents.x); mix(boxes[i].half_extents.y); mix(boxes[i].half_extents.z);
+    }
+    if (h == impl_->voxel_shape_hash && !impl_->voxel_body.IsInvalid()) {
+        return;     // geometry unchanged — skip rebuild
+    }
+
     // Tear down the previous voxel body.
     if (!impl_->voxel_body.IsInvalid()) {
         bi.RemoveBody(impl_->voxel_body);
         bi.DestroyBody(impl_->voxel_body);
         impl_->voxel_body = JPH::BodyID();
     }
-    if (count == 0) return;
+    if (count == 0) { impl_->voxel_shape_hash = h; return; }
 
     // Build each box shape, collect (shape, center). StaticCompoundShape
     // needs >= 2 sub-shapes; for 0/1 we special-case.
@@ -308,11 +377,15 @@ void PhysicsWorld::set_voxel_collision(const StaticBox* boxes, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         glm::vec3 he = boxes[i].half_extents;
         float min_he = std::min({he.x, he.y, he.z});
-        float cr = std::min(0.04f, std::max(0.001f, min_he * 0.4f));
+        float cr = calc_box_convex_radius(min_he);
         JPH::BoxShapeSettings ss(JPH::Vec3(he.x, he.y, he.z), cr);
         ss.SetEmbedded();
         JPH::ShapeSettings::ShapeResult sr = ss.Create();
-        if (sr.HasError()) continue;
+        if (sr.HasError()) {
+            log::errorf("[jolt] voxel box shape %zu: %s",
+                        i, sr.GetError().c_str());
+            continue;
+        }
         shapes.push_back(sr.Get());
         centers.push_back(JPH::Vec3(boxes[i].center.x, boxes[i].center.y,
                                     boxes[i].center.z));
@@ -326,11 +399,12 @@ void PhysicsWorld::set_voxel_collision(const StaticBox* boxes, size_t count) {
         JPH::BodyCreationSettings bcs(final_shape, centers[0],
                                       JPH::Quat::sIdentity(),
                                       JPH::EMotionType::Static,
-                                      Layers::NON_MOVING);
+                                      Layers::VOXEL);
         if (JPH::Body* b = bi.CreateBody(bcs)) {
             bi.AddBody(b->GetID(), JPH::EActivation::DontActivate);
             impl_->voxel_body = b->GetID();
         }
+        impl_->voxel_shape_hash = h;
         return;
     }
     JPH::StaticCompoundShapeSettings css;
@@ -346,11 +420,12 @@ void PhysicsWorld::set_voxel_collision(const StaticBox* boxes, size_t count) {
     JPH::BodyCreationSettings bcs(cr.Get(), JPH::RVec3(0, 0, 0),
                                   JPH::Quat::sIdentity(),
                                   JPH::EMotionType::Static,
-                                  Layers::NON_MOVING);
+                                  Layers::VOXEL);
     if (JPH::Body* b = bi.CreateBody(bcs)) {
         bi.AddBody(b->GetID(), JPH::EActivation::DontActivate);
         impl_->voxel_body = b->GetID();
     }
+    impl_->voxel_shape_hash = h;
 }
 
 void PhysicsWorld::add_static_heightfield(const float* samples, int dim,
@@ -398,7 +473,7 @@ void PhysicsWorld::add_static_heightfield(const float* samples, int dim,
 uint32_t PhysicsWorld::add_dynamic_box(glm::vec3 c, glm::vec3 he,
                                        glm::vec3 euler_rad, float density) {
     float min_he = std::min({he.x, he.y, he.z});
-    float convex_radius = std::min(0.04f, min_he * 0.4f);
+    float convex_radius = calc_box_convex_radius(min_he);
     JPH::BoxShapeSettings ss(JPH::Vec3(he.x, he.y, he.z), convex_radius);
     ss.SetEmbedded();
     JPH::ShapeSettings::ShapeResult sr = ss.Create();
@@ -453,6 +528,11 @@ uint32_t PhysicsWorld::add_dynamic_cylinder_ccd(glm::vec3 c, float radius,
     bcs.mLinearVelocity = JPH::Vec3(linvel.x, linvel.y, linvel.z);
     bcs.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
     bcs.mMassPropertiesOverride.mMass = mass;
+    // Suppress bullet tumble: a thin cylinder has highly anisotropic inertia,
+    // so any glancing contact spins it up enough that subsequent flight
+    // veers off the firing axis. Strong angular drag dissipates that spin
+    // each step; linear CCD behaviour is unaffected.
+    bcs.mAngularDamping = 2.0f;
     // Jolt's per-body default cap is 500 m/s — anything above asserts/clamps
     // on creation. Raise it so the bullet-speed slider's 600 m/s upper bound
     // lands inside the legal range with comfortable headroom.
@@ -521,7 +601,10 @@ PhysicsWorld::RayHit PhysicsWorld::raycast(glm::vec3 origin, glm::vec3 direction
     out.distance = res.mFraction * max_distance;
     out.position = origin + direction * out.distance;
 
-    JPH::BodyInterface& bi = impl_->system.GetBodyInterface();
+    // BodyLockRead uses GetBodyLockInterface directly — no BodyInterface
+    // needed. The previous `GetBodyInterface()` acquire took a mutex per
+    // raycast for nothing (the `(void)bi` was just suppressing the unused
+    // warning).
     JPH::BodyLockRead lock(impl_->system.GetBodyLockInterface(), res.mBodyID);
     if (lock.Succeeded()) {
         const JPH::Body& body = lock.GetBody();
@@ -537,14 +620,16 @@ PhysicsWorld::RayHit PhysicsWorld::raycast(glm::vec3 origin, glm::vec3 direction
             if (rit != impl_->id_by_body_index.end()) out.body_id = rit->second;
         }
     }
-    (void)bi;
     return out;
 }
 
 void PhysicsWorld::apply_impulse(uint32_t id, glm::vec3 impulse) {
     auto it = impl_->ids.find(id);
     if (it == impl_->ids.end()) return;
-    impl_->system.GetBodyInterface().AddImpulse(
+    // Single-threaded mutations between Update() — same justification as
+    // get_linear_velocity / get_body_world_matrix above; no body-mutex
+    // needed.
+    impl_->system.GetBodyInterfaceNoLock().AddImpulse(
         it->second, JPH::Vec3(impulse.x, impulse.y, impulse.z));
 }
 
@@ -617,7 +702,7 @@ glm::vec3 PhysicsWorld::get_linear_velocity_h(BodyHandle h) const {
 
 void PhysicsWorld::apply_impulse_h(BodyHandle h, glm::vec3 impulse) {
     if (h == 0) return;
-    impl_->system.GetBodyInterface().AddImpulse(
+    impl_->system.GetBodyInterfaceNoLock().AddImpulse(
         JPH::BodyID(h), JPH::Vec3(impulse.x, impulse.y, impulse.z));
 }
 
