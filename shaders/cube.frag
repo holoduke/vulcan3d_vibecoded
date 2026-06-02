@@ -48,12 +48,37 @@ layout(location = 8) in vec4 vPrevClip;  // prev_view_proj Г— prev_model Г�
 // a no-op.
 layout(location = 9) in vec3 vShellBase;
 layout(location = 0) out vec4 outColor;
-// Per-pixel screen-space motion vector вЂ” current_uv minus prev_uv. Dynamic
+// Per-pixel screen-space motion vector — current_uv minus prev_uv. Dynamic
 // surfaces get correct reprojection because cube.vert applied prev_model
-// (DynRender::prev_world Г— scale for dyn boxes; current model for static
+// (DynRender::prev_world × scale for dyn boxes; current model for static
 // brushes / camera-attached viewmodel / sub-pixel particles). Future SVGF
 // pass reads motion_vec_image_ + uses this delta to walk into history.
 layout(location = 1) out vec2 outMotion;
+// G-buffer outputs (Phase 2 of the deferred-render migration).
+//   GBuffer0 RGBA8        : albedo.rgb + material_id.a (id / 255)
+//   GBuffer1 R10G10B10A2  : octahedral_normal.rg + roughness.b + metallic.a
+// Cube.frag writes both alongside the existing forward output. Phase 3
+// will introduce a separate lighting pass that reads these; Phase 4
+// strips the forward lighting block here.
+//
+// Material IDs: 0 = stone/brick (default), 1 = wood, 2 = metal,
+//               3 = terrain, 4 = grass, 5 = emissive/sky-debug.
+// Coarse — refined per-material in Phase 5 when terrain gets its own
+// slot in the lighting branch.
+layout(location = 2) out vec4 outGBuffer0;
+layout(location = 3) out vec4 outGBuffer1;
+
+// Octahedral normal encoding (Meyer et al. 2010). Stable, branchless,
+// fits a unit normal into vec2 of [0,1] with ~10-bit precision per
+// component — enough for diffuse, no banding under our materials.
+vec2 octa_encode(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    vec2 e = (n.z >= 0.0)
+        ? n.xy
+        : ((1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0,
+                                     n.y >= 0.0 ? 1.0 : -1.0));
+    return e * 0.5 + 0.5;
+}
 
 layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  sun_direction;
@@ -3371,5 +3396,17 @@ void main() {
     }
 
     outColor = vec4(final, 1.0);
+
+    // G-buffer dual write (Phase 2 of the deferred migration). albedo is
+    // the surface colour after triplanar / SPOM displacement but before
+    // shadow + GI multiplication; N is the (possibly normal-mapped)
+    // world-space normal already used by the lighting block above.
+    // material_id stays at 0 for now — Phase 5 splits brushes vs terrain
+    // vs voxel into distinct ids for the lighting branch.
+    outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)),
+                       0.0);                    // material_id = 0
+    outGBuffer1 = vec4(octa_encode(N),
+                       0.5,                      // roughness placeholder
+                       0.0);                     // metallic
 }
 

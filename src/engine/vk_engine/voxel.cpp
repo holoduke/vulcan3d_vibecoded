@@ -309,7 +309,8 @@ void VulkanEngine::init_voxel() {
         cfg.vert = voxel_vert_module_;
         cfg.frag = voxel_frag_module_;
         cfg.layout = voxel_pipeline_layout_;
-        cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+        cfg.color_formats = { scene_color_format_, motion_vec_format_,
+                              gbuffer0_format_,    gbuffer1_format_ };
         cfg.depth_format = depth_format_;
         cfg.depth_test = true;
         cfg.depth_write = true;

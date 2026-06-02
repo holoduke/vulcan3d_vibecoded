@@ -792,12 +792,18 @@ void VulkanEngine::draw(uint32_t img_index) {
             { motion_vec_image_, VK_IMAGE_ASPECT_COLOR_BIT,
               VK_IMAGE_LAYOUT_UNDEFINED,
               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+            { gbuffer0_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+              VK_IMAGE_LAYOUT_UNDEFINED,
+              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+            { gbuffer1_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+              VK_IMAGE_LAYOUT_UNDEFINED,
+              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
             { depth_image_, VK_IMAGE_ASPECT_DEPTH_BIT,
               VK_IMAGE_LAYOUT_UNDEFINED,
               VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL },
         };
         vkinit::transition_images_batch(frame.command_buffer,
-                                         kWorldStart, 3);
+                                         kWorldStart, 5);
     }
 
     VkClearValue clear_color{};
@@ -973,7 +979,21 @@ void VulkanEngine::draw(uint32_t img_index) {
     auto motion_att = vkinit::color_attachment_info(motion_vec_view_,
                                                     &clear_motion,
                                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    VkRenderingAttachmentInfo color_atts[2] = { color_att, motion_att };
+    // G-buffer attachments (Phase 2 of deferred migration). Cleared to
+    // (0, 0, 0, 0). cube.frag dual-writes albedo+material to gbuffer0 and
+    // octa-normal+roughness+metallic to gbuffer1; other pipelines drawing
+    // in this scope (water, voxel, terrain, etc) don't write G-buffer
+    // and the attachments keep cleared / previously-written values.
+    VkClearValue clear_gbuf{};
+    clear_gbuf.color = { { 0.0f, 0.0f, 0.0f, 0.0f } };
+    auto gbuffer0_att = vkinit::color_attachment_info(gbuffer0_view_,
+                                                     &clear_gbuf,
+                                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    auto gbuffer1_att = vkinit::color_attachment_info(gbuffer1_view_,
+                                                     &clear_gbuf,
+                                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo color_atts[4] = { color_att, motion_att,
+                                                gbuffer0_att, gbuffer1_att };
 
     VkRenderingAttachmentInfo depth_att{
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -998,7 +1018,7 @@ void VulkanEngine::draw(uint32_t img_index) {
         // Pass 1 outputs scene_color + motion_vec at render_extent_.
         .renderArea = { {0, 0}, render_extent_ },
         .layerCount = 1, .viewMask = 0,
-        .colorAttachmentCount = 2, .pColorAttachments = color_atts,
+        .colorAttachmentCount = 4, .pColorAttachments = color_atts,
         .pDepthAttachment = &depth_att, .pStencilAttachment = nullptr,
     };
 
@@ -1058,11 +1078,17 @@ void VulkanEngine::draw(uint32_t img_index) {
             { motion_vec_image_, VK_IMAGE_ASPECT_COLOR_BIT,
               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+            { gbuffer0_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+            { gbuffer1_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
             { depth_image_, VK_IMAGE_ASPECT_DEPTH_BIT,
               VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
         };
-        vkinit::transition_images_batch(frame.command_buffer, kPostWorld, 3);
+        vkinit::transition_images_batch(frame.command_buffer, kPostWorld, 5);
     }
 
     // ---------- Pass 1c: SSDM compose remap (Phase 4) ----------

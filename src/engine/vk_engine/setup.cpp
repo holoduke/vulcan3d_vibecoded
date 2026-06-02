@@ -670,7 +670,8 @@ void VulkanEngine::init_pipeline() {
     cfg.layout = pipeline_layout_;
     // Two color attachments: location 0 = HDR scene color, location 1 = RG16F
     // motion vector. cube.frag emits real per-instance motion via prev_mvp.
-    cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+    cfg.color_formats = { scene_color_format_, motion_vec_format_,
+                          gbuffer0_format_,    gbuffer1_format_ };
     cfg.depth_format = depth_format_;
 
     VkVertexInputBindingDescription vb{};
@@ -769,7 +770,8 @@ void VulkanEngine::init_terrain_pipelines() {
         cfg.vert = terrain_vert_module_;
         cfg.frag = frag_module_;       // shared cube.frag
         cfg.layout = pipeline_layout_;
-        cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+        cfg.color_formats = { scene_color_format_, motion_vec_format_,
+                          gbuffer0_format_,    gbuffer1_format_ };
         cfg.depth_format = depth_format_;
         cfg.vbindings = { b0, b1 };
         cfg.vattrs = vattrs;
@@ -827,7 +829,8 @@ void VulkanEngine::init_terrain_pipelines() {
         // back-face darkening, just a benign same-depth double-shade.
         cfg.cull = VK_CULL_MODE_NONE;
         cfg.layout = pipeline_layout_;
-        cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+        cfg.color_formats = { scene_color_format_, motion_vec_format_,
+                          gbuffer0_format_,    gbuffer1_format_ };
         cfg.depth_format = depth_format_;
         cfg.vbindings = { b0 };
         cfg.vattrs = tattrs;
@@ -880,7 +883,8 @@ void VulkanEngine::init_terrain_raymarch_pipeline() {
     cfg.vert = terrain_raymarch_vert_module_;
     cfg.frag = terrain_raymarch_frag_module_;
     cfg.layout = pipeline_layout_;          // shares the cube push-constant layout
-    cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+    cfg.color_formats = { scene_color_format_, motion_vec_format_,
+                          gbuffer0_format_,    gbuffer1_format_ };
     cfg.depth_format = depth_format_;
     // No vertex bindings — the vert builds NDC corners from gl_VertexIndex.
     cfg.cull = VK_CULL_MODE_NONE;
@@ -970,7 +974,8 @@ void VulkanEngine::init_terrain_water_pipeline() {
     cfg.vert = water_vert_module_;
     cfg.frag = water_frag_module_;
     cfg.layout = pipeline_layout_;          // shares the cube push-constant layout
-    cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+    cfg.color_formats = { scene_color_format_, motion_vec_format_,
+                          gbuffer0_format_,    gbuffer1_format_ };
     cfg.depth_format = depth_format_;
 
     VkVertexInputBindingDescription vb{};
@@ -1766,7 +1771,8 @@ void VulkanEngine::init_terrain_raymarch_compose_pipeline() {
     cfg.vert = terrain_raymarch_vert_module_;   // reuse the fullscreen-tri vert
     cfg.frag = tr_compose_frag_module_;
     cfg.layout = pipeline_layout_;
-    cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+    cfg.color_formats = { scene_color_format_, motion_vec_format_,
+                          gbuffer0_format_,    gbuffer1_format_ };
     cfg.depth_format = depth_format_;
     cfg.cull = VK_CULL_MODE_NONE;
     cfg.depth_test = true;
@@ -1803,7 +1809,8 @@ void VulkanEngine::init_grass_pipeline() {
     cfg.vert = grass_vert_module_;
     cfg.frag = grass_frag_module_;
     cfg.layout = pipeline_layout_;     // shares cube's layout (push consts)
-    cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+    cfg.color_formats = { scene_color_format_, motion_vec_format_,
+                          gbuffer0_format_,    gbuffer1_format_ };
     cfg.depth_format = depth_format_;
 
     // Grass uses CULL_NONE — blades are double-sided, the back of a
@@ -1859,7 +1866,8 @@ void VulkanEngine::init_grass_raymarch_pipeline() {
     cfg.vert = taa_vert_module_;
     cfg.frag = grass_rm_frag_module_;
     cfg.layout = pipeline_layout_;            // shares the cube push-constant layout
-    cfg.color_formats = { scene_color_format_, motion_vec_format_ };
+    cfg.color_formats = { scene_color_format_, motion_vec_format_,
+                          gbuffer0_format_,    gbuffer1_format_ };
     cfg.depth_format  = depth_format_;
     cfg.cull = VK_CULL_MODE_NONE;
     cfg.depth_test = true;
