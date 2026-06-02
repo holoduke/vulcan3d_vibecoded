@@ -150,6 +150,14 @@ void VulkanEngine::recreate_taa_targets() {
     if (motion_vec_image_)  vmaDestroyImage(allocator_, motion_vec_image_, motion_vec_alloc_);
     motion_vec_image_ = VK_NULL_HANDLE; motion_vec_view_ = VK_NULL_HANDLE;
     motion_vec_alloc_ = nullptr;
+    if (gbuffer0_view_)  vkDestroyImageView(device_, gbuffer0_view_, nullptr);
+    if (gbuffer0_image_) vmaDestroyImage(allocator_, gbuffer0_image_, gbuffer0_alloc_);
+    gbuffer0_image_ = VK_NULL_HANDLE; gbuffer0_view_ = VK_NULL_HANDLE;
+    gbuffer0_alloc_ = nullptr;
+    if (gbuffer1_view_)  vkDestroyImageView(device_, gbuffer1_view_, nullptr);
+    if (gbuffer1_image_) vmaDestroyImage(allocator_, gbuffer1_image_, gbuffer1_alloc_);
+    gbuffer1_image_ = VK_NULL_HANDLE; gbuffer1_view_ = VK_NULL_HANDLE;
+    gbuffer1_alloc_ = nullptr;
     for (int s = 0; s < kHistorySlots; ++s) {
         if (history_view_[s])  vkDestroyImageView(device_, history_view_[s], nullptr);
         if (history_image_[s]) vmaDestroyImage(allocator_, history_image_[s], history_alloc_[s]);
@@ -203,6 +211,18 @@ void VulkanEngine::recreate_taa_targets() {
                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                VK_IMAGE_USAGE_SAMPLED_BIT,
                motion_vec_image_, motion_vec_alloc_, motion_vec_view_);
+    // G-buffer (Phase 1 of the deferred migration). Allocated alongside
+    // motion_vec since they're per-frame, render-resolution, and freed
+    // together. Phase 1 keeps them ignored — Phase 2 wires the geometry
+    // pass to fill them.
+    make_image(gbuffer0_format_,
+               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+               VK_IMAGE_USAGE_SAMPLED_BIT,
+               gbuffer0_image_, gbuffer0_alloc_, gbuffer0_view_);
+    make_image(gbuffer1_format_,
+               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+               VK_IMAGE_USAGE_SAMPLED_BIT,
+               gbuffer1_image_, gbuffer1_alloc_, gbuffer1_view_);
     for (int s = 0; s < kHistorySlots; ++s) {
         make_image(scene_color_format_,
                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
@@ -282,6 +302,10 @@ void VulkanEngine::destroy_taa() {
     if (scene_color_image_) vmaDestroyImage(allocator_, scene_color_image_, scene_color_alloc_);
     if (motion_vec_view_)   vkDestroyImageView(device_, motion_vec_view_, nullptr);
     if (motion_vec_image_)  vmaDestroyImage(allocator_, motion_vec_image_, motion_vec_alloc_);
+    if (gbuffer0_view_)     vkDestroyImageView(device_, gbuffer0_view_, nullptr);
+    if (gbuffer0_image_)    vmaDestroyImage(allocator_, gbuffer0_image_, gbuffer0_alloc_);
+    if (gbuffer1_view_)     vkDestroyImageView(device_, gbuffer1_view_, nullptr);
+    if (gbuffer1_image_)    vmaDestroyImage(allocator_, gbuffer1_image_, gbuffer1_alloc_);
 
     taa_pipeline_ = VK_NULL_HANDLE;
     taa_pipeline_layout_ = VK_NULL_HANDLE;

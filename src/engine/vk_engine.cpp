@@ -1695,14 +1695,44 @@ void VulkanEngine::run(const RunOptions& opts) {
             // not for crash repro (use a separate autodemo flavour for that
             // when it returns). y locked at 23 m (~1 m above plateau top).
             in = InputFrame{};
-            const float R     = 15.0f;
-            const float omega = 0.30f;   // rad/s — ~17°/s
-            const float ang   = demo_t * omega;
-            player_.position  = glm::vec3(R * std::sin(ang),
-                                          23.0f,
-                                          R * std::cos(ang));
-            player_.yaw       = ang + kHalfPi;              // tangent (CCW)
-            player_.pitch     = 0.0f;
+            // --scene N override: park the camera at one of the deferred-
+            // renderer reference scenes for deterministic before/after
+            // captures. Locks position/yaw/pitch and zeroes velocity each
+            // frame. Each scene covers a specific lighting/material case
+            // the migration must preserve.
+            if (opts_.scene > 0) {
+                struct ScenePose { glm::vec3 pos; float yaw; float pitch; };
+                static const ScenePose kScenes[] = {
+                    // 1: castle exterior, north entrance, sun behind us (lit walls)
+                    { glm::vec3(0.0f,  23.5f,  18.0f),  kPi,        0.10f },
+                    // 2: castle exterior, same spot, looking south (shadow side)
+                    { glm::vec3(0.0f,  23.5f, -18.0f),  0.0f,       0.10f },
+                    // 3: castle interior, looking up at the entrance lintel (PCSS)
+                    { glm::vec3(0.0f,  23.5f,   2.0f),  kPi,        0.55f },
+                    // 4: voxel tower mid-range (multi-shape, self-shadow)
+                    { glm::vec3(8.0f,  27.0f,  35.0f),  kPi,        0.10f },
+                    // 5: grass meadow far from castle (GI fed by terrain)
+                    { glm::vec3(60.0f, 26.0f,  60.0f), -0.75f,      0.05f },
+                    // 6: underwater at the bay (water blend chain)
+                    { glm::vec3(40.0f, 19.0f, -40.0f),  0.5f,      -0.15f },
+                    // 7: crate spawn zone (TAA + dyn-prop)
+                    { glm::vec3(0.0f,  24.0f,   0.0f),  kHalfPi,    0.0f  },
+                };
+                int idx = std::clamp(opts_.scene, 1, 7) - 1;
+                player_.position = kScenes[idx].pos;
+                player_.yaw      = kScenes[idx].yaw;
+                player_.pitch    = kScenes[idx].pitch;
+                player_.velocity = glm::vec3(0.0f);
+            } else {
+                const float R     = 15.0f;
+                const float omega = 0.30f;   // rad/s — ~17°/s
+                const float ang   = demo_t * omega;
+                player_.position  = glm::vec3(R * std::sin(ang),
+                                              23.0f,
+                                              R * std::cos(ang));
+                player_.yaw       = ang + kHalfPi;          // tangent (CCW)
+                player_.pitch     = 0.0f;
+            }
             in.mouse_dx = 0.0;
             in.mouse_dy = 0.0;
         }

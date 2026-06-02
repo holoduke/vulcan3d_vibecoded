@@ -355,7 +355,32 @@ layout(set = 0, binding = 0) uniform Scene {
     // vec4). Each cell = max terrain height in that footprint + 15 m
     // safety. The marcher skips whole cells a rising ray is above.
     vec4 terrain_max_grid[256];
+    // Extended prefix to reach voxel_origin / voxel_dims. The voxel
+    // castle is rendered via SSBO+DDA, NOT a TLAS BLAS, so the TLAS
+    // shadow ray can't see it — we use the AABB here for a cheap
+    // sun-occlusion check on the water specular. Field ordering must
+    // match cube.frag's SceneUBO; std140 alignment required.
+    vec4 _terrain_disp_params;
+    vec4 _terrain_antitile_params;
+    vec4 _grass_shadow_on_terrain_params;
+    vec4 _grass_side_lit_params;
+    vec4 voxel_origin;   // .xyz = world origin, .w = enabled (0/1)
+    vec4 voxel_dims;     // .xyz = world extent (m), .w = voxel size (m)
+    vec4 voxel_grid;     // .xyz = brick grid dims, .w = brick size (m)
 } scene;
+
+// Slab-test ray vs AABB. Used to check sun occlusion through the voxel
+// castle AABB (voxels aren't in the TLAS — see voxel_origin comment).
+bool ray_aabb_hit(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
+    vec3 inv = 1.0 / rd;
+    vec3 a = (bmin - ro) * inv;
+    vec3 b = (bmax - ro) * inv;
+    vec3 lo = min(a, b);
+    vec3 hi = max(a, b);
+    float t0 = max(max(lo.x, lo.y), lo.z);
+    float t1 = min(min(hi.x, hi.y), hi.z);
+    return t1 > max(t0, 0.0);
+}
 
 // Max terrain height of the 64 m cell containing world XZ. Branch-free
 // clamp + packed-vec4 unpack. kHeightmapSide is the 2048 m world span.
@@ -2078,15 +2103,27 @@ void main() {
                     : calcShadow(wpos + wnor * 0.05, sunDirW);
                 water_lit = min(water_lit, self_lit);
             }
-            // Explicit TLAS shadow ray — catches voxel castle / brushes
-            // that may not be in the sun shadow map cascade (or whose
-            // bounds the cascade doesn't reach). Without this, the sun
-            // glint reflects off water even when a castle wall is
-            // directly between the water surface and the sun. Mask
-            // 0x01 includes everything that should cast a sun shadow.
+            // Explicit TLAS shadow ray — catches brushes/dyn-props that
+            // may not be in the sun shadow map cascade. Mask 0x01 = all
+            // shadow casters (terrain + brushes + dyn-props).
             if (water_lit > 0.05 && dot(wnor, sunDirW) > 0.05) {
                 if (any_hit_shadow_caster(wpos + wnor * 0.05,
                                           sunDirW, 200.0)) {
+                    water_lit = 0.0;
+                }
+            }
+            // Voxel castle is NOT in the TLAS (it's rendered via SSBO +
+            // DDA, separate pipeline). The TLAS ray above misses it.
+            // Use the shape's AABB as a cheap conservative occluder —
+            // hits the "is the sun behind the castle?" question
+            // correctly even if it can't tell which interior voxel is
+            // blocking. Good enough for water glint suppression.
+            if (water_lit > 0.05 && scene.voxel_origin.w > 0.5 &&
+                dot(wnor, sunDirW) > 0.05) {
+                vec3 bmin = scene.voxel_origin.xyz;
+                vec3 bmax = bmin + scene.voxel_dims.xyz;
+                if (ray_aabb_hit(wpos + wnor * 0.05, sunDirW,
+                                 bmin, bmax)) {
                     water_lit = 0.0;
                 }
             }

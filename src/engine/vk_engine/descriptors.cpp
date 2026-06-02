@@ -644,22 +644,30 @@ void VulkanEngine::update_scene_ubo() {
         }
     }
 
-    // Voxel building params for cube.frag's inline-RT shadow + GI rays.
-    // Filled from voxel shape 0 when the voxel world exists; .w of
-    // voxel_origin gates the whole feature off (zero shader cost) when
+    // Voxel building params for cube.frag's inline-RT shadow + GI rays
+    // and for water-reflection sun-occlusion in terrain_raymarch.frag.
+    // Now stores the UNION AABB of ALL shapes (previously only shape 0,
+    // which missed multi-shape castles for the sun-block check). voxel_grid
+    // keeps shape 0's brick dims (per-shape data isn't useful at the
+    // union scale anyway). .w of voxel_origin gates the feature off when
     // there's no shape.
     if (voxel_world_ && !voxel_world_->shapes().empty()) {
-        const auto& s = voxel_world_->shapes()[0];
-        data.voxel_origin = glm::vec4(s.origin_world, 1.0f);
-        data.voxel_dims   = glm::vec4(
-            s.dim_bricks[0] * voxel::kBrickSize,
-            s.dim_bricks[1] * voxel::kBrickSize,
-            s.dim_bricks[2] * voxel::kBrickSize,
-            voxel::kVoxelSize);
+        glm::vec3 bmin( std::numeric_limits<float>::infinity());
+        glm::vec3 bmax(-std::numeric_limits<float>::infinity());
+        for (const auto& s : voxel_world_->shapes()) {
+            glm::vec3 ext(s.dim_bricks[0] * voxel::kBrickSize,
+                          s.dim_bricks[1] * voxel::kBrickSize,
+                          s.dim_bricks[2] * voxel::kBrickSize);
+            bmin = glm::min(bmin, s.origin_world);
+            bmax = glm::max(bmax, s.origin_world + ext);
+        }
+        data.voxel_origin = glm::vec4(bmin, 1.0f);
+        data.voxel_dims   = glm::vec4(bmax - bmin, voxel::kVoxelSize);
+        const auto& s0 = voxel_world_->shapes()[0];
         data.voxel_grid   = glm::vec4(
-            static_cast<float>(s.dim_bricks[0]),
-            static_cast<float>(s.dim_bricks[1]),
-            static_cast<float>(s.dim_bricks[2]),
+            static_cast<float>(s0.dim_bricks[0]),
+            static_cast<float>(s0.dim_bricks[1]),
+            static_cast<float>(s0.dim_bricks[2]),
             voxel::kBrickSize);
     } else {
         data.voxel_origin = glm::vec4(0.0f);  // .w = 0 → disabled

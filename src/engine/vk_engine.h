@@ -48,6 +48,11 @@ struct RunOptions {
     // requests window close. Lets us reproduce shoot+hit gameplay crashes
     // deterministically without manual play.
     float autodemo_seconds = 0.0f;
+    // --scene N: teleport the player to one of the deferred-renderer
+    // reference scenes (1..7) and lock the camera there. Used to make
+    // before/after PPM captures during the G-buffer migration
+    // deterministic. 0 = no override.
+    int scene = 0;
 };
 
 struct FrameData {
@@ -1393,6 +1398,22 @@ private:
     VmaAllocation motion_vec_alloc_ = nullptr;
     VkImageView  motion_vec_view_ = VK_NULL_HANDLE;
     VkFormat     motion_vec_format_ = VK_FORMAT_R16G16_SFLOAT;
+
+    // --- Deferred renderer G-buffer (migration phases 1+) ---
+    //   gbuffer0 RGBA8        : albedo.rgb + material_id.a
+    //   gbuffer1 R10G10B10A2  : octahedral_normal.rg + roughness.b +
+    //                            metallic_flag.a (2-bit, 0 or 1)
+    // Both reused across the frame: written by the geometry pass(es) and
+    // read by the deferred lighting pass. Allocated at render_extent_
+    // alongside scene_color; freed/recreated together.
+    VkImage      gbuffer0_image_ = VK_NULL_HANDLE;
+    VmaAllocation gbuffer0_alloc_ = nullptr;
+    VkImageView  gbuffer0_view_ = VK_NULL_HANDLE;
+    VkFormat     gbuffer0_format_ = VK_FORMAT_R8G8B8A8_UNORM;
+    VkImage      gbuffer1_image_ = VK_NULL_HANDLE;
+    VmaAllocation gbuffer1_alloc_ = nullptr;
+    VkImageView  gbuffer1_view_ = VK_NULL_HANDLE;
+    VkFormat     gbuffer1_format_ = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
 
     static constexpr int kHistorySlots = 2;
     VkImage      history_image_[kHistorySlots]{ VK_NULL_HANDLE, VK_NULL_HANDLE };

@@ -41,13 +41,17 @@ bool parse_args(int argc, char** argv, Args& out) {
         } else if (a == "--autodemo") {
             const char* v = next("--autodemo"); if (!v) return false;
             out.opts.autodemo_seconds = static_cast<float>(std::atof(v));
+        } else if (a == "--scene") {
+            const char* v = next("--scene"); if (!v) return false;
+            out.opts.scene = std::atoi(v);
         } else if (a == "--help" || a == "-h") {
             std::printf("usage: quake_like [options]\n"
                         "  --frames N            Run N frames then exit (-1 = forever)\n"
                         "  --screenshot PATH     Capture one frame to PATH (PPM) and exit\n"
                         "  --screenshot-after N  Wait N frames before capturing (default 5)\n"
                         "  --log PATH            Log file path (default qlike.log)\n"
-                        "  --autodemo SECS       Synthesise walk+fire input for SECS, then exit\n");
+                        "  --autodemo SECS       Synthesise walk+fire input for SECS, then exit\n"
+                        "  --scene N             Teleport to deferred-renderer reference scene 1..7\n");
             std::exit(0);
         } else {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
