@@ -16,6 +16,9 @@
 #include "engine/vk_engine/internal.h"
 #include "engine/vk_pipelines.h"
 #include "engine/voxel/voxel_world.h"
+#include "engine/frustum.h"
+
+#include <glm/gtc/matrix_transform.hpp>   // glm::translate for per-chunk model
 
 #include <algorithm>
 #include <cmath>
@@ -38,18 +41,33 @@ struct VoxelCameraUboData {
     glm::vec4 pal[16];
 };
 
+// Mirrors voxel.{vert,frag}'s push-constant layout — keep in lock-step.
+// Rigid transform is split into R + T so the fragment shader can build
+// the world→local inverse analytically (transpose(R), -T) — much cheaper
+// than a per-pixel mat4 inverse(). std430 mat3 occupies 3 vec4 columns
+// (48 B), so the total size matches the previous mat4 layout exactly.
 struct VoxelPushConstants {
-    glm::vec4  origin_world;
-    glm::vec4  dims_world;
-    glm::ivec4 dims_bricks;
-    glm::vec4  voxel_size;   // x = vs, y = bs
-    glm::vec4  shape_idx;
+    glm::vec4  R0;           // mat3 col 0 (xyz used, w pad)
+    glm::vec4  R1;           // mat3 col 1
+    glm::vec4  R2;           // mat3 col 2
+    glm::vec4  T;            // xyz translation, w pad
+    glm::vec4  dims_vs;      // xyz = shape extent (local), w = voxel size
+    glm::ivec4 grid_dir;     // xyz = brick dims, w = directory base offset
 };
-static_assert(sizeof(VoxelPushConstants) == 80, "VoxelPC size — fits 128B PC limit");
+static_assert(sizeof(VoxelPushConstants) == 96,
+              "VoxelPC size — fits 128B PC limit");
 
-// Tower placement — 100 m north of the castle origin. Tower extends
-// +X/+Y/+Z from the base corner; centre on (0, _, 100).
-constexpr float kTowerCenterZ = 100.0f;
+// Atlas + directory growth budget. The tower starts with ~892 bricks /
+// ~2.6k directory entries; chunks add per collapse. These caps cover many
+// dozens of chunks without ever resizing the GPU buffers (which would
+// require a queue idle). 4 000 bricks ≈ 18 MB host-mapped (BAR), 64 k
+// directory entries = 256 KB — both fit comfortably.
+constexpr uint32_t kVoxelAtlasCapacityBricks = 4000;
+constexpr uint32_t kVoxelDirCapacityEntries  = 64 * 1024;
+
+// Tower placement — 50 m north of the castle origin. Tower extends
+// +X/+Y/+Z from the base corner; centre on (0, _, 50).
+constexpr float kTowerCenterZ = 50.0f;
 
 } // namespace
 
@@ -59,9 +77,13 @@ void VulkanEngine::init_voxel() {
     // ---- CPU side: build the procedural tower ----
     voxel_world_ = std::make_unique<VoxelWorld>();
 
-    // 12×18×12 bricks → 19.2 × 28.8 × 19.2 m.
-    constexpr float kTowerSizeX = 12.0f * kBrickSize;   // 19.2
-    constexpr float kTowerSizeZ = 12.0f * kBrickSize;
+    // 8×24×8 bricks → 12.8 × 38.4 × 12.8 m. Slimmer footprint than the
+    // original 12×18×12 + a stepped narrower upper turret on top, so
+    // the new total is taller AND thinner. add_procedural_tower owns
+    // both layers; these constants only need to cover the BASE so the
+    // ground-snap math here can anchor the bottom.
+    constexpr float kTowerSizeX = 8.0f * kBrickSize;   // 12.8
+    constexpr float kTowerSizeZ = 8.0f * kBrickSize;
     // Anchor the tower's base 2 m below sampled terrain at (0, kTowerCenterZ)
     // so the bottom row of voxels embeds in the ground rather than floating.
     // Sample the four corners of the footprint and take the min so the tower
@@ -141,11 +163,13 @@ void VulkanEngine::init_voxel() {
         vmaDestroyBuffer(allocator_, staging, staging_alloc);
     };
 
-    const VkDeviceSize atlas_bytes = static_cast<VkDeviceSize>(bricks.size()) *
-                                     sizeof(voxel::BrickPayload);
-    // Brick atlas is host-mapped (not staged) so carves can flush touched
-    // bricks directly — see voxel_atlas_mapped_. Device-local-host-visible
-    // (ReBAR) when available; 4 MB fits the guaranteed BAR window.
+    // Brick atlas is host-mapped (not staged) so carves + chunk extraction
+    // can flush touched / appended bricks directly without command-buffer
+    // round-trips. Sized to a generous capacity so future chunk growth
+    // doesn't need a reallocation. Device-local-host-visible (ReBAR) when
+    // available — 18 MB easily fits the guaranteed BAR window.
+    const VkDeviceSize atlas_bytes =
+        VkDeviceSize(kVoxelAtlasCapacityBricks) * sizeof(voxel::BrickPayload);
     {
         VkBufferCreateInfo bci{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -163,28 +187,50 @@ void VulkanEngine::init_voxel() {
         vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
                                  &voxel_atlas_buffer_, &voxel_atlas_alloc_, &ai),
                  "voxel brick atlas");
-        std::memcpy(ai.pMappedData, bricks.data(), static_cast<size_t>(atlas_bytes));
-        voxel_atlas_mapped_ = ai.pMappedData;
-        voxel_atlas_bytes_  = atlas_bytes;
+        // Upload only the populated prefix; the rest stays uninitialised.
+        const size_t init_bytes = bricks.size() * sizeof(voxel::BrickPayload);
+        std::memcpy(ai.pMappedData, bricks.data(), init_bytes);
+        voxel_atlas_mapped_   = ai.pMappedData;
+        voxel_atlas_bytes_    = atlas_bytes;
+        voxel_atlas_uploaded_ = static_cast<uint32_t>(bricks.size());
     }
 
-    // Shape directory: header (uvec4 = dims) + entries[].
-    // GLSL std430 lays this out tightly when the buffer is declared as
-    // `uvec4 hdr; uint entries[];`.
-    std::vector<uint32_t> dir_blob;
-    dir_blob.reserve(4 + s0.directory.size());
-    dir_blob.push_back(static_cast<uint32_t>(s0.dim_bricks[0]));
-    dir_blob.push_back(static_cast<uint32_t>(s0.dim_bricks[1]));
-    dir_blob.push_back(static_cast<uint32_t>(s0.dim_bricks[2]));
-    dir_blob.push_back(0u);  // padding for uvec4
-    dir_blob.insert(dir_blob.end(), s0.directory.begin(), s0.directory.end());
-    const VkDeviceSize dir_bytes = dir_blob.size() * sizeof(uint32_t);
-    create_device_ssbo(dir_bytes, dir_blob.data(), "voxel shape directory",
-                       voxel_dir_buffer_, voxel_dir_alloc_);
+    // Directory: a single FLAT global array of `uint entries[]`. The main
+    // shape occupies the first N slots; each extracted chunk appends its
+    // own segment at the current head. Host-mapped for cheap appends.
+    const VkDeviceSize dir_bytes =
+        VkDeviceSize(kVoxelDirCapacityEntries) * sizeof(uint32_t);
+    {
+        VkBufferCreateInfo bci{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .size = dir_bytes,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
+        };
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo ai{};
+        vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
+                                 &voxel_dir_buffer_, &voxel_dir_alloc_, &ai),
+                 "voxel shape directory");
+        std::memcpy(ai.pMappedData, s0.directory.data(),
+                    s0.directory.size() * sizeof(uint32_t));
+        voxel_dir_mapped_   = ai.pMappedData;
+        voxel_dir_bytes_    = dir_bytes;
+        voxel_dir_uploaded_   = static_cast<uint32_t>(s0.directory.size());
+        voxel_dir_next_shape_ = 1;   // shape 0 (main) is already uploaded
+    }
 
-    log::infof("[voxel] GPU upload: atlas=%llu KB, dir=%llu KB",
+    log::infof("[voxel] GPU pools: atlas cap=%llu KB (%u bricks live), "
+               "dir cap=%llu KB (%u entries live)",
                (unsigned long long)(atlas_bytes / 1024),
-               (unsigned long long)(dir_bytes  / 1024));
+               voxel_atlas_uploaded_,
+               (unsigned long long)(dir_bytes  / 1024),
+               voxel_dir_uploaded_);
 
     // ---- Camera UBO (host-mapped, per-frame memcpy) ----
     {
@@ -209,7 +255,7 @@ void VulkanEngine::init_voxel() {
 
     // ---- Descriptor set layout ----
     {
-        VkDescriptorSetLayoutBinding b[3]{};
+        VkDescriptorSetLayoutBinding b[4]{};
         b[0].binding = 0;
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         b[0].descriptorCount = 1;
@@ -222,9 +268,15 @@ void VulkanEngine::init_voxel() {
         b[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         b[2].descriptorCount = 1;
         b[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        // Wall texture (shared with the castle brushes — same Bricks078
+        // albedo at index 1 of the main pipeline's u_albedo array).
+        b[3].binding = 3;
+        b[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        b[3].descriptorCount = 1;
+        b[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         VkDescriptorSetLayoutCreateInfo dlci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            .bindingCount = 3, .pBindings = b,
+            .bindingCount = 4, .pBindings = b,
         };
         vk_check(vkCreateDescriptorSetLayout(device_, &dlci, nullptr,
                                               &voxel_desc_set_layout_),
@@ -262,15 +314,12 @@ void VulkanEngine::init_voxel() {
         cfg.depth_test = true;
         cfg.depth_write = true;
         cfg.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
-        // CULL_NONE: rasterize all 12 tris of the AABB. The near (front)
-        // face supplies a depth value < the back face, so depth-test
-        // LESS_OR_EQUAL against existing world depth correctly admits
-        // the fragment when no terrain occludes the near face. CULL_FRONT
-        // would rasterize ONLY the back face, whose far depth fails the
-        // depth-test against any terrain in front of the box → invisible
-        // voxel. Cost: up to 2x fragment invocations per AABB pixel; the
-        // second invocation writes the same gl_FragDepth, so depth_write
-        // is idempotent and the perf hit is negligible for one shape.
+        // CULL_NONE: rasterize both front + back faces. CULL_FRONT
+        // (back-only) halves fragment invocations but caused visible
+        // dropouts on the far wall from some camera angles — likely
+        // near-plane clipping of back-face geometry when the camera
+        // approaches the AABB. Reverted; the cheap analytic inverse +
+        // tighter max_steps cap recover most of the win.
         cfg.cull = VK_CULL_MODE_NONE;
         cfg.alpha_blend_color0_only = false;
         // No vertex buffer — vertex shader derives corners from gl_VertexIndex.
@@ -282,14 +331,15 @@ void VulkanEngine::init_voxel() {
     // ---- Descriptor pool + set + write ----
     {
         VkDescriptorPoolSize sizes[] = {
-            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 },
-            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         1 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         2 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 },
         };
         VkDescriptorPoolCreateInfo pci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
             .maxSets = 1,
-            .poolSizeCount = 2, .pPoolSizes = sizes,
+            .poolSizeCount = 3, .pPoolSizes = sizes,
         };
         vk_check(vkCreateDescriptorPool(device_, &pci, nullptr,
                                          &voxel_desc_pool_),
@@ -306,7 +356,16 @@ void VulkanEngine::init_voxel() {
         VkDescriptorBufferInfo ubo_bi  { voxel_camera_ubo_,   0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo atlas_bi{ voxel_atlas_buffer_, 0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo dir_bi  { voxel_dir_buffer_,   0, VK_WHOLE_SIZE };
-        VkWriteDescriptorSet w[3]{};
+        // Bricks078 lives at albedo index 1 (see init_textures specs[]). If
+        // that ever drops below 2, the fallback writes the first available
+        // albedo so the shader still gets a real texture.
+        const int wall_idx = (kFileTextureCount > 1) ? 1 : 0;
+        VkDescriptorImageInfo wall_ii{
+            .sampler     = texture_sampler_,
+            .imageView   = albedo_textures_[wall_idx].view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        VkWriteDescriptorSet w[4]{};
         w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[0].dstSet = voxel_desc_set_; w[0].dstBinding = 0;
         w[0].descriptorCount = 1;
@@ -319,7 +378,12 @@ void VulkanEngine::init_voxel() {
         w[2] = w[1];
         w[2].dstBinding = 2;
         w[2].pBufferInfo = &dir_bi;
-        vkUpdateDescriptorSets(device_, 3, w, 0, nullptr);
+        w[3] = w[0];
+        w[3].dstBinding = 3;
+        w[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[3].pBufferInfo = nullptr;
+        w[3].pImageInfo  = &wall_ii;
+        vkUpdateDescriptorSets(device_, 4, w, 0, nullptr);
     }
 
     // ---- Session B: also bind the brick atlas + directory into the
@@ -384,76 +448,302 @@ void VulkanEngine::flush_voxel_brick_(uint32_t slot) {
                        sizeof(voxel::BrickPayload));
 }
 
-int VulkanEngine::apply_voxel_carve(glm::vec3 center, float radius) {
-    if (!voxel_world_ || voxel_world_->shapes().empty()) return 0;
+void VulkanEngine::flush_voxel_bricks_batched_(const std::vector<uint32_t>& slots) {
+    // Batched memcpy + single vmaFlushAllocation across the [min,max] slot
+    // range. One driver call instead of N. Wasted flush bytes for unmodified
+    // bricks inside the range are cheap (non-coherent memory; flush is a
+    // CPU-side cache line writeback, not a GPU upload).
+    if (!voxel_atlas_mapped_ || slots.empty()) return;
+    uint32_t mn = slots.front(), mx = slots.front();
+    for (uint32_t s : slots) {
+        if (s < mn) mn = s;
+        if (s > mx) mx = s;
+        // memcpy each brick individually (sparse) — keeps unmodified bricks
+        // in the range as-is. A whole-range memcpy would also work since the
+        // host mirror IS authoritative, but per-slot is symmetric with the
+        // single-brick path.
+        const voxel::BrickPayload& bp = voxel_world_->brick(s);
+        size_t off = static_cast<size_t>(s) * sizeof(voxel::BrickPayload);
+        if (off + sizeof(voxel::BrickPayload) > voxel_atlas_bytes_) continue;
+        std::memcpy(static_cast<char*>(voxel_atlas_mapped_) + off,
+                    &bp, sizeof(voxel::BrickPayload));
+    }
+    size_t off0 = static_cast<size_t>(mn) * sizeof(voxel::BrickPayload);
+    size_t bytes = static_cast<size_t>(mx - mn + 1) * sizeof(voxel::BrickPayload);
+    if (off0 + bytes > voxel_atlas_bytes_)
+        bytes = voxel_atlas_bytes_ - off0;
+    vmaFlushAllocation(allocator_, voxel_atlas_alloc_, off0, bytes);
+}
+
+int VulkanEngine::apply_voxel_carve(int shape_idx, glm::vec3 world_center,
+                                    float radius) {
+    if (!voxel_world_ || shape_idx < 0 ||
+        shape_idx >= (int)voxel_world_->shapes().size()) return 0;
+
+    // For falling chunks (shape_idx > 0), the carve point is in world space
+    // but carve_sphere works in shape-local. Compute the chunk's CURRENT
+    // local-to-world from its Jolt body, invert, transform the world point
+    // into shape-local, then translate back by the shape's recorded
+    // origin_world (since carve_sphere subtracts that out internally).
+    glm::vec3 carve_pos = world_center;
+    if (shape_idx > 0 && physics_) {
+        for (const auto& ch : voxel_chunks_) {
+            if (ch.shape_index != shape_idx) continue;
+            glm::mat4 body_world;
+            if (!physics_->get_body_world_matrix_h(ch.jolt_handle, body_world))
+                return 0;
+            const auto& s = voxel_world_->shapes()[shape_idx];
+            glm::vec3 half = 0.5f * glm::vec3(s.dim_bricks[0],
+                                              s.dim_bricks[1],
+                                              s.dim_bricks[2]) * voxel::kBrickSize;
+            // chunk_world maps shape-local (0..dims) → world. Built the same
+            // way render_voxels does it: body_world * translate(-half).
+            glm::mat4 chunk_world = body_world *
+                glm::translate(glm::mat4(1.0f), -half);
+            glm::mat4 inv = glm::inverse(chunk_world);
+            glm::vec3 local = glm::vec3(inv * glm::vec4(world_center, 1.0f));
+            // carve_sphere does (carve_pos - s.origin_world) → reinjecting
+            // origin_world here cancels that subtraction so the local point
+            // makes it through to the DDA.
+            carve_pos = s.origin_world + local;
+            break;
+        }
+    }
+
     // CHEAP path (runs per bullet impact): clear the sphere of voxels and
     // push ONLY the touched bricks to the GPU so the hole shows instantly.
     // The expensive collapse + collision rebuild are deferred to
     // process_voxel_updates (debounced) so rapid fire never stalls a frame.
     std::vector<uint32_t> dirty;
-    int removed = voxel_world_->carve_sphere(0, center, radius, dirty);
+    int removed = voxel_world_->carve_sphere(shape_idx, carve_pos, radius, dirty);
     if (removed == 0) return 0;
-    for (uint32_t slot : dirty) flush_voxel_brick_(slot);
+    flush_voxel_bricks_batched_(dirty);
     voxel_update_pending_ = true;
     voxel_removed_accum_ += removed;
+    // Mark this shape dirty (dedupe).
+    bool already = false;
+    for (int s : voxel_dirty_shapes_) if (s == shape_idx) { already = true; break; }
+    if (!already) voxel_dirty_shapes_.push_back(shape_idx);
     return removed;
+}
+
+void VulkanEngine::upload_voxel_growth_() {
+    // Push any newly-allocated bricks (slot ≥ voxel_atlas_uploaded_) to the
+    // host-mapped atlas, and any newly-claimed directory entries (offset ≥
+    // voxel_dir_uploaded_) to the host-mapped dir buffer. Both are bounded
+    // memcpys + a single vmaFlushAllocation each — cheap.
+    if (!voxel_world_) return;
+    if (voxel_atlas_mapped_) {
+        uint32_t target = voxel_world_->brick_pool_size();
+        if (target > voxel_atlas_uploaded_) {
+            const auto& bricks = voxel_world_->bricks();
+            if (target > kVoxelAtlasCapacityBricks) {
+                target = kVoxelAtlasCapacityBricks;     // bound to capacity
+                log::error("[voxel] brick atlas capacity exceeded — chunks dropped");
+            }
+            size_t off = size_t(voxel_atlas_uploaded_) * sizeof(voxel::BrickPayload);
+            size_t cnt = size_t(target - voxel_atlas_uploaded_)
+                       * sizeof(voxel::BrickPayload);
+            std::memcpy((char*)voxel_atlas_mapped_ + off,
+                        bricks.data() + voxel_atlas_uploaded_, cnt);
+            vmaFlushAllocation(allocator_, voxel_atlas_alloc_, off, cnt);
+            voxel_atlas_uploaded_ = target;
+        }
+    }
+    if (voxel_dir_mapped_) {
+        uint32_t target = voxel_world_->total_directory_size();
+        if (target > voxel_dir_uploaded_) {
+            if (target > kVoxelDirCapacityEntries) {
+                target = kVoxelDirCapacityEntries;
+                log::error("[voxel] directory capacity exceeded — chunks dropped");
+            }
+            // Walk only the shapes added since the last call (tracked by
+            // voxel_dir_next_shape_). Old code re-scanned every shape ever
+            // created on each collapse — cost grew linearly with session-
+            // long debris history.
+            const auto& shapes = voxel_world_->shapes();
+            for (size_t si = voxel_dir_next_shape_; si < shapes.size(); ++si) {
+                const auto& s = shapes[si];
+                size_t off = size_t(s.dir_base) * sizeof(uint32_t);
+                size_t bytes = s.directory.size() * sizeof(uint32_t);
+                if (off + bytes > size_t(voxel_dir_bytes_)) continue;
+                std::memcpy((char*)voxel_dir_mapped_ + off,
+                            s.directory.data(), bytes);
+                vmaFlushAllocation(allocator_, voxel_dir_alloc_, off, bytes);
+            }
+            voxel_dir_next_shape_ = static_cast<uint32_t>(shapes.size());
+            voxel_dir_uploaded_   = target;
+        }
+    }
 }
 
 void VulkanEngine::process_voxel_updates(float dt) {
     if (!voxel_world_ || voxel_world_->shapes().empty()) return;
     if (voxel_collapse_cd_  > 0.0f) voxel_collapse_cd_  -= dt;
     if (voxel_collision_cd_ > 0.0f) voxel_collision_cd_ -= dt;
+
+    // Tick chunk lifetime each frame regardless of pending state. A chunk
+    // despawns when EITHER its TTL hits zero (hard cap) or Jolt has put
+    // the body to sleep AFTER the chunk has been alive long enough that
+    // sleep means "settled on terrain" (not "just hasn't been ticked yet").
+    // The age gate replaces a magic-number TTL threshold (was `ttl < 6.5f`,
+    // which silently broke if the initial TTL was changed).
+    constexpr float kMinAgeBeforeSleepCull = 1.0f;   // seconds
+    for (auto it = voxel_chunks_.begin(); it != voxel_chunks_.end(); ) {
+        it->ttl -= dt;
+        it->age += dt;
+        const bool active = physics_ &&
+                            physics_->is_body_active_h(it->jolt_handle);
+        const bool slept = it->age >= kMinAgeBeforeSleepCull && !active;
+        if (it->ttl <= 0.0f || slept) {
+            if (physics_) physics_->remove_body(it->body_id);
+            voxel_world_->drop_shape(it->shape_index);
+            it = voxel_chunks_.erase(it);
+        } else { ++it; }
+    }
+
     if (!voxel_update_pending_) return;
 
     // Collapse (the ~20 ms BFS) only when enough has been carved to plausibly
     // disconnect a chunk, and rate-limited — a single bullet hole never pays
     // for it. A big cut (≥ ~3000 voxels of accumulated damage) triggers the
-    // structural check; the detached top falls as debris.
+    // structural check; each detached connected component falls as its own
+    // VOXEL CHUNK (own shape, own brick atlas slice, own Jolt body).
     bool collapsed = false;
     if (voxel_removed_accum_ >= 3000 && voxel_collapse_cd_ <= 0.0f) {
         voxel_removed_accum_ = 0;
         voxel_collapse_cd_   = 0.25f;
         collapsed = true;
 
-        std::vector<uint32_t> dirty;
-        std::vector<voxel::CollisionBox> debris;
-        voxel_world_->collapse_unsupported(0, 8, debris, dirty);
-        for (uint32_t slot : dirty) flush_voxel_brick_(slot);
+        std::vector<uint32_t> main_dirty;
+        std::vector<voxel::VoxelWorld::ChunkOut> chunks;
+        voxel_world_->collapse_into_chunks(0, 8, chunks, main_dirty);
+        // Flush the main shape's cleared voxels (batched).
+        flush_voxel_bricks_batched_(main_dirty);
+        // Push the new chunks' bricks + directories to the GPU buffers.
+        upload_voxel_growth_();
 
-    // Spawn the detached chunk as falling debris boxes (reuses dynamic-prop
-    // physics + rendering). Largest chunks first so the visible mass is
-    // preserved; the rest were already cleared from the shape.
-    if (physics_ && !debris.empty()) {
-        std::sort(debris.begin(), debris.end(),
-                  [](const voxel::CollisionBox& a, const voxel::CollisionBox& b) {
-                      return a.half.x * a.half.y * a.half.z >
-                             b.half.x * b.half.y * b.half.z;
-                  });
-        constexpr int kMaxDebris = 40;
-        int n = std::min((int)debris.size(), kMaxDebris);
-        for (int i = 0; i < n; ++i) {
-            glm::vec3 he = debris[i].half;
-            if (std::min({he.x, he.y, he.z}) < 0.05f) continue;
-            uint32_t id = physics_->add_dynamic_box(debris[i].center, he,
-                                                    glm::vec3(0.0f), 400.0f);
-            if (id == 0) continue;
-            DynamicProp p{};
-            p.body_id = id;
-            p.jolt_handle = physics_->handle_of(id);
-            p.full_size = he * 2.0f;
-            p.fallback_color = glm::vec4(0.62f, 0.50f, 0.36f, 1.0f);  // sandstone
-            p.color = glm::vec4(0.62f, 0.50f, 0.36f, 1.0f);
-            p.tex_albedo = -1; p.tex_normal = -1; p.uv_scale = 1.0f;
-            dyn_props_.push_back(p);
-            while (static_cast<int>(dyn_props_.size()) > kMaxDynProps) {
-                physics_->remove_body(dyn_props_.front().body_id);
-                dyn_props_.erase(dyn_props_.begin());
+        // Spawn a Jolt dynamic body per chunk (a single box for now — sized
+        // to the chunk's bounding extent). Each chunk's voxel structure is
+        // preserved in its own VoxelShape; voxel.frag draws it at the body's
+        // pose, so it READS as a falling voxel piece (not a smooth log).
+        if (physics_ && !chunks.empty()) {
+            constexpr size_t kMaxChunks = 24;
+            const size_t n = std::min(chunks.size(), kMaxChunks);
+            for (size_t i = 0; i < n; ++i) {
+                glm::vec3 he = chunks[i].half_extents;
+                // Skip degenerate slivers (any axis < 5 cm OR total volume
+                // < 0.001 m³, ~one 10-cm voxel). They produce wasted Jolt
+                // bodies and invisible debris that drags physics for no
+                // visual gain — drop the shape entry, don't spawn.
+                float vol = 8.0f * he.x * he.y * he.z;
+                if (std::min({he.x, he.y, he.z}) < 0.05f || vol < 0.001f) {
+                    voxel_world_->drop_shape(chunks[i].shape_index);
+                    continue;
+                }
+                uint32_t id = physics_->add_dynamic_box(
+                    chunks[i].center_world, he, glm::vec3(0.0f), 250.0f);
+                if (id == 0) {
+                    voxel_world_->drop_shape(chunks[i].shape_index);
+                    continue;
+                }
+                VoxelChunk vc{};
+                vc.shape_index = chunks[i].shape_index;
+                vc.body_id     = id;
+                vc.jolt_handle = physics_->handle_of(id);
+                vc.ttl         = 9.0f;
+                voxel_chunks_.push_back(vc);
             }
-        }
-            log::infof("[voxel] collapse: %d debris boxes spawned (of %zu)",
-                       n, debris.size());
+            // Drop any chunks past the cap (they were extracted from the main
+            // shape but we don't want a fleet of dynamic bodies — keep the
+            // biggest, leak the rest as orphaned shapes that don't render).
+            for (size_t i = n; i < chunks.size(); ++i)
+                voxel_world_->drop_shape(chunks[i].shape_index);
+            log::infof("[voxel] collapse: %zu voxel chunks spawned (of %zu)",
+                       n, chunks.size());
         }
     }
+
+    // Per-chunk self-split. If a bullet carved a chunk and the carve broke
+    // it into multiple pieces, drop the smaller pieces as new chunks (the
+    // largest stays in the parent's Jolt body). This is the "chunks can
+    // break again" path — voxels remain voxels at every level.
+    if (physics_ && !voxel_dirty_shapes_.empty()) {
+        // Snapshot inheritance: pulling the parent body's pose + velocity
+        // before split lets each new piece get a Jolt body that's roughly
+        // where it visibly was (no teleport) and continues the bulk motion.
+        for (int dirty_shape : voxel_dirty_shapes_) {
+            if (dirty_shape <= 0) continue;  // shape 0 = main, handled above
+            // Find the parent chunk entry.
+            VoxelChunk* parent_ch = nullptr;
+            for (auto& c : voxel_chunks_) {
+                if (c.shape_index == dirty_shape) { parent_ch = &c; break; }
+            }
+            if (!parent_ch) continue;
+            glm::mat4 parent_world;
+            if (!physics_->get_body_world_matrix_h(parent_ch->jolt_handle,
+                                                   parent_world)) continue;
+            const glm::vec3 parent_lin =
+                physics_->get_linear_velocity_h(parent_ch->jolt_handle);
+
+            std::vector<uint32_t> piece_dirty;
+            std::vector<voxel::VoxelWorld::ChunkOut> pieces;
+            constexpr int kMinPieceVoxels = 8;   // tiny shards become dust
+            int removed = voxel_world_->split_floating_chunk(
+                dirty_shape, kMinPieceVoxels, pieces, piece_dirty);
+            if (removed == 0 && pieces.empty()) continue;  // still 1 CC
+
+            // Flush parent's cleared bricks + upload new shapes' bricks/dir.
+            flush_voxel_bricks_batched_(piece_dirty);
+            upload_voxel_growth_();
+
+            // Spawn a body per new piece. Inherit parent velocity so they
+            // continue along its trajectory + a small outward kick from the
+            // parent centroid so they separate visibly.
+            const auto& parent_sh = voxel_world_->shapes()[dirty_shape];
+            const glm::vec3 parent_half = 0.5f * glm::vec3(
+                parent_sh.dim_bricks[0],
+                parent_sh.dim_bricks[1],
+                parent_sh.dim_bricks[2]) * voxel::kBrickSize;
+            const glm::mat4 parent_chunk_world =
+                parent_world * glm::translate(glm::mat4(1.0f), -parent_half);
+            for (const auto& p : pieces) {
+                glm::vec3 he = p.half_extents;
+                float vol = 8.0f * he.x * he.y * he.z;
+                if (std::min({he.x, he.y, he.z}) < 0.05f || vol < 0.001f) {
+                    voxel_world_->drop_shape(p.shape_index);
+                    continue;
+                }
+                // p.center_world is in the parent's SHAPE-LOCAL frame
+                // (split_floating_chunk built it from origin_world which
+                // is the parent's REST origin, not its current world pos).
+                // Transform it through parent_chunk_world to current world.
+                glm::vec3 local_centre = p.center_world - parent_sh.origin_world;
+                glm::vec3 spawn_world = glm::vec3(
+                    parent_chunk_world * glm::vec4(local_centre, 1.0f));
+                // Outward kick: spawn_world − parent body centre, scaled.
+                glm::vec3 outward = spawn_world - glm::vec3(parent_world[3]);
+                float ol = glm::length(outward);
+                glm::vec3 kick = (ol > 1e-3f) ? outward * (1.5f / ol)
+                                              : glm::vec3(0.0f);
+                glm::vec3 init_vel = parent_lin + kick;
+                uint32_t id = physics_->add_dynamic_box(
+                    spawn_world, he, init_vel, 100.0f);
+                if (id == 0) { voxel_world_->drop_shape(p.shape_index); continue; }
+                VoxelChunk vc{};
+                vc.shape_index = p.shape_index;
+                vc.body_id     = id;
+                vc.jolt_handle = physics_->handle_of(id);
+                vc.ttl         = 9.0f;
+                voxel_chunks_.push_back(vc);
+            }
+            log::infof("[voxel] chunk split: shape %d -> %zu new pieces",
+                       dirty_shape, pieces.size());
+            // parent_ch pointer may now dangle if voxel_chunks_ reallocated
+            // — do NOT touch it past this point.
+        }
+    }
+    voxel_dirty_shapes_.clear();
 
     // Collision rebuild (player AABBs + Jolt body): voxel_update_pending_ is
     // the "collision is stale" flag, set by every carve. Rebuild on a slow
@@ -512,12 +802,25 @@ void VulkanEngine::destroy_voxel() {
         vmaDestroyBuffer(allocator_, voxel_atlas_buffer_, voxel_atlas_alloc_);
         voxel_atlas_buffer_ = VK_NULL_HANDLE;
         voxel_atlas_alloc_ = nullptr;
+        voxel_atlas_mapped_ = nullptr;
+        voxel_atlas_bytes_ = 0;
+        voxel_atlas_uploaded_ = 0;
     }
     if (voxel_dir_buffer_) {
         vmaDestroyBuffer(allocator_, voxel_dir_buffer_, voxel_dir_alloc_);
         voxel_dir_buffer_ = VK_NULL_HANDLE;
         voxel_dir_alloc_ = nullptr;
+        voxel_dir_mapped_ = nullptr;
+        voxel_dir_bytes_ = 0;
+        voxel_dir_uploaded_ = 0;
+        voxel_dir_next_shape_ = 0;
     }
+    // Remove any active chunks' Jolt bodies before tearing physics down.
+    if (physics_) {
+        for (const auto& ch : voxel_chunks_) physics_->remove_body(ch.body_id);
+    }
+    voxel_chunks_.clear();
+    voxel_dirty_shapes_.clear();
     voxel_world_.reset();
 }
 
@@ -549,14 +852,20 @@ void VulkanEngine::update_voxel_camera_ubo() {
     float h = static_cast<float>(render_extent_.height);
     data.viewport = glm::vec4(w, h, 1.0f / w, 1.0f / h);
 
-    // 16-entry palette. Index 0 reserved; 1 = stone, 2 = warm accent.
-    for (int i = 0; i < 16; ++i) data.pal[i] = glm::vec4(1.0f, 0.0f, 1.0f, 1.0f);
-    data.pal[0]  = glm::vec4(0.50f, 0.50f, 0.50f, 1.0f);
-    // Saturated sandstone + warm wood — tuned to stand out against the
-    // distant terrain (which sits around grey-green at 100 m) and pink
-    // sky. Will tone down once normal lighting / shadows land in Session B.
-    data.pal[1]  = glm::vec4(0.95f, 0.78f, 0.45f, 1.0f);  // bright sandstone
-    data.pal[2]  = glm::vec4(0.75f, 0.30f, 0.15f, 1.0f);  // warm red wood accent
+    // 16-entry palette. 0 = grey, 1 = sandstone, 2 = warm wood, 3-15 =
+    // procedurally interpolated copper-gold → rust-brown ramp so any
+    // material id below 16 lands on a plausible masonry tone instead of
+    // the old magenta sentinels.
+    data.pal[0]  = glm::vec4(0.50f, 0.50f, 0.50f, 1.0f);   // grey stone
+    data.pal[1]  = glm::vec4(0.95f, 0.78f, 0.45f, 1.0f);   // bright sandstone
+    data.pal[2]  = glm::vec4(0.75f, 0.30f, 0.15f, 1.0f);   // warm red wood
+    const glm::vec3 c_copper(0.85f, 0.55f, 0.30f);
+    const glm::vec3 c_rust  (0.45f, 0.22f, 0.12f);
+    for (int i = 3; i < 16; ++i) {
+        float t = float(i - 3) / 12.0f;
+        glm::vec3 col = glm::mix(c_copper, c_rust, t);
+        data.pal[i] = glm::vec4(col, 1.0f);
+    }
 
     std::memcpy(voxel_camera_mapped_, &data, sizeof(data));
 }
@@ -571,24 +880,86 @@ void VulkanEngine::render_voxels(VkCommandBuffer cmd) {
                             voxel_pipeline_layout_, 0, 1,
                             &voxel_desc_set_, 0, nullptr);
 
-    const voxel::VoxelShape& s = voxel_world_->shapes()[0];
-    VoxelPushConstants pc{};
-    pc.origin_world = glm::vec4(s.origin_world, 0.0f);
-    pc.dims_world   = glm::vec4(
-        s.dim_bricks[0] * voxel::kBrickSize,
-        s.dim_bricks[1] * voxel::kBrickSize,
-        s.dim_bricks[2] * voxel::kBrickSize,
-        0.0f);
-    pc.dims_bricks  = glm::ivec4(s.dim_bricks[0], s.dim_bricks[1],
-                                  s.dim_bricks[2], 0);
-    pc.voxel_size   = glm::vec4(voxel::kVoxelSize, voxel::kBrickSize, 0.0f, 0.0f);
-    pc.shape_idx    = glm::vec4(0.0f);
+    // Helper: push a shape's PC + draw the 36-vert AABB cube.
+    const Frustum& frustum = current_frame_view_.frustum;
+    auto draw_shape = [&](const voxel::VoxelShape& s, const glm::mat4& model) {
+        // Skip dropped shapes (dim_bricks zeroed) or shapes whose grid is
+        // empty.
+        if (s.dim_bricks[0] <= 0 || s.dim_bricks[1] <= 0 || s.dim_bricks[2] <= 0)
+            return;
+        // World-space AABB frustum cull. Even with rotation, the shape's
+        // axis-aligned box around its CURRENT transform is a conservative
+        // bound — rotate the 8 local corners and take min/max. Off-screen
+        // chunks skip the proxy-cube draw + per-pixel DDA entirely.
+        glm::vec3 ext = glm::vec3(s.dim_bricks[0], s.dim_bricks[1], s.dim_bricks[2])
+                      * voxel::kBrickSize;
+        glm::vec3 lo( std::numeric_limits<float>::infinity());
+        glm::vec3 hi(-std::numeric_limits<float>::infinity());
+        for (int ci = 0; ci < 8; ++ci) {
+            glm::vec3 c(((ci >> 0) & 1) ? ext.x : 0.0f,
+                        ((ci >> 1) & 1) ? ext.y : 0.0f,
+                        ((ci >> 2) & 1) ? ext.z : 0.0f);
+            glm::vec3 w = glm::vec3(model * glm::vec4(c, 1.0f));
+            lo = glm::min(lo, w);
+            hi = glm::max(hi, w);
+        }
+        if (!aabb_visible(frustum, lo, hi)) return;
+        // Decompose the rigid model into rotation R + translation T so the
+        // fragment shader can use the analytic rigid-inverse (transpose,
+        // -T) instead of mat4 inverse() per pixel. glm matrices are
+        // column-major; model[0..2] are the rotation columns, model[3]
+        // is the translation column.
+        VoxelPushConstants pc{};
+        pc.R0       = glm::vec4(glm::vec3(model[0]), 0.0f);
+        pc.R1       = glm::vec4(glm::vec3(model[1]), 0.0f);
+        pc.R2       = glm::vec4(glm::vec3(model[2]), 0.0f);
+        pc.T        = glm::vec4(glm::vec3(model[3]), 0.0f);
+        pc.dims_vs  = glm::vec4(
+            s.dim_bricks[0] * voxel::kBrickSize,
+            s.dim_bricks[1] * voxel::kBrickSize,
+            s.dim_bricks[2] * voxel::kBrickSize,
+            voxel::kVoxelSize);
+        pc.grid_dir = glm::ivec4(s.dim_bricks[0], s.dim_bricks[1],
+                                  s.dim_bricks[2], (int)s.dir_base);
+        vkCmdPushConstants(cmd, voxel_pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(pc), &pc);
+        vkCmdDraw(cmd, 36, 1, 0, 0);
+    };
 
-    vkCmdPushConstants(cmd, voxel_pipeline_layout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(pc), &pc);
+    // Draw the main shape (translation-only).
+    const auto& shapes = voxel_world_->shapes();
+    {
+        const voxel::VoxelShape& s = shapes[0];
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), s.origin_world);
+        draw_shape(s, model);
+    }
 
-    vkCmdDraw(cmd, 36, 1, 0, 0);
+    // Draw each chunk with its Jolt-driven transform. The shape origin is
+    // the chunk's rest position (in shape-local 0..dims), so the model
+    // matrix moves to the Jolt body's centre AND rotates around the chunk's
+    // own centre — translate(centre) · rotate · translate(-half) — so the
+    // chunk's local centre lines up with the body's centre.
+    if (physics_) {
+        for (const auto& ch : voxel_chunks_) {
+            if (ch.shape_index < 0 || ch.shape_index >= (int)shapes.size()) continue;
+            const voxel::VoxelShape& s = shapes[ch.shape_index];
+            glm::mat4 body_world;
+            if (!physics_->get_body_world_matrix_h(ch.jolt_handle, body_world))
+                continue;
+            // body_world is centred at the chunk's centre. The shape's local
+            // origin is at (0,0,0); its centre is at half_extent. We want:
+            //   world = body_world * translate(-half_extent) when applied to
+            //   shape-local coords (so a local (0,0,0) maps to body_centre
+            //   − half_extent, and local (dims) maps to body_centre + half).
+            glm::vec3 half = 0.5f * glm::vec3(
+                s.dim_bricks[0], s.dim_bricks[1], s.dim_bricks[2]) *
+                voxel::kBrickSize;
+            glm::mat4 model = body_world *
+                              glm::translate(glm::mat4(1.0f), -half);
+            draw_shape(s, model);
+        }
+    }
 }
 
 } // namespace qlike

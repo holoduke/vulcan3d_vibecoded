@@ -192,8 +192,11 @@ struct VoxBrick { uint occ[128]; uint pal[1024]; };
 layout(set = 0, binding = 24, std430) readonly buffer VoxBrickAtlas {
     VoxBrick vox_bricks[];
 };
+// Flat global directory: all shapes' entries concatenated. cube.frag only
+// tests the MAIN voxel shape (the static tower) for inline-RT shadows + GI,
+// and its directory lives at offset 0, so this shader can read
+// `vox_entries[dir_i]` directly without a per-shape base offset.
 layout(set = 0, binding = 25, std430) readonly buffer VoxShapeDir {
-    uvec4 vox_hdr;       // xyz = brick dims (mirrors scene.voxel_grid)
     uint  vox_entries[];
 };
 const uint kVoxEmpty = 0xFFFFFFFFu;
@@ -958,7 +961,15 @@ bool vox_march(vec3 origin_w, vec3 dir_w, float t_max,
         (ld.y != 0.0) ? (face.y - lo.y) / ld.y : 1e30,
         (ld.z != 0.0) ? (face.z - lo.z) / ld.z : 1e30);
 
-    int max_steps = (voxel_dim.x + voxel_dim.y + voxel_dim.z) + 32;
+    // Tight cap (was the worst-case diagonal, ~700 steps) so RT rays — fired
+    // up to N×PCSS taps per pixel by cube.frag's shadow loop — can't pay the
+    // worst-case cost when the player is close to the voxel tower. 96 covers
+    // a ray that threads the grid via empty-brick fast-skips (each brick step
+    // jumps 16 voxel cells at once), and bounds the in-solid case so a thick
+    // chunk doesn't drag every shadow tap through hundreds of cells. Visually
+    // invisible: shadows are soft and a few missed grazing voxels get absorbed
+    // by the PCSS penumbra. Halved from 192 in the perf pass.
+    const int max_steps = 96;
     for (int i = 0; i < max_steps; ++i) {
         if (t > t_max) return false;
         if (any(lessThan(vc, ivec3(0))) ||
@@ -1951,6 +1962,196 @@ void main() {
                               vec4(hit_world, 1.0);
                     gl_FragDepth = max(gl_FragCoord.z, rc.z / rc.w);
                 }
+            } else if (spom_mode == 3) {
+                // ---- Godot-style POM + Silhouette Clipping (full port) ----
+                //
+                // Faithful port of the user-supplied Godot shader, adapted
+                // to our triplanar tiled-UV walls. Three parts:
+                //
+                //   1. POM march with reference_plane = 0.5
+                //      Independent of the existing spom_uv() (which goes
+                //      inward-only) so bricks can stick BOTH OUT and IN
+                //      of the geometric face. Same loop as Godot's:
+                //      starts at base_uv + P * reference_plane, marches
+                //      backward, contact-refines with binary search.
+                //   2. Silhouette UV clipping (per-tile-adapted)
+                //      Godot's `if (base_uv outside [0,1]) discard` —
+                //      adapted as "if the parallax shift crossed the
+                //      local brick-tile boundary, discard". Each brick
+                //      texture tile is [0,1] in fract(uv) space; if the
+                //      pre-fract shift goes outside the tile of the
+                //      starting UV, the brick at this lateral position
+                //      doesn't extend that far -> sky shows through.
+                //   3. Curved silhouette (NdotV + curvature mask)
+                //      Godot's `use_curved_silhouette` block — with the
+                //      `fwidth(NORMAL)` curvature mask. On flat brush
+                //      faces fwidth(N) is 0 so the mask is 0 and this
+                //      part doesn't fire (matches Godot's actual
+                //      behaviour on flat surfaces — the effect is for
+                //      curved meshes like the sphere in their demo).
+                //      Kept for correctness in case a tessellated /
+                //      curved brush is added later.
+                //
+                // Self-shadow (GetParallaxShadow) intentionally skipped:
+                // cube.frag has its own RT-based shadow + GI pipeline,
+                // re-implementing Godot's height-march would conflict
+                // with that. Same for the PBR light() function.
+                if (axis != 1) {
+                    // ---- Setup: tangent-space view, march params ----
+                    vec3  V_w = normalize(scene.camera_pos.xyz - vWorldPos);
+                    vec3  V_t = vec3(dot(V_w, spom_T),
+                                     dot(V_w, spom_B),
+                                     dot(V_w, spom_face_n));
+                    int   h_idx = clamp(spom_h_idx, 0, 5);
+
+                    // Distance fade — same as spom_uv() so mode 3 looks
+                    // consistent with the other modes' fade behaviour.
+                    float d = distance(vWorldPos, scene.camera_pos.xyz);
+                    float depth_w = 1.0 - smoothstep(8.0, 30.0, d);
+
+                    // Skip path: grazing or distance-faded -> just shade
+                    // the un-displaced sample, no silhouette clipping
+                    // (the parallax shift is too small to be meaningful).
+                    if (V_t.z < 0.2 || depth_w <= 0.001 ||
+                        max(0.0, scene.spom_params.x) < 0.01) {
+                        spom_uv_off = spom_uv0;
+                        spom_world  = vWorldPos;
+                    } else {
+                        // ---- Part 1: POM march with reference_plane ----
+                        // Use the same scale formula as spom_uv() so the
+                        // brick depth matches across modes.
+                        const float kHeightScale  = 0.04;
+                        const float kReferencePlane = 0.5;
+                        float spom_strength = max(0.0, scene.spom_params.x);
+                        // Per-axis number of layers (Godot mixes by
+                        // |z_view|: head-on -> few layers, grazing ->
+                        // many). 8..32 here, same defaults Godot ships.
+                        float v_z_abs = clamp(abs(V_t.z), 0.0, 1.0);
+                        float num_layers = mix(32.0, 8.0, v_z_abs);
+                        float layer_depth = 1.0 / num_layers;
+                        // Tangent-space shift per unit depth, scaled by
+                        // depth_w for the same distance-fade as the
+                        // other SPOM modes.
+                        vec2  P = (V_t.xy / max(V_t.z, 0.1)) *
+                                  (kHeightScale * spom_strength * depth_w);
+                        vec2  delta = P / num_layers;
+
+                        // Start the march at the reference plane.
+                        vec2  ofs = spom_uv0 + P * kReferencePlane;
+                        float depth_at_ofs = 1.0 -
+                            texture(u_height[h_idx], ofs).r;
+                        float current_depth = 0.0;
+                        // Steep parallax: march backward (ofs -= delta)
+                        // until current_depth catches the height map's
+                        // depth. Capped at 32 — matches num_layers max.
+                        for (int i = 0; i < 32; ++i) {
+                            if (current_depth >= depth_at_ofs) break;
+                            ofs -= delta;
+                            depth_at_ofs = 1.0 -
+                                texture(u_height[h_idx], ofs).r;
+                            current_depth += layer_depth;
+                        }
+                        // Contact refinement (binary search). 3 iters
+                        // matches Godot's default `heightmap_refinement_steps`.
+                        ofs += delta;
+                        current_depth -= layer_depth;
+                        vec2  half_delta = delta * 0.5;
+                        float half_depth = layer_depth * 0.5;
+                        for (int i = 0; i < 3; ++i) {
+                            ofs -= half_delta;
+                            current_depth += half_depth;
+                            float dh = 1.0 - texture(u_height[h_idx], ofs).r;
+                            if (current_depth > dh) {
+                                ofs += half_delta;
+                                current_depth -= half_depth;
+                            }
+                            half_delta *= 0.5;
+                            half_depth *= 0.5;
+                        }
+                        spom_uv_off = ofs;
+
+                        // ---- Part 2: Per-tile silhouette clipping ----
+                        // Godot's "discard if base_uv outside [0,1]"
+                        // adapted to tiled UVs. Compute the shift from
+                        // the un-displaced UV; if the fractional position
+                        // crossed the tile boundary, the brick at this
+                        // lateral position doesn't extend that far ->
+                        // discard so sky shows through.
+                        vec2 shift = ofs - spom_uv0;
+                        vec2 base_frac = fract(spom_uv0);
+                        vec2 ofs_in_tile = base_frac + shift;
+                        if (ofs_in_tile.x < 0.0 || ofs_in_tile.x > 1.0 ||
+                            ofs_in_tile.y < 0.0 || ofs_in_tile.y > 1.0) {
+                            outColor     = vec4(0.0);
+                            outMotion    = vec2(0.0);
+                            gl_FragDepth = 1.0;
+                            return;
+                        }
+
+                        // ---- Part 3: Curved silhouette (Godot-style) ----
+                        // Curvature mask via fwidth(N) / fwidth(VERTEX) —
+                        // 0 on flat surfaces (our brush faces), 1 on
+                        // curved. Multiplied into horizon_factor so this
+                        // part does nothing on flat walls (matches
+                        // Godot's actual behaviour on flat meshes).
+                        // Kept verbatim for correctness in case a curved
+                        // brush is added later.
+                        float NdotV = abs(dot(spom_face_n, V_w));
+                        float normal_change  = length(fwidth(vNormal));
+                        float pixel_size     = length(fwidth(vWorldPos));
+                        float true_curvature = normal_change /
+                                               max(pixel_size, 0.0001);
+                        const float kCurvatureActivation  = 0.05;
+                        float curvature_mask =
+                            smoothstep(0.0, kCurvatureActivation,
+                                       true_curvature);
+                        const float kHorizonSafeThreshold = 0.30;
+                        const float kHorizonFalloffPower  = 2.0;
+                        const float kHorizonClipStrength  = 1.0;
+                        const float kHorizonHeightBias    = 0.0;
+                        float t = clamp(
+                            1.0 - NdotV /
+                            max(kHorizonSafeThreshold, 0.001), 0.0, 1.0);
+                        float horizon_factor =
+                            pow(t, kHorizonFalloffPower) * curvature_mask;
+                        float height_threshold = clamp(
+                            horizon_factor * kHorizonClipStrength,
+                            0.0, 1.0);
+                        float surface_h = texture(u_height[h_idx],
+                                                  ofs).r -
+                                          kHorizonHeightBias;
+                        if (surface_h < height_threshold) {
+                            outColor     = vec4(0.0);
+                            outMotion    = vec2(0.0);
+                            gl_FragDepth = 1.0;
+                            return;
+                        }
+
+                        // ---- Pixel depth offset (write_to_depth) ----
+                        // Godot formula:
+                        //   local_z = (current_depth - ref) * scale
+                        //   view_dist = local_z / max(N·V, 0.0001)
+                        //   offset = VERTEX - VIEW * view_dist
+                        //   DEPTH = clip_pos.z / clip_pos.w
+                        float local_z = (current_depth - kReferencePlane) *
+                                        kHeightScale * spom_strength;
+                        float view_dist = local_z /
+                                          max(dot(spom_face_n, V_w), 0.0001);
+                        // VIEW in Godot is camera-relative; in world we
+                        // displace along V_w (camera→fragment) by -view_dist
+                        // to push toward camera when local_z < 0 (brick
+                        // out) or away when > 0 (brick in).
+                        vec3 hit_world = vWorldPos - V_w * view_dist;
+                        vec4 rc = (pc.mvp * inverse(pc.model)) *
+                                  vec4(hit_world, 1.0);
+                        gl_FragDepth = max(gl_FragCoord.z, rc.z / rc.w);
+
+                        // Update spom_world for the downstream RT lighting
+                        // shaders so shadow / AO rays trace from the
+                        // displaced surface.
+                        spom_world = hit_world;
+                    }
+                }
             } else if (spom_disc) {
                 // ---- Legacy SPOM: ray-query seam probe (original path) ----
                 //
@@ -2419,16 +2620,26 @@ void main() {
                 vec2 texel = 1.0 / vec2(sz_b);
                 const float kBlurM = 4.0;                 // ~4 m penumbra
                 float step_uv = (kBlurM / side_b) * 0.5;  // half-extent
-                float s = 0.0, wsum = 0.0;
+                // Pre-baked exp(-(ox² + oy²) * 0.35) for ox, oy ∈ [-2, +2].
+                // Was 25 exp() per shadowed terrain pixel; now a constant
+                // table lookup. Sum = 6.62 (used as wsum, no need to
+                // recompute per-pixel).
+                const float kW[25] = float[25](
+                    0.0608, 0.1738, 0.2466, 0.1738, 0.0608,
+                    0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
+                    0.2466, 0.7047, 1.0000, 0.7047, 0.2466,
+                    0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
+                    0.0608, 0.1738, 0.2466, 0.1738, 0.0608);
+                const float kWsum = 6.6172;
+                float s = 0.0;
                 for (int oy = -2; oy <= 2; ++oy) {
                     for (int ox = -2; ox <= 2; ++ox) {
                         vec2 d = vec2(float(ox), float(oy)) * (step_uv * 0.5);
-                        float w = exp(-float(ox*ox + oy*oy) * 0.35);
-                        s    += texture(u_terrain_shadow, uv_b + d).r * w;
-                        wsum += w;
+                        s += texture(u_terrain_shadow, uv_b + d).r *
+                             kW[(oy + 2) * 5 + (ox + 2)];
                     }
                 }
-                sh_bake = (s / max(wsum, 1e-4)) * scene.rt_params.w;
+                sh_bake = (s * (1.0 / kWsum)) * scene.rt_params.w;
             }
             shadow = max(shadow, sh_bake);
         }
@@ -2470,9 +2681,12 @@ void main() {
                 // kHeightmapSide in terrain_raymarch.frag / water.frag).
                 const float kGsSide = 2048.0;
                 float gs_shadow = 0.0;
+                // Hoist the per-loop divisor — gs_N is uniform across the
+                // iterations, no need to divide each tap.
+                float inv_gs_N = 1.0 / float(gs_N);
                 for (int gi = 1; gi <= 8; ++gi) {
                     if (gi > gs_N) break;
-                    float gd = gs_reach * (float(gi) / float(gs_N));
+                    float gd = gs_reach * (float(gi) * inv_gs_N);
                     vec2 sxz = vWorldPos.xz + sun_xz * gd;
                     vec2 gs_uv = (sxz / kGsSide) + vec2(0.5);
                     if (gs_uv.x < 0.0 || gs_uv.x > 1.0 ||

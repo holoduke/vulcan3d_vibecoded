@@ -592,7 +592,8 @@ void VulkanEngine::build_menu_ui() {
         // and see how much relief either is adding.
         const char* spom_mode_labels[] = { "Flat (no parallax)",
                                             "SPOM (ray-query)",
-                                            "SSDM (depth-override)" };
+                                            "SSDM (depth-override)",
+                                            "POM (curved silhouette)" };
         ImGui::Combo("Wall displacement", &rt_.spom_mode, spom_mode_labels,
                      IM_ARRAYSIZE(spom_mode_labels));
 

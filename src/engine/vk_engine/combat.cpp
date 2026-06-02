@@ -4,6 +4,7 @@
 
 #include "engine/vk_engine/internal.h"
 #include "engine/audio.h"
+#include "engine/voxel/voxel_world.h"   // VoxelWorld::raycast for bullet carving
 
 #include <algorithm>
 #include <cmath>
@@ -43,8 +44,13 @@ void VulkanEngine::apply_player_pushes(glm::vec3 pre_velocity) {
             b_min = dyn_tick_aabb_cache_[i].aabb.min;
             b_max = dyn_tick_aabb_cache_[i].aabb.max;
         } else {
+            // Handle-based query skips the unordered_map.find that the
+            // id-based path does. jolt_handle is already cached on the
+            // DynamicProp at spawn — no reason to look it up again.
             glm::mat4 m;
-            if (!physics_->get_body_world_matrix(dp.body_id, m)) continue;
+            if (dp.jolt_handle == 0 ||
+                !physics_->get_body_world_matrix_h(dp.jolt_handle, m))
+                continue;
             world_aabb_of_box(m, dp.full_size * 0.5f, b_min, b_max);
         }
 
@@ -88,6 +94,15 @@ void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
     // Muzzle: a short distance ahead of the eye so the bullet is immediately
     // visible and doesn't spawn inside the player capsule.
     glm::vec3 spawn = origin + dir * 0.5f;
+    // Pre-check ONLY for spawn-inside-wall: tightened to 0.15 m so an
+    // aim at a wall 30 cm away still fires (the previous 0.45 m gate
+    // ate too many legitimate shots at close range, especially when the
+    // user was strafing along a wall — the eye→dir ray clipped the
+    // wall a hair before the muzzle exit cleared it).
+    {
+        auto rh = physics_->raycast(origin, dir, 0.15f);
+        if (rh.hit) return;
+    }
 
     float speed = std::max(10.0f, game_.bullet_speed);
     uint32_t id = physics_->add_dynamic_cylinder_ccd(
@@ -112,6 +127,7 @@ void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
     p.ttl = kProjectileTtl;
     p.initial_speed = speed;
     p.initial_dir = dir;
+    p.spawn_origin = spawn;    // actual muzzle, not eye — for accurate carve falloff
     // Laser beam look — bluish-red glowing core (magenta-violet).
     // .rgb is the surface colour you'd see if bloom were off; emissive
     // is HDR-bright (well above the 1.0 bloom threshold), so the bullet
@@ -146,6 +162,7 @@ void VulkanEngine::update_projectiles(float dt) {
         it->ttl -= dt;
         bool drop = it->ttl <= 0.0f;
         bool was_impact = false;
+        bool was_voxel_hit = false;
         glm::vec3 hit_pos(0.0f);
 
         if (!drop) {
@@ -166,10 +183,25 @@ void VulkanEngine::update_projectiles(float dt) {
                 glm::vec3 bp = glm::vec3(m[3]);
                 glm::vec3 b_prev = bp;       // default: no swept test on first frame
                 if (!std::isnan(it->prev_pos.x)) b_prev = it->prev_pos;
+                // Pre-compute segment midpoint + half-length for the
+                // cheap sphere-vs-sphere distance gate below.
+                const glm::vec3 seg_mid = 0.5f * (bp + b_prev);
+                const float     seg_half_len = 0.5f * glm::length(bp - b_prev);
                 for (auto& f : spacejet_flights_) {
                     if (f.destroying || f.hp <= 0) continue;
                     glm::vec3 mn, mx;
                     spacejet_aabb(f, mn, mx);
+                    // Distance pre-reject: skip the 6-plane slab math if
+                    // the segment's bounding sphere can't reach the jet's
+                    // bounding sphere. ~80 % of jets are well outside the
+                    // bullet's segment each frame; the slab math was the
+                    // hot inner loop for those.
+                    const glm::vec3 aabb_center = 0.5f * (mn + mx);
+                    const glm::vec3 aabb_extent = 0.5f * (mx - mn);
+                    const float aabb_max_ext =
+                        std::max({aabb_extent.x, aabb_extent.y, aabb_extent.z});
+                    if (glm::distance(seg_mid, aabb_center) >
+                        aabb_max_ext + seg_half_len) continue;
                     // Slab method: clip the segment b_prev->bp against
                     // each axis-aligned plane pair, tracking the
                     // tightest entry/exit t. Overlap exists iff
@@ -257,49 +289,165 @@ void VulkanEngine::update_projectiles(float dt) {
                         break;     // bullet is dead, no other planes
                     }
                 }
-                // If drop was set by a plane hit above, the regular
-                // physics-impact check below will harmlessly re-check
-                // and re-overwrite the same was_impact/hit_pos values
-                // (bullet is at the plane AABB and still fast). The
-                // outer drop block then handles cleanup (decal raycast
-                // returns no hit at 150 m altitude → no decal in air;
-                // extra sparks at hit_pos look like the bullet biting
-                // the plane).
-                // Impact detection. After Jolt's step the bullet's velocity
-                // tells us what happened. The previous heuristic only
-                // checked the speed-along-fire-axis — that meant a shallow
-                // glance off a wall (which keeps most of its speed and
-                // deflects only ~10°) wasn't registered as an impact and
-                // the bullet kept ricocheting. New rule: any noticeable
-                // direction change kills the bullet. Only a near-zero
-                // deflection (≤ 6° = `dot ≥ ~0.994`) lets it continue —
-                // i.e. only super grazing hits ricochet.
-                glm::vec3 v = physics_->get_linear_velocity_h(it->jolt_handle);
-                float speed = glm::length(v);
-                // min_speed dropped from initial*0.5 (110 m/s for the
-                // 220 m/s laser) to 30 m/s. The high bar was false-
-                // tripping bullets that had simply slowed via gravity
-                // arc — bullet decals appeared in mid-air. Lasers
-                // shouldn't impact-and-die just because they slowed.
-                float min_speed = 30.0f;
-                bool dir_change = false;
-                if (speed > 0.5f) {
-                    float align = glm::dot(v / speed, it->initial_dir);
-                    // cos(25°) ≈ 0.906. Was cos(6°) ≈ 0.9945 — that
-                    // threshold detected pure-gravity arcs as
-                    // "deflection" and spawned a decal in mid-air on
-                    // every long-range shot. Real glance-offs deflect
-                    // ≥30°, well past the new threshold.
-                    if (align < 0.906f) dir_change = true;
+                // Voxel-building destruction. Raycast the bullet's travel
+                // segment (b_prev → bp) against the LIVE voxel grid — exact
+                // and lag-free, independent of the debounced Jolt collision
+                // body (which doesn't even collide with bullets, so a stale
+                // pre-hole surface can't stop them short). On a solid hit we
+                // carve at the contact point and kill the bullet. This is
+                // why destruction is now consistent regardless of how many
+                // holes already exist or how far away the shooter is.
+                if (!drop && voxel_world_) {
+                    glm::vec3 seg = bp - b_prev;
+                    float seglen = glm::length(seg);
+                    if (seglen > 1e-4f) {
+                        glm::vec3 vd = seg / seglen;
+                        float vt = 0.0f; glm::vec3 vn(0.0f);
+                        // Loop across every voxel shape (main tower + each
+                        // falling chunk) and keep the nearest hit.
+                        //
+                        // For chunks (shape > 0), the body has rotated under
+                        // Jolt, but VoxelWorld::raycast only knows about the
+                        // shape's translation-only origin_world. We transform
+                        // the WORLD ray into the chunk's LOCAL frame before
+                        // calling raycast, then rotate the returned face
+                        // normal back to world. Distance (`vt`) is invariant
+                        // under rigid transforms — no fix-up needed there.
+                        int   hit_shape = -1;
+                        float best_t    = seglen + 0.5f;
+                        glm::vec3 best_n(0.0f);
+                        const auto& shapes_v = voxel_world_->shapes();
+                        for (int si = 0; si < (int)shapes_v.size(); ++si) {
+                            glm::vec3 ro_q = b_prev;
+                            glm::vec3 rd_q = vd;
+                            glm::mat3 rot_world(1.0f);  // chunk-local→world rot
+                            if (si > 0) {
+                                // Find this shape's chunk entry + body pose.
+                                const VoxelChunk* ch = nullptr;
+                                for (const auto& c : voxel_chunks_) {
+                                    if (c.shape_index == si) { ch = &c; break; }
+                                }
+                                if (!ch) continue;
+                                glm::mat4 body_world;
+                                if (!physics_->get_body_world_matrix_h(
+                                        ch->jolt_handle, body_world))
+                                    continue;
+                                const auto& sh = shapes_v[si];
+                                glm::vec3 half = 0.5f * glm::vec3(
+                                    sh.dim_bricks[0],
+                                    sh.dim_bricks[1],
+                                    sh.dim_bricks[2]) * voxel::kBrickSize;
+                                glm::mat4 chunk_world = body_world *
+                                    glm::translate(glm::mat4(1.0f), -half);
+                                glm::mat4 inv = glm::inverse(chunk_world);
+                                glm::vec3 ro_local = glm::vec3(
+                                    inv * glm::vec4(b_prev, 1.0f));
+                                glm::vec3 rd_local = glm::vec3(
+                                    inv * glm::vec4(vd, 0.0f));
+                                // Place the ray as if the chunk sat at its
+                                // recorded origin_world (translation-only),
+                                // since VoxelWorld::raycast subtracts that
+                                // off internally.
+                                ro_q = sh.origin_world + ro_local;
+                                rd_q = rd_local;
+                                rot_world = glm::mat3(chunk_world);
+                            }
+                            float st = 0.0f; glm::vec3 sn(0.0f);
+                            if (voxel_world_->raycast(si, ro_q, rd_q,
+                                                      best_t, st, sn)) {
+                                if (st < best_t) {
+                                    best_t = st;
+                                    best_n = (si > 0) ? rot_world * sn : sn;
+                                    hit_shape = si;
+                                }
+                            }
+                        }
+                        if (hit_shape >= 0) {
+                            vt = best_t; vn = best_n;
+                            glm::vec3 vhit = b_prev + vd * vt;
+                            // Crater scales with shot distance + impact angle.
+                            //   distance: full bite up close, fading to ~25%
+                            //     by 90 m; beyond that it's too weak to breach
+                            //     (just scorches the surface — "not even a hole").
+                            //   angle: head-on (ray ⟂ surface) punches a round,
+                            //     deeper hole; a grazing hit barely gouges.
+                            float dist = glm::length(vhit - it->spawn_origin);
+                            float dfac = glm::mix(1.0f, 0.25f,
+                                glm::clamp((dist - 25.0f) / 65.0f, 0.0f, 1.0f));
+                            float ndl  = glm::clamp(glm::dot(-vd, vn), 0.0f, 1.0f);
+                            float afac = glm::mix(0.35f, 1.0f, ndl);
+                            float radius = 0.8f * dfac * afac;
+                            drop = true;
+                            was_impact = true;
+                            hit_pos = vhit;
+                            if (radius >= 0.16f) {
+                                // Head-on shots drive the crater centre deeper
+                                // into the wall; grazing ones stay at the face.
+                                float pen = glm::mix(0.05f, 0.45f, ndl);
+                                glm::vec3 base = vhit + vd * pen;
+                                // Grazing hits SCRAPE a gouge along the surface
+                                // tangent (the direction the bullet was skidding)
+                                // instead of a single round crater. The streak
+                                // grows as the angle shallows; head-on = one hole.
+                                glm::vec3 tang = vd - vn * glm::dot(vd, vn);
+                                float tl = glm::length(tang);
+                                float streak = (1.0f - ndl) * 2.0f;   // 0 head-on → ~2 m grazing
+                                if (tl > 1e-3f && streak > radius) {
+                                    glm::vec3 td = tang / tl;
+                                    int n = glm::clamp(
+                                        int(streak / (radius * 0.7f)) + 1, 2, 6);
+                                    for (int g = 0; g < n; ++g) {
+                                        float f = float(g) / float(n - 1);
+                                        apply_voxel_carve(hit_shape,
+                                                          base + td * (f * streak),
+                                                          radius * 0.8f);
+                                    }
+                                } else {
+                                    apply_voxel_carve(hit_shape, base, radius);
+                                }
+                                was_voxel_hit = true;   // suppress decal — hole is the mark
+                            }
+                            // else: too weak to breach → fall through so the
+                            // drop block leaves a scorch decal instead.
+                        }
+                    }
                 }
-                if (dir_change || speed < min_speed) {
-                    drop = true;
-                    was_impact = true;
-                    hit_pos = glm::vec3(m[3]);
+                // Impact detection (terrain / castle / crates). Skipped when
+                // a spacejet or voxel hit already claimed the bullet. After
+                // Jolt's step the bullet's velocity tells us what happened:
+                // any noticeable direction change or a big slowdown = impact.
+                // Only a near-grazing deflection (≤ ~25°) lets it ricochet.
+                if (!drop) {
+                    glm::vec3 v = physics_->get_linear_velocity_h(it->jolt_handle);
+                    float speed = glm::length(v);
+                    float min_speed = 30.0f;
+                    bool dir_change = false;
+                    if (speed > 0.5f) {
+                        float align = glm::dot(v / speed, it->initial_dir);
+                        if (align < 0.906f) dir_change = true;  // cos(25°)
+                    }
+                    if (dir_change || speed < min_speed) {
+                        drop = true;
+                        was_impact = true;
+                        // Snap the impact point to the aim ray. The bullet
+                        // is a 4 cm-radius cylinder; at angled hits the
+                        // cylinder's SIDE contacts the wall first, so the
+                        // body's centre sits up to kProjectileRad off the
+                        // crosshair line. Re-cast from the muzzle along
+                        // the original firing direction and use that as
+                        // hit_pos — matches what the player aimed at.
+                        // Falls back to the body position if the raycast
+                        // finds no surface (e.g. impact via dir_change in
+                        // mid-air).
+                        auto aim_hit = physics_->raycast(it->spawn_origin,
+                                                         it->initial_dir,
+                                                         500.0f);
+                        hit_pos = aim_hit.hit ? aim_hit.position
+                                              : glm::vec3(m[3]);
+                    }
                 }
-                // Latch this frame's position so next tick's spacejet
-                // swept test has a valid prev. Only when the bullet
-                // survives this tick — drop=true exits the projectile.
+                // Latch this frame's position so next tick's swept tests
+                // have a valid prev. Only when the bullet survives this tick.
                 if (!drop) it->prev_pos = bp;
             }
         }
@@ -314,13 +462,9 @@ void VulkanEngine::update_projectiles(float dt) {
                                          : -it->initial_dir;
                 glm::vec3 saved_dir = it->initial_dir;
                 uint32_t  saved_body = it->body_id;
-                // CCD stops the bullet when its LEADING TIP touches the
-                // surface, so hit_pos (the body centre) sits ~half_length
-                // short of the actual contact point. Advance to the contact
-                // point (plus a little) so the carve sphere bites INTO the
-                // wall rather than carving air in front of it.
-                glm::vec3 carve_pos = hit_pos +
-                    saved_dir * (it->half_length + 0.2f);
+                // A voxel-tower hit already carved the crater above; skip the
+                // wall decal for those (the hole is the mark). Terrain /
+                // castle / crate impacts still get a decal.
 
                 // Order matters: remove the bullet body BEFORE the decal
                 // raycast so the ray doesn't hit the cylinder itself
@@ -328,16 +472,8 @@ void VulkanEngine::update_projectiles(float dt) {
                 // the decal BEFORE spawning sparks so the ray doesn't
                 // hit the freshly-spawned spark spheres either.
                 physics_->remove_body(saved_body);
-                // Voxel destruction: carve a crater at the contact point.
-                // apply_voxel_carve no-ops unless carve_pos is on the tower,
-                // so it's safe to call for every impact. Skip the decal on
-                // a successful carve (the hole IS the mark).
-                int carved = apply_voxel_carve(carve_pos, 0.7f);
-                if (carved == 0) {
+                if (!was_voxel_hit) {
                     spawn_impact_decal(hit_pos, saved_dir);
-                } else {
-                    // Debris: a few sparks kicked back along the surface.
-                    spawn_hit_particles(hit_pos, -saved_dir, saved_dir);
                 }
                 spawn_hit_particles(hit_pos, reflect, saved_dir);
                 if (audio_) {
@@ -411,6 +547,19 @@ void VulkanEngine::spawn_hit_particles(glm::vec3 pos, glm::vec3 reflect_dir,
                  speed_envelope * scale * boost;
 
         float spawn_dist = frand_range(spawn_rng_state_, 0.05f, 0.18f);
+        // Prevent spark spawn inside thin geometry: probe the spray
+        // direction; if a surface is closer than the planned spawn
+        // distance, pull the spawn back to half that distance.
+        // Gated: only short-distance spawns risk burying the spark
+        // inside thin geometry. The ~70 % of sparks past 0.08 m sit
+        // far enough out that the probe just costs a Jolt mutex with
+        // nothing in range to clip against. Skips ~half the raycasts.
+        if (spawn_dist < 0.08f) {
+            auto srh = physics_->raycast(pos, dir, spawn_dist * 1.2f);
+            if (srh.hit && srh.distance < spawn_dist) {
+                spawn_dist = std::max(0.002f, srh.distance * 0.5f);
+            }
+        }
         glm::vec3 spawn = pos + dir * spawn_dist;
 
         // Low restitution: sparks land with a small hop and stop, instead
@@ -441,7 +590,21 @@ void VulkanEngine::draw_decals(VkCommandBuffer cmd, const glm::mat4& vp) {
     VkDeviceSize off = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &cylinder_mesh_.vertex_buffer, &off);
     vkCmdBindIndexBuffer(cmd, cylinder_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
-    for (const auto& d : decals_) {
+    // Back-to-front sort for correct alpha overlap on rapid-fire bursts.
+    // O(n log n) at kMaxDecals=64 is negligible — sort indices to avoid
+    // touching the parent_body_id pointers (decals_ stays in spawn order
+    // for FIFO eviction).
+    const glm::vec3 eye = player_.eye_position();
+    std::vector<uint32_t> order;
+    order.reserve(decals_.size());
+    for (uint32_t i = 0; i < decals_.size(); ++i) order.push_back(i);
+    std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+        float da = glm::dot(decals_[a].pos - eye, decals_[a].pos - eye);
+        float db = glm::dot(decals_[b].pos - eye, decals_[b].pos - eye);
+        return da > db;   // farther first
+    });
+    for (uint32_t oi : order) {
+        const auto& d = decals_[oi];
         float life = 1.0f - (d.age / d.ttl);
         if (life <= 0.0f) continue;
 
@@ -463,16 +626,17 @@ void VulkanEngine::draw_decals(VkCommandBuffer cmd, const glm::mat4& vp) {
         glm::mat4 model = align_local_y_to(world_pos, world_normal) *
                           glm::scale(glm::mat4(1.0f),
                                      glm::vec3(d.size, 0.002f, d.size));
-        // Lighter base color — opaque pipeline can't blend with the wall
-        // beneath, so a brighter scorch reads as more "tinted/transparent"
-        // than the previous near-black 0.04*life. Fades with life.
-        glm::vec3 col(0.18f * life);
+        // Dark charcoal scorch with a faint red ember glow so the decal
+        // stays visible against bright sunlit walls AND in shadow. The
+        // previous mid-grey 0.18 vanished against the busy brick triplanar.
+        glm::vec3 col(0.03f * life);
+        glm::vec3 emi(0.35f * life, 0.06f * life, 0.02f * life);
         PushConstants pc{};
         pc.mvp = vp * model;
         pc.model = model;
         pc.prev_mvp = pc.mvp;
-        pc.color = glm::vec4(col, 1.0f);
-        pc.emissive = glm::vec4(0.0f);
+        pc.color    = glm::vec4(col, 1.0f);
+        pc.emissive = glm::vec4(emi, 1.0f);
         pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
                            kPushConstantStages,
@@ -669,17 +833,47 @@ void VulkanEngine::spawn_impact_decal(glm::vec3 hit_pos, glm::vec3 incoming_dir)
     // straight at the in-air hit_pos (the floating-decal bug).
     glm::vec3 from = hit_pos - dir * 5.0f;
     auto rh = physics_->raycast(from, dir, 20.0f);
-    // Hard skip if the ray finds NO surface within 20 m. Previously
-    // this fell through to "place decal at hit_pos with synthetic
-    // normal" which is exactly what put decals in mid-air. No surface
-    // = no decal — the user's eye correctly registers "shot missed."
-    if (!rh.hit) return;
-    glm::vec3 normal = rh.normal;
-    glm::vec3 pos    = rh.position;
-    pos += normal * 0.005f;     // anti-z-fight skin
+    // Fallback layer 1: vertical probes (catches near-corner impacts
+    // where the incoming-dir ray traces along a wall and misses).
+    if (!rh.hit) {
+        rh = physics_->raycast(hit_pos + glm::vec3(0, 0.5f, 0),
+                                glm::vec3(0, -1, 0), 10.0f);
+    }
+    if (!rh.hit) {
+        rh = physics_->raycast(hit_pos - glm::vec3(0, 0.5f, 0),
+                                glm::vec3(0, 1, 0), 10.0f);
+    }
+    // Fallback layer 2: short backwards probe along -dir from hit_pos
+    // (the bullet's CCD resolution can leave hit_pos slightly INSIDE
+    // the wall, so the forward probe from −5 m exits-then-re-enters
+    // and misses the front face). Trace backward from just inside the
+    // bullet's stopped position.
+    if (!rh.hit) {
+        rh = physics_->raycast(hit_pos + dir * 0.3f, -dir, 1.0f);
+    }
+    // Last-resort synthetic decal at the bullet's stop position. The
+    // bullet really did hit something (was_impact was set), so showing
+    // a faint scorch where it stopped is preferable to silently swallowing
+    // the shot. Synthetic normal = -dir (faces the shooter); a real
+    // surface normal would be better but is unrecoverable here.
+    glm::vec3 normal;
+    glm::vec3 pos;
+    if (rh.hit) {
+        normal = rh.normal;
+        pos    = rh.position;
+    } else {
+        normal = -dir;
+        pos    = hit_pos;
+    }
+    pos += normal * 0.02f;     // anti-z-fight skin (2 cm — 5 mm wasn't enough
+                                // on textured walls; the disc dropped behind
+                                // the bumpy triplanar bricks at glancing angles)
 
     Decal d{};
-    d.size = frand_range(spawn_rng_state_, 0.04f, 0.07f);
+    // 20-35 cm — even after the 4→10 cm bump the user couldn't see decals
+    // on the brick wall (the brick triplanar pattern is busy enough that a
+    // small mid-grey disc just blends in). 20-35 cm reads as a real impact.
+    d.size = frand_range(spawn_rng_state_, 0.20f, 0.35f);
     d.ttl  = kDecalTtl;
     if (rh.hit && rh.dynamic && rh.body_id != 0) {
         // Hit a dyn box — parent the decal to it. Store pos/normal in
@@ -700,8 +894,12 @@ void VulkanEngine::spawn_impact_decal(glm::vec3 hit_pos, glm::vec3 incoming_dir)
         d.normal = normal;
     }
     decals_.push_back(d);
-    while (static_cast<int>(decals_.size()) > kMaxDecals) {
-        decals_.erase(decals_.begin());
+    // Single-range erase. Each `erase(begin())` is O(N) — over multiple
+    // calls in a burst that's O(excess × N). Erasing the front range in
+    // one call collapses to a single shift.
+    if (static_cast<int>(decals_.size()) > kMaxDecals) {
+        int excess = static_cast<int>(decals_.size()) - kMaxDecals;
+        decals_.erase(decals_.begin(), decals_.begin() + excess);
     }
 }
 

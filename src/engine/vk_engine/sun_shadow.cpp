@@ -341,6 +341,27 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     }
 
+    // Castle gate panels — cast shadow with the same hinge-rotated model
+    // matrix the colour pass uses. Without this, a closed door let
+    // sunlight straight through the entrance and the courtyard read as
+    // open even when both panels were visibly shut.
+    for (const auto& d : doors_) {
+        const glm::mat4 model =
+            glm::translate(glm::mat4(1.0f), d.hinge_world) *
+            glm::rotate(glm::mat4(1.0f), d.angle, glm::vec3(0, 1, 0)) *
+            glm::translate(glm::mat4(1.0f), d.closed_offset) *
+            glm::scale(glm::mat4(1.0f), d.half_size * 2.0f);
+        // Conservative light-frustum cull: door swing keeps the panel
+        // within a 3-m envelope of its hinge, so test that envelope.
+        glm::vec3 env = glm::abs(d.half_size) +
+                        glm::vec3(glm::length(d.closed_offset));
+        glm::vec3 mn = d.hinge_world - env;
+        glm::vec3 mx = d.hinge_world + env;
+        if (!aabb_visible(light_frustum, mn, mx)) continue;
+        push_shadow(model);
+        vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
+    }
+
     // Terrain chunks — frustum-culled, distance-LOD'd. Distance metric is
     // camera-to-chunk (not light-to-chunk) so terrain casters share the
     // same LOD selection as the main render — keeps the cost bounded

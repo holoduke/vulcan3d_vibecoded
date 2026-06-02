@@ -49,6 +49,13 @@ struct VoxelShape {
     // Row-major: idx = (bz * dim_bricks[1] + by) * dim_bricks[0] + bx.
     // Values: brick pool slot, or kEmptyBrick.
     std::vector<uint32_t> directory;
+    // Offset into the global, flat GPU directory SSBO where this shape's
+    // entries[] start. Assigned in append order: main shape = 0, the next
+    // extracted chunk gets the main shape's size, and so on.
+    uint32_t              dir_base = 0;
+    // True for the main static shape; false for extracted falling chunks
+    // (used to gate which collision / collapse passes touch it).
+    bool                  is_main  = false;
 };
 
 // World-space solid box produced by greedy decomposition — fed to both the
@@ -74,6 +81,17 @@ public:
 
     // Read a single voxel (world index). True if solid. Out-of-range = false.
     bool solid_at(int shape, int vx, int vy, int vz) const;
+
+    // Voxel DDA raycast against shape `shape` (world-space ray; `dir` should
+    // be normalized). Returns true on the first solid-voxel hit within
+    // `max_dist`, filling `out_t` (world distance) and `out_normal` (the
+    // axis-aligned face normal of the voxel that was hit, pointing back
+    // toward the ray). Used for exact, lag-free bullet-vs-voxel destruction
+    // — independent of the Jolt collision body (which is debounced for perf
+    // and would otherwise miss fresh holes). The normal lets callers scale
+    // the crater by impact angle.
+    bool raycast(int shape, glm::vec3 origin, glm::vec3 dir,
+                 float max_dist, float& out_t, glm::vec3& out_normal) const;
 
     // Greedy box decomposition of shape `shape`'s solid voxels into a small
     // set of world-space AABBs. Used for player + projectile collision.
@@ -101,6 +119,46 @@ public:
                              std::vector<CollisionBox>& out_debris,
                              std::vector<uint32_t>& dirty);
 
+    // Multi-shape collapse (Session E). Like collapse_unsupported but,
+    // instead of greedy-boxing the detached voxels into Jolt-box "logs",
+    // groups them into 6-connected ISLANDS and EXTRACTS each island into
+    // its own brand-new VoxelShape (own brick slots in the global atlas,
+    // own directory) — so the caller can render the chunks via voxel.frag
+    // with their own model matrix and they look like falling voxel pieces
+    // (preserving the wall's voxel structure). For each new chunk shape
+    // returns its shape index plus its world-space bounding-box size
+    // (used to size the Jolt dynamic body). The main shape's voxels are
+    // cleared and its touched brick slots reported in `main_dirty` so the
+    // caller can flush them to the GPU. Returns total voxels detached.
+    struct ChunkOut {
+        int       shape_index;
+        glm::vec3 center_world;   // world centre of the chunk's AABB
+        glm::vec3 half_extents;   // world half-size of the chunk's AABB
+    };
+    int collapse_into_chunks(int shape, int anchor_layers,
+                             std::vector<ChunkOut>& out_chunks,
+                             std::vector<uint32_t>& main_dirty);
+
+    // Remove a chunk shape (created by collapse_into_chunks). Its directory
+    // slot is leaked (the dir_base of later chunks would shift if compacted;
+    // leaks are fine — the directory buffer is sized for thousands of slots).
+    // Its bricks are dropped from the active atlas-occupancy view but the
+    // pool grows monotonically (also fine for the session length).
+    void drop_shape(int shape);
+
+    // Free-floating chunk split. Used when a CHUNK (an extracted piece, not
+    // the anchored main shape) is carved by a bullet — checks whether the
+    // carve disconnected the chunk's voxels. If 2+ connected components
+    // remain, keep the largest in-place (the parent chunk continues to be
+    // simulated by its existing Jolt body) and extract the rest into new
+    // VoxelShapes (ChunkOut entries). No anchor concept is used — every
+    // solid voxel is a candidate, since a free-floating chunk has no ground
+    // to lean against. Returns total voxels detached. main_dirty contains
+    // touched brick slots in the original (now smaller) chunk.
+    int split_floating_chunk(int shape, int min_piece_voxels,
+                             std::vector<ChunkOut>& out_pieces,
+                             std::vector<uint32_t>& main_dirty);
+
 private:
     VoxelShape& new_shape_(glm::vec3 origin_world, int bx, int by, int bz);
     void        poke_(VoxelShape& s, int vx, int vy, int vz, uint8_t pal);
@@ -110,12 +168,24 @@ private:
 
     std::vector<BrickPayload> bricks_;
     std::vector<VoxelShape>   shapes_;
+    // Monotonic head into the flat global directory: every new shape claims
+    // [dir_head_, dir_head_ + dir_size) and bumps the head. Lets the engine
+    // upload just the new segment to the GPU directory buffer.
+    uint32_t                  dir_head_ = 0;
+public:
+    uint32_t total_directory_size() const { return dir_head_; }
+    uint32_t brick_pool_size() const { return (uint32_t)bricks_.size(); }
+private:
     // Reused scratch for the per-grid passes (collapse BFS + greedy box
     // decomposition). Sized to the shape's voxel count once, refilled per
     // call — avoids ~10 MB alloc/free churn on every structural update.
     // mutable: build_collision_boxes is const but uses scratch_a_.
     mutable std::vector<uint8_t> scratch_a_;
     mutable std::vector<uint8_t> scratch_b_;
+    // Third scratch — used by the load-stress SI pass to hold per-voxel
+    // "vertical load above" counts before mixing them into the cantilever
+    // distance for fracture decisions.
+    mutable std::vector<uint8_t> scratch_c_;
 };
 
 } // namespace qlike::voxel

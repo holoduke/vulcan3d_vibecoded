@@ -487,10 +487,23 @@ void VulkanEngine::rebuild_dirty_terrain_chunks() {
 void VulkanEngine::refresh_terrain_collision() {
     if (!terrain_jolt_dirty_) return;
     if (terrain_data_.heights.empty()) return;
-    // Jolt has no incremental update for HeightFieldShape РІР‚вЂќ we rebuild
+    // Jolt has no incremental update for HeightFieldShape — we rebuild
     // the whole shape. Mirrors the sub-grid trim done at level load:
     // when sample_count would be odd Jolt's block-size requirement
-    // forces us onto a 2048Р“вЂ”2048 sub-grid taken from the 2049Р’Р† heightmap.
+    // forces us onto a 2048×2048 sub-grid taken from the 2049² heightmap.
+    //
+    // For each Jolt sample we store max(self, neighbours). Reason:
+    // Jolt's HeightFieldShape is a per-cell triangulation — the
+    // collision surface is a piecewise-linear plane between corners,
+    // which sits BELOW the visual surface (whether the rasterized
+    // mesh's smooth-shaded reading or the raymarched FBM) at sub-cell
+    // peaks. Dynamic boxes settle on the linear plane and visually
+    // appear "a bit inside" the terrain. Lifting the corner samples
+    // to the local max raises the triangle plane so boxes sit AT or
+    // slightly ABOVE the visual surface instead of below it. Player
+    // ground-clamp still uses the un-lifted terrain_data_.heights
+    // (separate sample_terrain_height path), so the player's feet
+    // stay anchored to the visual mesh exactly as before.
     if (physics_) {
         const int W = terrain_data_.dim + 1;
         const int physics_samples = (W % 2 == 0) ? W : (W - 1);
@@ -1754,7 +1767,14 @@ void VulkanEngine::init_world() {
         // time (line ~1363) — hp itself is out of scope here.
         const float kCastleSink   = 0.6f;
         const float kPlateauH     = 22.0f;
-        const float kSinkRadius   = 11.5f;
+        // 10.5 m so the depressed zone stays strictly UNDER the courtyard
+        // brush floor (which extends to cr-wt/2 ≈ 10.70 m on each axis).
+        // Previously 11.5 m — wider than the brush — left a ~50 cm
+        // ring where the depressed Jolt heightfield was the only collider
+        // and the brush didn't cover it. Boxes landing or rolling into
+        // that ring dropped to y=21.4 while the visible mesh terrain was
+        // rendered at y≈22, reading as "box inside terrain".
+        const float kSinkRadius   = 10.5f;
         const float kSinkLimit    = kPlateauH - kCastleSink;
         const glm::vec2 plateau_c(0.0f, 0.0f);
         std::vector<float> jolt_heights(static_cast<size_t>(physics_samples) *
@@ -3247,6 +3267,95 @@ void VulkanEngine::rebuild_tick_aabbs() {
     }
 }
 
+void VulkanEngine::init_doors() {
+    // North entrance gap is at z = +11 (castle outer wall half-extent =
+    // 11 m), centered on x = 0, gap width 3.2 m, clearance ~3.6 m
+    // (set in game/level.cpp). Two panels meet at x = 0 when closed; each
+    // hinges on its outer edge so opening swings the inner edges outward
+    // away from the courtyard, leaving a clear archway for the player to
+    // walk through.
+    const float plateau_y       = 22.0f;
+    const float ent_half        = 1.6f;
+    const float gate_z          = 11.0f;
+    const float panel_w_half    = 0.78f;   // 0.78 × 2 = 1.56 m; sub-2 cm gap
+                                            // at meet line so the closed
+                                            // panels don't z-fight in the
+                                            // middle
+    const float panel_h_half    = 1.70f;   // 3.4 m tall — fits in 3.6 m gap
+    const float panel_t_half    = 0.06f;   // 12 cm thick wooden plank
+    const float y_center        = plateau_y + panel_h_half + 0.05f;
+
+    auto make_door = [&](float hinge_x, float closed_dx, float open_a) {
+        Door d{};
+        d.hinge_world   = glm::vec3(hinge_x, y_center, gate_z);
+        d.closed_offset = glm::vec3(closed_dx, 0.0f, 0.0f);
+        d.half_size     = glm::vec3(panel_w_half, panel_h_half, panel_t_half);
+        d.open_angle    = open_a;
+        d.angle         = 0.0f;
+        return d;
+    };
+    // Left panel: hinge on -X side, swings outward (toward +Z) by ~85°.
+    doors_.push_back(make_door(-ent_half, +panel_w_half + 0.01f, +1.48f));
+    // Right panel: hinge on +X side, swings outward by -85°.
+    doors_.push_back(make_door(+ent_half, -panel_w_half - 0.01f, -1.48f));
+}
+
+void VulkanEngine::update_doors(float dt) {
+    if (doors_.empty()) return;
+    // Trigger distance is measured from the player's eye to the midpoint
+    // between the two hinges. 5 m gives the doors time to swing fully
+    // open at a normal walking pace before the player reaches the gap.
+    glm::vec3 mid(0.0f);
+    for (const auto& d : doors_) mid += d.hinge_world;
+    mid /= float(doors_.size());
+
+    const float dist = glm::length(player_.eye_position() - mid);
+    constexpr float kOpenRadius = 5.0f;
+    constexpr float kCloseDelay = 3.0f;     // seconds after leaving range
+    if (dist < kOpenRadius) door_far_time_ = 0.0f;
+    else                    door_far_time_ += dt;
+    const bool want_open = door_far_time_ < kCloseDelay;
+
+    const float lerp_k = std::min(1.0f, 4.0f * dt);   // ~250 ms time constant
+    for (auto& d : doors_) {
+        const float target = want_open ? d.open_angle : 0.0f;
+        d.angle += (target - d.angle) * lerp_k;
+    }
+}
+
+void VulkanEngine::draw_doors(VkCommandBuffer cmd, const glm::mat4& vp,
+                              const glm::mat4& prev_vp) {
+    if (doors_.empty()) return;
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &off);
+    vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    for (const auto& d : doors_) {
+        // Hinge-relative rotation: translate the local cube origin to the
+        // panel centre via closed_offset, rotate around the hinge, then
+        // place the whole thing in world. cube mesh is unit-cube
+        // (-0.5..+0.5), so scale by full panel dimensions (2 × half).
+        const glm::mat4 model =
+            glm::translate(glm::mat4(1.0f), d.hinge_world) *
+            glm::rotate(glm::mat4(1.0f), d.angle, glm::vec3(0, 1, 0)) *
+            glm::translate(glm::mat4(1.0f), d.closed_offset) *
+            glm::scale(glm::mat4(1.0f), d.half_size * 2.0f);
+        PushConstants pc{};
+        pc.mvp        = vp * model;
+        pc.model      = model;
+        pc.prev_mvp   = prev_vp * model;
+        pc.color      = glm::vec4(0.55f, 0.33f, 0.16f, 1.0f);   // wood tint
+        pc.emissive   = glm::vec4(0.0f);
+        // Wood048 lives at albedo index 2 (see init_textures specs[]).
+        // tex_params.x/y = albedo+normal slot, .z = uv scale, .w = 0 →
+        // world-space triplanar so the planks read consistently across
+        // both panels.
+        pc.tex_params = glm::vec4(2.0f, 2.0f, 0.7f, 0.0f);
+        vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
+                           0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
+    }
+}
+
 void VulkanEngine::spawn_random_box() {
     if (!physics_) return;
 
@@ -3981,6 +4090,26 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }
 
+    // Voxel buildings rendered BEFORE the rasterised water plane so the
+    // water's alpha-blend pass sees the submerged voxel pixels in the
+    // scene_color/depth buffer and blends over them. Without this swap,
+    // voxel pixels written after the water draw replace the water tint
+    // entirely — a submerged tower reads as fully opaque dry stone.
+    render_voxels(cmd);
+    // Re-bind cube pipeline + mesh: voxel pass swapped them out.
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipeline_layout_, 0, 1, &scene_desc_set_,
+                            0, nullptr);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+    vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+
+    // Castle gate panels — drawn after the static brushes (so they sit at
+    // the entrance wall) but before the water raster so submerged panels
+    // would also blend correctly. Same cube pipeline, just an extra two
+    // draws with per-panel hinge-rotated model matrices.
+    draw_doors(cmd, vp, prev_vp);
+
     // Mesh-terrain mode + water: draw the REAL rasterised water plane
     // (verbatim ocean shading in water.frag) instead of the fullscreen
     // analytic water-only pass. Depth is owned by the plane geometry, so
@@ -4275,14 +4404,10 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // glm::inverse(fv.view) here -- a full 4x4 mat inverse is ~80 fmuls).
     draw_viewmodel(cmd, vp, fv.inv_view);
 
-    // Voxel buildings (Session A) — drawn last of all because the voxel
-    // pipeline has its own layout / descriptor set; nothing else in
-    // render_world should run after it without rebinding pipeline_.
-    // The viewmodel sits in front of everything so it always wins the
-    // depth test against the 100 m-distant voxel tower regardless of
-    // draw order. Brick-DDA ray-march into scene_color + motion_vec +
-    // gl_FragDepth.
-    render_voxels(cmd);
+    // (Voxel buildings were drawn earlier, before the water raster, so
+    // the water plane's alpha blend correctly tints submerged voxel
+    // pixels. See the comment + call near the start of render_world's
+    // water block.)
 
     last_draw_static_ = drawn_static;
     last_draw_dyn_    = drawn_dyn;

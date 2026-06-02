@@ -360,7 +360,122 @@ layout(set = 0, binding = 0) uniform Scene {
     // vec4). Each cell = max terrain height in that footprint + 15 m
     // safety. The marcher skips whole cells a rising ray is above.
     vec4 terrain_max_grid[256];
+    // Trailing slots present in the C++ SceneUBO. Each shader picks its
+    // own subset of fields, but the order/offset MUST match C++ — these
+    // pads carry us up to the voxel_* fields.
+    vec4 terrain_disp_params;
+    vec4 terrain_antitile_params;
+    vec4 grass_shadow_on_terrain_params;
+    vec4 grass_side_lit_params;
+    // Voxel building — mirrors cube.frag's declarations exactly.
+    vec4 voxel_origin;     // xyz = world origin, .w = enabled (0/1)
+    vec4 voxel_dims;       // xyz = extent (m), .w = voxel size (m)
+    vec4 voxel_grid;       // xyz = brick grid dims, .w = brick size (m)
 } scene;
+
+// Voxel brickmap atlas + shape directory. Shared with cube.frag at the
+// same binding slots — both shaders live in the same descriptor set.
+// Suffixed _w so glslang doesn't see a block-name conflict if both
+// shaders ever end up linked into one compilation unit.
+struct VoxBrickW { uint occ[128]; uint pal[1024]; };
+layout(set = 0, binding = 24, std430) readonly buffer VoxBrickAtlas_w {
+    VoxBrickW vox_bricks[];
+};
+layout(set = 0, binding = 25, std430) readonly buffer VoxShapeDir_w {
+    uint vox_entries[];
+};
+const uint kVoxEmptyW = 0xFFFFFFFFu;
+
+// Voxel brickmap DDA for water reflections. The voxel tower lives
+// OUTSIDE the TLAS (it's a raster pipeline + per-pixel DDA), so the
+// closest-hit ray queries on `topLevelAS` miss it entirely. This march
+// gives the water reflection path a way to see the tower as a mirror
+// reflection. Disabled gate (scene.voxel_origin.w < 0.5) so the whole
+// feature is near-zero cost when no voxel shape is live.
+bool water_vox_march(vec3 origin_w, vec3 dir_w, float t_max,
+                     out float out_t, out uint out_pal) {
+    out_t = t_max; out_pal = 0u;
+    if (scene.voxel_origin.w < 0.5) return false;
+
+    vec3 lo = origin_w - scene.voxel_origin.xyz;
+    vec3 ld = dir_w;
+    float vs = scene.voxel_dims.w;
+    float bs = scene.voxel_grid.w;
+    ivec3 brick_dim = ivec3(scene.voxel_grid.xyz + 0.5);
+    ivec3 voxel_dim = brick_dim * 16;
+    vec3  shape_max = scene.voxel_dims.xyz;
+
+    vec3 invd = 1.0 / max(abs(ld), vec3(1e-20)) * sign(ld);
+    vec3 a = (vec3(0.0) - lo) * invd;
+    vec3 b = (shape_max - lo) * invd;
+    vec3 lov = min(a, b);
+    vec3 hiv = max(a, b);
+    float t0 = max(max(lov.x, lov.y), lov.z);
+    float t1 = min(min(hiv.x, hiv.y), hiv.z);
+    if (t1 <= max(t0, 0.0)) return false;
+    float t = max(t0, 0.0) + 1e-4;
+    if (t >= t_max) return false;
+
+    vec3  pe = lo + t * ld;
+    ivec3 vc = clamp(ivec3(floor(pe / vs)), ivec3(0), voxel_dim - ivec3(1));
+    ivec3 stp = ivec3(ld.x >= 0.0 ? 1 : -1,
+                      ld.y >= 0.0 ? 1 : -1,
+                      ld.z >= 0.0 ? 1 : -1);
+    vec3 abs_inv = vec3(
+        (abs(ld.x) > 1e-8) ? 1.0 / abs(ld.x) : 1e30,
+        (abs(ld.y) > 1e-8) ? 1.0 / abs(ld.y) : 1e30,
+        (abs(ld.z) > 1e-8) ? 1.0 / abs(ld.z) : 1e30);
+    vec3 tDelta = vs * abs_inv;
+    vec3 face = (vec3(vc) + max(vec3(stp), 0.0)) * vs;
+    vec3 tMax = vec3(
+        (ld.x != 0.0) ? (face.x - lo.x) / ld.x : 1e30,
+        (ld.y != 0.0) ? (face.y - lo.y) / ld.y : 1e30,
+        (ld.z != 0.0) ? (face.z - lo.z) / ld.z : 1e30);
+
+    const int max_steps = 96;
+    for (int i = 0; i < max_steps; ++i) {
+        if (t > t_max) return false;
+        if (any(lessThan(vc, ivec3(0))) ||
+            any(greaterThanEqual(vc, voxel_dim))) return false;
+
+        ivec3 bc = vc >> 4;
+        int   dir_i = (bc.z * brick_dim.y + bc.y) * brick_dim.x + bc.x;
+        uint  bp = vox_entries[dir_i];
+        if (bp == kVoxEmptyW) {
+            vec3 brickFace = (vec3(bc) + max(vec3(stp), 0.0)) * bs;
+            vec3 bMax = vec3(
+                (ld.x != 0.0) ? (brickFace.x - lo.x) / ld.x : 1e30,
+                (ld.y != 0.0) ? (brickFace.y - lo.y) / ld.y : 1e30,
+                (ld.z != 0.0) ? (brickFace.z - lo.z) / ld.z : 1e30);
+            t = min(min(bMax.x, bMax.y), bMax.z) + 1e-4;
+            vec3 pn = lo + t * ld;
+            vc = ivec3(floor(pn / vs));
+            face = (vec3(vc) + max(vec3(stp), 0.0)) * vs;
+            tMax = vec3(
+                (ld.x != 0.0) ? (face.x - lo.x) / ld.x : 1e30,
+                (ld.y != 0.0) ? (face.y - lo.y) / ld.y : 1e30,
+                (ld.z != 0.0) ? (face.z - lo.z) / ld.z : 1e30);
+            continue;
+        }
+        ivec3 lv = vc & ivec3(15);
+        int   li = (lv.z * 256) + (lv.y * 16) + lv.x;
+        if ((vox_bricks[bp].occ[li >> 5] & (1u << (li & 31))) != 0u) {
+            int word = li >> 2;
+            int shift = (li & 3) * 8;
+            out_pal = (vox_bricks[bp].pal[word] >> shift) & 0xFFu;
+            out_t = t;
+            return true;
+        }
+        if (tMax.x < tMax.y && tMax.x < tMax.z) {
+            t = tMax.x; vc.x += stp.x; tMax.x += tDelta.x;
+        } else if (tMax.y < tMax.z) {
+            t = tMax.y; vc.y += stp.y; tMax.y += tDelta.y;
+        } else {
+            t = tMax.z; vc.z += stp.z; tMax.z += tDelta.z;
+        }
+    }
+    return false;
+}
 
 // Max terrain height of the 64 m cell containing world XZ. Branch-free
 // clamp + packed-vec4 unpack. kHeightmapSide is the 2048 m world span.
@@ -379,7 +494,7 @@ float cellMaxHeight(vec2 wp) {
 float distanceFogAmount(vec3 p_world, vec3 cam) {
     float strength = scene.distance_fog_color.a;
     if (strength < 1e-3) return 0.0;
-    float density   = scene.distance_fog_params.x;
+    float density   = clamp(scene.distance_fog_params.x, 0.0, 0.1);
     float start_d   = scene.distance_fog_params.y;
     float height_top = scene.distance_fog_params.z;
     float max_alpha  = scene.distance_fog_params.w;
@@ -1939,8 +2054,18 @@ void main() {
                             (water_only && pc.grass_params.w > 0.5);
         if (tlas_refl_on && refl.y > 0.02) {
             vec3 r_ro = wpos + wnor * 0.05;
-            float t_tlas;
-            if (closest_hit_no_terrain(r_ro, refl, 200.0, t_tlas)) {
+            float t_tlas = 200.0;
+            float t_vox  = 200.0;
+            uint  vox_pal = 0u;
+            bool  tlas_hit = closest_hit_no_terrain(r_ro, refl, 200.0, t_tlas);
+            // Also probe the voxel tower — it's not in the TLAS, so the
+            // TLAS-only query above can't see it.
+            bool  vox_hit  = water_vox_march(r_ro, refl,
+                                              tlas_hit ? t_tlas : 200.0,
+                                              t_vox, vox_pal);
+            bool  use_vox  = vox_hit && (!tlas_hit || t_vox < t_tlas);
+            if (tlas_hit || vox_hit) {
+                float t_use = use_vox ? t_vox : t_tlas;
                 // Fake a vaguely-up normal weighted toward the
                 // reflection ray (no real RT normal without a hit-
                 // attribute pass). Good enough for water mirrors.
@@ -1949,11 +2074,22 @@ void main() {
                 float r_dif = max(dot(r_nor, sunDirW), 0.0);
                 float r_amb = 0.5 + 0.5 * r_nor.y;
                 vec3 stone = vec3(0.55, 0.52, 0.48);
-                vec3 r_col = stone * (r_dif * scene.sun_color.rgb *
+                // For voxel hits use the actual palette colour so the
+                // tower's sandstone/wood reads back in the water; TLAS
+                // hits stick with the generic stone fallback (cheap).
+                vec3 albedo = stone;
+                if (use_vox) {
+                    if      (vox_pal == 1u) albedo = vec3(0.95, 0.78, 0.45);
+                    else if (vox_pal == 2u) albedo = vec3(0.75, 0.30, 0.15);
+                    else                    albedo = mix(vec3(0.85, 0.55, 0.30),
+                                                        vec3(0.45, 0.22, 0.12),
+                                                        float(max(int(vox_pal) - 3, 0)) / 12.0);
+                }
+                vec3 r_col = albedo * (r_dif * scene.sun_color.rgb *
                                        scene.sun_color.a +
                                        r_amb * scene.sky_color.rgb * 0.35);
                 // Atmospheric extinction over reflection distance.
-                vec3 r_ext = exp(-t_tlas * 0.00025 *
+                vec3 r_ext = exp(-t_use * 0.00025 *
                                   vec3(1.0, 1.5, 4.0));
                 // pow(x, 8) → 3 squarings — same trick as the rest
                 // of the file; this water-TLAS-reflection branch was
@@ -2069,7 +2205,9 @@ void main() {
             //   3. Skip past 80 m view distance — the shadow-map
             //      cascade already covers everything within its frustum
             //      and beyond that the FBM detail is sub-pixel.
-            float w_dist = length(wpos - scene.camera_pos.xyz);
+            // t_water_plane (line 1765) already holds the camera-to-surface
+            // distance — reuse it instead of recomputing a length() here.
+            float w_dist = t_water_plane;
             if (water_lit > 0.95 && w_dist < 80.0 &&
                 dot(wnor, sunDirW) > 0.05) {
                 float self_lit = water_only

@@ -587,6 +587,7 @@ void VulkanEngine::init() {
     present_loader_frame("Compiling pipelines",   0.70f);
     init_pipeline();
     init_voxel();
+    init_doors();
     init_terrain_pipelines();
     init_terrain_raymarch_pipeline();
     init_terrain_water_pipeline();
@@ -2013,6 +2014,11 @@ void VulkanEngine::run(const RunOptions& opts) {
         // Voxel destruction: debounced heavy work (collapse + collision
         // rebuild) once per frame, off the per-bullet impact path.
         process_voxel_updates(frame_dt);
+
+        // Castle gate animation — proximity trigger + lerp toward target
+        // angles. Runs once per frame (the lerp is dt-relative so it's
+        // not tied to the physics fixed-step).
+        update_doors(frame_dt);
 
         // Recompute the sun shadow-map light view-proj before update_scene_ubo
         // so the matrix copied into the UBO this frame matches the geometry

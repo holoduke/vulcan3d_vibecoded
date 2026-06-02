@@ -46,6 +46,15 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  _scene_pad[24];
     vec4  restir_params;
     vec4  spom_params;          // .x = SPOM strength (UI slider)
+    // Extended prefix to reach grass_side_lit_params (= spom_mode at .z).
+    // Field ordering matches cube.frag's SceneUBO; std140 alignment of
+    // the trailing 256-vec4 grid is critical -- keep in lock-step.
+    vec4  _terrain_local_info;
+    vec4  _terrain_max_grid[256];
+    vec4  _terrain_disp_params;
+    vec4  _terrain_antitile_params;
+    vec4  _grass_shadow_on_terrain_params;
+    vec4  grass_side_lit_params;   // .z = spom_mode (0=Flat,1=SPOM,2=SSDM,3=POM-curved)
 } scene;
 
 layout(location = 0) out vec3 vNormal;
@@ -127,7 +136,12 @@ void main() {
     float shell_world_t  = kShellThickness * spom_strength;
     const float kLateralPush = 0.12;
     float lateral_world_t = kLateralPush * spom_strength;
-    bool  do_extrude     = is_spom_wall && spom_strength > 0.01;
+    // Extrusion only fires for SSDM mode (2). Modes 0 (Flat), 1 (SPOM
+    // legacy ray-query) and 3 (POM curved-silhouette) keep the original
+    // un-extruded geometry — they don't grow walls.
+    int   spom_mode_v    = int(scene.grass_side_lit_params.z + 0.5);
+    bool  do_extrude     = is_spom_wall && spom_strength > 0.01 &&
+                           spom_mode_v == 2;
 
     vec3 scale = vec3(length(pc.model[0].xyz),
                       length(pc.model[1].xyz),

@@ -970,6 +970,26 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         write_instance(dr.model, dr.prev_model, dyn_base, glm::vec3(0.0f),
                        false, blas_device_address_, tex);
     }
+    // Castle gate panels as TLAS instances so RT shadow + GI rays see
+    // them. Same cube BLAS the dyn-props use; per-panel hinge-rotated
+    // model matrix. mask 0xFF — visible to shadows AND GI/reflection
+    // (matches the static castle brushes, which the doors functionally
+    // extend). Materials pass tex_params for the Wood048 albedo so
+    // bounce light off the doors tints reflected GI correctly.
+    for (const auto& d : doors_) {
+        const glm::mat4 model =
+            glm::translate(glm::mat4(1.0f), d.hinge_world) *
+            glm::rotate(glm::mat4(1.0f), d.angle, glm::vec3(0, 1, 0)) *
+            glm::translate(glm::mat4(1.0f), d.closed_offset) *
+            glm::scale(glm::mat4(1.0f), d.half_size * 2.0f);
+        glm::vec4 door_color(0.55f, 0.33f, 0.16f, 1.0f);
+        glm::vec4 door_tex = tex_on
+            ? glm::vec4(2.0f, 2.0f, 0.7f, 0.0f)
+            : kNoTex;
+        write_instance(model, model, door_color, glm::vec3(0.0f),
+                       false, blas_device_address_, door_tex);
+    }
+
     // Sparks are intentionally NOT added to the TLAS. With kMaxParticles=384
     // and high fire rates, including them costs ~hundreds of instance writes
     // + AS-build work per frame, plus they get traversed by every GI and

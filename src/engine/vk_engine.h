@@ -653,6 +653,29 @@ private:
     };
     std::vector<DynamicProp> dyn_props_;
 
+    // Castle gate — a two-panel hinged wooden door at the north entrance.
+    // Each panel swings around a vertical axis at its outer edge. The
+    // pair opens automatically when the player gets close and closes
+    // again a few seconds after they step out of trigger range. Render
+    // path is the same cube-pipeline push-constant draw the brushes use;
+    // collision is a single AABB envelope that participates in
+    // rebuild_tick_aabbs while the door is mostly closed.
+    struct Door {
+        glm::vec3 hinge_world;    // pivot point in world space
+        glm::vec3 closed_offset;  // hinge → panel-centre vector when shut
+        glm::vec3 half_size;      // panel half extents (x = width/2, y = height/2, z = thickness/2)
+        float     open_angle;     // target angle when open (signed; rotation about world Y)
+        float     angle;          // current angle, lerped each frame
+    };
+    std::vector<Door> doors_;
+    // Seconds since the player was last inside the open-trigger radius.
+    // Starts large so doors begin closed. Drives the auto-close timer.
+    float door_far_time_ = 999.0f;
+    void  init_doors();
+    void  update_doors(float dt);
+    void  draw_doors(VkCommandBuffer cmd, const glm::mat4& vp,
+                     const glm::mat4& prev_vp);
+
     // Hyper-fast cylinder bullets. Jolt body uses LinearCast motion quality
     // (sweep-cast at the start of each step) so the projectile cannot tunnel
     // through dynamic boxes between physics ticks. Despawn on TTL.
@@ -664,6 +687,7 @@ private:
         float    ttl;            // seconds remaining
         float    initial_speed;  // for impact-detection threshold
         glm::vec3 initial_dir;
+        glm::vec3 spawn_origin{0.0f};  // muzzle position — for shot-distance falloff on voxel carves
         glm::vec4 color;
         glm::vec3 emissive;
         // Previous-frame world position — used by update_projectiles to
@@ -2517,7 +2541,13 @@ private:
     // The expensive structural-collapse + collision rebuild are NOT done
     // here — they're deferred + debounced via process_voxel_updates so a
     // burst of impacts doesn't stall the frame. Returns voxels removed.
-    int  apply_voxel_carve(glm::vec3 center, float radius);
+    // Carve a sphere out of voxel shape `shape_idx`. shape 0 = main static
+    // tower; >0 = a falling chunk (the carve point is in world space and is
+    // transformed into the chunk's local frame using its current Jolt body
+    // pose). Returns number of voxels removed. Marks the shape dirty so the
+    // next process_voxel_updates tick re-runs the collapse on JUST that
+    // shape (chunks can split into smaller pieces when shot).
+    int  apply_voxel_carve(int shape_idx, glm::vec3 world_center, float radius);
     // Once-per-frame: if a carve happened, run the debounced heavy work
     // (collapse → debris → collision rebuild) at most ~5×/sec, off the
     // bullet-impact hot path. dt in seconds.
@@ -2525,10 +2555,17 @@ private:
     void rebuild_voxel_collision();
     bool  voxel_update_pending_  = false;  // a carve happened, not yet settled
     int   voxel_removed_accum_   = 0;      // voxels carved since last collapse
+    // Shape indices that were carved this frame (or since last collapse).
+    // process_voxel_updates collapses only these — chunks split into smaller
+    // chunks when hit again, and main-shape collapse stays as before.
+    std::vector<int> voxel_dirty_shapes_;
     float voxel_collapse_cd_     = 0.0f;   // min time between collapse BFS runs
     float voxel_collision_cd_    = 0.0f;   // min time between collision rebuilds
     // Flush a single brick slot's payload to the host-mapped GPU atlas.
     void  flush_voxel_brick_(uint32_t slot);
+    // Batched flush: memcpy each slot's brick + a single vmaFlushAllocation
+    // across the [min,max] range. Saves ~200 driver calls per large carve.
+    void  flush_voxel_bricks_batched_(const std::vector<uint32_t>& slots);
     VkBuffer              voxel_dir_buffer_        = VK_NULL_HANDLE;
     VmaAllocation         voxel_dir_alloc_         = nullptr;
     VkBuffer              voxel_camera_ubo_        = VK_NULL_HANDLE;
@@ -2541,6 +2578,34 @@ private:
     VkPipeline            voxel_pipeline_          = VK_NULL_HANDLE;
     VkDescriptorPool      voxel_desc_pool_         = VK_NULL_HANDLE;
     VkDescriptorSet       voxel_desc_set_          = VK_NULL_HANDLE;
+
+    // ---- Multi-shape chunk support (Session E) ----
+    // Active falling voxel chunks. Each is a new VoxelShape in voxel_world_
+    // driven by its own Jolt dynamic body. Rendered with voxel.frag via a
+    // per-shape model matrix (rotation + translation).
+    struct VoxelChunk {
+        int      shape_index;     // index into voxel_world_->shapes()
+        uint32_t body_id;         // qlike Jolt id
+        uint32_t jolt_handle;     // cached BodyHandle
+        float    ttl;             // seconds remaining before forced despawn
+        float    age = 0.0f;      // seconds since spawn — gates sleep-cull
+    };
+    std::vector<VoxelChunk> voxel_chunks_;
+    // Upload watermarks: how many bricks / directory entries have been
+    // pushed to the GPU. After a collapse we push the newly-added range.
+    uint32_t voxel_atlas_uploaded_ = 0;
+    uint32_t voxel_dir_uploaded_   = 0;
+    // Index of the next NEW shape whose directory needs uploading. Lets
+    // upload_voxel_growth_() skip already-pushed shapes in O(1) instead of
+    // re-scanning every shape every collapse (which grew linearly with
+    // session-long debris history).
+    uint32_t voxel_dir_next_shape_ = 0;
+    // Mapped pointers for live updates (atlas pointer already exists above).
+    void*       voxel_dir_mapped_  = nullptr;
+    VkDeviceSize voxel_dir_bytes_  = 0;
+    // Push fresh chunks (their bricks + directory) to the GPU, sized once at
+    // init for thousands of bricks so growth is lock-free memcpys.
+    void upload_voxel_growth_();
 
     bool initialized_ = false;
     // Set when run() catches a DEVICE_LOST-class exception. shutdown() skips
