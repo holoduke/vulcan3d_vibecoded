@@ -158,6 +158,10 @@ void VulkanEngine::recreate_taa_targets() {
     if (gbuffer1_image_) vmaDestroyImage(allocator_, gbuffer1_image_, gbuffer1_alloc_);
     gbuffer1_image_ = VK_NULL_HANDLE; gbuffer1_view_ = VK_NULL_HANDLE;
     gbuffer1_alloc_ = nullptr;
+    if (staging_color_view_)  vkDestroyImageView(device_, staging_color_view_, nullptr);
+    if (staging_color_image_) vmaDestroyImage(allocator_, staging_color_image_, staging_color_alloc_);
+    staging_color_image_ = VK_NULL_HANDLE; staging_color_view_ = VK_NULL_HANDLE;
+    staging_color_alloc_ = nullptr;
     for (int s = 0; s < kHistorySlots; ++s) {
         if (history_view_[s])  vkDestroyImageView(device_, history_view_[s], nullptr);
         if (history_image_[s]) vmaDestroyImage(allocator_, history_image_[s], history_alloc_[s]);
@@ -223,6 +227,11 @@ void VulkanEngine::recreate_taa_targets() {
                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                VK_IMAGE_USAGE_SAMPLED_BIT,
                gbuffer1_image_, gbuffer1_alloc_, gbuffer1_view_);
+    // Staging colour for the deferred lighting pass (Phase 3).
+    make_image(scene_color_format_,
+               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+               VK_IMAGE_USAGE_SAMPLED_BIT,
+               staging_color_image_, staging_color_alloc_, staging_color_view_);
     for (int s = 0; s < kHistorySlots; ++s) {
         make_image(scene_color_format_,
                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
@@ -306,6 +315,8 @@ void VulkanEngine::destroy_taa() {
     if (gbuffer0_image_)    vmaDestroyImage(allocator_, gbuffer0_image_, gbuffer0_alloc_);
     if (gbuffer1_view_)     vkDestroyImageView(device_, gbuffer1_view_, nullptr);
     if (gbuffer1_image_)    vmaDestroyImage(allocator_, gbuffer1_image_, gbuffer1_alloc_);
+    if (staging_color_view_)  vkDestroyImageView(device_, staging_color_view_, nullptr);
+    if (staging_color_image_) vmaDestroyImage(allocator_, staging_color_image_, staging_color_alloc_);
 
     taa_pipeline_ = VK_NULL_HANDLE;
     taa_pipeline_layout_ = VK_NULL_HANDLE;

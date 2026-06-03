@@ -588,6 +588,7 @@ void VulkanEngine::init() {
     init_pipeline();
     init_voxel();
     init_doors();
+    init_deferred_lighting();
     init_terrain_pipelines();
     init_terrain_raymarch_pipeline();
     init_terrain_water_pipeline();
@@ -1100,6 +1101,37 @@ void VulkanEngine::draw(uint32_t img_index) {
     // discards via parallax march. Shell pass runs INSIDE the main
     // rendering scope (see render_world).
     // compose_ssdm(frame.command_buffer);
+
+    // ---------- Pass 1d: Deferred lighting (Phase 3 of migration) ----------
+    // Reads gbuffer0/1 + depth + sun_shadow and writes lit colour to
+    // staging_color_image_. Skipped when deferred_lighting_active_ is
+    // false (default until Phase 4 promotes this to the canonical scene
+    // colour writer).
+    render_deferred_lighting(frame.command_buffer);
+    // When the toggle is on, blit the deferred output back into
+    // scene_color so the downstream chain (SVGF, TAA, FSR3, compose)
+    // sees the deferred result without descriptor surgery. scene_color
+    // is currently in SHADER_READ_ONLY (post-world transition); the
+    // blit needs it in TRANSFER_DST, then back to SHADER_READ_ONLY.
+    if (deferred_lighting_active_) {
+        vkinit::transition_image(frame.command_buffer, scene_color_image_,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit blit{};
+        blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        blit.srcOffsets[1] = { (int32_t)render_extent_.width,
+                                (int32_t)render_extent_.height, 1 };
+        blit.dstOffsets[1] = { (int32_t)render_extent_.width,
+                                (int32_t)render_extent_.height, 1 };
+        vkCmdBlitImage(frame.command_buffer,
+                        staging_color_image_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        scene_color_image_,   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        1, &blit, VK_FILTER_NEAREST);
+        vkinit::transition_image(frame.command_buffer, scene_color_image_,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
 
     // ---------- Pass 1.5: SVGF deep denoise (4a-deep) ----------
     // Updates the per-pixel luminance moments (binding 22/23) by
@@ -2480,6 +2512,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_terrain_pipelines", [&]{ destroy_terrain_pipelines(); });
     guarded("destroy_sun_shadow_pipeline", [&]{ destroy_sun_shadow_pipeline(); });
     guarded("destroy_voxel", [&]{ destroy_voxel(); });
+    guarded("destroy_deferred_lighting", [&]{ destroy_deferred_lighting(); });
     guarded("destroy_pipeline", [&]{ destroy_pipeline(); });
     guarded("destroy_grass", [&]{ destroy_grass(allocator_, grass_); });
     guarded("stop_terrain_shadow_worker", [&]{ stop_terrain_shadow_worker(); });

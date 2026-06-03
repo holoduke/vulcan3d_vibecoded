@@ -1414,6 +1414,31 @@ private:
     VmaAllocation gbuffer1_alloc_ = nullptr;
     VkImageView  gbuffer1_view_ = VK_NULL_HANDLE;
     VkFormat     gbuffer1_format_ = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    // Staging colour buffer for the deferred lighting pass (Phase 3).
+    // Same RGBA16F format as scene_color so it can be sampled by TAA/
+    // SVGF/compose with no descriptor changes. The lighting pass reads
+    // gbuffer0+1 + depth + the existing scene-set bindings and writes
+    // this; compose picks scene_color vs staging_color via a runtime
+    // toggle (deferred_lighting_active_).
+    VkImage      staging_color_image_ = VK_NULL_HANDLE;
+    VmaAllocation staging_color_alloc_ = nullptr;
+    VkImageView  staging_color_view_ = VK_NULL_HANDLE;
+    // Phase 3 toggle: 0 = compose reads scene_color (forward, default),
+    // 1 = compose reads staging_color (deferred lighting pass output).
+    // Drives a runtime descriptor-set swap, no shader recompile. Stays 0
+    // until the deferred lighting shader reaches parity in Phase 4.
+    bool deferred_lighting_active_ = false;
+    // Deferred lighting pipeline (Phase 3).
+    VkPipeline       deferred_lighting_pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout deferred_lighting_pipeline_layout_ = VK_NULL_HANDLE;
+    VkShaderModule   deferred_lighting_vert_ = VK_NULL_HANDLE;
+    VkShaderModule   deferred_lighting_frag_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout deferred_lighting_desc_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool deferred_lighting_desc_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet  deferred_lighting_desc_set_ = VK_NULL_HANDLE;
+    void init_deferred_lighting();
+    void destroy_deferred_lighting();
+    void render_deferred_lighting(VkCommandBuffer cmd);
 
     static constexpr int kHistorySlots = 2;
     VkImage      history_image_[kHistorySlots]{ VK_NULL_HANDLE, VK_NULL_HANDLE };
