@@ -46,6 +46,12 @@ layout(set = 0, binding = 5) uniform sampler2D u_sun_shadow;
 
 layout(push_constant) uniform PC {
     mat4 inv_vp;
+    // Per-frame point lights. .xyz = world position, .w = radius (m).
+    // Per-light colour comes in light_colors with .a = intensity. Up to
+    // 4 active lights — overflow lights drop. Inactive slots set radius
+    // to 0 so the early-out gate culls them at no cost.
+    vec4 light_pos[4];
+    vec4 light_col[4];
 } pc;
 
 // Octahedral normal decode — matches cube.frag's encode.
@@ -296,23 +302,26 @@ void main() {
     }
 
     // ---------------------------------------------------------------
-    //  Point lights (muzzle flash) — cheap fixed-falloff loop
+    //  Point lights — variable list driven by push constant. Muzzle
+    //  flash, lanterns, future fires all share this loop; the CPU
+    //  packs up to 4 active lights per frame.
     // ---------------------------------------------------------------
     vec3 point_term = vec3(0.0);
-    if (scene.muzzle_pos.w > 1e-3) {
-        vec3 mp = scene.muzzle_pos.xyz;
-        vec3 to = mp - world_pos;
+    for (int i = 0; i < 4; ++i) {
+        float radius = pc.light_pos[i].w;
+        if (radius < 1e-3) continue;
+        vec3 lp = pc.light_pos[i].xyz;
+        vec3 to = lp - world_pos;
         float d2 = dot(to, to);
-        float radius = max(0.1, scene.muzzle_color.w);
         float r2 = radius * radius;
-        if (d2 < r2) {
-            vec3 ld = to * inversesqrt(d2);
-            float pndl = max(dot(N, ld), 0.0);
-            float fall = 1.0 - clamp(sqrt(d2) / radius, 0.0, 1.0);
-            fall = fall * fall;
-            point_term += albedo * scene.muzzle_color.rgb *
-                          scene.muzzle_pos.w * pndl * fall;
-        }
+        if (d2 >= r2) continue;
+        vec3 ld = to * inversesqrt(d2);
+        float pndl = max(dot(N, ld), 0.0);
+        if (pndl <= 0.0) continue;
+        float fall = 1.0 - clamp(sqrt(d2) / radius, 0.0, 1.0);
+        fall = fall * fall;
+        point_term += albedo * pc.light_col[i].rgb *
+                      pc.light_col[i].a * pndl * fall;
     }
 
     vec3 lit = sun_term + ambient_term + sky_fill + point_term;

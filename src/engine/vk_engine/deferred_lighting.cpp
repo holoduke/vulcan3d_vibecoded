@@ -13,6 +13,18 @@
 
 namespace qlike {
 
+// Mirrors the layout of the shader's PC block (std430 packed under push
+// constant rules). Total 192 B — under the 256 B threshold all desktop
+// GPUs expose.
+struct DeferredLightingPC {
+    glm::mat4 inv_vp;
+    glm::vec4 light_pos[4];   // .xyz pos, .w radius (m); .w == 0 disables
+    glm::vec4 light_col[4];   // .rgb colour, .a intensity multiplier
+};
+static_assert(sizeof(DeferredLightingPC) == 192,
+              "DeferredLightingPC layout mismatch — check std140 expectations");
+
+
 void VulkanEngine::init_deferred_lighting() {
     // Descriptor set layout: scene UBO + TLAS + gbuffer0 + gbuffer1 +
     // depth + sun_shadow. Six bindings, all fragment-stage. Reuses the
@@ -43,12 +55,16 @@ void VulkanEngine::init_deferred_lighting() {
                  "deferred lighting desc layout");
     }
 
-    // Pipeline layout with push constant for the inverse-VP matrix.
+    // Pipeline layout. Push constant = inverse-VP (64 B) + 4 light_pos
+    // vec4 (64 B) + 4 light_col vec4 (64 B) = 192 B total. Vulkan
+    // guarantees 128 B minimum; modern desktop GPUs all expose ≥ 256 B,
+    // so 192 is safe. (No fallback path — if the device can't take it
+    // the pipeline create will report it.)
     {
         VkPushConstantRange pc{};
         pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         pc.offset = 0;
-        pc.size = sizeof(glm::mat4);
+        pc.size = sizeof(DeferredLightingPC);
         VkPipelineLayoutCreateInfo plci{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
@@ -234,11 +250,23 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                              deferred_lighting_pipeline_layout_, 0, 1,
                              &deferred_lighting_desc_set_, 0, nullptr);
-    // Push inverse-VP for world-pos reconstruction.
-    glm::mat4 inv_vp = current_frame_view_.inv_vp;
+    // Fill the push-constant struct: inverse-VP + active point lights.
+    // The muzzle flash takes slot 0 when firing; lanterns + future
+    // dynamic lights can take 1..3 once the engine collects them.
+    DeferredLightingPC pcd{};
+    pcd.inv_vp = current_frame_view_.inv_vp;
+    // Slot 0: muzzle flash. The scene UBO already has muzzle_pos + colour;
+    // mirror them here so the deferred path responds to the same trigger.
+    if (muzzle_flash_timer_ > 0.0f) {
+        const float t = std::min(1.0f, muzzle_flash_timer_ / kMuzzleFlashDuration);
+        const float intensity = t * t * 12.0f;
+        const glm::vec3 muzzle = player_.eye_position() + player_.forward() * 0.6f;
+        pcd.light_pos[0] = glm::vec4(muzzle, 6.0f);   // 6 m radius
+        pcd.light_col[0] = glm::vec4(1.00f, 0.85f, 0.55f, intensity);
+    }
     vkCmdPushConstants(cmd, deferred_lighting_pipeline_layout_,
                        VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(glm::mat4), &inv_vp);
+                       0, sizeof(pcd), &pcd);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
 
