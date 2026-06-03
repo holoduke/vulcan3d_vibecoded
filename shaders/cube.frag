@@ -3397,14 +3397,17 @@ void main() {
 
     outColor = vec4(final, 1.0);
 
-    // G-buffer dual write (Phase 2 of the deferred migration). albedo is
-    // the surface colour after triplanar / SPOM displacement but before
-    // shadow + GI multiplication; N is the (possibly normal-mapped)
-    // world-space normal already used by the lighting block above.
-    // material_id stays at 0 for now — Phase 5 splits brushes vs terrain
-    // vs voxel into distinct ids for the lighting branch.
+    // G-buffer dual write (Phase 2+5 of the deferred migration).
+    //   material_id: 0 = brush/stone, 2 = wood, 3 = terrain, 5 = emissive
+    // Phase 5 separates terrain from brush so the deferred lighting pass
+    // can apply slope blend (terrain) vs flat triplanar (brush) the same
+    // way cube.frag's forward branch does. Voxel tower has its own
+    // forward path (voxel.frag) and writes material_id = 6 there.
+    int mat_id = 0;
+    if (is_terrain_pre)        mat_id = 3;       // terrain
+    else if (vEmissive.a > 0.5) mat_id = 5;       // emissive
     outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)),
-                       0.0);                    // material_id = 0
+                       float(mat_id) / 255.0);
     outGBuffer1 = vec4(octa_encode(N),
                        0.5,                      // roughness placeholder
                        0.0);                     // metallic
