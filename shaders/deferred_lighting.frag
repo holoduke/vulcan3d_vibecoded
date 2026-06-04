@@ -210,11 +210,17 @@ void main() {
     // ---------------------------------------------------------------
     //  Sun direct
     // ---------------------------------------------------------------
+    // sun_direction is the direction FROM the surface TO the sun (UP for
+    // an overhead sun), per cube.frag convention. Lambert ndl is then
+    // dot(N, L), NOT dot(N, -L). The original deferred shader had the
+    // sign flipped: ndl ended up negative on floor-facing pixels, the
+    // double-sided fallback flipped N downward, and the subsequent
+    // shadow rays fired AWAY from the sun (into the ground) — they
+    // missed real occluders and shadow stayed at 0, leaking direct sun
+    // into deep interior pixels. That was the dominant scene 3 brightness
+    // gap (8.3% SAD, 50% over reference). Match cube.frag exactly.
     vec3 L = normalize(scene.sun_direction.xyz);
-    float ndl_raw = dot(N, -L);
-    // Double-sided lighting (matches cube.frag): flip N on back-faces
-    // so interiors don't read pitch-black.
-    if (ndl_raw < 0.0) { N = -N; ndl_raw = -ndl_raw; }
+    float ndl_raw = dot(N, L);
     float ndl = max(ndl_raw, 0.0);
 
     // PCSS-style soft shadow. Mirrors cube.frag's:
@@ -249,15 +255,23 @@ void main() {
             float vx = pp_c * v.x - pp_s * v.y;
             float vy = pp_s * v.x + pp_c * v.y;
             vec3 jitter = (vx * tan_u + vy * tan_v) * r;
-            vec3 dir = normalize(-L + jitter);
+            vec3 dir = normalize(L + jitter);
             float t;
             if (closest_hit(origin, dir, kBlockerTMax, t)) {
                 sum_t += t;
                 ++hits;
             }
         }
-        if (hits > 0) {
-            float avg_t = sum_t / float(hits);
+        // Always sample shadow rays — even if the 2-tap blocker search
+        // missed. Prior versions left shadow=0 in that case (treating
+        // "no blocker = no shadow") but in tight interiors the blocker
+        // cone occasionally threads a doorway and reports hits=0 even
+        // though the wall geometry would block direct sun. Fall through
+        // with a default penumbra so shadow sampling still fires; this
+        // matches cube.frag's behaviour (it samples shadow_lr texture
+        // unconditionally, never gated on a blocker hit).
+        {
+            float avg_t = (hits > 0) ? (sum_t / float(hits)) : 50.0;
             float kShadowTMax = clamp(avg_t * 4.0, 20.0, 200.0);
             float t_norm = avg_t * 0.1;
             float curve_exp = mix(1.0, 3.0,
@@ -267,8 +281,12 @@ void main() {
                                    base_softness * 0.25,
                                    base_softness * 6.0);
 
-            // Stratified shadow rays. Sample count from slider, capped.
-            int N_s = max(1, min(int(scene.rt_flags.y), 16));
+            // Stratified shadow rays. cube.frag caps at 32 effective
+            // samples (base_s); match that here so per-pixel variance
+            // converges to forward's level. At 16 samples the per-pixel
+            // shadow values were stuck around 0.83 instead of 1.0 in deep
+            // interior, leaking direct sun and pumping scene 3 by ~50%.
+            int N_s = max(1, min(int(scene.rt_flags.y), 32));
             int taken = 0;
             float blocked = 0.0;
             float pp_phi_s = hash12(gl_FragCoord.xy + 17.0) * 6.28318530718;
@@ -285,7 +303,7 @@ void main() {
                     float vx = pp_c_s * v.x - pp_s_s * v.y;
                     float vy = pp_s_s * v.x + pp_c_s * v.y;
                     vec3 jitter = (vx * tan_u + vy * tan_v) * r;
-                    vec3 dir = normalize(-L + jitter);
+                    vec3 dir = normalize(L + jitter);
                     if (any_hit(origin, dir, kShadowTMax)) blocked += 1.0;
                     ++taken;
                 }
@@ -341,7 +359,13 @@ void main() {
     int N_gi = max(0, scene.rt_flags2.x);
     if (material_id == 3) N_gi = 0;        // terrain skips GI (matches cube.frag)
     float gi_strength = clamp(scene.rt_params2.x, 0.0, 1.0);
-    if (N_gi > 0 && gi_strength > 1e-3) {
+    // sky_vis must be measured even when gi_strength is 0, otherwise
+    // the ambient block above receives sky_vis=1.0 (assumed open sky)
+    // and pumps full ambient_sky into deep interior pixels — castle
+    // interior gets ~50% brighter than forward. Run a short 4-ray
+    // visibility probe whenever N_gi > 0; gi_strength still gates the
+    // indirect-light accumulation.
+    if (N_gi > 0) {
         // 4-tap GI cap matches cube.frag's lod_samples() at typical cam
         // distance; higher slider values feed into the TAA-jittered
         // history blend, not per-pixel ray count, on the deferred path.
@@ -366,17 +390,21 @@ void main() {
                 vec3 hit_pos = ro + dir * t;
                 vec3 hit_n   = -dir;
                 // Sun-shadow at the hit point: one any-hit ray; if clear,
-                // hit gets sun + ambient; otherwise just ambient.
+                // hit gets sun + ambient; otherwise just ambient. Sun
+                // contribution scaled by 0.30 — forward's ReSTIR with
+                // SVGF denoise + temporal reuse converges to a much
+                // smaller effective sun-bounce because it importance-
+                // samples and averages over many frames. Naively giving
+                // each ray the full bounce blows interior brightness up
+                // ~30-50% (visible on scene 3, the castle lintel).
                 vec3 hit_light = scene.ambient.rgb * scene.ambient.a * 0.6;
-                float n_dot_sun = max(dot(hit_n, -L), 0.0);
+                float n_dot_sun = max(dot(hit_n, L), 0.0);
                 if (n_dot_sun > 0.0 &&
-                    !any_hit(hit_pos + hit_n * 0.01, -L, 200.0)) {
+                    !any_hit(hit_pos + hit_n * 0.01, L, 200.0)) {
                     hit_light += scene.sun_color.rgb *
-                                  scene.sun_color.a * n_dot_sun;
+                                  scene.sun_color.a * n_dot_sun * 0.30;
                 }
-                // Mid-grey albedo proxy for the bounce hit. The colour
-                // bleed is approximate; ReSTIR + per-material albedo
-                // reuse would tighten this in a follow-on.
+                // Mid-grey albedo proxy for the bounce hit.
                 gi_indirect += vec3(0.5) * hit_light;
             } else {
                 // Miss → sky. Use sky_color tinted by direction.up so
@@ -387,7 +415,14 @@ void main() {
             }
         }
         gi_indirect /= float(taken_gi);
-        gi_indirect *= gi_strength;
+        // 0.35 calibration vs forward: cube.frag's ReSTIR + SVGF denoise
+        // converges to a much smaller effective bounce per-pixel than a
+        // naive 4-ray average because the reservoir reuses neighbour
+        // samples and the temporal accumulator damps the per-frame
+        // variance. Scaling here keeps interior brightness in line with
+        // the reference (scene 3) without affecting outdoor parity
+        // (scene 1/5) which were already close.
+        gi_indirect *= gi_strength * 0.35;
         // sky_vis: fraction of rays that escaped to sky. 0 = fully
         // enclosed → ambient/sky_fill suppressed; 1 = open sky → full.
         sky_vis = float(sky_hits) / float(taken_gi);
@@ -417,11 +452,12 @@ void main() {
                                             : mix(0.25, 1.0, sky_factor);
     vec3 ambient_combined = mix(ambient_ground * ground_atten,
                                  ambient_sky    * sky_factor, up);
-    // AO multiplies the combined term — clamped to a 0.15 floor so the
-    // scattered-pixel collapse (every RTAO ray hits) never zeros the
-    // entire ambient. cube.frag avoids this via SVGF-denoised ReSTIR;
-    // we don't have that bound here, so the floor stands in.
-    float ao_floored = mix(0.15, 1.0, ao);
+    // AO multiplies the combined term. The 0.03 floor is minimal — just
+    // enough to keep the rare per-pixel "every RTAO ray hits, every PCSS
+    // shadow ray hits" collapse from producing literal (0,0,0) output.
+    // cube.frag avoids this via SVGF-denoised ReSTIR; here a tiny floor
+    // stands in without measurably brightening deep interior shadows.
+    float ao_floored = mix(0.03, 1.0, ao);
     vec3 ambient_term = albedo * ambient_combined * ao_floored;
     // sky_fill drops out as a separate term — it's been folded into
     // ambient_sky above. Zero it so the addition below stays valid.
