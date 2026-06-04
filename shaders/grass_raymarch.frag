@@ -18,6 +18,11 @@
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
+// G-buffer pass-through outputs — see grass.frag for the design rationale.
+// Material_id=5 makes deferred sample scene_color at this pixel instead
+// of recomputing lighting, preserving the raymarched grass shading.
+layout(location = 2) out vec4 outGBuffer0;
+layout(location = 3) out vec4 outGBuffer1;
 
 layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  sun_direction;
@@ -678,6 +683,13 @@ void main() {
         }
     }
     outColor = vec4(col, final_alpha);
+    outGBuffer0 = vec4(clamp(col, vec3(0.0), vec3(1.0)),
+                       5.0 / 255.0);   // mat 5 = pass-through
+    // Best-effort normal: use the cumulative marched hit normal if a
+    // local var carries one; otherwise zero — the downstream deferred
+    // pass-through reads scene_color, not gbuffer1, so this is just for
+    // any future normal-aware consumer (SSR, etc).
+    outGBuffer1 = vec4(0.5, 0.5, 0.5, 0.0);
 
     // Honour LESS_OR_EQUAL depth test so a closer wall already in
     // depth_image_ correctly occludes the marched grass.

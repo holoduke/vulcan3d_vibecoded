@@ -188,7 +188,17 @@ void main() {
     // particles / decals / grass / viewmodel — anything drawn AFTER
     // cube.frag without G-buffer outputs. Those pixels need the forward
     // colour, not a re-shade of the geometry behind them.
-    if (material_id >= 5 || material_id == 0) {
+    //
+    // Albedo dot-product guard: alpha-discarded grass / cube.frag's
+    // emissive early-return / depth-prepass rejected fragments all leave
+    // gbuffer0 at the (0,0,0,0) clear. Without the dot() guard those
+    // pixels classify as material_id 1 (cleared bytes round to mat 0
+    // when alpha=0; but R8G8B8A8 quantisation can also produce
+    // alpha=1/255 for some interpolated cases), and the lighting block
+    // multiplies by zero albedo and emits true black. Treat near-zero
+    // albedo as "no real gbuffer write here" and pass scene_color.
+    if (material_id >= 5 || material_id == 0 ||
+        dot(g0.rgb, vec3(1.0)) < 1e-4) {
         outColor = vec4(texture(u_scene_color, uv).rgb, 1.0);
         return;
     }

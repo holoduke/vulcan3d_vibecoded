@@ -13,6 +13,22 @@ layout(location = 8) in vec4 vPrevClip;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
+// G-buffer outputs — grass uses its own subsurface/wrap shading that's
+// hard to replicate in the deferred pass, so we ship LIT color as
+// material_id=5 (pre-shaded pass-through). The deferred shader detects
+// mat≥5 and reads scene_color unchanged, preserving the forward grass
+// look exactly. Normal still written for downstream signal users.
+layout(location = 2) out vec4 outGBuffer0;
+layout(location = 3) out vec4 outGBuffer1;
+
+vec2 _grass_octa_encode(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    vec2 e = (n.z >= 0.0)
+        ? n.xy
+        : ((1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0,
+                                     n.y >= 0.0 ? 1.0 : -1.0));
+    return e * 0.5 + 0.5;
+}
 
 layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  sun_direction;
@@ -153,6 +169,9 @@ void main() {
     if (side_taper < scene.grass_extra.y && vHeightRatio > 0.85) discard;
 
     outColor = vec4(lit, 1.0);
+    outGBuffer0 = vec4(clamp(lit, vec3(0.0), vec3(1.0)),
+                       5.0 / 255.0);    // mat 5 = pass-through to scene_color
+    outGBuffer1 = vec4(_grass_octa_encode(N), 0.5, 0.0);
     // Screen-space motion vector — current_uv − prev_uv. Same pattern
     // as cube.frag. Without this, walking grass goes black-flickery
     // because TAA reprojects against the same screen pixel from the

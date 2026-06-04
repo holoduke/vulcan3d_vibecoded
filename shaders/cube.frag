@@ -1091,7 +1091,18 @@ void main() {
     vec3 N = normalize(vNormal);
 
     if (vEmissive.a > 0.5) {
-        outColor = vec4(vColor + vEmissive.rgb, 1.0);
+        vec3 e = vColor + vEmissive.rgb;
+        outColor = vec4(e, 1.0);
+        // Also fill gbuffer with the lit emissive value tagged mat 5 so the
+        // deferred shader's mat≥5 pass-through reads scene_color (which
+        // has the HDR emissive) instead of treating this as a hole and
+        // mis-shading the brush behind. Without this, emissive brushes
+        // (lamp strips, neon trim) render as scattered single-pixel black
+        // dots in the deferred path because alpha=0 in the cleared gbuffer
+        // round-trips to material_id=0 with non-zero noise, slipping past
+        // the albedo guard.
+        outGBuffer0 = vec4(clamp(e, vec3(0.0), vec3(1.0)), 5.0 / 255.0);
+        outGBuffer1 = vec4(octa_encode(N), 0.5, 0.0);
         return;
     }
 
