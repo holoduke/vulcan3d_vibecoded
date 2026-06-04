@@ -1720,6 +1720,14 @@ void VulkanEngine::run(const RunOptions& opts) {
         last = now;
         if (frame_dt > 1.0f / 15.0f) frame_dt = 1.0f / 15.0f;
         if (frame_dt < 1e-6f)        frame_dt = 1.0f / 240.0f;
+        // Headless captures (--frames N --screenshot) need bit-stable physics
+        // and spawn timing across runs; wallclock-derived dt varies by ~30%
+        // run-to-run depending on shader compile, GPU contention, etc. Pin
+        // it to a fixed 60 Hz step so crate spawns + Jolt integration land
+        // at the same place every time and SAD comparisons are meaningful.
+        if (opts_.max_frames > 0 || !opts_.screenshot_path.empty()) {
+            frame_dt = 1.0f / 60.0f;
+        }
         last_frame_dt_ = frame_dt;
         ema_fps_ = ema_fps_ == 0.0f
                    ? 1.0f / frame_dt
