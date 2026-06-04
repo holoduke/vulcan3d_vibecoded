@@ -24,6 +24,11 @@ layout(location = 3) in vec3 vWPos;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
+// G-buffer dual writes — Phase 2/5 of the deferred-render migration.
+// Water pixels get material_id 7 so the deferred lighting pass sees the
+// already-shaded water colour and passes it through unmodified.
+layout(location = 2) out vec4 outGBuffer0;
+layout(location = 3) out vec4 outGBuffer1;
 
 // Same push-constant layout as cube.frag's PushConstants. We use
 //   mvp           вЂ” view_proj for gl_FragDepth at the hit point
@@ -2430,6 +2435,8 @@ void main() {
                         mix(1.0, foam_op, foam_amt);
         float a       = mix(water_a, 1.0, foam_amt);
         outColor = vec4(col_w, a);
+        outGBuffer0 = vec4(clamp(col_w, vec3(0.0), vec3(1.0)), 7.0 / 255.0);
+        outGBuffer1 = vec4(0.5, 0.5, 0.2, 0.0);
         // Motion vector for TAA reprojection. clip-space derivation
         // (resolution-independent) so the LR raymarch path doesn't
         // pick up a constant ~0.5 offset from scene.viewport being
@@ -3109,6 +3116,10 @@ void main() {
         col = mix(col, scene.distance_fog_color.rgb, fa);
     }
     outColor = vec4(col, 1.0);
+    // G-buffer pass-through. Water is already fully shaded; material_id 7
+    // tells the deferred lighting pass to use albedo unmodified.
+    outGBuffer0 = vec4(clamp(col, vec3(0.0), vec3(1.0)), 7.0 / 255.0);
+    outGBuffer1 = vec4(0.5, 0.5, 0.2, 0.0);   // placeholder normal+rough
     // Screen-space motion vector for TAA. World position is stationary
     // вЂ” only the camera moves вЂ” so prev_uv comes from prev_view_proj
     // applied to the same world hit point. Without this, TAA cannot

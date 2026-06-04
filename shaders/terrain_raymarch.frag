@@ -19,6 +19,10 @@ layout(location = 2) in vec4 vWFar;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
+// G-buffer dual writes (deferred migration). Raymarched terrain
+// pixels carry material_id 8 = pre-shaded pass-through.
+layout(location = 2) out vec4 outGBuffer0;
+layout(location = 3) out vec4 outGBuffer1;
 
 // Same push-constant layout as cube.frag's PushConstants. We use
 //   mvp           вЂ” view_proj for gl_FragDepth at the hit point
@@ -2244,6 +2248,8 @@ void main() {
             col_w = mix(col_w, scene.distance_fog_color.rgb, fa);
         }
         outColor = vec4(col_w, 1.0);
+        outGBuffer0 = vec4(clamp(col_w, vec3(0.0), vec3(1.0)), 8.0 / 255.0);
+        outGBuffer1 = vec4(0.5, 0.5, 0.7, 0.0);
         // Motion vector for TAA reprojection. clip-space derivation
         // (resolution-independent) so the LR raymarch path doesn't
         // pick up a constant ~0.5 offset from scene.viewport being
@@ -2920,6 +2926,8 @@ void main() {
         col = mix(col, scene.distance_fog_color.rgb, fa);
     }
     outColor = vec4(col, 1.0);
+    outGBuffer0 = vec4(clamp(col, vec3(0.0), vec3(1.0)), 8.0 / 255.0);
+    outGBuffer1 = vec4(0.5, 0.5, 0.7, 0.0);
     // Screen-space motion vector for TAA. World position is stationary
     // вЂ” only the camera moves вЂ” so prev_uv comes from prev_view_proj
     // applied to the same world hit point. Without this, TAA cannot

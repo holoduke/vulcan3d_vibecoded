@@ -145,6 +145,15 @@ void main() {
     vec3 N = octa_decode(g1.xy);
     float roughness = g1.b;
 
+    // Pre-shaded materials (7 = water, 8 = raymarched terrain) — these
+    // pipelines already do their own complex shading (refraction, fog,
+    // foam, FBM lighting), so the deferred path just passes the colour
+    // through. Material 5 (emissive) likewise.
+    if (material_id == 7 || material_id == 8 || material_id == 5) {
+        outColor = vec4(albedo, 1.0);
+        return;
+    }
+
     vec3 cam_pos = scene.camera_pos.xyz;
     vec3 view_vec = cam_pos - world_pos;
     float cam_dist = length(view_vec);

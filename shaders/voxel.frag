@@ -14,6 +14,19 @@
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
+// G-buffer dual writes — same convention cube.frag uses (Phase 2/5 of
+// the deferred-render migration). Voxel-shape pixels get material_id 6.
+layout(location = 2) out vec4 outGBuffer0;
+layout(location = 3) out vec4 outGBuffer1;
+
+vec2 octa_encode_v(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    vec2 e = (n.z >= 0.0)
+        ? n.xy
+        : ((1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0,
+                                     n.y >= 0.0 ? 1.0 : -1.0));
+    return e * 0.5 + 0.5;
+}
 
 layout(push_constant) uniform PC {
     mat3  R;              // shape-local→world rotation (48 bytes, std430)
@@ -327,6 +340,12 @@ void main() {
                        cam.sun_color.rgb * cam.sun_color.a *
                            ndl * (1.0 - shadow_amt));
     outColor = vec4(col, 1.0);
+
+    // G-buffer write — voxel pixels appear in deferred mode. Albedo is
+    // pre-lighting (palette × wall_rgb), normal is the face normal we
+    // already shaded with, material_id 6 = voxel.
+    outGBuffer0 = vec4(clamp(base, vec3(0.0), vec3(1.0)), 6.0 / 255.0);
+    outGBuffer1 = vec4(octa_encode_v(N), 0.5, 0.0);
 
     vec4 clip = cam.view_proj * vec4(hit_world, 1.0);
     gl_FragDepth = clip.z / clip.w;
