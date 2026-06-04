@@ -36,6 +36,16 @@ layout(set = 0, binding = 0) uniform Scene {
     vec4  viewport;
     vec4  muzzle_pos;      // .xyz origin, .w intensity
     vec4  muzzle_color;    // .rgb colour, .w radius (m)
+    // Padding to reach the fog params at the same byte offsets cube.frag
+    // and the C++ scene UBO use. 27 vec4 = terrain_params, terrain_h_low,
+    // terrain_h_high, grass_extra, grass_extra2, light_vp (mat4 = 4 vec4),
+    // terrain_extra, _scene_pad[0..16].
+    vec4  _pad_a[27];
+    // _scene_pad[17] in cube.frag — base fog tint .rgb + master strength .a.
+    vec4  distance_fog_color;
+    // _scene_pad[18] in cube.frag — .x density, .y start, .z height_top,
+    // .w max alpha.
+    vec4  distance_fog_params;
 } scene;
 
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
@@ -439,5 +449,46 @@ void main() {
 
     vec3 lit = sun_term + ambient_term + sky_fill + point_term +
                albedo * gi_indirect;
+
+    // ---------------------------------------------------------------
+    //  Atmospheric distance fog (verbatim port of cube.frag's exp²
+    //  fog block with Henyey-Greenstein Mie scattering forward halo).
+    //  Master gate on dfog_col.a so the menu's fog-strength slider
+    //  controls it the same way for both renderers.
+    // ---------------------------------------------------------------
+    {
+        vec4 dfog_col = scene.distance_fog_color;
+        vec4 dfog_par = scene.distance_fog_params;
+        vec3 view_dir = normalize(world_pos - cam_pos);
+        float fog_t   = 0.0;
+        vec3  fog_rgb = dfog_col.rgb;
+        if (dfog_col.a > 1e-3) {
+            float density = max(0.0, dfog_par.x);
+            float start_d = max(0.0, dfog_par.y);
+            float h_top   = dfog_par.z;
+            float max_a   = clamp(dfog_par.w, 0.0, 1.0);
+            float d_raw   = max(0.0, cam_dist - start_d);
+            float dx      = d_raw * density;
+            float fog     = 1.0 - exp(-dx * dx);
+            if (h_top > 0.5) {
+                float h_w = 1.0 - smoothstep(0.0, h_top, world_pos.y);
+                fog *= h_w;
+            }
+            fog_t = clamp(fog * dfog_col.a, 0.0, max_a);
+            vec3  Lf  = scene.sun_direction.xyz;
+            float mu  = clamp(dot(view_dir, -Lf), -1.0, 1.0);
+            const float g  = 0.76;
+            const float g2 = g * g;
+            float hg_d = max(0.0001, 1.0 + g2 - 2.0 * g * mu);
+            float hg   = (1.0 - g2) / (12.566 * hg_d * sqrt(hg_d));
+            float mie  = clamp(hg * 0.40, 0.0, 1.5);
+            vec3  sun_tint = scene.sun_color.rgb * scene.sun_color.a;
+            fog_rgb = mix(dfog_col.rgb,
+                          dfog_col.rgb * 0.7 + sun_tint * 0.55,
+                          clamp(mie, 0.0, 1.0));
+        }
+        if (fog_t > 1e-4) lit = mix(lit, fog_rgb, fog_t);
+    }
+
     outColor = vec4(lit, 1.0);
 }
