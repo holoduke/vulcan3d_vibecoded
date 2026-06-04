@@ -30,7 +30,7 @@ void VulkanEngine::init_deferred_lighting() {
     // depth + sun_shadow. Six bindings, all fragment-stage. Reuses the
     // same binding numbers the shader declares.
     {
-        VkDescriptorSetLayoutBinding b[6]{};
+        VkDescriptorSetLayoutBinding b[7]{};
         b[0].binding = 0;
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         b[0].descriptorCount = 1;
@@ -39,7 +39,7 @@ void VulkanEngine::init_deferred_lighting() {
         b[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         b[1].descriptorCount = 1;
         b[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        for (int i = 2; i < 6; ++i) {
+        for (int i = 2; i < 7; ++i) {
             b[i].binding = i;
             b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             b[i].descriptorCount = 1;
@@ -48,7 +48,7 @@ void VulkanEngine::init_deferred_lighting() {
         VkDescriptorSetLayoutCreateInfo dlci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
-            .bindingCount = 6, .pBindings = b,
+            .bindingCount = 7, .pBindings = b,
         };
         vk_check(vkCreateDescriptorSetLayout(device_, &dlci, nullptr,
                                               &deferred_lighting_desc_layout_),
@@ -81,7 +81,7 @@ void VulkanEngine::init_deferred_lighting() {
         VkDescriptorPoolSize sizes[] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1 },
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     4 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     5 },
         };
         VkDescriptorPoolCreateInfo pci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -183,7 +183,9 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo ss_ii{ linear_sampler_, sun_shadow_view_,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet w[6]{};
+        VkDescriptorImageInfo sc_ii{ linear_sampler_, scene_color_view_,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w[7]{};
         w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[0].dstSet = deferred_lighting_desc_set_; w[0].dstBinding = 0;
         w[0].descriptorCount = 1;
@@ -194,7 +196,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[1].dstSet = deferred_lighting_desc_set_; w[1].dstBinding = 1;
         w[1].descriptorCount = 1;
         w[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        for (int i = 2; i < 6; ++i) {
+        for (int i = 2; i < 7; ++i) {
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w[i].dstSet = deferred_lighting_desc_set_; w[i].dstBinding = i;
             w[i].descriptorCount = 1;
@@ -204,7 +206,8 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[3].pImageInfo = &g1_ii;
         w[4].pImageInfo = &dep_ii;
         w[5].pImageInfo = &ss_ii;
-        vkUpdateDescriptorSets(device_, 6, w, 0, nullptr);
+        w[6].pImageInfo = &sc_ii;
+        vkUpdateDescriptorSets(device_, 7, w, 0, nullptr);
     }
 
     // Transition staging_color into COLOR_ATTACHMENT layout.
@@ -270,10 +273,14 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
 
-    // Make the staging colour sampleable by compose.
+    // Leave staging in TRANSFER_SRC so the caller can blit it back into
+    // scene_color (the canonical input to SVGF/TAA/compose). Earlier
+    // versions transitioned to SHADER_READ_ONLY which silently produced
+    // garbage in the downstream blit on NVIDIA — vkCmdBlitImage requires
+    // a TRANSFER_SRC_OPTIMAL (or GENERAL) source layout.
     vkinit::transition_image(cmd, staging_color_image_,
                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 }
 
 } // namespace qlike

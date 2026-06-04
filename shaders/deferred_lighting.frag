@@ -43,6 +43,12 @@ layout(set = 0, binding = 2) uniform sampler2D u_gbuffer0;
 layout(set = 0, binding = 3) uniform sampler2D u_gbuffer1;
 layout(set = 0, binding = 4) uniform sampler2D u_depth;
 layout(set = 0, binding = 5) uniform sampler2D u_sun_shadow;
+// scene_color from the forward pass — used at sky pixels (depth=1) and
+// at pixels that aren't covered by the G-buffer write (particles,
+// decals, projectiles, anything drawn after cube.frag without a
+// G-buffer output). Lets the deferred path pass them through unmodified
+// instead of overwriting with reconstructed sky.
+layout(set = 0, binding = 6) uniform sampler2D u_scene_color;
 
 layout(push_constant) uniform PC {
     mat4 inv_vp;
@@ -141,14 +147,12 @@ void main() {
     float z = texture(u_depth, uv).r;
     // World-pos / view-direction reconstruction from depth + inverse-VP.
     vec2 ndc = uv * 2.0 - 1.0;
-    // Sky / depth-cleared pixels — reconstruct the view direction from
-    // a unit-far point so sample_sky produces the same horizon→zenith
-    // blend cube.frag does on forward sky pixels.
+    // Sky / depth-cleared pixels — forward's compose pass samples an
+    // equirect skybox texture we don't have bound in the deferred
+    // descriptor set. Pass scene_color through so the forward sky path
+    // wins at depth=1, matching cube.frag's behaviour exactly.
     if (z >= 0.999999) {
-        vec4 far4 = pc.inv_vp * vec4(ndc, 1.0, 1.0);
-        vec3 far_world = far4.xyz / far4.w;
-        vec3 view_dir = normalize(far_world - scene.camera_pos.xyz);
-        outColor = vec4(sample_sky(view_dir), 1.0);
+        outColor = vec4(texture(u_scene_color, uv).rgb, 1.0);
         return;
     }
     vec4 clip = vec4(ndc, z, 1.0);
@@ -163,14 +167,19 @@ void main() {
     vec3 N = octa_decode(g1.xy);
     float roughness = g1.b;
 
-    // Pre-shaded materials (5 = emissive, 6 = voxel, 7 = water,
-    // 8 = raymarched terrain) — these pipelines already do their own
-    // complex shading (palette × wall, self-shadow, refraction, fog,
-    // foam, FBM lighting), so the deferred path just passes the colour
-    // through. The lighting block below applies only to brushes/dyn
-    // props (material 0) and the rasterised terrain (material 3).
-    if (material_id >= 5) {
-        outColor = vec4(albedo, 1.0);
+    // Pre-shaded materials (5..8 = brush / voxel / water / raymarched
+    // terrain) write LIT colour directly into scene_color in the
+    // forward pass. G-buffer0 is R8G8B8A8_UNORM so its alpha=material_id
+    // round-trips, but HDR colour clamps to [0,1] — sampling it here
+    // would dim every bright pixel and break tonemap parity. Sample
+    // scene_color instead so HDR is preserved bit-perfect.
+    //
+    // material_id 0 fall-through also reaches u_scene_color: that's
+    // particles / decals / grass / viewmodel — anything drawn AFTER
+    // cube.frag without G-buffer outputs. Those pixels need the forward
+    // colour, not a re-shade of the geometry behind them.
+    if (material_id >= 5 || material_id == 0) {
+        outColor = vec4(texture(u_scene_color, uv).rgb, 1.0);
         return;
     }
 

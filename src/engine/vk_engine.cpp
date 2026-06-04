@@ -1125,7 +1125,7 @@ void VulkanEngine::draw(uint32_t img_index) {
         blit.dstOffsets[1] = { (int32_t)render_extent_.width,
                                 (int32_t)render_extent_.height, 1 };
         vkCmdBlitImage(frame.command_buffer,
-                        staging_color_image_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        staging_color_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                         scene_color_image_,   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                         1, &blit, VK_FILTER_NEAREST);
         vkinit::transition_image(frame.command_buffer, scene_color_image_,
@@ -1792,6 +1792,30 @@ void VulkanEngine::run(const RunOptions& opts) {
                 player_.yaw       = ang + kHalfPi;          // tangent (CCW)
                 player_.pitch     = 0.0f;
             }
+            in.mouse_dx = 0.0;
+            in.mouse_dy = 0.0;
+        }
+        // --scene N teleport works WITHOUT --autodemo too. Pin the camera
+        // each frame so headless captures (--frames N --screenshot) hit the
+        // intended pose; without this the camera kept whatever position the
+        // settings file had saved from the previous run, silently producing
+        // 17%+ SAD against the reference shots.
+        if (opts_.scene > 0 && !autodemo) {
+            struct ScenePose { glm::vec3 pos; float yaw; float pitch; };
+            static const ScenePose kScenes[] = {
+                { glm::vec3(0.0f,  23.5f,  18.0f),  kPi,        0.10f },
+                { glm::vec3(0.0f,  23.5f, -18.0f),  0.0f,       0.10f },
+                { glm::vec3(0.0f,  23.5f,   2.0f),  kPi,        0.55f },
+                { glm::vec3(8.0f,  27.0f,  35.0f),  kPi,        0.10f },
+                { glm::vec3(60.0f, 26.0f,  60.0f), -0.75f,      0.05f },
+                { glm::vec3(40.0f, 19.0f, -40.0f),  0.5f,      -0.15f },
+                { glm::vec3(0.0f,  24.0f,   0.0f),  kHalfPi,    0.0f  },
+            };
+            int idx = std::clamp(opts_.scene, 1, 7) - 1;
+            player_.position = kScenes[idx].pos;
+            player_.yaw      = kScenes[idx].yaw;
+            player_.pitch    = kScenes[idx].pitch;
+            player_.velocity = glm::vec3(0.0f);
             in.mouse_dx = 0.0;
             in.mouse_dy = 0.0;
         }
