@@ -143,17 +143,34 @@ const vec2 kVogel[32] = vec2[32](
     vec2(-0.243,  1.297), vec2(-0.901,  1.046)
 );
 
-// Cheap deterministic hash for per-pixel jitter — matches cube.frag's
-// pattern (no salt animation, since TAA accumulates jitter across
-// frames).
+// Per-pixel deterministic noise — matches cube.frag's ign+rand pair so
+// the deferred shader picks the SAME Vogel disk rotations and shadow
+// sample sequences as the forward path. Different hash functions =
+// different shadow values per pixel = scene 3 / 7 pixel-level drift.
+float ign(vec2 p) {
+    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+}
+float rand(uvec3 seed) {
+    float s = float(seed.x) + 5.588238 * float(seed.z);
+    float t = float(seed.y) + 1.388765 * float(seed.z);
+    return ign(vec2(s, t));
+}
+// Back-compat shim for the remaining hash12() callsites (GI, AO). Maps
+// vec2 to a deterministic float via the same rand machinery so the
+// random stream is consistent throughout the shader.
 float hash12(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
+    return rand(uvec3(uint(p.x), uint(p.y), 0u));
 }
 
 void main() {
     vec2 uv = vUv;
+    // seed_base — matches cube.frag exactly (FragCoord int + frame & 7
+    // in z slot). All shadow + GI + AO ray jitters derive from this
+    // seed via rand() so deferred lighting picks the same Vogel disk
+    // rotations cube.frag picks at the same pixel.
+    uvec3 seed_base = uvec3(uint(gl_FragCoord.x),
+                            uint(gl_FragCoord.y),
+                            uint(scene.rt_flags.w) & 7u);
     float z = texture(u_depth, uv).r;
     // World-pos / view-direction reconstruction from depth + inverse-VP.
     vec2 ndc = uv * 2.0 - 1.0;
@@ -243,13 +260,16 @@ void main() {
         float kBlockerCone = base_softness * 4.0;
         float kBlockerTMax = clamp(cam_dist * 4.0, 30.0, 200.0);
 
-        // 2-tap blocker search (cube.frag uses 2 too).
+        // 4-tap blocker search to match cube.frag's coverage (was 2-tap;
+        // 2 missed the wall in cone-search through tight openings,
+        // letting shadow stay at 0 and full sun leak through). Per-pixel
+        // rotation matches cube.frag's seed_base + uvec3(0, 99u, 0u).
         float sum_t = 0.0;
         int hits = 0;
-        float pp_phi = hash12(gl_FragCoord.xy + 99.0) * 6.28318530718;
+        float pp_phi = rand(seed_base + uvec3(0u, 99u, 0u)) * 6.28318530718;
         float pp_c = cos(pp_phi), pp_s = sin(pp_phi);
-        for (int i = 0; i < 2; ++i) {
-            float r1 = hash12(gl_FragCoord.xy + vec2(i * 11.0, 47.0));
+        for (int i = 0; i < 4; ++i) {
+            float r1 = rand(seed_base + uvec3(uint(i), 91u, 13u));
             float r = sqrt(r1) * kBlockerCone;
             vec2 v = kVogel[i & 31];
             float vx = pp_c * v.x - pp_s * v.y;
@@ -289,14 +309,14 @@ void main() {
             int N_s = max(1, min(int(scene.rt_flags.y), 32));
             int taken = 0;
             float blocked = 0.0;
-            float pp_phi_s = hash12(gl_FragCoord.xy + 17.0) * 6.28318530718;
+            float pp_phi_s = rand(seed_base + uvec3(1u, 99u, 0u)) * 6.28318530718;
             float pp_c_s = cos(pp_phi_s), pp_s_s = sin(pp_phi_s);
             int strata = int(ceil(sqrt(float(N_s))));
             float inv_strata = 1.0 / float(strata);
             for (int sy = 0; sy < strata && taken < N_s; ++sy) {
                 for (int sx = 0; sx < strata && taken < N_s; ++sx) {
                     int idx = taken;
-                    float r1 = hash12(gl_FragCoord.xy + vec2(idx, 91.0));
+                    float r1 = rand(seed_base + uvec3(uint(idx), 11u, 47u));
                     float u1 = (float(sx) + r1) * inv_strata;
                     float r = sqrt(u1) * penumbra;
                     vec2 v = kVogel[idx & 31];
