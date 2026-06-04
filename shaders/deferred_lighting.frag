@@ -394,21 +394,38 @@ void main() {
     }
 
     // ---------------------------------------------------------------
-    //  Ambient + sky bounce
+    //  Ambient + sky bounce — mirrors cube.frag's ambient_ground +
+    //  ambient_sky split. ambient_ground is the "windowless room
+    //  reflection" constant that AO can darken but never fully kills;
+    //  ambient_sky is the open-sky contribution that fades when sky_vis
+    //  drops (deep crevices). Without the split, per-pixel PCSS
+    //  collapsing to shadow=1 + RTAO collapsing to ao=0 zeroes BOTH
+    //  ambient and sun → pure black pixels (the scattered-black bug).
     // ---------------------------------------------------------------
-    // Sky-vis fallback: bias the ambient up where N points up so
-    // outdoor surfaces (terrain, walkways) get the sky contribution
-    // even before ReSTIR is ported.
     float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
     vec3 sky_tint = scene.sky_color.rgb;
     float ambient_strength = clamp(scene.rt_params.z, 0.0, 1.0);
-    // sky_vis attenuates the sky-derived ambient on enclosed pixels —
-    // matches cube.frag's "interior darkening" behaviour. floor() ensures
-    // even fully-enclosed surfaces still get some baseline ambient.
-    float vis_blend = mix(0.25, 1.0, sky_vis);
-    vec3 ambient_term = albedo * scene.ambient.rgb * scene.ambient.a *
-                        ambient_strength * ao * vis_blend;
-    vec3 sky_fill = albedo * sky_tint * 0.18 * up * ao * vis_blend;
+    vec3 ambient_ground = scene.ambient.rgb * scene.ambient.a * ambient_strength;
+    vec3 ambient_sky    = sky_tint * 0.45 * ambient_strength;
+    // sky_factor: cube.frag uses smoothstep(0, 0.6, sky_vis) floored at
+    // 0.10. Same here so deep cracks still pick up a tiny sky leakage.
+    float sky_factor   = mix(0.10, 1.0, smoothstep(0.0, 0.6, sky_vis));
+    // Non-terrain receivers attenuate the ground term too (else interior
+    // brick reads as bright as exterior), but with a 0.25 floor so we
+    // never collapse to true black.
+    float ground_atten = (material_id == 3) ? 1.0
+                                            : mix(0.25, 1.0, sky_factor);
+    vec3 ambient_combined = mix(ambient_ground * ground_atten,
+                                 ambient_sky    * sky_factor, up);
+    // AO multiplies the combined term — clamped to a 0.15 floor so the
+    // scattered-pixel collapse (every RTAO ray hits) never zeros the
+    // entire ambient. cube.frag avoids this via SVGF-denoised ReSTIR;
+    // we don't have that bound here, so the floor stands in.
+    float ao_floored = mix(0.15, 1.0, ao);
+    vec3 ambient_term = albedo * ambient_combined * ao_floored;
+    // sky_fill drops out as a separate term — it's been folded into
+    // ambient_sky above. Zero it so the addition below stays valid.
+    vec3 sky_fill = vec3(0.0);
 
     // Sun term.
     vec3 sun_term = albedo * scene.sun_color.rgb * scene.sun_color.a *
