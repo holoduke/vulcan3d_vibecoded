@@ -3397,19 +3397,27 @@ void main() {
 
     outColor = vec4(final, 1.0);
 
-    // G-buffer dual write — ships the FORWARD-LIT pixel as pass-through
-    // (material_id 5 in deferred_lighting.frag detects mat ≥ 5 and
-    // outputs albedo unmodified). This lets us flip the deferred toggle
-    // ON without visual degradation: deferred mode produces forward-
-    // identical output because every pixel is pre-shaded.
+    // G-buffer write — RAW albedo + material id so deferred_lighting.frag
+    // can re-shade with its own sun/PCSS/RTAO/GI/point-light passes (RDR2
+    // RAGE style). cube.frag still produces `final` above and ships it to
+    // scene_color so the forward path is unchanged; the deferred path
+    // (--deferred 1) reads gbuffer0/1 and recomputes its own lit output.
     //
-    // The architectural refactor (replacing this lit-pass-through with
-    // a separate lighting pass that reads gbuffer normals/material and
-    // applies PCSS+GI on its own) is the next iteration's work — the
-    // harness, pipeline, descriptor wiring, push-constant light list,
-    // and pre-shaded fast path are all in place to support it.
-    outGBuffer0 = vec4(clamp(final, vec3(0.0), vec3(1.0)),
-                       5.0 / 255.0);             // mat 5 = pre-shaded
+    // material_id mapping:
+    //   1 = generic world opaque (stone, brick, painted, tile)
+    //   2 = wood
+    //   3 = terrain (skips GI, boosts ambient)
+    //   4 = grass / vegetation (extra wrap-around fill)
+    // is_terrain_pre (vTexParams.w > 1.5) is the only branch we can
+    // distinguish from the gbuffer write site without dragging more
+    // vertex data through; the rest fall through to mat 1 and the
+    // deferred shader's Lambert handles them. Per-material tightening
+    // (wood/grass) can be added later via a per-brush material slot in
+    // vColor.a or a 3rd gbuffer slot.
+    int mat_id = is_terrain_pre ? 3 : 1;
+    if (vEmissive.a > 0.5) mat_id = 5;     // emissive — handled above too
+    outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)),
+                       float(mat_id) / 255.0);
     outGBuffer1 = vec4(octa_encode(N), 0.5, 0.0);
 }
 
