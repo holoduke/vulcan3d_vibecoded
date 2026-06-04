@@ -44,6 +44,9 @@ bool parse_args(int argc, char** argv, Args& out) {
         } else if (a == "--scene") {
             const char* v = next("--scene"); if (!v) return false;
             out.opts.scene = std::atoi(v);
+        } else if (a == "--deferred") {
+            const char* v = next("--deferred"); if (!v) return false;
+            out.opts.deferred = std::atoi(v);
         } else if (a == "--help" || a == "-h") {
             std::printf("usage: quake_like [options]\n"
                         "  --frames N            Run N frames then exit (-1 = forever)\n"

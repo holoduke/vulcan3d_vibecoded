@@ -1658,6 +1658,7 @@ void VulkanEngine::dump_device_fault() {
 
 void VulkanEngine::run(const RunOptions& opts) {
     opts_ = opts;
+    if (opts_.deferred >= 0) deferred_lighting_active_ = (opts_.deferred != 0);
     log::infof("run(): max_frames=%d screenshot='%s' after=%d",
                opts_.max_frames, opts_.screenshot_path.c_str(),
                opts_.screenshot_after_frames);

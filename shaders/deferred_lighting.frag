@@ -265,6 +265,77 @@ void main() {
     }
 
     // ---------------------------------------------------------------
+    //  Path-traced GI (Phase 4b — simplified port of cube.frag's loop)
+    //
+    //  Fires N cosine-weighted hemisphere rays around N. Each ray
+    //  closest-hits the TLAS; on a miss it accumulates the sky tint.
+    //  Hit albedo uses a mid-grey approximation (the deferred path
+    //  doesn't carry the materials buffer; the small albedo error gets
+    //  absorbed by the sky_vis blend and the per-pixel hash).
+    //
+    //  sky_vis tracks the fraction of first-bounce rays that escape to
+    //  sky — used below to attenuate the ambient/sky_fill terms so
+    //  enclosed surfaces (castle interior) read as indoor rather than
+    //  the same flat brightness as outdoors.
+    // ---------------------------------------------------------------
+    vec3 gi_indirect = vec3(0.0);
+    float sky_vis = 1.0;
+    int N_gi = max(0, scene.rt_flags2.x);
+    if (material_id == 3) N_gi = 0;        // terrain skips GI (matches cube.frag)
+    float gi_strength = clamp(scene.rt_params2.x, 0.0, 1.0);
+    if (N_gi > 0 && gi_strength > 1e-3) {
+        // 4-tap GI cap matches cube.frag's lod_samples() at typical cam
+        // distance; higher slider values feed into the TAA-jittered
+        // history blend, not per-pixel ray count, on the deferred path.
+        int taken_gi = min(N_gi, 4);
+        vec3 N_up  = abs(N.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0);
+        vec3 N_tan = normalize(cross(N_up, N));
+        vec3 N_bit = cross(N, N_tan);
+        vec3 ro    = world_pos + N * 0.01;
+        float gi_radius = max(8.0, scene.rt_params2.y);
+        int sky_hits = 0;
+        for (int i = 0; i < taken_gi; ++i) {
+            float r1 = hash12(gl_FragCoord.xy + vec2(i * 13.0, 73.0));
+            float r2 = hash12(gl_FragCoord.xy + vec2(i * 13.0, 47.0));
+            float r_h = sqrt(r1);
+            float phi = 6.28318530718 * r2;
+            vec3 ld = vec3(r_h * cos(phi),
+                           sqrt(max(0.0, 1.0 - r1)),
+                           r_h * sin(phi));
+            vec3 dir = ld.x * N_tan + ld.y * N + ld.z * N_bit;
+            float t;
+            if (closest_hit(ro, dir, gi_radius, t)) {
+                vec3 hit_pos = ro + dir * t;
+                vec3 hit_n   = -dir;
+                // Sun-shadow at the hit point: one any-hit ray; if clear,
+                // hit gets sun + ambient; otherwise just ambient.
+                vec3 hit_light = scene.ambient.rgb * scene.ambient.a * 0.6;
+                float n_dot_sun = max(dot(hit_n, -L), 0.0);
+                if (n_dot_sun > 0.0 &&
+                    !any_hit(hit_pos + hit_n * 0.01, -L, 200.0)) {
+                    hit_light += scene.sun_color.rgb *
+                                  scene.sun_color.a * n_dot_sun;
+                }
+                // Mid-grey albedo proxy for the bounce hit. The colour
+                // bleed is approximate; ReSTIR + per-material albedo
+                // reuse would tighten this in a follow-on.
+                gi_indirect += vec3(0.5) * hit_light;
+            } else {
+                // Miss → sky. Use sky_color tinted by direction.up so
+                // overhead rays brighten more than horizon ones.
+                float up_w = clamp(dir.y, 0.0, 1.0);
+                gi_indirect += scene.sky_color.rgb * (0.4 + 0.6 * up_w);
+                ++sky_hits;
+            }
+        }
+        gi_indirect /= float(taken_gi);
+        gi_indirect *= gi_strength;
+        // sky_vis: fraction of rays that escaped to sky. 0 = fully
+        // enclosed → ambient/sky_fill suppressed; 1 = open sky → full.
+        sky_vis = float(sky_hits) / float(taken_gi);
+    }
+
+    // ---------------------------------------------------------------
     //  Ambient + sky bounce
     // ---------------------------------------------------------------
     // Sky-vis fallback: bias the ambient up where N points up so
@@ -273,9 +344,13 @@ void main() {
     float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
     vec3 sky_tint = scene.sky_color.rgb;
     float ambient_strength = clamp(scene.rt_params.z, 0.0, 1.0);
+    // sky_vis attenuates the sky-derived ambient on enclosed pixels —
+    // matches cube.frag's "interior darkening" behaviour. floor() ensures
+    // even fully-enclosed surfaces still get some baseline ambient.
+    float vis_blend = mix(0.25, 1.0, sky_vis);
     vec3 ambient_term = albedo * scene.ambient.rgb * scene.ambient.a *
-                        ambient_strength * ao;
-    vec3 sky_fill = albedo * sky_tint * 0.18 * up * ao;
+                        ambient_strength * ao * vis_blend;
+    vec3 sky_fill = albedo * sky_tint * 0.18 * up * ao * vis_blend;
 
     // Sun term.
     vec3 sun_term = albedo * scene.sun_color.rgb * scene.sun_color.a *
@@ -324,6 +399,7 @@ void main() {
                       pc.light_col[i].a * pndl * fall;
     }
 
-    vec3 lit = sun_term + ambient_term + sky_fill + point_term;
+    vec3 lit = sun_term + ambient_term + sky_fill + point_term +
+               albedo * gi_indirect;
     outColor = vec4(lit, 1.0);
 }

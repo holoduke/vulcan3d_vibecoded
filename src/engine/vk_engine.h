@@ -53,6 +53,9 @@ struct RunOptions {
     // before/after PPM captures during the G-buffer migration
     // deterministic. 0 = no override.
     int scene = 0;
+    // --deferred N: 1 = force deferred lighting pass active; 0 = forward.
+    // -1 = leave whatever the default is.
+    int deferred = -1;
 };
 
 struct FrameData {
