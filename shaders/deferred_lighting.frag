@@ -155,6 +155,14 @@ float rand(uvec3 seed) {
     float t = float(seed.y) + 1.388765 * float(seed.z);
     return ign(vec2(s, t));
 }
+// Distance-LOD sample reducer — same as cube.frag's lod_samples. Close
+// pixels get the full requested count; far pixels collapse toward 1.
+int lod_samples(int requested, float dist) {
+    float lod_t = clamp((dist - scene.rt_lod.x) /
+                        max(0.001, scene.rt_lod.y - scene.rt_lod.x), 0.0, 1.0);
+    int n = int(round(mix(float(requested), 1.0, lod_t)));
+    return max(1, n);
+}
 // Back-compat shim for the remaining hash12() callsites (GI, AO). Maps
 // vec2 to a deterministic float via the same rand machinery so the
 // random stream is consistent throughout the shader.
@@ -386,10 +394,11 @@ void main() {
     // visibility probe whenever N_gi > 0; gi_strength still gates the
     // indirect-light accumulation.
     if (N_gi > 0) {
-        // 4-tap GI cap matches cube.frag's lod_samples() at typical cam
-        // distance; higher slider values feed into the TAA-jittered
-        // history blend, not per-pixel ray count, on the deferred path.
-        int taken_gi = min(N_gi, 4);
+        // Distance-LOD scaling — match cube.frag. Close pixels get the
+        // full slider, far pixels collapse toward 1. Cap at 16 in the
+        // deferred path so RT bandwidth doesn't explode (cube.frag also
+        // caps internally via the half-rate parity trick).
+        int taken_gi = min(lod_samples(N_gi, cam_dist), 16);
         vec3 N_up  = abs(N.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0);
         vec3 N_tan = normalize(cross(N_up, N));
         vec3 N_bit = cross(N, N_tan);
