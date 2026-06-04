@@ -341,10 +341,10 @@ void main() {
                            ndl * (1.0 - shadow_amt));
     outColor = vec4(col, 1.0);
 
-    // G-buffer write — voxel pixels appear in deferred mode. Albedo is
-    // pre-lighting (palette × wall_rgb), normal is the face normal we
-    // already shaded with, material_id 6 = voxel.
-    outGBuffer0 = vec4(clamp(base, vec3(0.0), vec3(1.0)), 6.0 / 255.0);
+    // G-buffer write — voxel pipeline does its own self-shadow + sun +
+    // ambient lighting, so we ship the LIT colour as albedo with
+    // material_id 6 (pre-shaded pass-through in deferred_lighting.frag).
+    outGBuffer0 = vec4(clamp(col, vec3(0.0), vec3(1.0)), 6.0 / 255.0);
     outGBuffer1 = vec4(octa_encode_v(N), 0.5, 0.0);
 
     vec4 clip = cam.view_proj * vec4(hit_world, 1.0);

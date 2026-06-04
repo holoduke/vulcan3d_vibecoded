@@ -54,6 +54,22 @@ layout(push_constant) uniform PC {
     vec4 light_col[4];
 } pc;
 
+// Procedural sky — verbatim port of cube.frag's sample_sky so deferred
+// sky pixels match the forward output exactly.
+vec3 sample_sky(vec3 dir) {
+    vec3 L = normalize(scene.sun_direction.xyz);
+    float up = clamp(dir.y, 0.0, 1.0);
+    vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
+    vec3 zenith  = scene.sky_color.rgb;
+    vec3 sky = mix(horizon, zenith, sqrt(up));
+    float h1 = max(dot(dir, L), 0.0);
+    float h2 = h1 * h1;
+    float h4 = h2 * h2;
+    float halo = h4 * h4;
+    sky += scene.sun_color.rgb * scene.sun_color.a * 0.08 * halo;
+    return sky;
+}
+
 // Octahedral normal decode — matches cube.frag's encode.
 vec3 octa_decode(vec2 e) {
     e = e * 2.0 - 1.0;
@@ -123,16 +139,18 @@ float hash12(vec2 p) {
 void main() {
     vec2 uv = vUv;
     float z = texture(u_depth, uv).r;
-    // Sky / depth-cleared pixels. The deferred path doesn't have the
-    // sky procedural-gradient code; instead we leave a sentinel that
-    // composes against scene_color where forward already wrote sky.
+    // World-pos / view-direction reconstruction from depth + inverse-VP.
+    vec2 ndc = uv * 2.0 - 1.0;
+    // Sky / depth-cleared pixels — reconstruct the view direction from
+    // a unit-far point so sample_sky produces the same horizon→zenith
+    // blend cube.frag does on forward sky pixels.
     if (z >= 0.999999) {
-        outColor = vec4(scene.sky_color.rgb, 0.0);
+        vec4 far4 = pc.inv_vp * vec4(ndc, 1.0, 1.0);
+        vec3 far_world = far4.xyz / far4.w;
+        vec3 view_dir = normalize(far_world - scene.camera_pos.xyz);
+        outColor = vec4(sample_sky(view_dir), 1.0);
         return;
     }
-
-    // World-pos reconstruction from depth + inverse-VP.
-    vec2 ndc = uv * 2.0 - 1.0;
     vec4 clip = vec4(ndc, z, 1.0);
     vec4 world4 = pc.inv_vp * clip;
     vec3 world_pos = world4.xyz / world4.w;
@@ -145,11 +163,13 @@ void main() {
     vec3 N = octa_decode(g1.xy);
     float roughness = g1.b;
 
-    // Pre-shaded materials (7 = water, 8 = raymarched terrain) — these
-    // pipelines already do their own complex shading (refraction, fog,
+    // Pre-shaded materials (5 = emissive, 6 = voxel, 7 = water,
+    // 8 = raymarched terrain) — these pipelines already do their own
+    // complex shading (palette × wall, self-shadow, refraction, fog,
     // foam, FBM lighting), so the deferred path just passes the colour
-    // through. Material 5 (emissive) likewise.
-    if (material_id == 7 || material_id == 8 || material_id == 5) {
+    // through. The lighting block below applies only to brushes/dyn
+    // props (material 0) and the rasterised terrain (material 3).
+    if (material_id >= 5) {
         outColor = vec4(albedo, 1.0);
         return;
     }
