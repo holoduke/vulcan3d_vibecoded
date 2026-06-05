@@ -96,24 +96,29 @@ vec3 octa_decode(vec2 e) {
     return normalize(n);
 }
 
-// Inline-RT any-hit shadow ray. Cull-mask 0x01 = shadow casters
-// (sparks/projectiles flagged 0xFE so they're skipped).
-bool any_hit(vec3 origin, vec3 dir, float t_max) {
+// Inline-RT any-hit shadow ray. Mask parameter selects which BLAS
+// instances participate: 0x01 = brushes (default), 0x02 = terrain-only
+// shadow casters (cube.frag uses 0x02 when receiver is_terrain_pre so
+// castle walls don't shadow the open terrain plateau). 0xFF = both.
+bool any_hit_m(vec3 origin, vec3 dir, float t_max, uint mask) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS,
                           gl_RayFlagsTerminateOnFirstHitEXT |
                           gl_RayFlagsOpaqueEXT,
-                          0x01, origin, 0.001, dir, t_max);
+                          mask, origin, 0.001, dir, t_max);
     while (rayQueryProceedEXT(rq)) {}
     return rayQueryGetIntersectionTypeEXT(rq, true) ==
            gl_RayQueryCommittedIntersectionTriangleEXT;
 }
+bool any_hit(vec3 origin, vec3 dir, float t_max) {
+    return any_hit_m(origin, dir, t_max, 0x01u);
+}
 
 // Closest-hit with t-value — used by the PCSS blocker search.
-bool closest_hit(vec3 origin, vec3 dir, float t_max, out float out_t) {
+bool closest_hit_m(vec3 origin, vec3 dir, float t_max, uint mask, out float out_t) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
-                          0x01, origin, 0.001, dir, t_max);
+                          mask, origin, 0.001, dir, t_max);
     while (rayQueryProceedEXT(rq)) {}
     if (rayQueryGetIntersectionTypeEXT(rq, true) ==
         gl_RayQueryCommittedIntersectionTriangleEXT) {
@@ -121,6 +126,9 @@ bool closest_hit(vec3 origin, vec3 dir, float t_max, out float out_t) {
         return true;
     }
     return false;
+}
+bool closest_hit(vec3 origin, vec3 dir, float t_max, out float out_t) {
+    return closest_hit_m(origin, dir, t_max, 0x01u, out_t);
 }
 
 // 32-tap Vogel disk — same one cube.frag uses for PCSS sample placement.
@@ -252,6 +260,10 @@ void main() {
     //   1. Blocker search: N rays in a wide cone, take avg t.
     //   2. Penumbra estimate proportional to avg_t × softness.
     //   3. Stratified shadow rays in the size-adapted cone.
+    // Cull mask: terrain receivers use 0x02 (terrain-only casters) so
+    // brushes/castle don't shadow the open plateau — cube.frag's same
+    // rule. Brushes/dyn props use 0x01.
+    uint shadow_mask = (material_id == 3) ? 0x02u : 0x01u;
     float shadow = 0.0;
     bool shadow_on = scene.rt_flags.x != 0 &&
                      scene.rt_params.w > 1e-3 &&
@@ -285,7 +297,7 @@ void main() {
             vec3 jitter = (vx * tan_u + vy * tan_v) * r;
             vec3 dir = normalize(L + jitter);
             float t;
-            if (closest_hit(origin, dir, kBlockerTMax, t)) {
+            if (closest_hit_m(origin, dir, kBlockerTMax, shadow_mask, t)) {
                 sum_t += t;
                 ++hits;
             }
@@ -332,7 +344,7 @@ void main() {
                     float vy = pp_s_s * v.x + pp_c_s * v.y;
                     vec3 jitter = (vx * tan_u + vy * tan_v) * r;
                     vec3 dir = normalize(L + jitter);
-                    if (any_hit(origin, dir, kShadowTMax)) blocked += 1.0;
+                    if (any_hit_m(origin, dir, kShadowTMax, shadow_mask)) blocked += 1.0;
                     ++taken;
                 }
             }
@@ -444,14 +456,7 @@ void main() {
             }
         }
         gi_indirect /= float(taken_gi);
-        // 0.35 calibration vs forward: cube.frag's ReSTIR + SVGF denoise
-        // converges to a much smaller effective bounce per-pixel than a
-        // naive 4-ray average because the reservoir reuses neighbour
-        // samples and the temporal accumulator damps the per-frame
-        // variance. Scaling here keeps interior brightness in line with
-        // the reference (scene 3) without affecting outdoor parity
-        // (scene 1/5) which were already close.
-        gi_indirect *= gi_strength * 0.35;
+        gi_indirect *= gi_strength;
         // sky_vis: fraction of rays that escaped to sky. 0 = fully
         // enclosed → ambient/sky_fill suppressed; 1 = open sky → full.
         sky_vis = float(sky_hits) / float(taken_gi);
@@ -469,7 +474,12 @@ void main() {
     float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
     vec3 sky_tint = scene.sky_color.rgb;
     float ambient_strength = clamp(scene.rt_params.z, 0.0, 1.0);
-    vec3 ambient_ground = scene.ambient.rgb * scene.ambient.a * ambient_strength;
+    // ambient.a is `terrain_ao_punch` on the C++ side (descriptors.cpp line
+    // 341 packs it there), NOT a strength multiplier. cube.frag does
+    // `ambient.rgb * rt_params.z` only — multiplying by `ambient.a` here
+    // (as the earlier port did) zeroed the entire ambient term whenever
+    // terrain_ao_punch was 0, producing literal black on castle walls.
+    vec3 ambient_ground = scene.ambient.rgb * ambient_strength;
     vec3 ambient_sky    = sky_tint * 0.45 * ambient_strength;
     // sky_factor: cube.frag uses smoothstep(0, 0.6, sky_vis) floored at
     // 0.10. Same here so deep cracks still pick up a tiny sky leakage.
