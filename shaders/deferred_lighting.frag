@@ -560,12 +560,11 @@ void main() {
                                             : mix(0.25, 1.0, sky_factor);
     vec3 ambient_combined = mix(ambient_ground * ground_atten,
                                  ambient_sky    * sky_factor, up);
-    // AO multiplies the combined term. The 0.03 floor is minimal — just
-    // enough to keep the rare per-pixel "every RTAO ray hits, every PCSS
-    // shadow ray hits" collapse from producing literal (0,0,0) output.
-    // cube.frag avoids this via SVGF-denoised ReSTIR; here a tiny floor
-    // stands in without measurably brightening deep interior shadows.
-    float ao_floored = mix(0.03, 1.0, ao);
+    // AO multiplies the combined term. 0.08 floor matches the residual
+    // brightness forward shows in deeply-shadowed pixels (tiny GI bounce
+    // + temporal-smoothed RTAO). At 0.03 the scene 7 crate-corner pixels
+    // came out literal (0,0,0) where forward had ~(20,20,20).
+    float ao_floored = mix(0.08, 1.0, ao);
     vec3 ambient_term = albedo * ambient_combined * ao_floored;
     // sky_fill drops out as a separate term — it's been folded into
     // ambient_sky above. Zero it so the addition below stays valid.
