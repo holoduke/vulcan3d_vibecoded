@@ -59,6 +59,11 @@ layout(set = 0, binding = 5) uniform sampler2D u_sun_shadow;
 // G-buffer output). Lets the deferred path pass them through unmodified
 // instead of overwriting with reconstructed sky.
 layout(set = 0, binding = 6) uniform sampler2D u_scene_color;
+// Baked terrain shadow texture — cube.frag uses this to put castle
+// shadows on the terrain plateau. It's a 2048m-wide top-down texture
+// of the shadow factor sampled at vWorldPos.xz / 2048 + 0.5. Only
+// sampled when material_id == 3 (terrain receiver).
+layout(set = 0, binding = 7) uniform sampler2D u_terrain_shadow;
 
 layout(push_constant) uniform PC {
     mat4 inv_vp;
@@ -353,6 +358,42 @@ void main() {
         shadow *= clamp(scene.rt_params.w, 0.0, 1.0);
     }
 
+    // Terrain receivers: sample the baked terrain shadow texture (covers
+    // castle / static-brush shadows on the open plateau) and MAX with
+    // the inline-RT result. cube.frag does the same — without this,
+    // mask-0x02 RT shadows alone miss the castle and every terrain
+    // pixel under the wall reads full sun. 5x5 Gaussian-ish PCF matches
+    // cube.frag's blur exactly so the shadow softness lines up.
+    if (material_id == 3) {
+        const float kSide = 2048.0;
+        vec2 uv_b = (world_pos.xz / kSide) + vec2(0.5);
+        if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
+            all(lessThanEqual(uv_b, vec2(1.0)))) {
+            ivec2 sz_b = textureSize(u_terrain_shadow, 0);
+            vec2 texel = 1.0 / vec2(sz_b);
+            const float kBlurM = 4.0;
+            float step_uv = (kBlurM / kSide) * 0.5;
+            const float kW[25] = float[25](
+                0.0608, 0.1738, 0.2466, 0.1738, 0.0608,
+                0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
+                0.2466, 0.7047, 1.0000, 0.7047, 0.2466,
+                0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
+                0.0608, 0.1738, 0.2466, 0.1738, 0.0608);
+            const float kWsum = 6.6172;
+            float sh_bake = 0.0;
+            for (int j = 0; j < 5; ++j) {
+                for (int i = 0; i < 5; ++i) {
+                    vec2 off2 = vec2(float(i - 2), float(j - 2)) * step_uv;
+                    sh_bake += texture(u_terrain_shadow, uv_b + off2).r *
+                               kW[j * 5 + i];
+                }
+            }
+            sh_bake /= kWsum;
+            sh_bake *= clamp(scene.rt_params.w, 0.0, 1.0);
+            shadow = max(shadow, sh_bake);
+        }
+    }
+
     // ---------------------------------------------------------------
     //  Ambient occlusion (short-ray RT, modes off / fast / full / HBAO)
     // ---------------------------------------------------------------
@@ -399,6 +440,34 @@ void main() {
     int N_gi = max(0, scene.rt_flags2.x);
     if (material_id == 3) N_gi = 0;        // terrain skips GI (matches cube.frag)
     float gi_strength = clamp(scene.rt_params2.x, 0.0, 1.0);
+
+    // Terrain sky-vis probe (cube.frag lines 3010-3030). For terrain
+    // receivers within 50m of the camera, fire 4 rays in a cosine
+    // hemisphere with mask 0xFD (everything EXCEPT terrain itself —
+    // hits castle / brushes but not terrain) and count misses. Without
+    // this, terrain near the castle wall renders with full sky-fill
+    // ambient even though the castle blocks half the sky dome — scene 2
+    // terrain pixels came out ~17% brighter than forward.
+    if (material_id == 3 && scene.rt_flags.x != 0 &&
+        gi_strength > 1e-4 && cam_dist < 50.0) {
+        const int kProbeN = 4;
+        const uint kProbeMask = 0xFDu;
+        vec3 probe_origin = world_pos + vec3(0.0, 0.10, 0.0);
+        int probe_misses = 0;
+        for (int i = 0; i < kProbeN; ++i) {
+            float r1 = rand(seed_base + uvec3(uint(i), 41u, 67u));
+            float r2 = rand(seed_base + uvec3(uint(i), 13u, 89u));
+            float r_h = sqrt(r1);
+            float phi = 6.28318530718 * r2;
+            vec3 dir = vec3(r_h * cos(phi),
+                            sqrt(max(0.0, 1.0 - r1)),
+                            r_h * sin(phi));
+            if (!any_hit_m(probe_origin, dir, 60.0, kProbeMask)) {
+                probe_misses += 1;
+            }
+        }
+        sky_vis = float(probe_misses) / float(kProbeN);
+    }
     // sky_vis must be measured even when gi_strength is 0, otherwise
     // the ambient block above receives sky_vis=1.0 (assumed open sky)
     // and pumps full ambient_sky into deep interior pixels — castle

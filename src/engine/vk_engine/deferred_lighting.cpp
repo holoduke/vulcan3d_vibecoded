@@ -30,7 +30,12 @@ void VulkanEngine::init_deferred_lighting() {
     // depth + sun_shadow. Six bindings, all fragment-stage. Reuses the
     // same binding numbers the shader declares.
     {
-        VkDescriptorSetLayoutBinding b[7]{};
+        // Bindings 0..7. Binding 7 is u_terrain_shadow — the heightmap +
+        // brush-cast baked terrain shadow texture cube.frag samples for
+        // terrain receivers. Without it, my inline-RT shadow with mask
+        // 0x02 misses the castle's static shadow on the plateau and
+        // every terrain pixel under the wall reads full sun.
+        VkDescriptorSetLayoutBinding b[8]{};
         b[0].binding = 0;
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         b[0].descriptorCount = 1;
@@ -39,7 +44,7 @@ void VulkanEngine::init_deferred_lighting() {
         b[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         b[1].descriptorCount = 1;
         b[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        for (int i = 2; i < 7; ++i) {
+        for (int i = 2; i < 8; ++i) {
             b[i].binding = i;
             b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             b[i].descriptorCount = 1;
@@ -48,7 +53,7 @@ void VulkanEngine::init_deferred_lighting() {
         VkDescriptorSetLayoutCreateInfo dlci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
-            .bindingCount = 7, .pBindings = b,
+            .bindingCount = 8, .pBindings = b,
         };
         vk_check(vkCreateDescriptorSetLayout(device_, &dlci, nullptr,
                                               &deferred_lighting_desc_layout_),
@@ -81,7 +86,7 @@ void VulkanEngine::init_deferred_lighting() {
         VkDescriptorPoolSize sizes[] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1 },
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     5 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     6 },
         };
         VkDescriptorPoolCreateInfo pci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -185,7 +190,15 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo sc_ii{ linear_sampler_, scene_color_view_,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet w[7]{};
+        // Terrain shadow bake — falls back to gbuffer1 view if unset
+        // (e.g. on terrain-less scenes); the shader gates the sample on
+        // material_id == 3 anyway, so the bound texture is never read
+        // off-terrain. linear_sampler_ matches cube.frag's 5x5 PCF.
+        VkImageView terr_v = terrain_shadow_view_ ? terrain_shadow_view_
+                                                   : gbuffer1_view_;
+        VkDescriptorImageInfo ts_ii{ linear_sampler_, terr_v,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w[8]{};
         w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[0].dstSet = deferred_lighting_desc_set_; w[0].dstBinding = 0;
         w[0].descriptorCount = 1;
@@ -196,7 +209,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[1].dstSet = deferred_lighting_desc_set_; w[1].dstBinding = 1;
         w[1].descriptorCount = 1;
         w[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        for (int i = 2; i < 7; ++i) {
+        for (int i = 2; i < 8; ++i) {
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w[i].dstSet = deferred_lighting_desc_set_; w[i].dstBinding = i;
             w[i].descriptorCount = 1;
@@ -207,7 +220,8 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[4].pImageInfo = &dep_ii;
         w[5].pImageInfo = &ss_ii;
         w[6].pImageInfo = &sc_ii;
-        vkUpdateDescriptorSets(device_, 7, w, 0, nullptr);
+        w[7].pImageInfo = &ts_ii;
+        vkUpdateDescriptorSets(device_, 8, w, 0, nullptr);
     }
 
     // Transition staging_color into COLOR_ATTACHMENT layout.
