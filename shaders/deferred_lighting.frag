@@ -411,7 +411,15 @@ void main() {
     // ---------------------------------------------------------------
     float ao = 1.0;
     int ao_mode = scene.rt_flags2.w;
-    if (ao_mode > 0) {
+    // cube.frag gates AO on BOTH ao_mode AND rt_flags.z (ao_samples).
+    // With ao_samples=0 in the user's settings forward skips the AO ray
+    // queries entirely and keeps ao=1.0. My deferred was firing them
+    // anyway, producing a 0.4-0.7 ao multiplier that darkened ambient
+    // ~50% in indoor pixels — visible as deferred-brighter elsewhere
+    // because the LACK of darkening was the issue. Wait, opposite: my
+    // AO was darkening pixels forward DOESN'T darken, making deferred
+    // dimmer. ...let me just match the gate.
+    if (ao_mode > 0 && scene.rt_flags.z > 0) {
         // 2-tap "fast" AO as default; full mode could expand to 4-8 taps.
         int n_taps = (ao_mode == 1) ? 2 : 4;
         float ao_radius = max(0.05, scene.rt_params.y);
