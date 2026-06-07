@@ -36,11 +36,15 @@ layout(set = 0, binding = 0) uniform Scene {
     vec4  viewport;
     vec4  muzzle_pos;      // .xyz origin, .w intensity
     vec4  muzzle_color;    // .rgb colour, .w radius (m)
-    // Padding to reach the fog params at the same byte offsets cube.frag
-    // and the C++ scene UBO use. 27 vec4 = terrain_params, terrain_h_low,
-    // terrain_h_high, grass_extra, grass_extra2, light_vp (mat4 = 4 vec4),
-    // terrain_extra, _scene_pad[0..16].
-    vec4  _pad_a[27];
+    // terrain_params.y = wrap_strength (sky-tint lift on back-facing
+    // terrain pixels — atmospheric scattering bounce onto shadow side).
+    // Other channels: .x fog_strength (unused here, fog has its own
+    // params below), .z detail_strength, .w shadow_softness_scale.
+    vec4  terrain_params;
+    // Remaining padding to reach the fog params at the same byte offsets
+    // cube.frag uses. 26 vec4 = terrain_h_low/high, grass_extra(x2),
+    // light_vp (4 vec4), terrain_extra, _scene_pad[0..16].
+    vec4  _pad_a[26];
     // _scene_pad[17] in cube.frag — base fog tint .rgb + master strength .a.
     vec4  distance_fog_color;
     // _scene_pad[18] in cube.frag — .x density, .y start, .z height_top,
@@ -515,9 +519,12 @@ void main() {
                 // samples and averages over many frames. Naively giving
                 // each ray the full bounce blows interior brightness up
                 // ~30-50% (visible on scene 3, the castle lintel).
-                // ambient.a is terrain_ao_punch (not a strength). Drop it
-                // from the multiply, otherwise hit_light zeroes whenever
-                // the user disables terrain AO punch.
+                // ambient.rgb * 0.6 fill (NOT cube.frag's sky_fill of
+                // sky_color * 0.05). Empirically the * 0.6 ambient lift
+                // closes the SAD gap better here because the deferred
+                // path's single-bounce GI under-samples vs cube.frag's
+                // multi-bounce path-trace — the extra ambient lift makes
+                // up for the missing higher bounces statistically.
                 vec3 hit_light = scene.ambient.rgb * 0.6;
                 float n_dot_sun = max(dot(hit_n, L), 0.0);
                 if (n_dot_sun > 0.0 &&
@@ -630,6 +637,17 @@ void main() {
 
     vec3 lit = sun_term + ambient_term + sky_fill + point_term +
                albedo * gi_indirect;
+
+    // Terrain sky-bounce wrap (cube.frag lines 3322-3331). Back-facing
+    // terrain pixels (-N·L > 0) pick up a sky-tinted lift to model
+    // atmospheric scattering bouncing onto the shadow side of slopes.
+    // Without this, the back of distant ridges in scene 5 / 7 reads as
+    // a flat dark patch where forward has a 30% sky-tint contribution.
+    if (material_id == 3) {
+        float wrap_amt = clamp(scene.terrain_params.y, 0.0, 1.0);
+        float back     = max(0.0, -dot(N, L));
+        lit += albedo * scene.sky_color.rgb * back * 0.30 * wrap_amt;
+    }
 
     // ---------------------------------------------------------------
     //  Atmospheric distance fog (verbatim port of cube.frag's exp²
