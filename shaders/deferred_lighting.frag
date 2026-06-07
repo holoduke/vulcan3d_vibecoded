@@ -326,12 +326,20 @@ void main() {
                                    base_softness * 0.25,
                                    base_softness * 6.0);
 
-            // Stratified shadow rays. cube.frag caps at 32 effective
-            // samples (base_s); match that here so per-pixel variance
-            // converges to forward's level. At 16 samples the per-pixel
-            // shadow values were stuck around 0.83 instead of 1.0 in deep
-            // interior, leaking direct sun and pumping scene 3 by ~50%.
+            // Stratified shadow rays — cube.frag's half-rate PCSS:
+            // each frame fires only HALF the ray budget alternating via
+            // a per-pixel checkerboard + frame parity, then TAA's history
+            // blend accumulates the missing samples over two frames so
+            // steady-state quality matches full-rate. Without the
+            // checkerboard, my deferred fires double the rays cube.frag
+            // does per frame, producing slightly different per-pixel
+            // shadow values at edges — same average over 2 frames but
+            // different at any single frame readback.
             int N_s = max(1, min(int(scene.rt_flags.y), 32));
+            ivec2 ip2     = ivec2(gl_FragCoord.xy);
+            int   parity  = ((ip2.x + ip2.y) ^ int(scene.rt_flags.w)) & 1;
+            int   N_s_eff = max(1, (N_s + (parity == 0 ? 1 : 0)) / 2);
+            N_s = N_s_eff;
             int taken = 0;
             float blocked = 0.0;
             float pp_phi_s = rand(seed_base + uvec3(1u, 99u, 0u)) * 6.28318530718;
@@ -507,12 +515,15 @@ void main() {
                 // samples and averages over many frames. Naively giving
                 // each ray the full bounce blows interior brightness up
                 // ~30-50% (visible on scene 3, the castle lintel).
-                vec3 hit_light = scene.ambient.rgb * scene.ambient.a * 0.6;
+                // ambient.a is terrain_ao_punch (not a strength). Drop it
+                // from the multiply, otherwise hit_light zeroes whenever
+                // the user disables terrain AO punch.
+                vec3 hit_light = scene.ambient.rgb * 0.6;
                 float n_dot_sun = max(dot(hit_n, L), 0.0);
                 if (n_dot_sun > 0.0 &&
                     !any_hit(hit_pos + hit_n * 0.01, L, 200.0)) {
                     hit_light += scene.sun_color.rgb *
-                                  scene.sun_color.a * n_dot_sun * 0.30;
+                                  scene.sun_color.a * n_dot_sun;
                 }
                 // Mid-grey albedo proxy for the bounce hit.
                 gi_indirect += vec3(0.5) * hit_light;
