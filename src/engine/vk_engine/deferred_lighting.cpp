@@ -30,12 +30,14 @@ void VulkanEngine::init_deferred_lighting() {
     // depth + sun_shadow. Six bindings, all fragment-stage. Reuses the
     // same binding numbers the shader declares.
     {
-        // Bindings 0..7. Binding 7 is u_terrain_shadow — the heightmap +
-        // brush-cast baked terrain shadow texture cube.frag samples for
-        // terrain receivers. Without it, my inline-RT shadow with mask
-        // 0x02 misses the castle's static shadow on the plateau and
-        // every terrain pixel under the wall reads full sun.
-        VkDescriptorSetLayoutBinding b[8]{};
+        // Bindings 0..8. Binding 8 is u_svgf_gi — cube.frag's raw GI
+        // output (pre-denoise). Sampling it lets the deferred shader
+        // reuse cube.frag's material-aware multi-bounce GI instead of
+        // its own 4-ray approximation, closing most of the remaining
+        // SAD gap on indoor / shadow-side surfaces. Image is in GENERAL
+        // layout when cube.frag writes via imageStore — sampler2D reads
+        // are allowed from GENERAL.
+        VkDescriptorSetLayoutBinding b[9]{};
         b[0].binding = 0;
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         b[0].descriptorCount = 1;
@@ -44,7 +46,7 @@ void VulkanEngine::init_deferred_lighting() {
         b[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         b[1].descriptorCount = 1;
         b[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        for (int i = 2; i < 8; ++i) {
+        for (int i = 2; i < 9; ++i) {
             b[i].binding = i;
             b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             b[i].descriptorCount = 1;
@@ -53,7 +55,7 @@ void VulkanEngine::init_deferred_lighting() {
         VkDescriptorSetLayoutCreateInfo dlci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
-            .bindingCount = 8, .pBindings = b,
+            .bindingCount = 9, .pBindings = b,
         };
         vk_check(vkCreateDescriptorSetLayout(device_, &dlci, nullptr,
                                               &deferred_lighting_desc_layout_),
@@ -86,7 +88,7 @@ void VulkanEngine::init_deferred_lighting() {
         VkDescriptorPoolSize sizes[] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1 },
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     6 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     7 },
         };
         VkDescriptorPoolCreateInfo pci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -198,7 +200,16 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
                                                    : gbuffer1_view_;
         VkDescriptorImageInfo ts_ii{ linear_sampler_, terr_v,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet w[8]{};
+        // SVGF GI image — cube.frag writes raw GI via imageStore in
+        // VK_IMAGE_LAYOUT_GENERAL. Sampling a GENERAL-layout image as
+        // sampler2D is permitted by the spec when the image was created
+        // with both STORAGE and SAMPLED usage bits, which init_svgf_targets
+        // does (setup.cpp ~1498). Falls back to gbuffer1 view if missing
+        // so the descriptor stays valid for early-init crashes.
+        VkImageView svgf_v = svgf_gi_view_ ? svgf_gi_view_ : gbuffer1_view_;
+        VkDescriptorImageInfo svgf_ii{ linear_sampler_, svgf_v,
+                                       VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet w[9]{};
         w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[0].dstSet = deferred_lighting_desc_set_; w[0].dstBinding = 0;
         w[0].descriptorCount = 1;
@@ -209,7 +220,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[1].dstSet = deferred_lighting_desc_set_; w[1].dstBinding = 1;
         w[1].descriptorCount = 1;
         w[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        for (int i = 2; i < 8; ++i) {
+        for (int i = 2; i < 9; ++i) {
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w[i].dstSet = deferred_lighting_desc_set_; w[i].dstBinding = i;
             w[i].descriptorCount = 1;
@@ -221,7 +232,8 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[5].pImageInfo = &ss_ii;
         w[6].pImageInfo = &sc_ii;
         w[7].pImageInfo = &ts_ii;
-        vkUpdateDescriptorSets(device_, 8, w, 0, nullptr);
+        w[8].pImageInfo = &svgf_ii;
+        vkUpdateDescriptorSets(device_, 9, w, 0, nullptr);
     }
 
     // Transition staging_color into COLOR_ATTACHMENT layout.

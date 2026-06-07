@@ -68,6 +68,13 @@ layout(set = 0, binding = 6) uniform sampler2D u_scene_color;
 // of the shadow factor sampled at vWorldPos.xz / 2048 + 0.5. Only
 // sampled when material_id == 3 (terrain receiver).
 layout(set = 0, binding = 7) uniform sampler2D u_terrain_shadow;
+// Raw GI image cube.frag writes (material-aware multi-bounce path-trace
+// via the materials buffer + voxel marcher). Sampling it lets the
+// deferred shader use a HIGHER-QUALITY GI than its own 4-ray loop can
+// produce. The image is in VK_IMAGE_LAYOUT_GENERAL (storage layout)
+// when cube.frag runs imageStore; sampler2D reads from GENERAL are
+// permitted by the spec for STORAGE+SAMPLED images.
+layout(set = 0, binding = 8) uniform sampler2D u_svgf_gi;
 
 layout(push_constant) uniform PC {
     mat4 inv_vp;
@@ -552,6 +559,20 @@ void main() {
         }
         gi_indirect /= float(taken_gi);
         gi_indirect *= gi_strength;
+        // For NON-terrain pixels, cube.frag's GI loop already wrote the
+        // raw single-frame irradiance into u_svgf_gi. Replace my 4-ray
+        // approximation with cube.frag's full-quality multi-bounce trace
+        // — material-aware m_color, voxel-tower aware, with sky_fill +
+        // sun-bounce term using the SAME hash seeds. That puts deferred
+        // GI on the same noise floor as forward without porting all the
+        // materials buffer + voxel marcher into this shader.
+        // Terrain (material_id 3) does NOT get written to u_svgf_gi by
+        // cube.frag (its GI is gated off), so the deferred shader keeps
+        // its own loop result for terrain.
+        if (material_id != 3) {
+            vec3 svgf_raw = texture(u_svgf_gi, uv).rgb;
+            gi_indirect = svgf_raw * gi_strength;
+        }
         // sky_vis: fraction of rays that escaped to sky. 0 = fully
         // enclosed → ambient/sky_fill suppressed; 1 = open sky → full.
         sky_vis = float(sky_hits) / float(taken_gi);
