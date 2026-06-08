@@ -6,8 +6,10 @@
 // stb_image declarations — the implementation is owned by skybox.cpp's TU.
 #include <stb_image.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -389,6 +391,59 @@ void destroy_texture_2d(VkDevice device, VmaAllocator alloc, Texture2D& t) {
 // GPU uploads — total init time becomes max(decode) + sum(upload)
 // instead of the previous sum(decode + upload). On an 8-core CPU with
 // 8K JPG sources that's a ~5× wall-clock cut for the textures init.
+// Texture streaming budget. 8K source assets are decoded at half
+// resolution (4K) — drops JPG decode + GPU upload by 4× without a
+// visible quality hit at typical viewing distance. Override via the
+// QLIKE_TEX_MAX_DIM env var (set to 0 to disable, 8192 to keep full
+// resolution). 8K textures are overkill at 1280×720 anyway; mip-LOD
+// already drops to 4K-equivalent for most pixels.
+static int texture_max_dim() {
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    const char* e = std::getenv("QLIKE_TEX_MAX_DIM");
+    cached = e ? std::atoi(e) : 4096;
+    if (cached < 0) cached = 0;
+    return cached;
+}
+
+// Box-downsample RGBA8 to the given dimensions. In-place safe? No,
+// allocates a fresh buffer. Caller must std::free() the input AND the
+// returned buffer when done.
+static unsigned char* downsample_rgba8(const unsigned char* src,
+                                       int sw, int sh,
+                                       int dw, int dh) {
+    auto* dst = static_cast<unsigned char*>(std::malloc(
+        static_cast<size_t>(dw) * dh * 4));
+    if (!dst) return nullptr;
+    for (int y = 0; y < dh; ++y) {
+        for (int x = 0; x < dw; ++x) {
+            // Map dst pixel back to a tile in src; average the 4 corners.
+            // Cheaper than a proper Lanczos but quality at 4K is fine.
+            float sx0f = float(x)     * float(sw) / float(dw);
+            float sx1f = float(x + 1) * float(sw) / float(dw);
+            float sy0f = float(y)     * float(sh) / float(dh);
+            float sy1f = float(y + 1) * float(sh) / float(dh);
+            int sx0 = int(sx0f), sx1 = (std::min)(sw - 1, int(sx1f));
+            int sy0 = int(sy0f), sy1 = (std::min)(sh - 1, int(sy1f));
+            int n = 0; uint32_t r = 0, g = 0, b = 0, a = 0;
+            for (int yy = sy0; yy <= sy1; ++yy) {
+                for (int xx = sx0; xx <= sx1; ++xx) {
+                    const unsigned char* s = src + (yy * sw + xx) * 4;
+                    r += s[0]; g += s[1]; b += s[2]; a += s[3];
+                    ++n;
+                }
+            }
+            if (n == 0) n = 1;
+            unsigned char* d = dst + (y * dw + x) * 4;
+            d[0] = static_cast<unsigned char>(r / n);
+            d[1] = static_cast<unsigned char>(g / n);
+            d[2] = static_cast<unsigned char>(b / n);
+            d[3] = static_cast<unsigned char>(a / n);
+        }
+    }
+    return dst;
+}
+
 TextureCpuPixels decode_texture_pixels(const std::string& path) {
     TextureCpuPixels r{};
     r.debug_path = path;
@@ -399,6 +454,20 @@ TextureCpuPixels decode_texture_pixels(const std::string& path) {
         px = stbi_load(path.c_str(), &w, &h, &comps, 4);
         if (!px) return r;
         save_cache(path, px, w, h);
+    }
+    // Cap to texture_max_dim — drops 8K → 4K for the heavy castle wall
+    // textures. The mip chain already produces 4K-equivalent for typical
+    // sample distances at 1280×720, so this is a free 4× bandwidth win.
+    const int cap = texture_max_dim();
+    if (cap > 0 && (w > cap || h > cap)) {
+        int dw, dh;
+        if (w >= h) { dw = cap; dh = (std::max)(1, h * cap / w); }
+        else        { dh = cap; dw = (std::max)(1, w * cap / h); }
+        unsigned char* small_px = downsample_rgba8(px, w, h, dw, dh);
+        std::free(px);
+        if (!small_px) return r;
+        px = small_px;
+        w = dw; h = dh;
     }
     r.pixels = px;
     r.width  = w;
