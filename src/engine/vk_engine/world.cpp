@@ -1898,6 +1898,73 @@ void VulkanEngine::destroy_skybox_resources() {
     destroy_skybox(device_, allocator_, skybox_);
 }
 
+// Resolve "assets/tex/<tail>" trying the three roots the engine
+// supports (build/, ../, ../../). Shared between the early-kickoff
+// decode path and the in-init upload path so the two see the same
+// resolved files.
+static std::string resolve_tex_path(const std::string& tail) {
+    const std::string roots[] = {
+        "assets/tex/" + tail,
+        "../assets/tex/" + tail,
+        "../../assets/tex/" + tail,
+    };
+    for (const std::string& p : roots) {
+        std::ifstream f(p);
+        if (f.good()) return p;
+    }
+    return std::string();
+}
+
+// Canonical list of the file-loaded world textures. Kept here so the
+// early-kickoff decode and the in-init upload walk the same indices.
+namespace {
+struct WorldTexSpec {
+    const char* color_jpg;
+    const char* normal_jpg;
+};
+const WorldTexSpec kWorldTexSpecs[] = {
+    { "Ground054/Ground054_2K-JPG_Color.jpg",
+      "Ground054/Ground054_2K-JPG_NormalGL.jpg" },
+    { "Bricks078/Bricks078_8K-JPG_Color.jpg",
+      "Bricks078/Bricks078_8K-JPG_NormalGL.jpg" },
+    { "Wood048/Wood048_2K-JPG_Color.jpg",
+      "Wood048/Wood048_2K-JPG_NormalGL.jpg" },
+    { "Metal042A/Metal042A_2K-JPG_Color.jpg",
+      "Metal042A/Metal042A_2K-JPG_NormalGL.jpg" },
+    { "PaintedBricks001/PaintedBricks001_8K-JPG_Color.jpg",
+      "PaintedBricks001/PaintedBricks001_8K-JPG_NormalGL.jpg" },
+    { "Tiles130/Tiles130_8K-JPG_Color.jpg",
+      "Tiles130/Tiles130_8K-JPG_NormalGL.jpg" },
+    { "Tiles074/Tiles074_8K-JPG_Color.jpg",
+      "Tiles074/Tiles074_8K-JPG_NormalGL.jpg" },
+};
+const char* kWorldSpomPaths[] = {
+    "Bricks078/Bricks078_8K-JPG_Displacement.jpg",
+    "PaintedBricks001/PaintedBricks001_8K-JPG_Displacement.jpg",
+    "Tiles130/Tiles130_8K-JPG_Displacement.jpg",
+    "Tiles074/Tiles074_8K-JPG_Displacement.jpg",
+};
+}  // namespace
+
+void VulkanEngine::start_world_texture_decodes() {
+    // Resolve paths NOW on the main thread (filesystem access is fast)
+    // so the worker threads only do JPG decode. paths[i] empty => skip.
+    std::vector<std::string> paths;
+    paths.reserve(VulkanEngine::kFileTextureCount * 2);
+    for (int i = 0; i < VulkanEngine::kFileTextureCount; ++i) {
+        paths.push_back(resolve_tex_path(kWorldTexSpecs[i].color_jpg));
+        paths.push_back(resolve_tex_path(kWorldTexSpecs[i].normal_jpg));
+    }
+    world_tex_decode_handle_ = start_background_decode(paths);
+
+    std::vector<std::string> spom_paths;
+    spom_paths.reserve(4);
+    for (int i = 0; i < 4; ++i) {
+        spom_paths.push_back(resolve_tex_path(kWorldSpomPaths[i]));
+    }
+    world_spom_decode_handle_ = start_background_decode(spom_paths);
+}
+
 void VulkanEngine::init_textures() {
     {
         VkSamplerCreateInfo si{};
@@ -2014,22 +2081,51 @@ void VulkanEngine::init_textures() {
                   "specs[] must list exactly the file-loaded textures");
     // Albedos go through an sRGB sampler so the GPU does the gamma decode
     // automatically; normals stay UNORM (linear-space, already in [0,1]).
-    // Batched parallel decode: 14 JPGs (7 albedo + 7 normal) decoded
-    // concurrently on worker threads, uploads serialise on the graphics
-    // queue. Was sum(14 × ~150ms decode + ~10ms upload) = ~2.2s, now
-    // max(decode) + 14 × upload ≈ ~300ms on an 8-core CPU.
+    // Decodes were kicked off in start_world_texture_decodes() BEFORE
+    // init_world ran, so they overlapped with the 6-second terrain mesh
+    // upload + chunk build. By the time we walk the futures here the
+    // decode work is typically already done and only the serial uploads
+    // remain — saves another ~1s over the pure-batched approach.
     {
-        std::vector<std::pair<std::string, VkFormat>> reqs;
-        reqs.reserve(kFileTextureCount * 2);
+        std::vector<TextureCpuPixels> cpu =
+            finish_background_decode(world_tex_decode_handle_);
+        world_tex_decode_handle_ = {};
         for (int i = 0; i < kFileTextureCount; ++i) {
-            reqs.emplace_back(specs[i].color_jpg,  VK_FORMAT_R8G8B8A8_SRGB);
-            reqs.emplace_back(specs[i].normal_jpg, VK_FORMAT_R8G8B8A8_UNORM);
-        }
-        std::vector<TextureSlot> out;
-        probe_parallel(reqs, out);
-        for (int i = 0; i < kFileTextureCount; ++i) {
-            albedo_textures_[i] = out[i * 2 + 0];
-            normal_textures_[i] = out[i * 2 + 1];
+            const int ci = i * 2 + 0, ni = i * 2 + 1;
+            // Re-do the path probe-log on miss so users still see which
+            // file was missing.
+            if (cpu.size() <= static_cast<size_t>(ni) ||
+                !cpu[ci].pixels) {
+                log::warnf("[texture] %s missing on every probe path",
+                            specs[i].color_jpg);
+            } else {
+                Texture2D r = upload_decoded_pixels(device_, allocator_,
+                                                     graphics_queue_,
+                                                     graphics_queue_family_,
+                                                     std::move(cpu[ci]),
+                                                     VK_FORMAT_R8G8B8A8_SRGB);
+                if (r.ok) {
+                    TextureSlot s{};
+                    s.image = r.image; s.alloc = r.alloc; s.view = r.view;
+                    albedo_textures_[i] = s;
+                }
+            }
+            if (cpu.size() <= static_cast<size_t>(ni) ||
+                !cpu[ni].pixels) {
+                log::warnf("[texture] %s missing on every probe path",
+                            specs[i].normal_jpg);
+            } else {
+                Texture2D r = upload_decoded_pixels(device_, allocator_,
+                                                     graphics_queue_,
+                                                     graphics_queue_family_,
+                                                     std::move(cpu[ni]),
+                                                     VK_FORMAT_R8G8B8A8_UNORM);
+                if (r.ok) {
+                    TextureSlot s{};
+                    s.image = r.image; s.alloc = r.alloc; s.view = r.view;
+                    normal_textures_[i] = s;
+                }
+            }
         }
     }
     // Slots 7-11: procedurally-baked seamless terrain materials.
@@ -2045,19 +2141,29 @@ void VulkanEngine::init_textures() {
     //                       band material (ground under blades); also
     //                       sampled by .tese for vertex displacement
     //                       on the grass band.
-    // Parallel-decode the 4 displacement maps too (they're 8K JPGs, same
-    // ~150ms decode each — overlapping them via probe_parallel saves
-    // another ~450ms on cold cache).
+    // Displacement maps — already decoded during init_world by the
+    // early-kickoff handle. Just upload the finished CPU buffers.
     {
-        std::vector<std::pair<std::string, VkFormat>> reqs = {
-            { "Bricks078/Bricks078_8K-JPG_Displacement.jpg",                 VK_FORMAT_R8G8B8A8_UNORM },
-            { "PaintedBricks001/PaintedBricks001_8K-JPG_Displacement.jpg",   VK_FORMAT_R8G8B8A8_UNORM },
-            { "Tiles130/Tiles130_8K-JPG_Displacement.jpg",                   VK_FORMAT_R8G8B8A8_UNORM },
-            { "Tiles074/Tiles074_8K-JPG_Displacement.jpg",                   VK_FORMAT_R8G8B8A8_UNORM },
-        };
-        std::vector<TextureSlot> out;
-        probe_parallel(reqs, out);
-        for (int i = 0; i < 4; ++i) spom_height_textures_[i] = out[i];
+        std::vector<TextureCpuPixels> cpu =
+            finish_background_decode(world_spom_decode_handle_);
+        world_spom_decode_handle_ = {};
+        for (int i = 0; i < 4; ++i) {
+            if (cpu.size() <= static_cast<size_t>(i) || !cpu[i].pixels) {
+                log::warnf("[texture] %s missing on every probe path",
+                            kWorldSpomPaths[i]);
+                continue;
+            }
+            Texture2D r = upload_decoded_pixels(device_, allocator_,
+                                                  graphics_queue_,
+                                                  graphics_queue_family_,
+                                                  std::move(cpu[i]),
+                                                  VK_FORMAT_R8G8B8A8_UNORM);
+            if (r.ok) {
+                TextureSlot s{};
+                s.image = r.image; s.alloc = r.alloc; s.view = r.view;
+                spom_height_textures_[i] = s;
+            }
+        }
     }
 
     // Stylized-grass texture set (assets/stylized_grass/...). Used as the

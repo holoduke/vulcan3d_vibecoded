@@ -21,6 +21,7 @@
 #include "engine/skybox.h"
 #include "engine/terrain.h"
 #include "engine/grass.h"
+#include "engine/texture.h"   // for BackgroundDecodeHandle
 #include "game/level.h"
 #include "game/player.h"
 
@@ -239,6 +240,10 @@ private:
     void init_skybox();
     void destroy_skybox_resources();
     void init_textures();
+    // Background-decode kick-off — called BEFORE init_world() so JPG
+    // decodes overlap with the terrain mesh upload. Stashes the handle
+    // in world_tex_decode_handle_; init_textures() picks it back up.
+    void start_world_texture_decodes();
     // CPU-generate the 5 seamless tiling terrain materials (albedo+normal)
     // into texture-array slots 7-11. Called at the end of init_textures().
     void bake_terrain_materials();
@@ -585,6 +590,12 @@ private:
     };
     TextureSlot albedo_textures_[kTextureCount]{};
     TextureSlot normal_textures_[kTextureCount]{};
+    // Async-decode handle owned for the brief window between
+    // start_world_texture_decodes() (kicked off before init_world) and
+    // init_textures() (which finishes the futures + uploads). Null at
+    // all other times — VulkanEngine::init() is the only owner.
+    BackgroundDecodeHandle world_tex_decode_handle_{};
+    BackgroundDecodeHandle world_spom_decode_handle_{};
     // Height-map array for SPOM (parallax occlusion). Only the materials
     // that actually need parallax depth get a slot here; cube.frag picks
     // the right entry by albedo index. Order MUST match cube.frag's

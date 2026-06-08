@@ -530,6 +530,12 @@ void VulkanEngine::init() {
     // FBM (when raymarch is enabled) or the default FastNoiseLite path.
     // Peek just that one flag here.
     preload_terrain_raymarch_flag();
+    // Kick off JPG decodes for the world texture set BEFORE init_world
+    // starts the multi-second terrain mesh + chunk upload. The decodes
+    // run on worker threads while the main thread is busy with terrain;
+    // by the time init_textures() needs them they're (mostly) already
+    // available and only the serial graphics-queue uploads remain.
+    start_world_texture_decodes();
     init_world();
     present_loader_frame("Loading skybox",        0.30f);
     init_skybox();

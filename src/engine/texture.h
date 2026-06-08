@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace qlike {
 
@@ -67,5 +68,25 @@ TextureCpuPixels decode_texture_pixels(const std::string& path);
 Texture2D upload_decoded_pixels(VkDevice device, VmaAllocator alloc,
                                  VkQueue queue, uint32_t queue_family,
                                  TextureCpuPixels&& pixels, VkFormat format);
+
+// Background decode pool. Lets the engine kick off JPG decodes BEFORE
+// the texture init step actually runs — the decodes overlap with the
+// expensive terrain mesh upload + BLAS build that sits between them in
+// VulkanEngine::init(), so by the time init_textures() walks the
+// futures the CPU decode work is already done and only the serial GPU
+// uploads remain. Wins ~1-2s of init wall-clock for free.
+//
+// Caller pattern:
+//   auto handle = start_background_decode({{"path/a.jpg", FMT_A}, ...});
+//   ... other init work that takes >= 1 sec ...
+//   auto pixels = finish_background_decode(handle);   // typically no wait
+//   for (auto& p : pixels) upload_decoded_pixels(...);
+struct BackgroundDecodeJob;
+struct BackgroundDecodeHandle {
+    BackgroundDecodeJob* job = nullptr;       // opaque to caller
+};
+BackgroundDecodeHandle start_background_decode(
+    const std::vector<std::string>& paths);
+std::vector<TextureCpuPixels> finish_background_decode(BackgroundDecodeHandle h);
 
 } // namespace qlike

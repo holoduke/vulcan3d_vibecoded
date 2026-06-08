@@ -11,6 +11,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <utility>
 #include <vector>
 
 namespace qlike {
@@ -423,6 +425,41 @@ Texture2D upload_decoded_pixels(VkDevice device, VmaAllocator alloc,
     std::free(cpu.pixels);
     cpu.pixels = nullptr;
     return r;
+}
+
+// Background decode job — holds the future-vector that
+// start_background_decode kicked off. Lives on the heap so the handle
+// stays trivially copyable.
+struct BackgroundDecodeJob {
+    std::vector<std::future<TextureCpuPixels>> futures;
+    std::vector<std::string> paths;            // for empty-path skipping
+};
+
+BackgroundDecodeHandle start_background_decode(
+    const std::vector<std::string>& paths) {
+    auto* job = new BackgroundDecodeJob();
+    job->paths = paths;
+    job->futures.resize(paths.size());
+    for (size_t i = 0; i < paths.size(); ++i) {
+        if (paths[i].empty()) continue;       // skipped
+        job->futures[i] = std::async(std::launch::async,
+                                       decode_texture_pixels, paths[i]);
+    }
+    BackgroundDecodeHandle h{};
+    h.job = job;
+    return h;
+}
+
+std::vector<TextureCpuPixels> finish_background_decode(BackgroundDecodeHandle h) {
+    std::vector<TextureCpuPixels> out;
+    if (!h.job) return out;
+    out.resize(h.job->paths.size());
+    for (size_t i = 0; i < h.job->paths.size(); ++i) {
+        if (h.job->paths[i].empty() || !h.job->futures[i].valid()) continue;
+        out[i] = h.job->futures[i].get();
+    }
+    delete h.job;
+    return out;
 }
 
 } // namespace qlike
