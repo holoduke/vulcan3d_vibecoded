@@ -134,7 +134,7 @@ void VulkanEngine::init_deferred_lighting() {
     }
 
     log::info("[deferred] lighting pass initialised "
-              "(staging buffer + pipeline ready; default = forward)");
+              "(staging buffer + pipeline ready; default = deferred ON)");
 }
 
 void VulkanEngine::destroy_deferred_lighting() {
