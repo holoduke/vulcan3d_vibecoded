@@ -498,9 +498,15 @@ void main() {
     // sky_vis must be measured even when gi_strength is 0, otherwise
     // the ambient block above receives sky_vis=1.0 (assumed open sky)
     // and pumps full ambient_sky into deep interior pixels — castle
-    // interior gets ~50% brighter than forward. Run a short 4-ray
-    // visibility probe whenever N_gi > 0; gi_strength still gates the
-    // indirect-light accumulation.
+    // interior gets ~50% brighter than forward. Run a short visibility
+    // probe whenever N_gi > 0; gi_strength still gates the indirect-
+    // light accumulation.
+    //
+    // PERF: for non-terrain pixels we overwrite gi_indirect below from
+    // u_svgf_gi, so the inner sun-shadow ray-query is wasted bandwidth.
+    // Skip it on non-terrain — keep the closest_hit for sky_vis but
+    // don't fire the sun-shadow any_hit nor accumulate hit_light.
+    bool skip_gi_inner = (material_id != 3);
     if (N_gi > 0) {
         // Distance-LOD scaling — match cube.frag. Close pixels get the
         // full slider, far pixels collapse toward 1. Cap at 16 in the
@@ -526,34 +532,27 @@ void main() {
             if (closest_hit(ro, dir, gi_radius, t)) {
                 vec3 hit_pos = ro + dir * t;
                 vec3 hit_n   = -dir;
-                // Sun-shadow at the hit point: one any-hit ray; if clear,
-                // hit gets sun + ambient; otherwise just ambient. Sun
-                // contribution scaled by 0.30 — forward's ReSTIR with
-                // SVGF denoise + temporal reuse converges to a much
-                // smaller effective sun-bounce because it importance-
-                // samples and averages over many frames. Naively giving
-                // each ray the full bounce blows interior brightness up
-                // ~30-50% (visible on scene 3, the castle lintel).
-                // ambient.rgb * 0.6 fill (NOT cube.frag's sky_fill of
-                // sky_color * 0.05). Empirically the * 0.6 ambient lift
-                // closes the SAD gap better here because the deferred
-                // path's single-bounce GI under-samples vs cube.frag's
-                // multi-bounce path-trace — the extra ambient lift makes
-                // up for the missing higher bounces statistically.
-                vec3 hit_light = scene.ambient.rgb * 0.6;
-                float n_dot_sun = max(dot(hit_n, L), 0.0);
-                if (n_dot_sun > 0.0 &&
-                    !any_hit(hit_pos + hit_n * 0.01, L, 200.0)) {
-                    hit_light += scene.sun_color.rgb *
-                                  scene.sun_color.a * n_dot_sun;
+                if (!skip_gi_inner) {
+                    // Sun-shadow at the hit point: one any-hit ray; if
+                    // clear, hit gets sun + ambient; otherwise just
+                    // ambient. Mid-grey 0.5 albedo proxy for the bounce.
+                    vec3 hit_light = scene.ambient.rgb * 0.6;
+                    float n_dot_sun = max(dot(hit_n, L), 0.0);
+                    if (n_dot_sun > 0.0 &&
+                        !any_hit(hit_pos + hit_n * 0.01, L, 200.0)) {
+                        hit_light += scene.sun_color.rgb *
+                                      scene.sun_color.a * n_dot_sun;
+                    }
+                    gi_indirect += vec3(0.5) * hit_light;
                 }
-                // Mid-grey albedo proxy for the bounce hit.
-                gi_indirect += vec3(0.5) * hit_light;
             } else {
                 // Miss → sky. Use sky_color tinted by direction.up so
-                // overhead rays brighten more than horizon ones.
-                float up_w = clamp(dir.y, 0.0, 1.0);
-                gi_indirect += scene.sky_color.rgb * (0.4 + 0.6 * up_w);
+                // overhead rays brighten more than horizon ones. Skip
+                // the accumulation when svgf_gi will overwrite below.
+                if (!skip_gi_inner) {
+                    float up_w = clamp(dir.y, 0.0, 1.0);
+                    gi_indirect += scene.sky_color.rgb * (0.4 + 0.6 * up_w);
+                }
                 ++sky_hits;
             }
         }
