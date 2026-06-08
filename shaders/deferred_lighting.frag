@@ -609,8 +609,10 @@ void main() {
                                  ambient_sky    * sky_factor, up);
     // AO multiplies the combined term. 0.08 floor matches the residual
     // brightness forward shows in deeply-shadowed pixels (tiny GI bounce
-    // + temporal-smoothed RTAO). At 0.03 the scene 7 crate-corner pixels
-    // came out literal (0,0,0) where forward had ~(20,20,20).
+    // + temporal-smoothed RTAO). Empirical sweep: removing the floor
+    // regresses all scenes 0.03-0.05% mean SAD even though cube.frag has
+    // no floor of its own — likely because forward's SVGF temporal
+    // smoothing averages the per-pixel collapses out where mine can't.
     float ao_floored = mix(0.08, 1.0, ao);
     vec3 ambient_term = albedo * ambient_combined * ao_floored;
     // sky_fill drops out as a separate term — it's been folded into
