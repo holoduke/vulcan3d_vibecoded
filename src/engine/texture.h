@@ -44,4 +44,28 @@ Texture2D upload_texture_from_pixels(VkDevice device, VmaAllocator alloc,
 
 void destroy_texture_2d(VkDevice device, VmaAllocator alloc, Texture2D& t);
 
+// ---- Streaming / parallel texture loading -----------------------------
+// CPU-side decode result. Holds malloc()'d RGBA8 pixel buffer that must
+// be freed via free() after the corresponding GPU upload. Width/height
+// are zero on failure (file missing or stbi_load failed).
+struct TextureCpuPixels {
+    unsigned char* pixels = nullptr;   // malloc()'d, RGBA8 w*h*4 bytes
+    int            width  = 0;
+    int            height = 0;
+    std::string    debug_path;         // for logging; copied from request
+};
+
+// Decode-only helper. Tries .qtc cache then stbi_load(). No GPU work —
+// safe to call from any thread. Returns empty struct on failure. Caller
+// must free `pixels` with std::free() after upload completes.
+TextureCpuPixels decode_texture_pixels(const std::string& path);
+
+// Upload an already-decoded buffer (from decode_texture_pixels). This
+// MUST be called from the thread that owns the graphics queue (Vulkan
+// queues are externally synchronised). Frees the input pixel buffer on
+// successful upload OR on failure — the caller need not free it.
+Texture2D upload_decoded_pixels(VkDevice device, VmaAllocator alloc,
+                                 VkQueue queue, uint32_t queue_family,
+                                 TextureCpuPixels&& pixels, VkFormat format);
+
 } // namespace qlike
