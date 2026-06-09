@@ -335,16 +335,19 @@ int VoxelWorld::collapse_into_chunks(int shape, int anchor_layers,
     //                    than the same overhang with nothing on it.
     //    This matches the intuition: empty pillars survive long overhangs;
     //    weight-bearing walls fracture earlier under the same cut.
-    // Tuned looser to keep single-bullet holes from cascading vertically.
-    //   kMaxCantilever 20 voxels (~2 m) — voxels can reach support via a
-    //                   longer lateral path before being flagged.
-    //   kLoadWeight 0.05 — load above counts, but less; a 30-voxel stack
-    //                   adds only 1.5 to effective stress.
-    //   kStressMax 20 — matches kMaxCantilever for a pure cantilever
-    //                   (no load), and stays loose under realistic load.
-    const int   kMaxCantilever = 20;
-    const int   kStressMax     = 20;
-    const float kLoadWeight    = 0.05f;
+    // Tightened from 20 → 14 so the BFS reach from a supported column is
+    // shorter — sub-sections of the top start to flag as unstable when
+    // their neck gets thin, instead of holding together until the entire
+    // top disconnects in one component. Effect: hitting one tower weakens
+    // it AND its near neighbours individually, so the top crumbles in
+    // several chunks instead of toppling as one block.
+    //
+    // kLoadWeight bumped to 0.08 so a tall stack on a weakened pillar
+    // bites in earlier — load_above 30 now adds +2.4 to stress (was 1.5),
+    // tipping the heavy-on-thin case toward breakaway.
+    const int   kMaxCantilever = 14;
+    const int   kStressMax     = 14;
+    const float kLoadWeight    = 0.08f;
     scratch_a_.assign(N, 255u);   // 255 = unreached
     std::vector<uint8_t>& dist = scratch_a_;
     std::vector<int> stk; stk.reserve(1 << 16);
