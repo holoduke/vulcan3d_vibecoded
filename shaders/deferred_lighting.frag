@@ -290,7 +290,21 @@ void main() {
         vec3 tan_u = normalize(cross(ref, L));
         vec3 tan_v = cross(L, tan_u);
 
-        float bias = 0.005 + 0.02 * (1.0 - ndl_raw);
+        // Terrain (material 3) needs an aggressive far-distance bias to
+        // clear the rasterised-LOD-vs-BLAS height gap on distant ridges.
+        // Same formula cube.frag's forward terrain path uses — without
+        // it, kilometre-range mountain ridges false-hit their own BLAS
+        // detail and the deferred path reproduces the "dark leaves"
+        // splatter the forward fix already addressed. Brushes keep the
+        // tight base bias (a few cm) so close-shadow precision survives.
+        float bias;
+        if (material_id == 3) {
+            float far_t = max((cam_dist - 60.0) / 200.0, 0.0);
+            float far_bias = min(far_t * far_t * 6.0, 32.0);
+            bias = 0.05 + 0.10 * (1.0 - ndl_raw) + far_bias;
+        } else {
+            bias = 0.005 + 0.02 * (1.0 - ndl_raw);
+        }
         vec3 origin = world_pos + N * bias;
         float base_softness = scene.rt_params.x;
         float kBlockerCone = base_softness * 4.0;

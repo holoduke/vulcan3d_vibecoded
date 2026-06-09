@@ -2469,16 +2469,18 @@ void main() {
         //   320 m   : ~6 m  (covers typical LOD-3 peak undershoot)
         //   в‰Ґ 600 m : ~12 m (covers worst-case)
         float dist_to_cam = cam_dist;      // P5: use hoisted distance
-        float far_t = clamp((dist_to_cam - 80.0) / 320.0, 0.0, 1.0);
-        // far_t² × 8 covers the worst-case LOD-3 raster-vs-BLAS gap
-        // (~15m below true heightmap peaks at ≥320m); without this
-        // distant terrain ridges get false-hit by the BLAS peaks the
-        // rasterised LOD interpolates under, producing the dark
-        // patches the user reports. NB: this term WAS computed but
-        // never added to `bias` — a stale optimisation comment claimed
-        // mask 0x02 sidestepped the need, but terrain ALSO uses 0x02
-        // and so still gets hit by its own BLAS detail.
-        float terrain_far_bias = far_t * far_t * 8.0;
+        // Unclamped far_t so the bias keeps growing past 400 m. The
+        // BLAS-vs-raster gap on LOD-2 stride-4 ridges keeps widening
+        // with distance (the rasterised quad's straight-line interp
+        // can sit further below sharp BLAS peaks the further out you
+        // go), and the previous clamp at 1.0 capped the bias at 8 m —
+        // not enough to clear the ~20–30 m peak undershoot at km-
+        // range, so distant ridges kept reading as dark splatter
+        // ("dark leaves") even after the first fix. Quadratic growth
+        // soft-clamped at 32 m covers the worst case without blowing
+        // out near-shadow precision.
+        float far_t = max((dist_to_cam - 60.0) / 200.0, 0.0);
+        float terrain_far_bias = min(far_t * far_t * 6.0, 32.0);
         float bias = is_terrain_pre
             ? (0.05 + 0.10 * (1.0 - n_dot_l_raw) + terrain_far_bias)
             : (0.005 + 0.02 * (1.0 - n_dot_l_raw));
