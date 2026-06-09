@@ -644,26 +644,26 @@ void VulkanEngine::update_scene_ubo() {
         }
     }
 
-    // Voxel building params for cube.frag's inline-RT shadow + GI rays
-    // and for water-reflection sun-occlusion in terrain_raymarch.frag.
-    // Now stores the UNION AABB of ALL shapes (previously only shape 0,
-    // which missed multi-shape castles for the sun-block check). voxel_grid
-    // keeps shape 0's brick dims (per-shape data isn't useful at the
-    // union scale anyway). .w of voxel_origin gates the feature off when
-    // there's no shape.
+    // Voxel building params for cube.frag's inline-RT shadow + GI rays,
+    // water_vox_march reflection lookups, and the sun-block AABB in
+    // terrain_raymarch.frag. MUST be shape 0's bounds — vox_entries[]
+    // is indexed in shape 0's brick grid, so any other origin makes
+    // the brick lookup misaligned (every brick coord points off by the
+    // delta between shape 0 and the chosen origin → holes shot in the
+    // main castle stop showing in water reflections after the first
+    // chunk falls and shifts the union origin).
+    //
+    // Previous "union of all shapes" attempt broke water_vox_march on
+    // post-collapse frames; the sun-block AABB in terrain_raymarch is
+    // approximate anyway (chunks rarely shadow much terrain) so the
+    // minor regression there is the right trade.
     if (voxel_world_ && !voxel_world_->shapes().empty()) {
-        glm::vec3 bmin( std::numeric_limits<float>::infinity());
-        glm::vec3 bmax(-std::numeric_limits<float>::infinity());
-        for (const auto& s : voxel_world_->shapes()) {
-            glm::vec3 ext(s.dim_bricks[0] * voxel::kBrickSize,
-                          s.dim_bricks[1] * voxel::kBrickSize,
-                          s.dim_bricks[2] * voxel::kBrickSize);
-            bmin = glm::min(bmin, s.origin_world);
-            bmax = glm::max(bmax, s.origin_world + ext);
-        }
-        data.voxel_origin = glm::vec4(bmin, 1.0f);
-        data.voxel_dims   = glm::vec4(bmax - bmin, voxel::kVoxelSize);
         const auto& s0 = voxel_world_->shapes()[0];
+        glm::vec3 ext0(s0.dim_bricks[0] * voxel::kBrickSize,
+                       s0.dim_bricks[1] * voxel::kBrickSize,
+                       s0.dim_bricks[2] * voxel::kBrickSize);
+        data.voxel_origin = glm::vec4(s0.origin_world, 1.0f);
+        data.voxel_dims   = glm::vec4(ext0, voxel::kVoxelSize);
         data.voxel_grid   = glm::vec4(
             static_cast<float>(s0.dim_bricks[0]),
             static_cast<float>(s0.dim_bricks[1]),
