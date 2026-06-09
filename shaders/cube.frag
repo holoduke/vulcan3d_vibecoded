@@ -2333,7 +2333,16 @@ void main() {
     // the "AO * sky_factor" double-darkening that crushed interior
     // edges to black.
     vec3 ambient_ground = scene.ambient.rgb * scene.rt_params.z;
-    vec3 ambient_sky    = scene.sky_color.rgb * 0.45 * scene.rt_params.z;
+    // Warm-bias the ambient sky tint by mixing 12 % sun colour. The
+    // raw sky tint here is the saturated Rayleigh blue used for the
+    // sky dome (0.55, 0.72, 0.95), which is correct for the sky
+    // itself but reads as steel-blue on pure-shadow surfaces (keep
+    // walls, deep brush interiors) that get no sun direct. Real
+    // shadow surfaces pick up bounce light off warm nearby geometry
+    // and tonally drift toward neutral; the sky dome stays untouched
+    // since this only affects the ambient term computed downstream.
+    vec3 sky_tint       = mix(scene.sky_color.rgb, scene.sun_color.rgb, 0.12);
+    vec3 ambient_sky    = sky_tint * 0.45 * scene.rt_params.z;
 
     // Direct lighting uses pure Lambert (max(0, NВ·L)). The "wrap" lift
     // for back-of-mountain pixels is applied LATER as a sky-tinted

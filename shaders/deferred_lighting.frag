@@ -601,7 +601,11 @@ void main() {
     //  ambient and sun → pure black pixels (the scattered-black bug).
     // ---------------------------------------------------------------
     float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 sky_tint = scene.sky_color.rgb;
+    // Warm-bias the ambient sky tint (12 % sun colour). See the matching
+    // block in cube.frag — the raw saturated Rayleigh blue reads as
+    // steel-blue on pure-shadow surfaces; bounce light off warm
+    // geometry tonally lifts real shadows toward neutral.
+    vec3 sky_tint = mix(scene.sky_color.rgb, scene.sun_color.rgb, 0.12);
     float ambient_strength = clamp(scene.rt_params.z, 0.0, 1.0);
     // ambient.a is `terrain_ao_punch` on the C++ side (descriptors.cpp line
     // 341 packs it there), NOT a strength multiplier. cube.frag does
