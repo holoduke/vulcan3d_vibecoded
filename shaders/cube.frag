@@ -2470,14 +2470,17 @@ void main() {
         //   в‰Ґ 600 m : ~12 m (covers worst-case)
         float dist_to_cam = cam_dist;      // P5: use hoisted distance
         float far_t = clamp((dist_to_cam - 80.0) / 320.0, 0.0, 1.0);
-        float terrain_far_bias = far_t * far_t * 8.0;   // 0 в†’ 8 across the ramp
-        // Bias along the receiver normal so the ray clears the
-        // surface. Terrain has near-flat surfaces so a small lift
-        // is enough; the BLAS-vs-LOD mismatch that needed the big
-        // distance-ramped bias is now sidestepped by the no-terrain
-        // mask above (the ray won't hit terrain at all).
+        // far_t² × 8 covers the worst-case LOD-3 raster-vs-BLAS gap
+        // (~15m below true heightmap peaks at ≥320m); without this
+        // distant terrain ridges get false-hit by the BLAS peaks the
+        // rasterised LOD interpolates under, producing the dark
+        // patches the user reports. NB: this term WAS computed but
+        // never added to `bias` — a stale optimisation comment claimed
+        // mask 0x02 sidestepped the need, but terrain ALSO uses 0x02
+        // and so still gets hit by its own BLAS detail.
+        float terrain_far_bias = far_t * far_t * 8.0;
         float bias = is_terrain_pre
-            ? (0.05 + 0.10 * (1.0 - n_dot_l_raw))
+            ? (0.05 + 0.10 * (1.0 - n_dot_l_raw) + terrain_far_bias)
             : (0.005 + 0.02 * (1.0 - n_dot_l_raw));
         // For axis-aligned brushes (non-terrain), the shading normal
         // N has been bent by corner softening (~30° at outer corners)
