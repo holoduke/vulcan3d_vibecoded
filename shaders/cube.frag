@@ -429,13 +429,28 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
         Bb = vec3(0.0, 1.0, 0.0);
         uv0 = vec2(wp_scaled.x * sign(N.z), wp_scaled.y);
     }
+    // 2:1-aspect source textures (Bricks078 → height slot 0, Tiles130 →
+    // slot 2) tile twice as often in U as in V when driven by square
+    // world-space UVs, so the stones render squashed 2:1. Halve U for
+    // those slots so texels are world-square. ssdm_disp.frag and
+    // shell.frag apply the same factor — keep in sync.
+    vec2 tex_aspect = (height_idx == 0 || height_idx == 2)
+                      ? vec2(0.5, 1.0) : vec2(1.0);
+    uv0 *= tex_aspect;
     out_axis = axis;
     out_T = T; out_B = Bb; out_face_n = face_n;
     out_uv0 = uv0;
 
     vec3 V_w = normalize(scene.camera_pos.xyz - vWorldPos);
     vec3 V_t = vec3(dot(V_w, T), dot(V_w, Bb), dot(V_w, face_n));
-    if (V_t.z < 0.2) return uv0;   // grazing — skip parallax (shimmer guard)
+    // Grazing fade. The old hard cutoff (V_t.z < 0.2 → flat) switched
+    // from FULL parallax to none across one pixel, and just above the
+    // cutoff P = V_t.xy / V_t.z is near its largest — walls viewed
+    // along their plane (looking up from the base) showed maximal
+    // smearing right next to a flat band. Ramp the strength to zero
+    // instead so displacement dies out smoothly toward grazing.
+    float graze = smoothstep(0.12, 0.45, V_t.z);
+    if (graze <= 0.001) return uv0;   // fully grazing — skip the march
 
     // Ramp parallax depth down at distance so far walls stay flat (no
     // visible texture swimming) and only close-up walls show the bumps.
@@ -451,7 +466,10 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     float spom_strength = max(0.0, scene.spom_params.x);
     if (spom_strength < 0.01) return uv0;
     float kHeightScale = kHeightScaleBase * spom_strength;
-    vec2  P = (V_t.xy / V_t.z) * (kHeightScale * depth_w);
+    // graze folds into the effective depth so the march, the recessed
+    // depth-override and the silhouette test all fade together.
+    float eff_depth = depth_w * graze;
+    vec2  P = (V_t.xy / V_t.z) * (kHeightScale * eff_depth) * tex_aspect;
 
     // Step count ramps with depth_w: full 12 steps for the closest
     // walls (depth_w → 1), down to 4 steps for walls just inside the
@@ -514,7 +532,7 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     // edge — make those pixels transparent so the silhouette looks
     // bumped at corners instead of flat-clipped.
     vec2 d_uv = final_uv - uv0;
-    float d_T = d_uv.x / max(uv_scale, 1e-4);
+    float d_T = d_uv.x / max(uv_scale * tex_aspect.x, 1e-4);
     float d_B = d_uv.y / max(uv_scale, 1e-4);
     // World-axis index for T and B: 0=X, 1=Y, 2=Z. T's axis depends on
     // the dominant face axis (see basis selection above).
@@ -588,7 +606,7 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     // the hit. Pushing INTO the surface (-face_n) keeps the displacement
     // inward-only, matching cube.frag's `layout(depth_greater)` contract
     // so gl_FragDepth writes never go nearer than the rasterised face.
-    float depth_world = final_layer * kHeightScale * depth_w;
+    float depth_world = final_layer * kHeightScale * eff_depth;
     out_recessed_pos  = out_displaced_pos - face_n * depth_world;
     return final_uv;
 }
@@ -1993,9 +2011,19 @@ void main() {
                     // Brick reaches up to this fragment -- write
                     // the parallax-hit depth so downstream passes
                     // see the correct brick-top geometry.
+                    // pc.mvp maps OBJECT space to clip; static brushes are
+                    // translate*scale only, so undo the model transform
+                    // analytically instead of a generic per-fragment
+                    // mat4 inverse() (~100 ALU on every wall pixel).
                     vec3 hit_world = vWorldPos - proj_n * parallax_hit_depth;
-                    vec4 rc = (pc.mvp * inverse(pc.model)) *
-                              vec4(hit_world, 1.0);
+                    vec3 inv_sc = 1.0 / vec3(dot(pc.model[0].xyz, pc.model[0].xyz),
+                                             dot(pc.model[1].xyz, pc.model[1].xyz),
+                                             dot(pc.model[2].xyz, pc.model[2].xyz));
+                    vec3 rel_h  = hit_world - pc.model[3].xyz;
+                    vec3 hit_obj = vec3(dot(rel_h, pc.model[0].xyz),
+                                        dot(rel_h, pc.model[1].xyz),
+                                        dot(rel_h, pc.model[2].xyz)) * inv_sc;
+                    vec4 rc = pc.mvp * vec4(hit_obj, 1.0);
                     gl_FragDepth = max(gl_FragCoord.z, rc.z / rc.w);
                 }
             } else if (spom_mode == 3) {
@@ -2070,6 +2098,10 @@ void main() {
                         // other SPOM modes.
                         vec2  P = (V_t.xy / max(V_t.z, 0.1)) *
                                   (kHeightScale * spom_strength * depth_w);
+                        // Match spom_uv()'s 2:1 texture-aspect handling so
+                        // the march direction agrees with the scaled UVs.
+                        P *= (h_idx == 0 || h_idx == 2) ? vec2(0.5, 1.0)
+                                                        : vec2(1.0);
                         vec2  delta = P / num_layers;
 
                         // Start the march at the reference plane.
@@ -2178,8 +2210,16 @@ void main() {
                         // to push toward camera when local_z < 0 (brick
                         // out) or away when > 0 (brick in).
                         vec3 hit_world = vWorldPos - V_w * view_dist;
-                        vec4 rc = (pc.mvp * inverse(pc.model)) *
-                                  vec4(hit_world, 1.0);
+                        // Same analytic translate*scale un-transform as the
+                        // mode-2 path — avoids a per-fragment mat4 inverse().
+                        vec3 inv_sc3 = 1.0 / vec3(dot(pc.model[0].xyz, pc.model[0].xyz),
+                                                  dot(pc.model[1].xyz, pc.model[1].xyz),
+                                                  dot(pc.model[2].xyz, pc.model[2].xyz));
+                        vec3 rel_h3  = hit_world - pc.model[3].xyz;
+                        vec3 hit_obj3 = vec3(dot(rel_h3, pc.model[0].xyz),
+                                             dot(rel_h3, pc.model[1].xyz),
+                                             dot(rel_h3, pc.model[2].xyz)) * inv_sc3;
+                        vec4 rc = pc.mvp * vec4(hit_obj3, 1.0);
                         gl_FragDepth = max(gl_FragCoord.z, rc.z / rc.w);
 
                         // Update spom_world for the downstream RT lighting

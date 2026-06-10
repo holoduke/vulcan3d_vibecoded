@@ -92,19 +92,33 @@ void main() {
     // Triplanar UV in object space: the dominant tangent plane is the one
     // perpendicular to the largest normal axis. For vertical walls that's
     // XY (normal=Z) or ZY (normal=X). Use object-space UVs so brick
-    // alignment matches cube.frag's spom_uv() sampling exactly.
+    // alignment matches cube.frag's spom_uv() sampling exactly — including
+    // the sign(N) handedness flip; without it the -X/-Z faces sampled a
+    // MIRRORED height field, so the compose remap smeared pixels toward
+    // crevices that don't line up with the rendered bricks.
     vec3 absN = abs(N);
     vec2 uvw;
     if (absN.x > absN.z) {
-        uvw = vec2(vWorldPos.z, vWorldPos.y);
+        uvw = vec2(vWorldPos.z * sign(N.x), vWorldPos.y);
     } else {
-        uvw = vec2(vWorldPos.x, vWorldPos.y);
+        uvw = vec2(vWorldPos.x * sign(N.z), vWorldPos.y);
     }
     uvw *= vTexParams.z;  // uv_scale per material
+    if (hidx == 0) uvw.x *= 0.5;  // 2:1 Bricks078 aspect — matches spom_uv()
 
     // Sample height map. h ∈ [0,1] -- 1 = brick top (no recession), 0 = deep crevice.
     float h = texture(u_spom_height[hidx], uvw).r;
-    float recession = (1.0 - h) * 0.04 * strength;   // matches cube.frag base
+    // Distance fade matches cube.frag's spom_uv() (flat past 30 m). The
+    // displacement field must die out where the wall pass stops doing
+    // parallax, or the compose remap keeps smearing far walls whose
+    // relief is no longer rendered.
+    float cam_d   = distance(scene.camera_pos.xyz, vWorldPos);
+    float depth_w = 1.0 - smoothstep(8.0, 30.0, cam_d);
+    float recession = (1.0 - h) * 0.04 * strength * depth_w;   // matches cube.frag base
+    if (recession < 1e-5) {
+        outDisp = vec2(0.0);
+        return;
+    }
 
     // Project the recession back to screen pixels via the normal's screen
     // derivative at this fragment. dFdx/dFdy of screen position is by

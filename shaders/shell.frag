@@ -109,15 +109,18 @@ void main() {
     // Triplanar UV (object-space, world-space-equivalent for axis-aligned brushes):
     // pick the lateral plane based on dominant normal.
     vec3 absN = abs(N);
+    // sign(N) handedness + 2:1 aspect for Bricks078 (hidx 0) — must match
+    // cube.frag's spom_uv() or the silhouette bricks mirror the wall's.
+    float u_asp = (hidx == 0) ? 0.5 : 1.0;
     vec2 uv;
     vec2 dUV_dWorldX;  // unit per metre, used to convert march steps to UV
     vec2 dUV_dWorldZ;
     if (absN.x > absN.z) {
         // wall faces ±X: lateral UV = world (Z, Y)
-        uv = vec2(vWorldPos.z, vWorldPos.y) * vTexParams.z;
+        uv = vec2(vWorldPos.z * sign(N.x) * u_asp, vWorldPos.y) * vTexParams.z;
     } else {
         // wall faces ±Z: lateral UV = world (X, Y)
-        uv = vec2(vWorldPos.x, vWorldPos.y) * vTexParams.z;
+        uv = vec2(vWorldPos.x * sign(N.z) * u_asp, vWorldPos.y) * vTexParams.z;
     }
 
     // March parallax. View ray steps INWARD (along -N component of V).
@@ -169,8 +172,8 @@ void main() {
         if (depth_from_base < 0.0) continue;  // still above un-extruded face
         // Lateral UV at this march point.
         vec2 puv;
-        if (absN.x > absN.z) puv = vec2(p_world.z, p_world.y) * vTexParams.z;
-        else                 puv = vec2(p_world.x, p_world.y) * vTexParams.z;
+        if (absN.x > absN.z) puv = vec2(p_world.z * sign(N.x) * u_asp, p_world.y) * vTexParams.z;
+        else                 puv = vec2(p_world.x * sign(N.z) * u_asp, p_world.y) * vTexParams.z;
         float h = texture(u_spom_height[hidx], puv).r;
         float surface_depth = (1.0 - h) * max_depth;  // brick surface depth from un-extruded face
         if (depth_from_base >= surface_depth) {
