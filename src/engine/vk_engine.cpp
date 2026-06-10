@@ -1776,10 +1776,13 @@ void VulkanEngine::run(const RunOptions& opts) {
             if (opts_.scene > 0) {
                 struct ScenePose { glm::vec3 pos; float yaw; float pitch; };
                 static const ScenePose kScenes[] = {
-                    // 1: castle exterior, north entrance, sun behind us (lit walls)
-                    { glm::vec3(0.0f,  23.5f,  18.0f),  kPi,        0.10f },
-                    // 2: castle exterior, same spot, looking south (shadow side)
-                    { glm::vec3(0.0f,  23.5f, -18.0f),  0.0f,       0.10f },
+                    // 1: castle exterior, north entrance, sun behind us (lit walls).
+                    // Yaw 0 faces -Z (south, toward the castle from z=+18);
+                    // the old kPi here faced +Z and framed the voxel tower
+                    // 100 m north instead of the castle.
+                    { glm::vec3(0.0f,  23.5f,  18.0f),  0.0f,       0.10f },
+                    // 2: castle exterior, south side (shadow side), looking north
+                    { glm::vec3(0.0f,  23.5f, -18.0f),  kPi,        0.10f },
                     // 3: castle interior, looking up at the entrance lintel (PCSS)
                     { glm::vec3(0.0f,  23.5f,   2.0f),  kPi,        0.55f },
                     // 4: voxel tower mid-range (multi-shape, self-shadow)
@@ -1817,8 +1820,10 @@ void VulkanEngine::run(const RunOptions& opts) {
         if (opts_.scene > 0 && !autodemo) {
             struct ScenePose { glm::vec3 pos; float yaw; float pitch; };
             static const ScenePose kScenes[] = {
-                { glm::vec3(0.0f,  23.5f,  18.0f),  kPi,        0.10f },
-                { glm::vec3(0.0f,  23.5f, -18.0f),  0.0f,       0.10f },
+                // Keep in lock-step with the autodemo copy above (scene 1/2
+                // yaws face the castle, not the voxel tower north of it).
+                { glm::vec3(0.0f,  23.5f,  18.0f),  0.0f,       0.10f },
+                { glm::vec3(0.0f,  23.5f, -18.0f),  kPi,        0.10f },
                 { glm::vec3(0.0f,  23.5f,   2.0f),  kPi,        0.55f },
                 { glm::vec3(8.0f,  27.0f,  35.0f),  kPi,        0.10f },
                 { glm::vec3(60.0f, 26.0f,  60.0f), -0.75f,      0.05f },
