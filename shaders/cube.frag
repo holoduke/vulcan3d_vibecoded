@@ -2092,48 +2092,17 @@ void main() {
                 // discard would wipe every brick crevice on the floor.
                 float ss_strength = max(0.0, scene.spom_params.x);
                 if (axis != 1 && ss_strength > 0.01) {
-                    // Only discard at TRUE BRUSH CORNERS — pixels past
-                    // the un-extruded brush bounds on TWO lateral axes
-                    // simultaneously. Face edges (past on only ONE
-                    // lateral axis) keep full wall rendering.
-                    //
-                    // Without this 2-axis gate, the discard fires along
-                    // every face edge in a band the full width of the
-                    // lateral push (~4cm) → wall looked perforated
-                    // along all edges. Brush corners (where two faces
-                    // meet) are the only places "real" silhouette
-                    // extension should produce sky-through-bricks.
-                    vec3  brush_center = pc.model[3].xyz;
-                    vec3  brush_half   = vec3(length(pc.model[0].xyz),
-                                              length(pc.model[1].xyz),
-                                              length(pc.model[2].xyz)) * 0.5;
-                    vec3  past          = max(vec3(0.0),
-                                              abs(vWorldPos - brush_center) - brush_half);
-                    // Mask the face-normal axis out (its "past" is the
-                    // outward extrusion, not silhouette-relevant).
-                    vec3  lateral_mask  = 1.0 - abs(proj_n);
-                    vec3  lateral_past  = past * lateral_mask;
-                    float num_past      = float(lateral_past.x > 0.001) +
-                                          float(lateral_past.y > 0.001) +
-                                          float(lateral_past.z > 0.001);
-
+                    // The corner "sky-through-bricks" silhouette discard
+                    // that used to live here is REMOVED. It wrote
+                    // transparent far-plane pixels wherever the march
+                    // went deep at a brush corner — with the larger
+                    // stone tiling that punched visible see-through
+                    // holes in the walls around the gate (and the same
+                    // class of artifact had already been reported twice
+                    // before). The depth-override relief below carries
+                    // the visual interest; corners stay solid.
                     float parallax_hit_depth = dot(vWorldPos - spom_recessed,
                                                    spom_face_n);
-                    // Threshold = half of max parallax depth (= 2cm with
-                    // heightScale=4cm). Bricks at h>0.5 of the height
-                    // map keep their pixels at the corner; bricks at
-                    // h<0.5 (deeper crevices) discard → sky shows
-                    // between brick-top extensions. Yields stepped
-                    // silhouette with ~50% brick coverage at corners.
-                    // Tightening to 0.001 would make corners super
-                    // sparse (only the very brick-top peaks); loosening
-                    // to 0.04 would discard nothing.
-                    if (num_past >= 2.0 && parallax_hit_depth > 0.02) {
-                        outColor     = vec4(0.0);
-                        outMotion    = vec2(0.0);
-                        gl_FragDepth = 1.0;
-                        return;
-                    }
                     // Brick reaches up to this fragment -- write
                     // the parallax-hit depth so downstream passes
                     // see the correct brick-top geometry.
