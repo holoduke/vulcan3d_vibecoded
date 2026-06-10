@@ -425,14 +425,20 @@ void VulkanEngine::update_scene_ubo() {
     // .z = half-rate-shadow toggle for cube.frag (Phase 3 consumer).
     //      When 1, brush/dyn surfaces skip the inline blocker+PCSS
     //      block and bilinear-sample u_shadow_lr (binding 18) instead.
-    // .w = SVGF GI denoiser enable (Session 2). When >0.5 cube.frag
+    // .w = GI temporal accumulator enable. When >0.5 cube.frag
     //      EMA-blends shade_radiance with the reprojected history
     //      sample from binding 20/21 (ping-pong by frame parity).
+    //      ALWAYS ON, decoupled from rt_.svgf_enabled: the accumulator
+    //      denoises ONLY the raw GI irradiance (pre-albedo, motion-
+    //      reprojected — sharp textures untouched), which is exactly
+    //      the scoped denoise the GI signal needs. svgf_enabled now
+    //      gates only the full-screen a-trous passes, whose scene-wide
+    //      blur is opt-in.
     data.terrain_local_info = glm::vec4(
         (!rt_.terrain_raymarch_enabled && rt_.water_enabled) ? 1.0f : 0.0f,
         terrain_height_max_ + 5.0f,   // .y = mesh max height (air early-out)
         rt_.half_rate_shadows ? 1.0f : 0.0f,
-        rt_.svgf_enabled ? 1.0f : 0.0f);
+        1.0f);
     // Copy the baked 32×32 hi-Z max-cell grid into the UBO (1024
     // floats → 256 vec4). The grid is static after level load (baked
     // in init_world from terrain_data_.heights); when it isn't ready
