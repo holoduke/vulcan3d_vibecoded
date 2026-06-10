@@ -210,7 +210,10 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
         float tilt = (u01(rng) - 0.5f) * 0.6f;       // [-0.30, 0.30] rad
         b.pos_pad        = glm::vec4(wx, wy, wz, tilt);
         float rotation   = rot(rng);
-        float h_factor   = 0.65f + u01(rng) * 0.7f;
+        // Tightened from 0.65 + 0.7u: with lawn-scale blade_height the
+        // tall tail of the old range stuck isolated blades 2x above the
+        // raymarched field.
+        float h_factor   = 0.75f + u01(rng) * 0.5f;
         // Clump id: a per-blade hash that the shader blends with the
         // base tint so neighbouring blades tend to share colour, giving
         // the "patches of slightly different green" look characteristic

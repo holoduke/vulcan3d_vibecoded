@@ -95,8 +95,11 @@ void main() {
     // sun direction; constant sky term is small enough to keep
     // back-facing slopes visible without flattening the look. The
     // cap below still bounds total brightness for bloom safety.
-    float sun_amt = scene.sun_color.a * 0.35 * n_dot_l;
-    float sky_amt = 0.20;
+    // Lifted 0.35/0.20 → 0.52/0.26: the instanced blades shaded ~2×
+    // darker than the raymarched blade field they stand in, so sparse
+    // blades read as near-black spears against the bright lawn.
+    float sun_amt = scene.sun_color.a * 0.52 * n_dot_l;
+    float sky_amt = 0.26;
 
     // Side-lit blade shading: brighten the sunward side and darken the
     // away-side using the RAW n_dot_l (sign carries direction). Done
@@ -157,8 +160,9 @@ void main() {
     vec3 lit = base * (lum * side_tint) + trans * vColor;
     // Hard ceiling — guarantees we never feed the bloom mip chain with
     // grass pixels above its threshold even under aggressive
-    // auto-exposure boosts.
-    lit = min(lit, vec3(0.50));
+    // auto-exposure boosts. (0.50 → 0.65 alongside the sun/sky lift;
+    // still well under the 1.349 bloom threshold.)
+    lit = min(lit, vec3(0.65));
 
     // Soft alpha across the blade UV — adjacent blades blend without
     // back-to-front sorting. Discard threshold from grass_extra.y so

@@ -52,8 +52,11 @@ struct GrassParams {
     // a square centred on the heightmap, sized to cover most of the
     // terrain. Larger = sparser grass, smaller = denser.
     float    half_extent  = 600.0f;
-    float    blade_height = 0.55f;   // base unit blade height (m)
-    float    blade_width  = 0.045f;  // base half-width (m)
+    // Lawn-scale blades. 0.55 m made every instanced blade tower over
+    // the ~0.3 m raymarched blade field and read as sparse dark spears
+    // wherever placement density thinned out (steep slopes).
+    float    blade_height = 0.30f;   // base unit blade height (m)
+    float    blade_width  = 0.035f;  // base half-width (m)
     int      seed         = 0xC0DE;
     // Rectangular keep-out zone, centered on (0, 0). Candidates with
     // |x| < keep_out_xz.x AND |z| < keep_out_xz.y are rejected — so

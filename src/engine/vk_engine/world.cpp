@@ -3822,9 +3822,13 @@ void VulkanEngine::render_grass_raymarch(VkCommandBuffer cmd) {
                  rt_.terrain_raymarch_lod_far_m),
         static_cast<float>(std::clamp(rt_.terrain_raymarch_lod_min_octaves, 2, 8)));
     pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
+    // .w = blade height scale. The SDF blade is ~1.7 units tall
+    // intrinsically; grass_raymarch.frag multiplies by .w * 0.21 so the
+    // default slider (≈1.0) gives ~0.25-0.37 m blades — matching the
+    // instanced raster grass instead of the old 1.1-1.7 m dark spears.
     pc.grass_params = glm::vec4(rt_.grass_distance, rt_.grass_wind,
                                  static_cast<float>(frame_number_) * 0.016f,
-                                 0.0f);
+                                 rt_.grass_height_scale);
     vkCmdPushConstants(cmd, pipeline_layout_,
                        kPushConstantStages,
                        0, sizeof(PushConstants), &pc);

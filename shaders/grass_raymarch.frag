@@ -325,10 +325,10 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
     float distToTerrain = 0.5 * (p.y - terrainY);
 
     // Coarse guard: if we're far above terrain, skip the per-cell SDF
-    // evaluation (blades top out at ~1 m). Saves the inner 9-cell loop
-    // for the long descent through air at ray start.
-    const float kGuard = 1.6;
-    if (distToTerrain > kGuard) return distToTerrain - (kGuard - 1.0);
+    // evaluation (blades top out at ~0.4 m + sway at the default height
+    // slider; guard leaves headroom for slider values up to ~2).
+    const float kGuard = 1.0;
+    if (distToTerrain > kGuard) return distToTerrain - (kGuard - 0.6);
 
     vec2 cellId;
     const float kPeriod = 0.20;        // ~25 blades per m²
@@ -388,16 +388,27 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
             // Per-blade rotation + sub-cell xy offset.
             np.xz = rotate2d(r.z * kPi2) * np.xz;
             np.xz += (r.xy - 0.5) * kPeriod;
+            // World blade-height factor. The SDF blade is ~1.7 units
+            // tall intrinsically; pc.grass_params.w carries the UI
+            // height slider, ×0.21 lands the default (≈1.0) at
+            // ~0.25-0.37 m blades — lawn scale, matching the instanced
+            // raster grass. (Was unscaled: every blade was 1.1-1.7 m
+            // and read as sparse dark spears towering over the lawn.)
+            float bh = clamp(pc.grass_params.w, 0.05, 3.0) * 0.21;
             // Wind sway — bend the blade as a function of height (np.y).
             // Per-blade phase + global time. Magnitude scales with wind
-            // strength (pc.color.y) and the blade's own height factor.
+            // strength (pc.color.y); profile normalised to blade height.
             float wind_t = pc.color.z + r.w * kPi2;
             float bend   = sin(wind_t * 1.4) * pc.color.y * 0.025;
-            np.x += bend * smoothstep(0.0, 1.0, np.y);
+            np.x += bend * smoothstep(0.0, 1.7 * bh, np.y);
             // sqrt(r.w) gives a more uniform-looking height distribution
             // than the raw [0,1] hash.
-            float scale = max(0.65, sqrt(r.w));
-            float bladeDist = sdGrassBlade(np / scale, 0.002);
+            float scale = max(0.65, sqrt(r.w)) * bh;
+            // Multiply the scaled-space SDF back by `scale` so the
+            // returned value is a true (conservative) world distance —
+            // sdf(p/s) alone overestimates by 1/s for s < 1 and lets the
+            // sphere-trace tunnel straight through thin blades.
+            float bladeDist = sdGrassBlade(np / scale, 0.002 / scale) * scale;
             if (bladeDist < d) {
                 d = bladeDist;
                 out_blade_hit = true;
@@ -548,9 +559,12 @@ void main() {
     // hash modulation breaks regularity without needing two separate
     // "young/old" colour vars.
     float h_above = max(0.0, p.y - terrainY);
-    // h_above is already ≥ 0 from the max above — the lower clamp is dead.
-    // Replace the div+clamp with a single mul + min.
-    float h_t     = min(h_above * (1.0 / 1.2), 1.0);
+    // Normalise by the actual max blade height (1.7 SDF units × height
+    // factor) so the base→tip gradient spans the whole blade. The old
+    // /1.2 assumed the unscaled 1.2+ m blades — with lawn-scale blades
+    // it left every pixel at the dark base colour.
+    float bh_max  = 1.7 * clamp(pc.grass_params.w, 0.05, 3.0) * 0.21;
+    float h_t     = min(h_above / bh_max, 1.0);
     float clump   = hash12(floor(p.xz * 0.5)) * 0.15;   // ±15% per-clump tint shift
     vec3 grassCol = mix(scene.grass_color_bottom.rgb,
                         scene.grass_color_top.rgb, h_t);

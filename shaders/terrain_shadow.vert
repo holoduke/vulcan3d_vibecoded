@@ -75,14 +75,11 @@ void main() {
 
     vec3 pos = vec3(world_xz.x, hm_height(world_xz), world_xz.y);
 
-    float kRockyAmp = max(0.0, pc.grass_params.z);
-    float kDispMip  = clamp(pc.grass_params.w, 0.0, 6.0);
-    float fade = 1.0 - smoothstep(60.0, 110.0, dist);
-    if (kRockyAmp * fade > 1e-4) {
-        float g_tile = max(scene.spom_params.z, 0.25);
-        float h0 = textureLod(u_height[5], pos.xz / g_tile, kDispMip).r;
-        pos.y += h0 * kRockyAmp * fade;
-    }
+    // NO rocky detail displacement here, deliberately. The shadow map's
+    // consumers (grass.vert blades, water) sit on the UNDISPLACED
+    // heightmap; displacing the casters raised the shadow surface up to
+    // ~0.4 m above the blade bases and every blade inside a bump read
+    // as fully self-shadowed (near-black spears in the lawn).
     if (inGrid.y > 0.5) pos.y -= inInstB.z;
 
     gl_Position = pc.mvp * vec4(pos, 1.0);
