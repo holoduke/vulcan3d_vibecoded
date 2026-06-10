@@ -3601,6 +3601,19 @@ void main() {
         float legacy_fog = clamp(scene.terrain_params.x, 0.0, 1.0);
         if (is_terrain_pre && cam_dist > 250.0 && legacy_fog > 1e-3) {
             vec3 sky_col = sample_sky_atmosphere(view_dir);
+            // Phase 6: forward-scatter tint on the aerial haze — looking
+            // toward the sun, distant haze warms to the sun colour
+            // (small Henyey-Greenstein lobe, g = 0.6).
+            {
+                float mu2 = clamp(dot(view_dir, -scene.sun_direction.xyz),
+                                  -1.0, 1.0);
+                float hd = max(0.0001, 1.36 - 1.2 * mu2);
+                float hg2 = 0.64 / (12.566 * hd * sqrt(hd));
+                sky_col = mix(sky_col,
+                              sky_col * 0.65 + scene.sun_color.rgb *
+                              scene.sun_color.a * 0.5,
+                              clamp(hg2 * 0.5, 0.0, 0.6));
+            }
             float fl = clamp((cam_dist - 250.0) / 1100.0, 0.0, 0.95);
             fl = fl * fl * (3.0 - 2.0 * fl) * legacy_fog;
             // Take the MAX so the realistic fog wins where it's
@@ -3609,6 +3622,25 @@ void main() {
             if (fl > fog_t) {
                 fog_t   = fl;
                 fog_rgb = sky_col;
+            }
+        }
+        // ---- Aerial colour grading (AAA Phase 6) ----
+        // Before the haze takes over, distant surfaces desaturate and
+        // cool — the scattering-in-depth look every AAA open world has.
+        if (is_terrain_pre) {
+            float ap = smoothstep(180.0, 1200.0, cam_dist) * 0.5;
+            float lum_ap = dot(final, vec3(0.299, 0.587, 0.114));
+            vec3 graded = mix(final, vec3(lum_ap), 0.45) *
+                          vec3(0.93, 0.98, 1.08);
+            final = mix(final, graded, ap);
+            // Valley haze: a thin pool below the plateau altitude that
+            // only reads at distance — dawn-valley layering.
+            float vh = clamp((24.0 - vWorldPos.y) * 0.05, 0.0, 0.45) *
+                       smoothstep(150.0, 550.0, cam_dist);
+            if (vh > 1e-3) {
+                vec3 vfc = mix(scene.sky_color.rgb,
+                               scene.sun_color.rgb, 0.25) * 0.9;
+                final = mix(final, vfc, vh);
             }
         }
         if (fog_t > 1e-4) final = mix(final, fog_rgb, fog_t);
