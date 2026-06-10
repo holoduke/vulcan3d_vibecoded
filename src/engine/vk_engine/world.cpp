@@ -2940,6 +2940,162 @@ void VulkanEngine::update_texture_sampler_for_fsr2() {
 // slider (`grass_slope_n_min`) at runtime without re-baking. Both
 // raymarched grass + the terrain green-tint sample this same texture
 // for consistent eligibility.
+// Terrain aux bake (AAA Phases 4/5). RG8 1024² covering the 2048 m
+// world: R = curvature (0.5 flat, <0.5 concave gullies — sediment +
+// cavity darkening, >0.5 convex ridges — exposed rock), G = sky
+// visibility from an 8-direction horizon scan (macro AO for valleys).
+// CPU bake, multi-threaded; ~100 ms at load.
+void VulkanEngine::init_terrain_aux_texture() {
+    if (terrain_data_.heights.empty()) return;
+    const int dim = 1024;
+    const float kWorldSide = 2048.0f;
+    std::vector<uint8_t> data(size_t(dim) * dim * 2, 0);
+
+    auto h_at = [&](float wx, float wz) {
+        return sample_terrain_height(wx, wz);
+    };
+    const float curv_r = 5.0f;     // curvature stencil radius (m)
+    const glm::vec2 dirs[8] = {
+        { 1, 0 }, { 0.7071f, 0.7071f }, { 0, 1 }, { -0.7071f, 0.7071f },
+        { -1, 0 }, { -0.7071f, -0.7071f }, { 0, -1 }, { 0.7071f, -0.7071f },
+    };
+    const float steps[6] = { 3.0f, 6.0f, 11.0f, 20.0f, 38.0f, 70.0f };
+
+    unsigned n_threads = (std::max)(1u, std::thread::hardware_concurrency());
+    std::vector<std::thread> workers;
+    int rows_per = (dim + int(n_threads) - 1) / int(n_threads);
+    for (unsigned t = 0; t < n_threads; ++t) {
+        int z0 = int(t) * rows_per;
+        int z1 = (std::min)(dim, z0 + rows_per);
+        if (z0 >= z1) break;
+        workers.emplace_back([&, z0, z1]() {
+            for (int tz = z0; tz < z1; ++tz) {
+                float wz = (float(tz) / dim - 0.5f) * kWorldSide;
+                for (int tx = 0; tx < dim; ++tx) {
+                    float wx = (float(tx) / dim - 0.5f) * kWorldSide;
+                    float h0 = h_at(wx, wz);
+                    // Curvature: 4-tap Laplacian at curv_r.
+                    float lap = h_at(wx + curv_r, wz) + h_at(wx - curv_r, wz)
+                              + h_at(wx, wz + curv_r) + h_at(wx, wz - curv_r)
+                              - 4.0f * h0;
+                    // lap > 0 = concave (valley floor). Map ±~6 m of
+                    // Laplacian to the full byte range around 0.5.
+                    float curv = std::clamp(0.5f - lap * 0.08f, 0.0f, 1.0f);
+                    // Sky visibility: per direction take the max horizon
+                    // slope over the step ladder; vis = 1 at open sky.
+                    float vis_sum = 0.0f;
+                    for (const glm::vec2& d : dirs) {
+                        float max_slope = 0.0f;
+                        for (float s : steps) {
+                            float dh = h_at(wx + d.x * s, wz + d.y * s) - h0;
+                            if (dh > 0.0f) {
+                                max_slope = (std::max)(max_slope, dh / s);
+                            }
+                        }
+                        float ang = std::atan(max_slope);   // 0..~pi/2
+                        vis_sum += 1.0f - ang * (2.0f / 3.14159265f);
+                    }
+                    float vis = vis_sum / 8.0f;
+                    size_t o = (size_t(tz) * dim + tx) * 2;
+                    data[o]     = uint8_t(curv * 255.0f + 0.5f);
+                    data[o + 1] = uint8_t(std::clamp(vis, 0.0f, 1.0f) * 255.0f + 0.5f);
+                }
+            }
+        });
+    }
+    for (auto& th : workers) th.join();
+
+    // Upload as RG8 + write binding 26.
+    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8G8_UNORM;
+    ici.extent = { uint32_t(dim), uint32_t(dim), 1 };
+    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vk_check(vmaCreateImage(allocator_, &ici, &aci, &terrain_aux_image_,
+                            &terrain_aux_alloc_, nullptr), "terrain aux image");
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = terrain_aux_image_;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_R8G8_UNORM;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vk_check(vkCreateImageView(device_, &vci, nullptr, &terrain_aux_view_),
+             "terrain aux view");
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = VK_FILTER_LINEAR;
+    si.minFilter = VK_FILTER_LINEAR;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vk_check(vkCreateSampler(device_, &si, nullptr, &terrain_aux_sampler_),
+             "terrain aux sampler");
+
+    // Staging upload.
+    VkBuffer stage = VK_NULL_HANDLE; VmaAllocation stage_alloc = nullptr;
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = data.size();
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo bac{};
+    bac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    bac.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo ai{};
+    vmaCreateBuffer(allocator_, &bci, &bac, &stage, &stage_alloc, &ai);
+    std::memcpy(ai.pMappedData, data.data(), data.size());
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_,
+                            [&](VkCommandBuffer cb) {
+        vkinit::transition_image(cb, terrain_aux_image_,
+                                 VK_IMAGE_LAYOUT_UNDEFINED,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = { uint32_t(dim), uint32_t(dim), 1 };
+        vkCmdCopyBufferToImage(cb, stage, terrain_aux_image_,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        vkinit::transition_image(cb, terrain_aux_image_,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    vmaDestroyBuffer(allocator_, stage, stage_alloc);
+
+    // Write binding 26 (runs after descriptors are created).
+    VkDescriptorImageInfo dii{};
+    dii.sampler = terrain_aux_sampler_;
+    dii.imageView = terrain_aux_view_;
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = scene_desc_set_;
+    w.dstBinding = 26;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &dii;
+    vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+    log::infof("[terrain] aux bake (curvature + sky-vis) %dx%d uploaded", dim, dim);
+}
+
+void VulkanEngine::destroy_terrain_aux_texture() {
+    if (terrain_aux_view_)    vkDestroyImageView(device_, terrain_aux_view_, nullptr);
+    if (terrain_aux_image_)   vmaDestroyImage(allocator_, terrain_aux_image_, terrain_aux_alloc_);
+    if (terrain_aux_sampler_) vkDestroySampler(device_, terrain_aux_sampler_, nullptr);
+    terrain_aux_view_ = VK_NULL_HANDLE;
+    terrain_aux_image_ = VK_NULL_HANDLE;
+    terrain_aux_alloc_ = nullptr;
+    terrain_aux_sampler_ = VK_NULL_HANDLE;
+}
+
 void VulkanEngine::init_grass_mask_texture() {
     const int dim = kGrassMaskDim;
     const float kWorldSide = 2048.0f;     // matches kHeightmapSide

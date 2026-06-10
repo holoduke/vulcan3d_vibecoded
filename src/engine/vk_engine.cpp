@@ -572,6 +572,7 @@ void VulkanEngine::init() {
         // binding-13/14 image views are real (not the slot-0 albedo
         // fallback). Both are CPU-baked, ~1 MB total, runs once.
         init_grass_mask_texture();
+        init_terrain_aux_texture();
         init_fog_wisp_texture();
         // ReSTIR reservoir SSBOs at scene_desc bindings 15/16. Allocated
         // here so the descriptor write below captures live handles.
@@ -1982,6 +1983,11 @@ void VulkanEngine::run(const RunOptions& opts) {
                     if (!brush_mode_is_grass(terrain_brush_mode_)) {
                         refresh_terrain_blas();
                         refresh_terrain_collision();
+                        // Re-bake the curvature/sky-vis aux for the new
+                        // surface (cheap ~100 ms, only at stroke end).
+                        vkDeviceWaitIdle(device_);
+                        destroy_terrain_aux_texture();
+                        init_terrain_aux_texture();
                     }
                     terrain_stroke_active_ = false;
                 }
@@ -2429,6 +2435,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_gpu_query_pool", [&]{ destroy_gpu_query_pool(); });
     guarded("destroy_skybox", [&]{ destroy_skybox_resources(); });
     guarded("destroy_grass_mask_texture", [&]{ destroy_grass_mask_texture(); });
+    guarded("destroy_terrain_aux_texture", [&]{ destroy_terrain_aux_texture(); });
     guarded("destroy_fog_wisp_texture",   [&]{ destroy_fog_wisp_texture(); });
     guarded("destroy_textures", [&]{ destroy_textures(); });
     guarded("destroy_grass_raymarch_pipeline", [&]{ destroy_grass_raymarch_pipeline(); });

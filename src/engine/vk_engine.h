@@ -259,6 +259,14 @@ private:
     // == 1.0, producing the same sampler as init_textures.
     void update_texture_sampler_for_fsr2();
     void init_grass_mask_texture();
+    // Terrain aux bake (AAA Phases 4/5): RG8 1024² — R = curvature
+    // (0.5 flat), G = sky visibility (horizon AO). Binding 26.
+    void init_terrain_aux_texture();
+    void destroy_terrain_aux_texture();
+    VkImage       terrain_aux_image_   = VK_NULL_HANDLE;
+    VmaAllocation terrain_aux_alloc_   = nullptr;
+    VkImageView   terrain_aux_view_    = VK_NULL_HANDLE;
+    VkSampler     terrain_aux_sampler_ = VK_NULL_HANDLE;
     void destroy_grass_mask_texture();
     void init_fog_wisp_texture();
     void destroy_fog_wisp_texture();

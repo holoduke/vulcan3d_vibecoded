@@ -61,8 +61,10 @@ void VulkanEngine::init_descriptors() {
         // +1 (now 10) for the half-rate shadow R8 image at binding 18
         // — cube.frag's bilateral upsample consumer (roadmap item #4
         // Phase 3) samples it in place of the inline PCSS trace.
+        // +1 (now 11) for the terrain aux bake (curvature + sky-vis)
+        // at binding 26 — AAA terrain Phases 4/5.
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            kTextureCount * 2 + 10 + kSpomMaterialCount },
+            kTextureCount * 2 + 11 + kSpomMaterialCount },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -82,7 +84,7 @@ void VulkanEngine::init_descriptors() {
     //              terrain_raymarch_scale < 1.
     //          15=ReSTIR reservoir SSBO (read prev), 16=write cur.
     //              Owned by restir.cpp; cube.frag's GI loop reads/writes.
-    VkDescriptorSetLayoutBinding bindings[26]{};
+    VkDescriptorSetLayoutBinding bindings[27]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -277,10 +279,20 @@ void VulkanEngine::init_descriptors() {
     bindings[25].descriptorCount = 1;
     bindings[25].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Binding 26: terrain aux bake (RG8 1024² over the 2048 m world).
+    // R = height curvature (0.5 flat, <0.5 concave gullies, >0.5 convex
+    // ridges) — splat rules + cavity darkening. G = sky visibility
+    // (horizon-scan AO) — multiplied into terrain ambient. Baked once
+    // at load + after sculpt strokes (AAA terrain Phases 4/5).
+    bindings[26].binding = 26;
+    bindings[26].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[26].descriptorCount = 1;
+    bindings[26].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 26, .pBindings = bindings,
+        .bindingCount = 27, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),

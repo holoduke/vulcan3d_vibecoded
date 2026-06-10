@@ -271,6 +271,11 @@ layout(set = 0, binding = 12) uniform sampler2D u_height[6];
 // steps along the sun's XZ direction and accumulating mask coverage.
 layout(set = 0, binding = 13) uniform sampler2D u_grass_mask;
 
+// Terrain aux bake (AAA Phases 4/5): R = curvature (0.5 flat, <0.5
+// concave gully, >0.5 convex ridge), G = sky visibility (horizon AO).
+// 1024² over the 2048 m world, baked at load from the heightmap.
+layout(set = 0, binding = 26) uniform sampler2D u_terrain_aux;
+
 // ReSTIR GI reservoir buffers (session 2 — see docs/restir_plan.md).
 // Layout MUST match the C++ Reservoir struct in restir.cpp (std430,
 // 48 B / pixel). Indexed as [pix.y * render_w + pix.x]. Session 2
@@ -1319,6 +1324,14 @@ void main() {
     // before indexing to keep the access well-defined regardless of any
     // hoisting the optimiser might do.
     vec3 albedo = vColor;
+    // Baked sky visibility for terrain pixels (set in the is_terrain
+    // block, multiplied into the ambient terms downstream — Phase 5).
+    float terrain_sky_vis = 1.0;
+    // Splat-height + specular weight carried to the lighting section:
+    // micro-shadowing (crevices lose grazing sun first) and a glancing
+    // specular on rock/snow.
+    float terrain_micro_h = 0.6;
+    float terrain_spec_w  = 0.0;
     if (is_terrain) {
         // ---- Terrain layer blend (height + slope) ----
         // Layer palette tuned for "natural earth" вЂ” desaturated, not too
@@ -1335,6 +1348,17 @@ void main() {
         float h = vWorldPos.y;
         // Slope: 0 = flat (normal up), 1 = vertical wall.
         float slope = 1.0 - clamp(N.y, 0.0, 1.0);
+
+        // ---- Baked curvature + sky-vis (AAA Phase 4) ----
+        vec2 t_aux = vec2(0.5, 1.0);
+        {
+            vec2 aux_uv = (vWorldPos.xz / 2048.0) + vec2(0.5);
+            t_aux = textureLod(u_terrain_aux,
+                               clamp(aux_uv, vec2(0.0), vec2(1.0)), 0.0).rg;
+        }
+        // -1 = gully floor .. +1 = exposed ridge.
+        float convexity = clamp((t_aux.x - 0.5) * 2.0, -1.0, 1.0);
+        terrain_sky_vis = t_aux.y;
 
         // ---- Automatic beach band from the live water level ----
         // scene._scene_pad[0] aliases the C++ water_params
@@ -1455,6 +1479,10 @@ void main() {
         // gradient, and cap the max so slope never fully erases grass.
         float slope_jitter = (tnoise(vWorldPos.xz * 0.02 + vec2(7.0, 19.0)) - 0.5) * 0.12;
         float steep_raw = smoothstep(0.40 + slope_jitter, 1.02 + slope_jitter, slope);
+        // Phase 4: convex ridges expose extra rock (erosion strips the
+        // soil off ridgelines); the baked curvature is mesh-independent
+        // so this doesn't reintroduce per-triangle classification noise.
+        steep_raw = clamp(steep_raw + max(convexity, 0.0) * 0.30 * slope, 0.0, 1.0);
         float steep_dist = cam_dist;    // P5: use hoisted distance
         float steep_w = 1.0 - smoothstep(80.0, 200.0, steep_dist);
         float steep = steep_raw * steep_w * 0.85;
@@ -1795,6 +1823,11 @@ void main() {
         m = mix(m, MAT_A(kMatSand, kScSand), w_beach);  // sand at waterline
         #undef MAT_A
         #undef MAT_H
+        // Carry the final splat height + a rock/snow specular weight to
+        // the lighting section (Phase 5).
+        terrain_micro_h = hcur;
+        terrain_spec_w  = clamp(w_rock + w_steep + w_snow * 1.6, 0.0, 1.0)
+                          * 0.22;
 
         // Tint the neutral material toward the art-directed band hue so
         // the overall palette stays controlled, keeping the per-texel
@@ -1830,6 +1863,15 @@ void main() {
         float mv1 = tnoise(vWorldPos.xz * 0.017 + vec2(3.3, 77.7));
         float mv  = clamp(mv0 * 0.7 + mv1 * 0.3, 0.0, 1.0);
         albedo *= mix(vec3(0.86, 0.89, 0.84), vec3(1.10, 1.06, 0.99), mv);
+
+        // ---- Gully sediment + cavity darkening (AAA Phase 4) ----
+        // Concave drainage floors collect sediment (warm-brown tint) and
+        // sit lower in the light (cheap baked cavity term). Curvature
+        // comes from the heightmap bake, so unlike the old dFdx(N)
+        // attempt this is stable across triangle/LOD boundaries.
+        float gully = clamp(-convexity, 0.0, 1.0);
+        albedo = mix(albedo, albedo * vec3(0.96, 0.88, 0.74), gully * 0.40);
+        albedo *= mix(1.0, 0.80, gully * 0.65);
 
         // ---- Detail normal mapping ----
         // Splat the matching baked normal maps, rotate into world space
@@ -2467,6 +2509,12 @@ void main() {
     // since this only affects the ambient term computed downstream.
     vec3 sky_tint       = mix(scene.sky_color.rgb, scene.sun_color.rgb, 0.12);
     vec3 ambient_sky    = sky_tint * 0.45 * scene.rt_params.z;
+    // Phase 5: baked horizon AO — valley floors see less sky dome, so
+    // their ambient drops. 0.45 floor keeps deep gorges readable.
+    if (is_terrain) {
+        float sv = mix(0.45, 1.0, terrain_sky_vis);
+        ambient_sky *= sv;
+    }
 
     // Direct lighting uses pure Lambert (max(0, NВ·L)). The "wrap" lift
     // for back-of-mountain pixels is applied LATER as a sky-tinted
@@ -2882,6 +2930,28 @@ void main() {
 
     vec3 direct = albedo * scene.sun_color.rgb * scene.sun_color.a *
                   n_dot_l * (1.0 - shadow);
+
+    // ---- Terrain micro-shadow + glancing specular (AAA Phase 5) ----
+    if (is_terrain) {
+        // Micro-shadowing: low texels of the splat height field lose
+        // grazing sun first — sells the material relief at zero ray
+        // cost (the displacement-derived analogue of the classic
+        // AO-based micro-shadow trick).
+        float graze2 = (1.0 - n_dot_l) * (1.0 - n_dot_l);
+        float micro = 1.0 - (1.0 - clamp(terrain_micro_h, 0.0, 1.0))
+                            * graze2 * 0.65;
+        direct *= clamp(micro, 0.3, 1.0);
+        // Glancing Blinn specular on rock/snow — low sun glints off
+        // wet-looking stone and snow crust; pure-Lambert terrain reads
+        // chalky by comparison.
+        if (terrain_spec_w > 0.005) {
+            vec3 Vs = normalize(scene.camera_pos.xyz - vWorldPos);
+            vec3 Hs = normalize(L + Vs);
+            float spec = pow(max(dot(N, Hs), 0.0), 32.0);
+            direct += scene.sun_color.rgb * scene.sun_color.a *
+                      spec * terrain_spec_w * n_dot_l * (1.0 - shadow);
+        }
+    }
 
     // --- Muzzle flash: dynamic point light + RT shadow ---
     // Active for kMuzzleFlashDuration on each shot; CPU sets intensity > 0
