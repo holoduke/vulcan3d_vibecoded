@@ -2944,12 +2944,16 @@ void main() {
         // Glancing Blinn specular on rock/snow — low sun glints off
         // wet-looking stone and snow crust; pure-Lambert terrain reads
         // chalky by comparison.
-        if (terrain_spec_w > 0.005) {
+        // Distance-faded: a pow-32 highlight on far rock shimmers per
+        // frame (sub-pixel normals, no jitter) — keep it a near effect.
+        float spec_fade = 1.0 - smoothstep(60.0, 140.0, cam_dist);
+        if (terrain_spec_w * spec_fade > 0.005) {
             vec3 Vs = normalize(scene.camera_pos.xyz - vWorldPos);
             vec3 Hs = normalize(L + Vs);
             float spec = pow(max(dot(N, Hs), 0.0), 32.0);
             direct += scene.sun_color.rgb * scene.sun_color.a *
-                      spec * terrain_spec_w * n_dot_l * (1.0 - shadow);
+                      spec * terrain_spec_w * spec_fade *
+                      n_dot_l * (1.0 - shadow);
         }
     }
 
