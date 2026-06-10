@@ -289,7 +289,6 @@ void VulkanEngine::apply_terrain_brush(float dt) {
         grass_mask_dirty_ = true;
         return;
     }
-    if (terrain_chunks_.chunks.empty()) return;
     if (terrain_data_.heights.empty()) return;
     const float r = terrain_brush_radius_;
     const float w = terrain_data_.cell;
@@ -440,50 +439,16 @@ void VulkanEngine::apply_terrain_brush(float dt) {
         }
     }
 
-    // Mark affected chunks dirty for next-frame mesh rebuild. A chunk's
-    // sample range is [origin_ix, origin_ix + chunk_cells] in X and Z,
-    // so we mark any chunk whose range overlaps the brush footprint.
-    // Use a vector<bool> indexed by chunk id (was: linear scan of
-    // terrain_dirty_chunks_ per cell вЂ” O(NВІ) on big sculpts).
-    const int chunk_cells = terrain_chunks_.chunk_cells;
-    std::vector<bool> already_dirty(terrain_chunks_.chunks.size(), false);
-    for (int ci : terrain_dirty_chunks_) {
-        if (ci >= 0 && ci < static_cast<int>(already_dirty.size())) {
-            already_dirty[ci] = true;
-        }
-    }
-    for (size_t ci = 0; ci < terrain_chunks_.chunks.size(); ++ci) {
-        const auto& c = terrain_chunks_.chunks[ci];
-        int cix0 = c.origin_ix;
-        int cix1 = c.origin_ix + chunk_cells;
-        int ciz0 = c.origin_iz;
-        int ciz1 = c.origin_iz + chunk_cells;
-        if (ix1 < cix0 || ix0 > cix1 || iz1 < ciz0 || iz0 > ciz1) continue;
-        if (already_dirty[ci]) continue;
-        already_dirty[ci] = true;
-        terrain_dirty_chunks_.push_back(static_cast<int>(ci));
-    }
+    // CLOD raster picks the edit up from the heightmap TEXTURE — no mesh
+    // rebake. Refresh the min/max pyramid for the touched region (culling
+    // AABBs) and flag the textures + BLAS + collision for re-upload.
+    update_clod_pyramid_region(terrain_clod_pyramid_,
+                               terrain_data_.heights.data(),
+                               terrain_data_.dim, terrain_data_.cell,
+                               16.0f, ix0, ix1, iz0, iz1);
     terrain_blas_dirty_ = true;
     terrain_jolt_dirty_ = true;
-    terrain_height_dirty_ = true;   // re-upload delta texture for raymarch
-}
-
-void VulkanEngine::rebuild_dirty_terrain_chunks() {
-    if (terrain_dirty_chunks_.empty()) return;
-    if (terrain_data_.heights.empty()) return;
-    Heightmap hm{};
-    hm.dim = terrain_data_.dim;
-    hm.cell = terrain_data_.cell;
-    hm.origin_x = terrain_data_.origin_x;
-    hm.origin_z = terrain_data_.origin_z;
-    hm.heights = terrain_data_.heights;
-    for (int ci : terrain_dirty_chunks_) {
-        if (ci < 0 || static_cast<size_t>(ci) >= terrain_chunks_.chunks.size()) continue;
-        rebuild_chunk_vertices(device_, allocator_, graphics_queue_,
-                               graphics_queue_family_, hm,
-                               terrain_chunks_.chunks[ci]);
-    }
-    terrain_dirty_chunks_.clear();
+    terrain_height_dirty_ = true;   // re-upload delta + full height textures
 }
 
 void VulkanEngine::refresh_terrain_collision() {
@@ -537,9 +502,9 @@ void VulkanEngine::refresh_terrain_collision() {
 }
 
 void VulkanEngine::ensure_terrain_raster_built() {
-    if (terrain_chunks_.chunks.size() > 0) return;     // already built
+    if (terrain_clod_patch_.vertex_buffer) return;       // already built
     if (terrain_data_.heights.empty()) return;          // no heightmap to build from
-    log::info("[terrain] lazy-building rasterised mesh + chunks");
+    log::info("[terrain] lazy-building rasterised mesh + CLOD patch");
     vkDeviceWaitIdle(device_);
     Heightmap hm{};
     hm.dim       = terrain_data_.dim;
@@ -549,10 +514,7 @@ void VulkanEngine::ensure_terrain_raster_built() {
     hm.heights   = terrain_data_.heights;
     terrain_mesh_ = build_terrain_mesh(device_, allocator_,
                                        graphics_queue_, graphics_queue_family_, hm);
-    const int chunks_per_side = 32;
-    terrain_chunks_ = build_terrain_chunks(device_, allocator_,
-                                           graphics_queue_, graphics_queue_family_,
-                                           hm, chunks_per_side);
+    init_terrain_clod();
     // Note: the terrain BLAS is built once in init_rt and not rebuilt
     // here. Toggling raymarch off mid-session draws raster terrain
     // correctly but RT shadow/AO/GI rays from cube.frag will not see
@@ -1077,12 +1039,11 @@ void VulkanEngine::add_fbm_erosion_to_sculpted(float amplitude_factor,
     log::infof("[terrain] FBM erosion baked into %d sculpted cells "
                "(amp=%.2f, freq=%.3f)", touched, amplitude_factor, frequency);
     terrain_height_dirty_ = true;
-    // Mark every chunk dirty so the rasterised mesh rebuilds.
-    terrain_dirty_chunks_.clear();
-    terrain_dirty_chunks_.reserve(terrain_chunks_.chunks.size());
-    for (size_t ci = 0; ci < terrain_chunks_.chunks.size(); ++ci) {
-        terrain_dirty_chunks_.push_back(static_cast<int>(ci));
-    }
+    // CLOD raster follows the heightmap texture; refresh the whole
+    // min/max pyramid since the erosion touched sculpted cells anywhere.
+    terrain_clod_pyramid_ = build_clod_pyramid(terrain_data_.heights.data(),
+                                               terrain_data_.dim,
+                                               terrain_data_.cell, 16.0f);
 }
 
 void VulkanEngine::destroy_terrain_height_texture() {
@@ -1161,6 +1122,106 @@ void VulkanEngine::upload_terrain_height_full_payload(VkImageLayout src_layout) 
                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     });
     vmaDestroyBuffer(allocator_, stage, stage_alloc);
+}
+
+// ---- Quadtree CDLOD terrain (engine side) -------------------------------
+
+void VulkanEngine::init_terrain_clod() {
+    if (terrain_data_.heights.empty()) {
+        log::warn("init_terrain_clod: heightmap empty, skipping");
+        return;
+    }
+    terrain_clod_patch_ = build_clod_patch_mesh(device_, allocator_,
+                                                graphics_queue_,
+                                                graphics_queue_family_);
+    terrain_clod_pyramid_ = build_clod_pyramid(terrain_data_.heights.data(),
+                                               terrain_data_.dim,
+                                               terrain_data_.cell, 16.0f);
+
+    // Host-visible per-frame instance ring: kFrameOverlap slots × two
+    // lists (camera, shadow) × kClodMaxInstances.
+    const VkDeviceSize bytes = VkDeviceSize(kFrameOverlap) * 2 *
+                               kClodMaxInstances * sizeof(ClodInstance);
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = bytes;
+    bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo ai{};
+    vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
+                             &terrain_clod_inst_buf_,
+                             &terrain_clod_inst_alloc_, &ai),
+             "terrain clod instance buffer");
+    terrain_clod_inst_map_ = ai.pMappedData;
+    log::infof("[terrain] CLOD ready: patch %u verts / %u idx, pyramid %d "
+               "levels, instance ring %.0f KB",
+               terrain_clod_patch_.vertex_count,
+               terrain_clod_patch_.index_count,
+               terrain_clod_pyramid_.levels,
+               double(bytes) / 1024.0);
+}
+
+void VulkanEngine::destroy_terrain_clod() {
+    destroy_mesh(allocator_, terrain_clod_patch_);
+    if (terrain_clod_inst_buf_) {
+        vmaDestroyBuffer(allocator_, terrain_clod_inst_buf_,
+                         terrain_clod_inst_alloc_);
+        terrain_clod_inst_buf_ = VK_NULL_HANDLE;
+        terrain_clod_inst_alloc_ = nullptr;
+        terrain_clod_inst_map_ = nullptr;
+    }
+}
+
+glm::vec4 VulkanEngine::terrain_clod_hm_params() const {
+    const float cell = (terrain_data_.cell > 0.0f) ? terrain_data_.cell : 1.0f;
+    return glm::vec4(terrain_data_.origin_x, terrain_data_.origin_z,
+                     1.0f / cell, 1.0f / float(terrain_data_.dim + 1));
+}
+
+void VulkanEngine::update_terrain_clod_instances() {
+    terrain_clod_cam_count_ = terrain_clod_shadow_count_ = 0;
+    if (!terrain_clod_inst_map_ || terrain_data_.heights.empty() ||
+        rt_.terrain_raymarch_enabled) {
+        return;
+    }
+    ClodParams p;
+    p.world_origin_x = terrain_data_.origin_x;
+    p.world_origin_z = terrain_data_.origin_z;
+    p.world_side     = float(terrain_data_.dim) * terrain_data_.cell;
+    p.leaf_size_m    = 16.0f;
+    p.levels = 1;
+    while (p.leaf_size_m * float(1 << (p.levels - 1)) < p.world_side - 0.5f)
+        ++p.levels;
+    p.range0 = std::max(10.0f, rt_.terrain_clod_range0);
+
+    select_clod_nodes(p, terrain_clod_pyramid_, current_frame_view_.eye_pos,
+                      terrain_clod_nodes_);
+
+    const uint32_t slot = uint32_t(frame_number_ % kFrameOverlap);
+    const uint32_t list_bytes = kClodMaxInstances * uint32_t(sizeof(ClodInstance));
+    terrain_clod_cam_offset_    = slot * 2 * list_bytes;
+    terrain_clod_shadow_offset_ = terrain_clod_cam_offset_ + list_bytes;
+    auto* cam_dst = reinterpret_cast<ClodInstance*>(
+        static_cast<char*>(terrain_clod_inst_map_) + terrain_clod_cam_offset_);
+    auto* sh_dst = reinterpret_cast<ClodInstance*>(
+        static_cast<char*>(terrain_clod_inst_map_) + terrain_clod_shadow_offset_);
+
+    const Frustum& camf = current_frame_view_.frustum;
+    const Frustum lightf = extract_frustum(sun_shadow_light_vp_);
+    for (const ClodNode& n : terrain_clod_nodes_) {
+        if (terrain_clod_cam_count_ < kClodMaxInstances &&
+            aabb_visible(camf, n.aabb_min, n.aabb_max)) {
+            cam_dst[terrain_clod_cam_count_++] = n.inst;
+        }
+        if (terrain_clod_shadow_count_ < kClodMaxInstances &&
+            aabb_visible(lightf, n.aabb_min, n.aabb_max)) {
+            sh_dst[terrain_clod_shadow_count_++] = n.inst;
+        }
+    }
 }
 
 void VulkanEngine::init_terrain_height_full_texture() {
@@ -1638,24 +1699,20 @@ void VulkanEngine::init_world() {
             }
             terrain_max_grid_ready_ = true;
         }
-        // Skip the rasterised terrain mesh + chunks + BLAS source when the
-        // procedural raymarch is the active terrain. Saves several hundred
-        // MB of VRAM (chunked LOD buffers, parent_y morph buffers, merged
-        // BLAS source mesh). Caveat: toggling raymarch OFF at runtime will
-        // show no rasterised terrain until the user restarts.
+        // Skip the rasterised terrain (BLAS source mesh + CLOD patch)
+        // when the procedural raymarch is the active terrain. Caveat:
+        // toggling raymarch OFF at runtime lazy-builds via
+        // ensure_terrain_raster_built.
         if (!rt_.terrain_raymarch_enabled) {
             terrain_mesh_ = build_terrain_mesh(device_, allocator_,
                                                graphics_queue_, graphics_queue_family_, hm);
-            // 32×32 chunks of 64 cells each — 64 is divisible by every LOD
-            // stride (1/2/4/8) so all four LODs cover every cell. ≈64 m per
-            // chunk side at 1 m cells. Skirt strips on each LOD's index
-            // buffer hide LOD-mismatch cracks at chunk seams.
-            const int chunks_per_side = 32;
-            terrain_chunks_ = build_terrain_chunks(device_, allocator_,
-                                                   graphics_queue_, graphics_queue_family_,
-                                                   hm, chunks_per_side);
+            // Quadtree CLOD raster: shared instanced patch + min/max
+            // pyramid. The vertex shader fetches heights from the
+            // heightmap texture, so there is no per-chunk geometry to
+            // bake — startup cost is a single 4.5 k-vertex mesh upload.
+            init_terrain_clod();
         } else {
-            log::info("[terrain] raymarch enabled — deferring mesh/chunks "
+            log::info("[terrain] raymarch enabled — deferring mesh/CLOD "
                       "build (will lazy-build if raymarch is toggled off)");
         }
         // Lift every level brush by plateau_height so the castle's y=0
@@ -3846,109 +3903,34 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         // rebuild_dyn_render_cache (was per-draw glm::scale here).
         push_depth(dr.model);
     }
-    // Terrain: distance-LOD per chunk. Pre-pass and color pass MUST
-    // pick the same LOD AND morph factor per chunk so the rasterised
-    // depth values match РІР‚вЂќ otherwise the LESS_OR_EQUAL test in the
-    // color pass would discard fragments. We bind terrain_depth_pipeline_
-    // (same terrain.vert as the color pass, just routed to depth-only).
-    if (!terrain_chunks_.chunks.empty() && !rt_.terrain_raymarch_enabled) {
-        // Skip the chunked depth prime when the procedural raymarch is
-        // active вЂ” its frag writes its own depth via gl_FragDepth in
-        // the color pass, and rasterised chunk depths from the prime
-        // would wrongly occlude that with stale heightfield depths.
-        glm::vec3 cam = player_.eye_position();
-        const bool tess_on = rt_.terrain_tessellation_enabled &&
-                             terrain_tess_depth_pipeline_ != VK_NULL_HANDLE;
-        const float tess_r2 = rt_.terrain_tess_range * rt_.terrain_tess_range;
-        auto chunk_near = [&](const TerrainChunk& c) {
-            glm::vec3 ctr = 0.5f * (c.aabb_min + c.aabb_max);
-            float dx = ctr.x - cam.x, dz = ctr.z - cam.z;
-            return (dx * dx + dz * dz) < tess_r2;
-        };
-
-        // Pass A: near chunks primed with the SAME tessellation
-        // pipeline (vert/tesc/tese) and SAME push constants as the
-        // color pass, so the primed depth is bit-identical → no
-        // 1-ULP LESS_OR_EQUAL rejects (sky-colour patches).
-        if (tess_on) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              terrain_tess_depth_pipeline_);
-            for (const auto& c : terrain_chunks_.chunks) {
-                if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
-                if (!chunk_near(c)) continue;
-                VkDeviceSize voff = 0;
-                vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &voff);
-                vkCmdBindIndexBuffer(cmd, c.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
-                PushConstants pc{};
-                pc.mvp = vp;
-                pc.model = glm::mat4(1.0f);
-                float sx = std::max(1e-3f, c.aabb_max.x - c.aabb_min.x);
-                float sz = std::max(1e-3f, c.aabb_max.z - c.aabb_min.z);
-                pc.color = glm::vec4(c.aabb_min.x, c.aabb_min.z,
-                                     1.0f / sx, 1.0f / sz);
-                // Tess knobs — MUST match the color pass exactly or the
-                // primed depth won't equal the color depth (sky patches).
-                pc.emissive = glm::vec4(rt_.terrain_tess_max_level,
-                                        rt_.terrain_tess_near_m,
-                                        rt_.terrain_tess_far_m,
-                                        rt_.terrain_tess_falloff);
-                // .y = rock vertex relief, .z = tess smoothing → .tese.
-                // BOTH MUST equal the colour pass's values or primed
-                // depth ≠ colour depth (sky-patch z-fight).
-                pc.tex_params = glm::vec4(0.0f, rt_.terrain_rock_relief,
-                                          rt_.terrain_tess_smooth, 2.0f);
-                // grass_params .z/.w drive the .tese's rocky-grass HEIGHT-
-                // map displacement (kRockyAmp / kDispMip). MUST match the
-                // colour pass's values or the primed depth sits below the
-                // colour geometry → LESS_OR_EQUAL rejects → missing tris.
-                pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
-                                            rt_.terrain_grass_line_scale,
-                                            rt_.terrain_disp_amp,
-                                            rt_.terrain_disp_smooth_mip);
-                vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
-                                   0, sizeof(PushConstants), &pc);
-                vkCmdDrawIndexed(cmd, c.index_count_lod[0], 1, 0, 0, 0);
-            }
-        }
-
-        // Pass B: the rest (and everything if tess off) with the plain
-        // CD-LOD depth pipeline.
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrain_depth_pipeline_);
-        // Same scaled thresholds shared with the colour + sun-shadow
-        // passes -- mismatch would cause LESS_OR_EQUAL depth rejects.
-        float thresh[kTerrainLodCount - 1];
-        for (int i = 0; i < kTerrainLodCount - 1; ++i)
-            thresh[i] = rt_.terrain_lod_distance[i] * rt_.terrain_lod_scale;
-        for (const auto& c : terrain_chunks_.chunks) {
-            if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
-            if (tess_on && chunk_near(c)) continue;   // primed in pass A
-            int lod = pick_terrain_lod(c, cam, thresh, kTerrainLodCount - 1);
-            float morph = pick_terrain_morph(c, cam, lod, thresh[0]);
-            VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
-            VkDeviceSize voffs[2] = { 0, 0 };
-            vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
-            VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
-            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
-            PushConstants pc{};
-            pc.mvp = vp;
-            pc.model = glm::mat4(1.0f);
-            pc.color = glm::vec4(1.0f, 1.0f, 1.0f, morph);
-            // grass_params.z/.w drive the terrain.vert rocky vertex
-            // displacement. MUST match the colour pass values exactly
-            // or the primed depth sits BELOW the displaced colour
-            // geometry -> LESS_OR_EQUAL rejects -> sky/black patches.
-            // (Same bug class as the tess depth-prime issue earlier.)
-            pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
-                                        rt_.terrain_grass_line_scale,
-                                        rt_.terrain_disp_amp,
-                                        rt_.terrain_disp_smooth_mip);
-            vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
-                               0, sizeof(PushConstants), &pc);
-            vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
-        }
-        // Caller binds depth_pipeline_ before invoking us; it will
-        // continue using that for any non-terrain post-terrain draws.
-        // Re-bind so the rest of the depth pre-pass goes through it.
+    // Terrain: quadtree CLOD, single instanced draw. The pre-pass and
+    // colour pass share terrain.vert + the same instance list + the same
+    // push constants, so the primed depth is bit-identical to the colour
+    // pass and LESS_OR_EQUAL never rejects.
+    if (terrain_clod_cam_count_ > 0 && !rt_.terrain_raymarch_enabled &&
+        terrain_clod_patch_.vertex_buffer) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          terrain_depth_pipeline_);
+        VkBuffer vbufs[2] = { terrain_clod_patch_.vertex_buffer,
+                              terrain_clod_inst_buf_ };
+        VkDeviceSize voffs[2] = { 0, terrain_clod_cam_offset_ };
+        vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
+        vkCmdBindIndexBuffer(cmd, terrain_clod_patch_.index_buffer, 0,
+                             VK_INDEX_TYPE_UINT32);
+        PushConstants pc{};
+        pc.mvp = vp;
+        pc.model = glm::mat4(1.0f);
+        pc.emissive = terrain_clod_hm_params();
+        pc.tex_params = glm::vec4(rt_.terrain_pom_strength, 0.0f, 1.0f, 2.0f);
+        pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
+                                    rt_.terrain_grass_line_scale,
+                                    rt_.terrain_disp_amp,
+                                    rt_.terrain_disp_smooth_mip);
+        vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
+                           0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, terrain_clod_patch_.index_count,
+                         terrain_clod_cam_count_, 0, 0, 0);
+        // Re-bind the caller's depth pipeline for any post-terrain draws.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, depth_pipeline_);
     }
 }
@@ -4073,123 +4055,39 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // Mesh (CDLOD) terrain draws first when the raymarcher is off, so its
     // depth is in the buffer before the (optional) water-only raymarch
     // pass below — hills then correctly occlude the water plane.
-    if (!rt_.terrain_raymarch_enabled && !terrain_chunks_.chunks.empty()) {
-        // Switch to the terrain-specific pipeline (terrain.vert + cube.frag,
-        // 2 vertex bindings РІР‚вЂќ pos/norm/uv + parent_y) so we can morph
-        // between LOD 0 and LOD 1 in the vertex shader. Skirts still hide
-        // LOD-mismatch cracks at higher LOD seams.
-        glm::vec3 cam = player_.eye_position();
-        const bool tess_on = rt_.terrain_tessellation_enabled &&
-                             terrain_tess_pipeline_ != VK_NULL_HANDLE;
-        const float tess_r2 = rt_.terrain_tess_range * rt_.terrain_tess_range;
-        auto chunk_near = [&](const TerrainChunk& c) {
-            glm::vec3 ctr = 0.5f * (c.aabb_min + c.aabb_max);
-            glm::vec3 d(ctr.x - cam.x, 0.0f, ctr.z - cam.z);
-            return (d.x * d.x + d.z * d.z) < tess_r2;
-        };
-        // The chunk parameter is unused by this lambda -- the morph factor
-        // is the only per-chunk value pushed via PC here (XZ origin/size are
-        // handled by the tessellated near-chunk path, not this CD-LOD one).
-        auto fill_pc = [&](const TerrainChunk& /*c*/, float morph) {
-            PushConstants pc{};
-            pc.mvp = vp;
-            pc.model = glm::mat4(1.0f);
-            pc.prev_mvp = prev_vp;
-            // .w doubles as the morph factor РІР‚вЂќ terrain.vert lerps Y by it.
-            pc.color = glm::vec4(1.0f, 1.0f, 1.0f, morph);
-            pc.emissive = glm::vec4(0.0f);
-            // .x = terrain parallax-occlusion strength (the terrain
-            // fragment path ignores tex_params.x/.y otherwise).
-            pc.tex_params = glm::vec4(rt_.terrain_pom_strength, 0.0f,
-                                      1.0f, 2.0f);
-            // .x = sand ripple scale, .y = grass contour-line scale
-            // (cube.frag terrain reads these; 0 = grass lines off).
-            // .z = rocky vertex disp amplitude, .w = disp mip smooth
-            // -- consumed by terrain_tess.tese for the grass-band
-            // displacement. Wired to UI sliders so the user can dial
-            // both at runtime.
-            pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
-                                        rt_.terrain_grass_line_scale,
-                                        rt_.terrain_disp_amp,
-                                        rt_.terrain_disp_smooth_mip);
-            vkCmdPushConstants(cmd, pipeline_layout_,
-                               kPushConstantStages,
-                               0, sizeof(PushConstants), &pc);
-        };
-
-        // Pass A: camera-near chunks via the GPU tessellation pipeline
-        // (LOD0 triangle IBO consumed as 3-CP patches; only vertex
-        // binding 0 — no parent_y/morph for near chunks).
-        if (tess_on) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                (rt_.terrain_wireframe && terrain_tess_wire_pipeline_)
-                    ? terrain_tess_wire_pipeline_ : terrain_tess_pipeline_);
-            for (const auto& c : terrain_chunks_.chunks) {
-                if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
-                if (!chunk_near(c)) continue;
-                VkDeviceSize voff = 0;
-                vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &voff);
-                vkCmdBindIndexBuffer(cmd, c.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
-                PushConstants pc{};
-                pc.mvp = vp;
-                pc.model = glm::mat4(1.0f);
-                pc.prev_mvp = prev_vp;
-                // pc.color carries the chunk XZ footprint for the .tese's
-                // border taper (no morph in the tess path, vColor is a
-                // constant in cube.frag, so .color is free here):
-                //   .xy = chunk min (x,z),  .zw = 1 / chunk size (x,z)
-                float sx = std::max(1e-3f, c.aabb_max.x - c.aabb_min.x);
-                float sz = std::max(1e-3f, c.aabb_max.z - c.aabb_min.z);
-                pc.color = glm::vec4(c.aabb_min.x, c.aabb_min.z,
-                                     1.0f / sx, 1.0f / sz);
-                // Tess knobs (UI sliders) → .tesc. Must equal the
-                // depth-prime pass's value so depths match.
-                pc.emissive = glm::vec4(rt_.terrain_tess_max_level,
-                                        rt_.terrain_tess_near_m,
-                                        rt_.terrain_tess_far_m,
-                                        rt_.terrain_tess_falloff);
-                // .x = parallax (pixel displacement, fragment only),
-                // .y = rock vertex relief, .z = tess smoothing.
-                // .y/.z drive .tese geometry → MUST equal the
-                // depth-prime pass's values or primed depth differs.
-                pc.tex_params = glm::vec4(rt_.terrain_pom_strength,
-                                          rt_.terrain_rock_relief,
-                                          rt_.terrain_tess_smooth, 2.0f);
-                // .x = sand ripple scale, .y = grass contour-line scale.
-                pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
-                                            rt_.terrain_grass_line_scale,
-                                            rt_.terrain_disp_amp,
-                                            rt_.terrain_disp_smooth_mip);
-                vkCmdPushConstants(cmd, pipeline_layout_,
-                                   kPushConstantStages,
-                                   0, sizeof(PushConstants), &pc);
-                vkCmdDrawIndexed(cmd, c.index_count_lod[0], 1, 0, 0, 0);
-            }
-        }
-
-        // Pass B: the rest (and everything, if tess is off) via the
-        // plain CD-LOD morph pipeline.
+    if (!rt_.terrain_raymarch_enabled && terrain_clod_cam_count_ > 0 &&
+        terrain_clod_patch_.vertex_buffer) {
+        // Quadtree CLOD terrain: ONE instanced draw. terrain.vert fetches
+        // height + normal from the heightmap texture per instance node;
+        // push constants are identical to the depth pre-pass so the
+        // LESS_OR_EQUAL prime always matches.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
             (rt_.terrain_wireframe && terrain_wire_pipeline_)
                 ? terrain_wire_pipeline_ : terrain_pipeline_);
-        // Hoist the scaled LOD thresholds out of the per-chunk loop --
-        // identical to the depth pre-pass thresholds above.
-        float thresh[kTerrainLodCount - 1];
-        for (int i = 0; i < kTerrainLodCount - 1; ++i)
-            thresh[i] = rt_.terrain_lod_distance[i] * rt_.terrain_lod_scale;
-        for (const auto& c : terrain_chunks_.chunks) {
-            if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
-            if (tess_on && chunk_near(c)) continue;   // drawn in pass A
-            int lod = pick_terrain_lod(c, cam, thresh, kTerrainLodCount - 1);
-            float morph = pick_terrain_morph(c, cam, lod, thresh[0]);
-            VkBuffer vbufs[2] = { c.mesh.vertex_buffer, c.parent_y_buffer };
-            VkDeviceSize voffs[2] = { 0, 0 };
-            vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
-            VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
-            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
-            fill_pc(c, morph);
-            vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
-        }
+        VkBuffer vbufs[2] = { terrain_clod_patch_.vertex_buffer,
+                              terrain_clod_inst_buf_ };
+        VkDeviceSize voffs[2] = { 0, terrain_clod_cam_offset_ };
+        vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
+        vkCmdBindIndexBuffer(cmd, terrain_clod_patch_.index_buffer, 0,
+                             VK_INDEX_TYPE_UINT32);
+        PushConstants pc{};
+        pc.mvp = vp;
+        pc.model = glm::mat4(1.0f);
+        pc.prev_mvp = prev_vp;
+        // .emissive = heightmap mapping (origin XZ, 1/cell, 1/(dim+1)).
+        pc.emissive = terrain_clod_hm_params();
+        // .x = terrain parallax-occlusion strength, .w = 2 → is_terrain.
+        pc.tex_params = glm::vec4(rt_.terrain_pom_strength, 0.0f, 1.0f, 2.0f);
+        // .xy = shore ripple scales (fragment), .zw = rocky detail
+        // displacement amp / mip (vertex) — MUST match the depth pre-pass.
+        pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
+                                    rt_.terrain_grass_line_scale,
+                                    rt_.terrain_disp_amp,
+                                    rt_.terrain_disp_smooth_mip);
+        vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
+                           0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, terrain_clod_patch_.index_count,
+                         terrain_clod_cam_count_, 0, 0, 0);
         // Switch back to the cube pipeline + cube mesh for the brush loop.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);

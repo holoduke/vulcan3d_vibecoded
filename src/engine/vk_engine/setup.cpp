@@ -743,14 +743,19 @@ void VulkanEngine::init_pipeline() {
 void VulkanEngine::init_terrain_pipelines() {
     std::string sd = QLIKE_SHADER_DIR;
     terrain_vert_module_ = vkpipe::load_shader_module(device_, sd + "/terrain.vert.spv");
+    terrain_shadow_vert_module_ =
+        vkpipe::load_shader_module(device_, sd + "/terrain_shadow.vert.spv");
 
-    // Vertex bindings: 0 = Vertex (pos/normal/uv), 1 = parent_y (float).
+    // Quadtree CLOD vertex input:
+    //   binding 0 = shared patch mesh (Vertex reused: position.xyz =
+    //               grid_x, skirt_flag, grid_z), per-vertex.
+    //   binding 1 = ClodInstance (2×vec4), per-INSTANCE.
     VkVertexInputBindingDescription b0{};
     b0.binding = 0; b0.stride = sizeof(Vertex);
     b0.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
     VkVertexInputBindingDescription b1{};
-    b1.binding = 1; b1.stride = sizeof(float);
-    b1.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    b1.binding = 1; b1.stride = sizeof(ClodInstance);
+    b1.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
     auto attr = [](uint32_t loc, uint32_t binding, VkFormat fmt, uint32_t off) {
         VkVertexInputAttributeDescription a{};
@@ -758,10 +763,9 @@ void VulkanEngine::init_terrain_pipelines() {
         return a;
     };
     std::vector<VkVertexInputAttributeDescription> vattrs = {
-        attr(0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)),
-        attr(1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)),
-        attr(2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(Vertex, uv)),
-        attr(3, 1, VK_FORMAT_R32_SFLOAT,       0),
+        attr(0, 0, VK_FORMAT_R32G32B32_SFLOAT,    offsetof(Vertex, position)),
+        attr(1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0),
+        attr(2, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 16),
     };
 
     // Color pass — same color/depth formats as cube pipeline.
@@ -773,6 +777,9 @@ void VulkanEngine::init_terrain_pipelines() {
         cfg.color_formats = { scene_color_format_, motion_vec_format_,
                           gbuffer0_format_,    gbuffer1_format_ };
         cfg.depth_format = depth_format_;
+        // Cull NONE: skirt strips are emitted double-sided and steep
+        // geomorphed quads can flip winding transiently.
+        cfg.cull = VK_CULL_MODE_NONE;
         cfg.vbindings = { b0, b1 };
         cfg.vattrs = vattrs;
         terrain_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
@@ -780,12 +787,12 @@ void VulkanEngine::init_terrain_pipelines() {
         {
             vkpipe::GraphicsPipelineConfig wcfg = cfg;
             wcfg.polygon_mode = VK_POLYGON_MODE_LINE;
-            wcfg.cull = VK_CULL_MODE_NONE;
             terrain_wire_pipeline_ = vkpipe::build_graphics_pipeline(device_, wcfg);
         }
     }
 
-    // Depth pre-pass — same morph as color pass so LESS_OR_EQUAL passes.
+    // Depth pre-pass — same terrain.vert, so gl_Position is bit-identical
+    // to the colour pass and LESS_OR_EQUAL never rejects.
     {
         vkpipe::GraphicsPipelineConfig cfg{};
         cfg.vert = terrain_vert_module_;
@@ -794,82 +801,46 @@ void VulkanEngine::init_terrain_pipelines() {
         cfg.color_attachment_count = 0;
         cfg.depth_format = depth_format_;
         cfg.depth_compare = VK_COMPARE_OP_LESS;
+        cfg.cull = VK_CULL_MODE_NONE;
         cfg.vbindings = { b0, b1 };
         cfg.vattrs = vattrs;
         terrain_depth_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
     }
 
-    // Near-terrain GPU tessellation pipeline. Triangle patches (3 CP) so
-    // it reuses the chunk's LOD0 triangle index buffer as a PATCH_LIST.
-    // Only binding 0 (pos/normal/uv) — no parent_y / morph (near chunks
-    // are full LOD0). Distance-adaptive subdivision in .tesc, detail
-    // displacement + normal recompute in .tese, shared cube.frag.
+    // Sun-shadow caster pipeline — terrain_shadow.vert mirrors the height
+    // fetch + geomorph so casters match the camera-pass surface. Uses the
+    // MAIN pipeline layout (needs set 0 for the heightmap + camera pos),
+    // unlike the slim sun_shadow layout the brush casters use.
     {
-        terrain_tess_vert_module_ = vkpipe::load_shader_module(device_, sd + "/terrain_tess.vert.spv");
-        terrain_tesc_module_      = vkpipe::load_shader_module(device_, sd + "/terrain_tess.tesc.spv");
-        terrain_tese_module_      = vkpipe::load_shader_module(device_, sd + "/terrain_tess.tese.spv");
-        std::vector<VkVertexInputAttributeDescription> tattrs = {
-            attr(0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)),
-            attr(1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)),
-            attr(2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(Vertex, uv)),
-        };
         vkpipe::GraphicsPipelineConfig cfg{};
-        cfg.vert = terrain_tess_vert_module_;
-        cfg.tesc = terrain_tesc_module_;
-        cfg.tese = terrain_tese_module_;
-        cfg.patch_control_points = 3;
-        cfg.frag = frag_module_;       // shared cube.frag
-        // Cull NONE. The tessellator's primitive winding through the
-        // reused triangle index buffer (with fractional_odd spacing)
-        // does NOT reliably match the rasteriser's front-face test, so
-        // back-face culling silently dropped ~half the patches → black
-        // gaps + "no tessellation visible". Disabling cull renders every
-        // patch; the .tese computes the surface normal analytically (not
-        // from gl_FrontFacing), so both facings shade identically — no
-        // back-face darkening, just a benign same-depth double-shade.
-        cfg.cull = VK_CULL_MODE_NONE;
+        cfg.vert = terrain_shadow_vert_module_;
+        cfg.frag = VK_NULL_HANDLE;          // depth-only
         cfg.layout = pipeline_layout_;
-        cfg.color_formats = { scene_color_format_, motion_vec_format_,
-                          gbuffer0_format_,    gbuffer1_format_ };
-        cfg.depth_format = depth_format_;
-        cfg.vbindings = { b0 };
-        cfg.vattrs = tattrs;
-        terrain_tess_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
-        // Wireframe variant — shows every tessellated sub-triangle.
-        {
-            vkpipe::GraphicsPipelineConfig wcfg = cfg;
-            wcfg.polygon_mode = VK_POLYGON_MODE_LINE;
-            terrain_tess_wire_pipeline_ = vkpipe::build_graphics_pipeline(device_, wcfg);
-        }
-
-        // Tessellation DEPTH-prepass pipeline — same vert/tesc/tese so
-        // the primed depth is bit-identical to the color pass (priming
-        // near chunks with the plain terrain.vert instead left a 1-ULP
-        // gl_Position delta → LESS_OR_EQUAL rejects → sky shows through).
-        vkpipe::GraphicsPipelineConfig dcfg = cfg;
-        dcfg.frag = depth_frag_module_;
-        dcfg.color_formats.clear();
-        dcfg.color_attachment_count = 0;
-        dcfg.depth_compare = VK_COMPARE_OP_LESS;
-        terrain_tess_depth_pipeline_ = vkpipe::build_graphics_pipeline(device_, dcfg);
+        cfg.color_attachment_count = 0;
+        cfg.depth_format = VK_FORMAT_D32_SFLOAT;
+        cfg.cull = VK_CULL_MODE_NONE;
+        cfg.depth_test = true;
+        cfg.depth_write = true;
+        cfg.depth_compare = VK_COMPARE_OP_LESS;
+        cfg.depth_bias_enable = true;       // dynamic slope/constant bias
+        cfg.vbindings = { b0, b1 };
+        cfg.vattrs = vattrs;
+        terrain_shadow_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
     }
-    log::info("terrain pipelines built (CD-LOD morph + near tessellation)");
+    log::info("terrain pipelines built (quadtree CDLOD, vertex-free)");
 }
 
 void VulkanEngine::destroy_terrain_pipelines() {
-    if (terrain_pipeline_)       vkDestroyPipeline(device_, terrain_pipeline_, nullptr);
-    if (terrain_depth_pipeline_) vkDestroyPipeline(device_, terrain_depth_pipeline_, nullptr);
-    if (terrain_tess_pipeline_)  vkDestroyPipeline(device_, terrain_tess_pipeline_, nullptr);
-    if (terrain_tess_depth_pipeline_) vkDestroyPipeline(device_, terrain_tess_depth_pipeline_, nullptr);
-    if (terrain_wire_pipeline_)  vkDestroyPipeline(device_, terrain_wire_pipeline_, nullptr);
-    if (terrain_tess_wire_pipeline_) vkDestroyPipeline(device_, terrain_tess_wire_pipeline_, nullptr);
-    if (terrain_vert_module_)    vkDestroyShaderModule(device_, terrain_vert_module_, nullptr);
-    if (terrain_tess_vert_module_) vkDestroyShaderModule(device_, terrain_tess_vert_module_, nullptr);
-    if (terrain_tesc_module_)    vkDestroyShaderModule(device_, terrain_tesc_module_, nullptr);
-    if (terrain_tese_module_)    vkDestroyShaderModule(device_, terrain_tese_module_, nullptr);
-    terrain_pipeline_ = terrain_depth_pipeline_ = terrain_tess_pipeline_ = VK_NULL_HANDLE;
-    terrain_vert_module_ = terrain_tess_vert_module_ = VK_NULL_HANDLE;
-    terrain_tesc_module_ = terrain_tese_module_ = VK_NULL_HANDLE;
+    if (terrain_pipeline_)        vkDestroyPipeline(device_, terrain_pipeline_, nullptr);
+    if (terrain_depth_pipeline_)  vkDestroyPipeline(device_, terrain_depth_pipeline_, nullptr);
+    if (terrain_wire_pipeline_)   vkDestroyPipeline(device_, terrain_wire_pipeline_, nullptr);
+    if (terrain_shadow_pipeline_) vkDestroyPipeline(device_, terrain_shadow_pipeline_, nullptr);
+    if (terrain_vert_module_)     vkDestroyShaderModule(device_, terrain_vert_module_, nullptr);
+    if (terrain_shadow_vert_module_)
+        vkDestroyShaderModule(device_, terrain_shadow_vert_module_, nullptr);
+    terrain_pipeline_ = terrain_depth_pipeline_ = VK_NULL_HANDLE;
+    terrain_wire_pipeline_ = terrain_shadow_pipeline_ = VK_NULL_HANDLE;
+    terrain_vert_module_ = terrain_shadow_vert_module_ = VK_NULL_HANDLE;
 }
 
 void VulkanEngine::init_terrain_raymarch_pipeline() {

@@ -20,6 +20,7 @@
 #include "engine/physics_world.h"
 #include "engine/skybox.h"
 #include "engine/terrain.h"
+#include "engine/terrain_clod.h"
 #include "engine/grass.h"
 #include "engine/texture.h"   // for BackgroundDecodeHandle
 #include "game/level.h"
@@ -335,26 +336,16 @@ private:
     VkShaderModule shadow_lr_frag_module_ = VK_NULL_HANDLE;
     void init_shadow_lr_pipeline();
     void render_world_shadow_lr_pass(VkCommandBuffer cmd);
-    // Terrain-specific pipelines that bind a second vertex stream (parent_y)
-    // and morph between LOD 0 and LOD 1 in the vertex shader. Color and
-    // depth-prepass variants must both morph or their depth values
-    // diverge and the LESS_OR_EQUAL test would discard fragments.
-    VkPipeline      terrain_pipeline_       = VK_NULL_HANDLE;
-    VkPipeline      terrain_depth_pipeline_ = VK_NULL_HANDLE;
-    VkShaderModule  terrain_vert_module_    = VK_NULL_HANDLE;
-    // Near-terrain GPU tessellation pipeline (distance-adaptive
-    // subdivision + detail displacement + normal recompute). Used for
-    // camera-near chunks only; far chunks keep the plain terrain_pipeline_.
-    VkPipeline      terrain_tess_pipeline_  = VK_NULL_HANDLE;
-    VkPipeline      terrain_tess_depth_pipeline_ = VK_NULL_HANDLE;
-    // Wireframe debug variants (POLYGON_MODE_LINE) of the plain + tess
-    // terrain color pipelines — shows every triangle incl. tessellated
-    // sub-triangles so the mesh density is directly visible.
-    VkPipeline      terrain_wire_pipeline_      = VK_NULL_HANDLE;
-    VkPipeline      terrain_tess_wire_pipeline_ = VK_NULL_HANDLE;
-    VkShaderModule  terrain_tess_vert_module_ = VK_NULL_HANDLE;
-    VkShaderModule  terrain_tesc_module_      = VK_NULL_HANDLE;
-    VkShaderModule  terrain_tese_module_      = VK_NULL_HANDLE;
+    // Quadtree CDLOD terrain pipelines. The same terrain.vert drives the
+    // depth pre-pass and colour pass (identical gl_Position by
+    // construction, so LESS_OR_EQUAL never rejects); terrain_shadow.vert
+    // mirrors the height fetch for the sun shadow map.
+    VkPipeline      terrain_pipeline_        = VK_NULL_HANDLE;
+    VkPipeline      terrain_depth_pipeline_  = VK_NULL_HANDLE;
+    VkPipeline      terrain_wire_pipeline_   = VK_NULL_HANDLE;
+    VkPipeline      terrain_shadow_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule  terrain_vert_module_     = VK_NULL_HANDLE;
+    VkShaderModule  terrain_shadow_vert_module_ = VK_NULL_HANDLE;
     void init_terrain_pipelines();
     void destroy_terrain_pipelines();
 
@@ -1031,9 +1022,8 @@ private:
 
     // Phase 1 terrain BLAS: a single full-resolution mesh used by the
     // RT path (shadows / GI / AO see crisp ground regardless of raster
-    // LOD). Raster goes through `terrain_chunks_` instead so the visible
-    // mesh can swap LOD per chunk and Phase 4 sculpt can rebuild only
-    // affected chunks.
+    // LOD). Raster goes through the quadtree CLOD path below — the
+    // vertex shader fetches the same heightmap this mesh is built from.
     Mesh terrain_mesh_{};
     VkBuffer terrain_blas_buffer_ = VK_NULL_HANDLE;
     VmaAllocation terrain_blas_alloc_ = nullptr;
@@ -1041,8 +1031,32 @@ private:
     VkDeviceAddress terrain_blas_device_address_ = 0;
     glm::vec3 terrain_color_ = glm::vec3(0.45f, 0.42f, 0.32f);
 
-    // Phase 2 chunked raster terrain.
-    TerrainChunkSet terrain_chunks_{};
+    // Quadtree CDLOD raster terrain (Decima-style, vertex-free). One
+    // shared grid patch drawn instanced over CPU-selected quadtree
+    // nodes; terrain.vert fetches height from the heightmap texture.
+    Mesh terrain_clod_patch_{};                 // shared K² grid + skirt
+    ClodHeightPyramid terrain_clod_pyramid_{};  // node AABB min/max heights
+    std::vector<ClodNode> terrain_clod_nodes_;  // this frame's selection
+    // Per-frame instance buffer ring (host-visible, kFrameOverlap slots).
+    // Layout per frame slot: [camera-culled instances][shadow-culled
+    // instances] — counts tracked below, draws bind with byte offsets.
+    VkBuffer      terrain_clod_inst_buf_   = VK_NULL_HANDLE;
+    VmaAllocation terrain_clod_inst_alloc_ = nullptr;
+    void*         terrain_clod_inst_map_   = nullptr;
+    uint32_t      terrain_clod_cam_count_    = 0;
+    uint32_t      terrain_clod_shadow_count_ = 0;
+    uint32_t      terrain_clod_cam_offset_    = 0;   // bytes, this frame
+    uint32_t      terrain_clod_shadow_offset_ = 0;   // bytes, this frame
+    static constexpr uint32_t kClodMaxInstances = 4096;  // per list
+    void init_terrain_clod();
+    void destroy_terrain_clod();
+    // Selects quadtree nodes + fills this frame's instance ranges.
+    // Camera list culled by current_frame_view_.frustum, shadow list by
+    // the sun_shadow_light_vp_ frustum.
+    void update_terrain_clod_instances();
+    // Fills the shared heightmap-mapping push-constant slots (emissive)
+    // used by terrain.vert / terrain_shadow.vert.
+    glm::vec4 terrain_clod_hm_params() const;
 
     // Instanced grass — one shared blade mesh + per-blade transforms.
     // Built once at level load via build_grass(). Pipeline is separate
@@ -1235,14 +1249,6 @@ private:
     bool  terrain_stroke_active_ = false;     // mouse held since stroke begin
     bool  terrain_blas_dirty_    = false;     // rebuild BLAS at next safe point
     bool  terrain_jolt_dirty_    = false;     // rebuild Jolt heightfield
-    bool  terrain_lod_dirty_     = false;     // rebake all chunk LOD index buffers
-    // Set when the user touches the near-density slider or near-radius
-    // slider. The next frame re-evaluates each chunk's desired densify
-    // (camera distance vs radius) and queues a re-bake of any chunk
-    // whose desired densify differs from its current `c.densify`. The
-    // queue is drained at a throttled rate (N chunks/frame) so a big
-    // jump never hitches more than a few ms.
-    bool  terrain_density_dirty_ = false;
     TerrainBrushMode terrain_brush_mode_ = TerrainBrushMode::Raise;
     float terrain_brush_radius_  = 6.0f;       // metres
     float terrain_brush_strength_ = 8.0f;      // metres/sec at brush centre
@@ -1264,19 +1270,9 @@ private:
     int   terrain_brush_fbm_octaves_     = 6;
     glm::vec3 terrain_brush_world_pos_{0.0f}; // last hit point (UI gizmo)
     bool  terrain_brush_has_hit_ = false;
-    std::vector<int> terrain_dirty_chunks_;    // indices into terrain_chunks_.chunks
     void apply_terrain_brush(float dt);
-    void rebuild_dirty_terrain_chunks();
     void refresh_terrain_blas();
     void refresh_terrain_collision();
-    // Settings loader helper: parse keys of the form
-    // `terrain_lod_distance_<i>` and `terrain_lod_stride_<i>` into the
-    // per-LOD arrays. Returns true if the key matched (handled), false
-    // so the caller falls through to the next else-if. Lives here so
-    // settings.cpp can call it without nesting another `if` block in
-    // its already-long key-dispatch chain (MSVC's C1061 limit).
-    bool apply_terrain_lod_key(const std::string& key,
-                                const std::string& val);
 
     VkBuffer tlas_buffer_ = VK_NULL_HANDLE;
     VmaAllocation tlas_alloc_ = nullptr;
@@ -1986,113 +1982,31 @@ private:
         //   3 = visualise screen-space face normal as RGB
         int   terrain_debug_mode = 0;
 
-        // Terrain LOD distance thresholds (metres of camera-XZ-to-chunk
-        // centre). `terrain_lod_distance[i]` is the distance at which a
-        // chunk leaves LOD i and switches to LOD i+1. With
-        // kTerrainLodCount = 8 we have 7 thresholds. The same array
-        // drives the depth pre-pass + colour pass + sun-shadow pass --
-        // they MUST share or depth values mismatch and LESS_OR_EQUAL
-        // discards fragments. The default ladder roughly doubles each
-        // step so far chunks use the very coarse strides without losing
-        // the near-chunk detail bands.
-        //
-        // CD-LOD morphing currently only covers LOD0 -> LOD1 (parent_y
-        // is baked between strides 1 and 2). LODs 2..7 transitions pop
-        // visibly. The thresholds for LODs 2+ are intentionally pushed
-        // far out so the pops happen at distances where (a) each chunk
-        // subtends few pixels, (b) the user typically has distance fog
-        // on (distance_fog_density default 0.005/m -> e-fold ~200 m),
-        // and (c) the user is unlikely to be looking at one specific
-        // chunk long enough to catch the snap. The 80 m threshold for
-        // LOD0->1 stays close because it's the only morphed transition.
-        // Follow-up: bake parent_y per LOD pair to morph every band.
-        float terrain_lod_distance[kTerrainLodCount - 1] = {
-            80.0f, 250.0f, 500.0f, 900.0f, 1400.0f, 2000.0f, 2700.0f
-        };
-        // Per-LOD vertex stride for the chunk index buffers. Defaults
-        // are powers of two: LOD 0 = stride 1 (full), LOD 7 = stride
-        // 128 (degenerate single quad on the 64-cell chunks). User can
-        // bump density via the UI; setting terrain_lod_dirty triggers a
-        // full LOD index re-bake at the next safe frame. LOD 0 stride
-        // is informational only -- the renderer always draws the mesh's
-        // baked stride-1 IBO for LOD 0.
-        int   terrain_lod_stride[kTerrainLodCount] = {
-            1, 2, 4, 8, 16, 32, 64, 128
-        };
-        // Per-chunk densification for chunks within `terrain_near_density_radius_m`
-        // metres of the camera (XZ). 1 = baseline (one vert per heightmap
-        // cell). 2/4/8 sub-divide each heightmap cell into N x N quads in
-        // the chunk VBO via bilinear sampling of the heightmap; LOD 0
-        // stride 1 then draws N x N times more triangles per chunk than
-        // the original LOD 0. Stride N at densify N reproduces the
-        // densify-1 mesh exactly, so the LOD ladder still applies.
-        // Memory cost scales O(N^2) per affected chunk; the near-radius
-        // bound keeps total VRAM bounded. Set to 1 to disable entirely.
-        int   terrain_near_density = 1;        // clamped to [1, 8]
-        float terrain_near_density_radius_m = 200.0f;  // metres from camera
-        // Master multiplier on all LOD distances. 1.0 = defaults above.
-        // Crank up to push distant terrain to higher LOD (more
-        // triangles, more detail).
-        float terrain_lod_scale = 1.0f;
-        // Near-terrain GPU tessellation: distance-adaptive subdivision +
-        // detail displacement on camera-near chunks. Far chunks keep the
-        // plain mesh (the .tesc ramps level→1 by ~110 m anyway). Toggle
-        // off to fall straight back to the known-good flat mesh.
-        // Near-terrain GPU tessellation + per-ground-type displacement.
-        // Distance-adaptive (dense near, ~none past ~110 m), border-
-        // tapered (crack-free), runtime-toggleable.
-        bool  terrain_tessellation_enabled = true;
-        // Chunk-centroid distance (m) under which a chunk is drawn with
-        // the tessellation pipeline. Beyond this it's the plain mesh.
-        // Slightly past the shader's fade-out so the transition is on
-        // already-flat patches.
-        float terrain_tess_range = 130.0f;
-        // Debug: draw terrain (incl. tessellated near chunks) as
-        // wireframe so the triangle/mesh density is directly visible.
-        bool  terrain_wireframe = true;
-        // Per-distance tessellation density knobs (fed to terrain_tess
-        // .tesc via pc.emissive). Live-tunable from the Terrain tab.
-        // Bumped defaults (was 40 / 7 / 60). The rocky-grass vertex
-        // displacement in terrain_tess.tese creates visible spikes
-        // anywhere tess level falls below ~5 (adjacent wider-spaced
-        // verts land on different rocky-height peaks). With max_level
-        // 64 + full radius 15 + ramp to 110, level stays >=5 out to
-        // ~95 m -- matches the rocky displacement fade band so we get
-        // real high-frequency vertex relief in the entire near band
-        // without the per-vertex spike artefacts.
-        float terrain_tess_max_level = 64.0f;  // peak subdivision
-        float terrain_tess_near_m    = 15.0f;  // full-detail radius
-        float terrain_tess_far_m     = 110.0f; // ramps to base by here
-        float terrain_tess_falloff   = 0.55f;  // <1 = dense band hugs cam
-        // Rocky-grass vertex displacement (terrain_tess.tese).
+        // Quadtree CDLOD terrain (replaces the chunk-stride LOD +
+        // tessellation + densify stack). One tunable: the leaf-node
+        // subdivision range. range[level] = clod_range0 * 2^level; a
+        // bigger value keeps high-density rings further from the camera
+        // (more triangles, more detail).
+        float terrain_clod_range0 = 50.0f;     // metres, leaf ring
+        // Debug: draw terrain as wireframe so the triangle/mesh density
+        // is directly visible.
+        bool  terrain_wireframe = false;
+        // Near-field detail displacement in terrain.vert (the old
+        // tessellation's visual role):
         //   amp  = 0..1 m peak metres of displacement
         //   smooth_mip = 0 = LOD0 crisp, +N = blur by N mip levels
-        //                (use to kill per-vert spikes without lowering amp)
         float terrain_disp_amp        = 0.40f;
         float terrain_disp_smooth_mip = 0.0f;
         // Per-pixel SPOM/POM far-fade distance (cube.frag is_terrain).
         // Bumps stop being raymarched past this distance; far terrain
         // uses just the splat normal. Was hardcoded 220 m.
         float terrain_pom_far_m       = 220.0f;
-        // Geometry smoothing pass applied in terrain_tess.tese BEFORE
-        // the material splat: 0 = raw per-type detail relief, 1 = fully
-        // smooth low-frequency swell. Fed to the .tese via the terrain
-        // draw's pc.tex_params.z (the terrain fragment path ignores
-        // that slot; the same value MUST go to the depth-prime and
-        // colour tess passes or primed depth won't match → sky patches).
-        float terrain_tess_smooth    = 0.65f;  // 0..1
         // Per-pixel parallax-occlusion on terrain (rocky/eroded depth).
         // Carried to cube.frag via the terrain colour draw's
         // pc.tex_params.x (terrain path ignores that slot otherwise).
         // Gated to rocky/snow pixels + ramped to 0 by ~45 m (built-in
         // per-pixel LOD). 0 = off.
         float terrain_pom_strength   = 0.6f;   // 0..1
-        // Rock VERTEX relief: real tessellated geometry on rock (the
-        // coarse/silhouette half of the vertex+pixel displacement
-        // combo; terrain_pom_strength is the fine pixel half). Carried
-        // to terrain_tess.tese via pc.tex_params.y on BOTH the
-        // depth-prime and colour tess passes (must match → no z-fight).
-        float terrain_rock_relief    = 0.5f;   // 0..1
         // Shore-following contour ripple scales (cube.frag terrain, via
         // the terrain draw's pc.grass_params.xy). Phase = height above
         // water so the lines parallel the coast. Independent:

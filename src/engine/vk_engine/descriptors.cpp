@@ -212,7 +212,11 @@ void VulkanEngine::init_descriptors() {
     bindings[17].binding = 17;
     bindings[17].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[17].descriptorCount = 1;
-    bindings[17].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // VERTEX added for the quadtree CLOD terrain: terrain.vert fetches
+    // absolute height + gradient normals from this texture instead of
+    // carrying per-chunk vertex buffers.
+    bindings[17].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT |
+                              VK_SHADER_STAGE_VERTEX_BIT;
 
     // Binding 18: half-rate sun-shadow R8 image (roadmap item #4
     // Phase 3). Produced by render_world_shadow_lr_pass at

@@ -299,36 +299,16 @@ void VulkanEngine::save_settings() const {
     f << "shadow_map_resolution = " << rt_.shadow_map_resolution << "\n";
     f << "shadow_map_world_half = " << rt_.shadow_map_world_half << "\n";
     f << "shadow_debug_overlay = "  << (rt_.shadow_debug_overlay ? 1 : 0) << "\n";
-    // Per-LOD distance thresholds (7 floats for 8 LODs). Index i is the
-    // distance at which the chunk leaves LOD i and switches to LOD i+1.
-    for (int i = 0; i < kTerrainLodCount - 1; ++i) {
-        f << "terrain_lod_distance_" << i << " = "
-          << rt_.terrain_lod_distance[i] << "\n";
-    }
-    // Per-LOD vertex stride (8 ints). LOD 0 stride is informational
-    // only -- the renderer always draws stride-1 at LOD 0.
-    for (int i = 0; i < kTerrainLodCount; ++i) {
-        f << "terrain_lod_stride_" << i << " = "
-          << rt_.terrain_lod_stride[i] << "\n";
-    }
-    f << "terrain_lod_scale = " << rt_.terrain_lod_scale << "\n";
-    f << "terrain_near_density = "          << rt_.terrain_near_density          << "\n";
-    f << "terrain_near_density_radius_m = " << rt_.terrain_near_density_radius_m << "\n";
-    f << "terrain_tessellation_enabled = " << (rt_.terrain_tessellation_enabled ? 1 : 0) << "\n";
-    f << "terrain_tess_range = " << rt_.terrain_tess_range << "\n";
+    // Quadtree CLOD terrain (the chunk-LOD distance/stride/tess/densify
+    // keys are gone — stale lines in old cfg files are ignored on load).
+    f << "terrain_clod_range0 = " << rt_.terrain_clod_range0 << "\n";
     f << "terrain_wireframe = " << (rt_.terrain_wireframe ? 1 : 0) << "\n";
-    f << "terrain_tess_max_level = " << rt_.terrain_tess_max_level << "\n";
-    f << "terrain_tess_near_m = " << rt_.terrain_tess_near_m << "\n";
-    f << "terrain_tess_far_m = " << rt_.terrain_tess_far_m << "\n";
-    f << "terrain_tess_falloff = " << rt_.terrain_tess_falloff << "\n";
-    f << "terrain_tess_smooth = " << rt_.terrain_tess_smooth << "\n";
     f << "terrain_pom_strength = " << rt_.terrain_pom_strength << "\n";
     f << "terrain_disp_amp = " << rt_.terrain_disp_amp << "\n";
     f << "terrain_disp_smooth_mip = " << rt_.terrain_disp_smooth_mip << "\n";
     f << "terrain_pom_far_m = " << rt_.terrain_pom_far_m << "\n";
     f << "terrain_sand_ripple_scale = " << rt_.terrain_sand_ripple_scale << "\n";
     f << "terrain_grass_line_scale = " << rt_.terrain_grass_line_scale << "\n";
-    f << "terrain_rock_relief = " << rt_.terrain_rock_relief << "\n";
     f << "ground_mat_strength = " << rt_.ground_mat_strength << "\n";
     f << "ground_mat_tile_m = " << rt_.ground_mat_tile_m << "\n";
     f << "ground_mat_normal = " << rt_.ground_mat_normal << "\n";
@@ -490,27 +470,6 @@ void VulkanEngine::save_settings() const {
     log::infof("settings saved to %s", kSettingsPath);
 }
 
-bool VulkanEngine::apply_terrain_lod_key(const std::string& key,
-                                          const std::string& val) {
-    // Match `terrain_lod_distance_<i>` -- 7 floats indexed 0..6.
-    static const char kDistPrefix[] = "terrain_lod_distance_";
-    if (key.rfind(kDistPrefix, 0) == 0) {
-        int idx = std::atoi(key.c_str() + sizeof(kDistPrefix) - 1);
-        if (idx >= 0 && idx < kTerrainLodCount - 1)
-            rt_.terrain_lod_distance[idx] = std::stof(val);
-        return true;
-    }
-    // Match `terrain_lod_stride_<i>` -- 8 ints indexed 0..7.
-    static const char kStridePrefix[] = "terrain_lod_stride_";
-    if (key.rfind(kStridePrefix, 0) == 0) {
-        int idx = std::atoi(key.c_str() + sizeof(kStridePrefix) - 1);
-        if (idx >= 0 && idx < kTerrainLodCount)
-            rt_.terrain_lod_stride[idx] = std::stoi(val);
-        return true;
-    }
-    return false;
-}
-
 void VulkanEngine::load_settings() {
     std::ifstream f(kSettingsPath);
     if (!f) return;  // first run; defaults are fine
@@ -558,21 +517,13 @@ void VulkanEngine::load_settings() {
             // fsr2_enabled in the fast-path section to dodge MSVC's nested-if depth limit.
             if (key == "fsr_backend")                   { rt_.fsr_backend = std::stoi(val); ++loaded; continue; }
             if (key == "fg_enabled")                    { rt_.fg_enabled  = (std::stoi(val) != 0); ++loaded; continue; }
-            // Per-LOD terrain ladder (kTerrainLodCount = 8). Routed
-            // through the fast-path because the else-if chain below is
-            // already at MSVC's nested-block depth limit (C1061).
-            if (apply_terrain_lod_key(key, val))        { ++loaded; continue; }
-            // Near-camera VBO densification -- fast-path because the
-            // else-if chain below already hits MSVC's nested-block
-            // depth limit (C1061).
-            if (key == "terrain_near_density")          { rt_.terrain_near_density          = std::clamp(std::stoi(val), 1, 8); ++loaded; continue; }
-            if (key == "terrain_near_density_radius_m") { rt_.terrain_near_density_radius_m = std::stof(val); ++loaded; continue; }
-            // Back-compat: legacy float keys map the first three
-            // thresholds onto the new array so old cfgs still roughly
-            // preserve their tuning.
-            if (key == "terrain_lod1")                  { rt_.terrain_lod_distance[0] = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_lod2")                  { rt_.terrain_lod_distance[1] = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_lod3")                  { rt_.terrain_lod_distance[2] = std::stof(val); ++loaded; continue; }
+            // Quadtree CLOD terrain. The legacy chunk-LOD keys
+            // (terrain_lod_distance_*, terrain_lod_stride_*,
+            // terrain_lod_scale, terrain_near_density*, terrain_tess_*,
+            // terrain_rock_relief, terrain_lod1/2) are intentionally
+            // unhandled — stale lines in old cfg files fall through as
+            // unknown keys and are ignored.
+            if (key == "terrain_clod_range0")           { rt_.terrain_clod_range0 = std::stof(val); ++loaded; continue; }
             if (key == "water_foam_color") {
                 glm::vec3 v(0.88f, 0.94f, 0.96f);
                 if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
@@ -690,16 +641,7 @@ void VulkanEngine::load_settings() {
             // there exceeds MSVC's nested-block limit (C1061).
             if (key == "spom_strength")              { rt_.spom_strength              = std::stof(val); ++loaded; continue; }
             if (key == "spom_mode")                  { int m = std::stoi(val); rt_.spom_mode = m < 0 ? 0 : (m > 2 ? 2 : m); ++loaded; continue; }
-            // Near-terrain tessellation — flat fast-path (NOT the else-if
-            // chain below; one more `else if` there hits C1061).
-            if (key == "terrain_tessellation_enabled") { rt_.terrain_tessellation_enabled = std::stoi(val) != 0; ++loaded; continue; }
-            if (key == "terrain_tess_range")          { rt_.terrain_tess_range          = std::stof(val); ++loaded; continue; }
             if (key == "terrain_wireframe")           { rt_.terrain_wireframe           = std::stoi(val) != 0; ++loaded; continue; }
-            if (key == "terrain_tess_max_level")      { rt_.terrain_tess_max_level      = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_tess_near_m")         { rt_.terrain_tess_near_m         = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_tess_far_m")          { rt_.terrain_tess_far_m          = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_tess_falloff")        { rt_.terrain_tess_falloff        = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_tess_smooth")         { rt_.terrain_tess_smooth         = std::stof(val); ++loaded; continue; }
             if (key == "terrain_pom_strength")        { rt_.terrain_pom_strength        = std::stof(val); ++loaded; continue; }
             if (key == "terrain_disp_amp")            { rt_.terrain_disp_amp            = std::stof(val); ++loaded; continue; }
             if (key == "terrain_disp_smooth_mip")     { rt_.terrain_disp_smooth_mip     = std::stof(val); ++loaded; continue; }
@@ -709,7 +651,6 @@ void VulkanEngine::load_settings() {
             if (key == "water_clarity_depth")         { rt_.water_clarity_depth         = std::stof(val); ++loaded; continue; }
             if (key == "water_shore_softness")        { rt_.water_shore_softness        = std::stof(val); ++loaded; continue; }
             if (key == "water_foam_opacity")          { rt_.water_foam_opacity          = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_rock_relief")         { rt_.terrain_rock_relief         = std::stof(val); ++loaded; continue; }
             if (key == "ground_mat_strength")         { rt_.ground_mat_strength         = std::stof(val); ++loaded; continue; }
             if (key == "ground_mat_tile_m")           { rt_.ground_mat_tile_m           = std::stof(val); ++loaded; continue; }
             if (key == "ground_mat_normal")           { rt_.ground_mat_normal           = std::stof(val); ++loaded; continue; }
@@ -792,12 +733,6 @@ void VulkanEngine::load_settings() {
             else if (key == "shadow_map_resolution") rt_.shadow_map_resolution = std::stoi(val);
             else if (key == "shadow_map_world_half") rt_.shadow_map_world_half = std::stof(val);
             else if (key == "shadow_debug_overlay")  rt_.shadow_debug_overlay  = std::stoi(val) != 0;
-            // Per-LOD ladder + back-compat keys live in the fast-path
-            // block above (apply_terrain_lod_key + the
-            // `terrain_lod1/2/3` continue checks). Adding even one
-            // else-if here triggers MSVC C1061 because the chain is
-            // already at the nested-block depth limit.
-            else if (key == "terrain_lod_scale") rt_.terrain_lod_scale = std::stof(val);
             else if (key == "terrain_bake_supersample") rt_.terrain_bake_supersample = std::stoi(val);
             else if (key == "terrain_shading_contrast") rt_.terrain_shading_contrast = std::stof(val);
             else if (key == "terrain_heightmap_scale") rt_.terrain_heightmap_scale = std::stoi(val);

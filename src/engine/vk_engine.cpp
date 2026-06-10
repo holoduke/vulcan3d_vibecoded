@@ -773,6 +773,13 @@ void VulkanEngine::draw(uint32_t img_index) {
     // identical aspect/lerp/view/proj/Halton-jitter rebuilds per frame.
     current_frame_view_ = compute_frame_view();
 
+    // Quadtree CLOD terrain: select nodes + fill this frame's instance
+    // ranges (camera list + light list). Must run after
+    // compute_frame_view (camera frustum) and update_sun_shadow_light_vp
+    // (light frustum), before any pass records terrain draws — depth,
+    // colour and shadow all consume the same selection.
+    update_terrain_clod_instances();
+
     // Sun shadow map pass — runs first so its depth target is in
     // SHADER_READ_ONLY_OPTIMAL by the time the scene color pass samples
     // it via grass.vert (binding 7). Skip the entire pass when no
@@ -1961,14 +1968,9 @@ void VulkanEngine::run(const RunOptions& opts) {
                     }
                     apply_terrain_brush(frame_dt);
                     terrain_brush_mode_ = prev_mode;
-                    // Grass-paint strokes don't dirty terrain chunks /
-                    // BLAS / Jolt — skip the rebuild + collision
-                    // refresh entirely so the brush stays cheap.
-                    const bool grass_stroke =
-                        brush_mode_is_grass(terrain_brush_mode_);
-                    if (!grass_stroke) {
-                        rebuild_dirty_terrain_chunks();
-                    }
+                    // CLOD raster reads the heightmap texture, so the
+                    // stroke shows up via the terrain_height_dirty_
+                    // re-upload — no per-chunk mesh rebuild needed.
                     if (!terrain_stroke_active_) terrain_stroke_active_ = true;
                 } else if (terrain_stroke_active_ && !in.fire_held && !in.alt_fire_held) {
                     // Mouse-up: heavy refresh (BLAS + Jolt) deferred until
@@ -2164,125 +2166,10 @@ void VulkanEngine::run(const RunOptions& opts) {
             destroy_sun_shadow_resources();
             init_sun_shadow_resources();
         }
-        // Per-LOD stride sliders changed -- the user wants to re-bake
-        // every chunk's LOD index buffers. Drain the GPU and rebuild
-        // synchronously; cost scales with chunk count * stride count
-        // and is paid once per slider change (not continuous drag).
-        if (terrain_lod_dirty_ && !terrain_chunks_.chunks.empty()) {
-            vkDeviceWaitIdle(device_);
-            rebuild_chunk_lod_indices(device_, allocator_, graphics_queue_,
-                                       graphics_queue_family_,
-                                       terrain_chunks_,
-                                       rt_.terrain_lod_stride);
-            terrain_lod_dirty_ = false;
-        }
-        // Near-camera chunk-vertex densification. Each chunk has its own
-        // c.densify (1 = baseline source-cell resolution; 2/4/8 = N x N
-        // bilinear sub-division of the source heightmap on the chunk
-        // VBO). Per-frame: compute desired densify for each chunk (near
-        // == near_density, far == 1) and queue a re-bake for any chunk
-        // whose current c.densify differs. Throttle to a small batch per
-        // frame so a slider jump never causes a multi-second hitch on
-        // large maps.
-        if (!terrain_chunks_.chunks.empty() &&
-            !terrain_data_.heights.empty() &&
-            !rt_.terrain_raymarch_enabled) {
-            int desired_near = std::clamp(rt_.terrain_near_density, 1, 8);
-            float r_m = std::max(0.0f, rt_.terrain_near_density_radius_m);
-            // Hysteresis on the radius boundary: a chunk that is
-            // currently dense stays dense until the camera moves past
-            // (r_m + kHysteresis_m); a chunk that is currently sparse
-            // only becomes dense when the camera comes within r_m.
-            // Without this, a chunk straddling the radius boundary
-            // would flip densify state every single frame as the
-            // camera bobs / rotates, and each flip triggers a full VBO
-            // re-bake (vkQueueWaitIdle + buffer realloc + LOD index
-            // rebake). 30 m is wider than a single chunk (64 m chunks
-            // -> 32 m radius) so a chunk can't flip back and forth
-            // within one chunk-width of camera motion.
-            constexpr float kHysteresis_m = 30.0f;
-            float r_dense_keep = r_m + kHysteresis_m;
-            float r2_enter = r_m * r_m;
-            float r2_keep  = r_dense_keep * r_dense_keep;
-            glm::vec3 cam = player_.position;
-            // Per-chunk desired-densify policy with hysteresis:
-            //   - currently dense (densify > 1) AND inside r_keep -> stay dense
-            //   - currently sparse (densify == 1) AND inside r_enter -> go dense
-            //   - otherwise -> sparse (densify = 1)
-            // The "desired" densify value still tracks the user's
-            // slider (`desired_near`) so a slider change re-bakes the
-            // chunks that fall under the new policy.
-            // Distance is CLOSEST POINT on the chunk AABB to the
-            // camera (XZ). Chunk you're standing in -> d=0 -> reliably
-            // dense. Was chunk-CENTRE distance which could put a chunk
-            // straight under the player at ~30 m and skip densification
-            // until walking forward triggered a rebuild a second later
-            // -- the user reported this as alternating dense/sparse
-            // patches as they walked.
-            auto desired_densify = [&](const TerrainChunk& c) -> int {
-                float cx = glm::clamp(cam.x, c.aabb_min.x, c.aabb_max.x);
-                float cz = glm::clamp(cam.z, c.aabb_min.z, c.aabb_max.z);
-                float dx = cx - cam.x;
-                float dz = cz - cam.z;
-                float d2 = dx * dx + dz * dz;
-                bool keep_dense = (c.densify > 1) && (d2 <= r2_keep);
-                bool enter_dense = (d2 <= r2_enter);
-                return (keep_dense || enter_dense) ? desired_near : 1;
-            };
-            // Cheap pre-scan: skip the heightmap-copy + bake path when
-            // every chunk already has the correct densify. This is the
-            // steady-state happy path -- the user isn't moving past
-            // any chunk boundary and the slider is unchanged.
-            bool any_needs_rebake = false;
-            for (const auto& c : terrain_chunks_.chunks) {
-                if (desired_densify(c) != c.densify) {
-                    any_needs_rebake = true; break;
-                }
-            }
-            if (any_needs_rebake) {
-                // A re-bake costs a vkQueueWaitIdle inside
-                // rebuild_chunk_at_density, so the per-frame cap keeps
-                // the stall on the order of a couple of ms even at
-                // densify 8. When the dirty flag is set (user just
-                // moved the slider) we bake every queued chunk in one
-                // shot so the visible change is immediate.
-                // Bumped 2 -> 8 to keep up with walking speed. At
-                // 8 m/s walking + 64 m chunk pitch you enter a new
-                // chunk every ~8 s, so a 7-chunk-wide near-radius
-                // queue of 14 dirty chunks at the old cap took ~7
-                // frames to drain -- visibly sparse while you walked.
-                // 8 per frame drains the queue in <2 frames at ~16 ms.
-                constexpr int kMaxRebakesPerFrame = 8;
-                int rebakes = 0;
-                // Build a Heightmap view -- the source-of-truth heights
-                // live in terrain_data_; we wrap them with origin/cell
-                // so the densified sampling matches what the BLAS /
-                // physics see. The copy is ~16 MB at 2049^2 but we only
-                // hit this path when a chunk actually needs re-baking.
-                Heightmap hm{};
-                hm.dim = terrain_data_.dim;
-                hm.cell = terrain_data_.cell;
-                hm.origin_x = terrain_data_.origin_x;
-                hm.origin_z = terrain_data_.origin_z;
-                hm.heights = terrain_data_.heights;
-                bool bake_all = terrain_density_dirty_;
-                for (auto& c : terrain_chunks_.chunks) {
-                    int want = desired_densify(c);
-                    if (want == c.densify) continue;
-                    if (!bake_all && rebakes >= kMaxRebakesPerFrame) break;
-                    rebuild_chunk_at_density(device_, allocator_, graphics_queue_,
-                                              graphics_queue_family_,
-                                              hm, c, want,
-                                              rt_.terrain_lod_stride);
-                    ++rebakes;
-                }
-                if (rebakes > 0) {
-                    log::infof("[terrain] densify rebaked %d chunk(s) (near=%d r=%.0fm hyst=%.0fm)",
-                               rebakes, desired_near, r_m, kHysteresis_m);
-                }
-            }
-            if (terrain_density_dirty_) terrain_density_dirty_ = false;
-        }
+        // (The chunk-LOD stride rebake + near-densify systems are gone —
+        // the quadtree CLOD terrain has no per-chunk geometry to rebake.
+        // Density follows the camera continuously via per-frame node
+        // selection in update_terrain_clod_instances.)
         // Heightmap-bake supersample changed → recreate texture and
         // restart the worker so subsequent jobs run at the new ss.
         // The user can flip 1x/2x/4x freely; texture realloc is cheap.

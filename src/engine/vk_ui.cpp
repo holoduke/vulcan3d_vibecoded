@@ -899,13 +899,13 @@ void VulkanEngine::build_menu_ui() {
             "Relaxation: faster march at the risk of skipping spikes.\n"
             "God-rays: 4 short rays per fog step, ~20% slower fog.");
         } else {
-        ImGui::SeparatorText("Mesh / tessellation");
-        ImGui::Checkbox("Near GPU tessellation + displacement",
-                         &rt_.terrain_tessellation_enabled);
-        ImGui::TextDisabled("Live toggle. OFF = plain CD-LOD mesh (no\n"
-                             "subdivision/displacement near the camera).");
-        ImGui::SliderFloat("Tessellation range (m)",
-                           &rt_.terrain_tess_range, 5.0f, 250.0f, "%.0f");
+        ImGui::SeparatorText("Quadtree CLOD terrain");
+        ImGui::SliderFloat("Detail range (m)",
+                           &rt_.terrain_clod_range0, 20.0f, 200.0f, "%.0f");
+        ImGui::TextDisabled("%s",
+            "Leaf-node subdivision ring. Each LOD ring doubles this.\n"
+            "Bigger = dense 0.25 m triangles reach further out\n"
+            "(more triangles, still one instanced draw).");
         ImGui::Checkbox("Wireframe (show triangles / mesh density)",
                          &rt_.terrain_wireframe);
         }   // end FBM / mesh renderer split
@@ -1047,154 +1047,7 @@ void VulkanEngine::build_menu_ui() {
 
         // ---- Mesh-path-only settings (hidden in FBM raymarch mode) ----
         if (!rt_.terrain_raymarch_enabled) {
-        ImGui::SeparatorText("LOD distances");
-        ImGui::SliderFloat("Terrain detail (multiplier)",
-                            &rt_.terrain_lod_scale, 0.5f, 4.0f, "%.2fx");
-        if (ImGui::CollapsingHeader("Terrain LOD")) {
-            ImGui::TextDisabled(
-                "Each LOD is shown as the distance RANGE it covers + the\n"
-                "MESH DENSITY at that LOD (1 = baseline heightmap; 1/N = N\n"
-                "times sparser; LOD 0 'N x denser' via the Near density\n"
-                "slider below). Drag the end-of-LOD distance to widen or\n"
-                "narrow that band. Morph blend only covers LOD 0 -> 1.");
-            bool any_stride_changed = false;
-            for (int i = 0; i < kTerrainLodCount; ++i) {
-                ImGui::PushID(i);
-                // Display the BAND for each LOD: start = previous LOD's
-                // end (or 0 for LOD 0), end = this LOD's distance.
-                float band_start = (i == 0) ? 0.0f
-                                            : rt_.terrain_lod_distance[i - 1];
-                // For the final LOD show "(farthest)" instead of an
-                // endpoint -- it has no "leaves at" distance.
-                if (i < kTerrainLodCount - 1) {
-                    ImGui::Text("LOD %d: %.0f m -> %.0f m", i, band_start,
-                                 rt_.terrain_lod_distance[i]);
-                } else {
-                    ImGui::Text("LOD %d: %.0f m -> (farthest)", i, band_start);
-                }
-                // LOD 0 = the near band. Density is the chunk VBO
-                // supersample slider (terrain_near_density). Stride 1
-                // is enforced by the renderer at LOD 0 (the baked IBO
-                // is always used), so we show the near-density slider
-                // here instead of a no-op stride.
-                if (i == 0) {
-                    int prev_near = rt_.terrain_near_density;
-                    ImGui::SliderInt("density (1 = baseline, N = N x denser)",
-                                      &rt_.terrain_near_density, 1, 8);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip(
-                            "Chunk VBO supersample on near chunks. 1 = baseline\n"
-                            "(one vert per heightmap cell). 2/4/8 = N x N more\n"
-                            "verts per cell via bilinear sampling. Only chunks\n"
-                            "inside the Near density radius pay the cost.");
-                    }
-                    if (rt_.terrain_near_density != prev_near) {
-                        terrain_density_dirty_ = true;
-                    }
-                } else {
-                    // LODs 1..7: density expressed inversely as "1 / N"
-                    // where N is the stride. Slider drags map to the
-                    // nearest stride in the discrete ladder 1/2/4/8/...
-                    // so user input is always a sensible density.
-                    int prev_stride = rt_.terrain_lod_stride[i];
-                    char density_label[64];
-                    std::snprintf(density_label, sizeof(density_label),
-                                   "density 1/%d", rt_.terrain_lod_stride[i]);
-                    ImGui::SliderInt(density_label,
-                                      &rt_.terrain_lod_stride[i], 1, 256);
-                    if (rt_.terrain_lod_stride[i] < 1) rt_.terrain_lod_stride[i] = 1;
-                    if (rt_.terrain_lod_stride[i] != prev_stride)
-                        any_stride_changed = true;
-                }
-                // The "end" distance slider for this LOD band, except
-                // for the final one (no endpoint).
-                if (i < kTerrainLodCount - 1) {
-                    float vmax = (i == 0) ? 600.0f
-                                          : std::max(rt_.terrain_lod_distance[i] * 4.0f,
-                                                     1500.0f * static_cast<float>(i + 1));
-                    ImGui::SliderFloat("end (m)",
-                                        &rt_.terrain_lod_distance[i],
-                                        10.0f, vmax, "%.0f");
-                }
-                ImGui::Separator();
-                ImGui::PopID();
-            }
-            // Monotone-clamp the distance ladder so a slider can't
-            // overtake its neighbours -- the picker assumes strict
-            // ascending order. Walk forward then back so dragging
-            // either way always lands on a valid ladder.
-            for (int i = 1; i < kTerrainLodCount - 1; ++i) {
-                if (rt_.terrain_lod_distance[i] <
-                    rt_.terrain_lod_distance[i - 1] + 10.0f) {
-                    rt_.terrain_lod_distance[i] =
-                        rt_.terrain_lod_distance[i - 1] + 10.0f;
-                }
-            }
-            if (any_stride_changed) {
-                // Defer the IBO re-bake to the main loop's safe-rebuild
-                // block (drains the GPU once). A drag will set the flag
-                // every frame the user moves a slider; the rebuild
-                // itself runs once between frames.
-                terrain_lod_dirty_ = true;
-            }
-            if (ImGui::Button("Reset LOD to defaults")) {
-                // Keep these in sync with the defaults declared in
-                // vk_engine.h Runtime::terrain_lod_distance / _stride.
-                // Far thresholds are pushed out so the un-morphed pops
-                // at LOD2..7 are fog-masked / sub-pixel.
-                const float def_d[kTerrainLodCount - 1] = {
-                    80.0f, 250.0f, 500.0f, 900.0f, 1400.0f, 2000.0f, 2700.0f
-                };
-                const int def_s[kTerrainLodCount] = {
-                    1, 2, 4, 8, 16, 32, 64, 128
-                };
-                for (int i = 0; i < kTerrainLodCount - 1; ++i)
-                    rt_.terrain_lod_distance[i] = def_d[i];
-                for (int i = 0; i < kTerrainLodCount; ++i)
-                    rt_.terrain_lod_stride[i] = def_s[i];
-                terrain_lod_dirty_ = true;
-            }
-
-            // Density slider now lives in the LOD 0 row above; only the
-            // radius needs its own slider down here.
-            ImGui::SeparatorText("Near-camera densification");
-            float prev_near_radius = rt_.terrain_near_density_radius_m;
-            ImGui::SliderFloat("Near density radius (m)",
-                                &rt_.terrain_near_density_radius_m,
-                                0.0f, 1000.0f, "%.0f");
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip(
-                    "Chunks whose centre is inside this radius (camera XZ)\n"
-                    "get the LOD 0 density (above) applied to their VBO via\n"
-                    "bilinear supersample. Far chunks stay at baseline.\n"
-                    "0 m = effectively disable. Each rebuild costs a VBO\n"
-                    "upload; main loop throttles to 2 chunks/frame.");
-            }
-            if (rt_.terrain_near_density_radius_m != prev_near_radius) {
-                terrain_density_dirty_ = true;
-            }
-        }
-
-        ImGui::SeparatorText("Near tessellation density (live)");
-        ImGui::SliderFloat("Tess max subdivision",
-                           &rt_.terrain_tess_max_level, 1.0f, 64.0f, "%.0f");
-        ImGui::SliderFloat("Tess full-detail dist (m)",
-                           &rt_.terrain_tess_near_m, 1.0f, 60.0f, "%.0f");
-        ImGui::SliderFloat("Tess fade-out dist (m)",
-                           &rt_.terrain_tess_far_m, 10.0f, 250.0f, "%.0f");
-        ImGui::SliderFloat("Tess falloff (<1 = denser near)",
-                           &rt_.terrain_tess_falloff, 0.2f, 3.0f, "%.2f");
-        ImGui::SliderFloat("Tess smoothing (before texture)",
-                           &rt_.terrain_tess_smooth, 0.0f, 1.0f, "%.2f");
-        ImGui::TextDisabled(
-            "0 = raw per-type relief, 1 = smooth low-frequency swell.\n"
-            "Low-passes the tessellated geometry + normal before the\n"
-            "material splat is applied.");
-        ImGui::SliderFloat("Rock relief (vertex geometry)",
-                           &rt_.terrain_rock_relief, 0.0f, 1.0f, "%.2f");
-        ImGui::TextDisabled(
-            "Real tessellated geometry on rock — the coarse/silhouette\n"
-            "half. Kept chunky even when Tess smoothing is high.");
+        ImGui::SeparatorText("Detail (live)");
         ImGui::SliderFloat("Sand ripple scale",
                            &rt_.terrain_sand_ripple_scale, 1.0f, 40.0f, "%.1f");
         ImGui::TextDisabled(
@@ -1215,8 +1068,8 @@ void VulkanEngine::build_menu_ui() {
                            &rt_.terrain_disp_amp, 0.0f, 1.0f, "%.2f");
         ImGui::TextDisabled(
             "Vertex displacement amplitude in metres for the rocky-grass\n"
-            "band material. Drives the tessellated near-terrain mesh.\n"
-            "Too high + low tess = spikes; raise Disp smooth to mitigate.");
+            "band material — applied in the CLOD vertex shader near the\n"
+            "camera (replaces the old tessellation displacement).");
         ImGui::SliderFloat("Disp smooth (mip bias)",
                            &rt_.terrain_disp_smooth_mip, 0.0f, 6.0f, "%.1f");
         ImGui::TextDisabled(
@@ -1229,8 +1082,6 @@ void VulkanEngine::build_menu_ui() {
             "Distance beyond which per-pixel parallax stops being\n"
             "raymarched. Was hardcoded 220 m. Higher = more detail far,\n"
             "lower = perf.");
-        if (rt_.terrain_tess_far_m < rt_.terrain_tess_near_m + 5.0f)
-            rt_.terrain_tess_far_m = rt_.terrain_tess_near_m + 5.0f;
 
         ImGui::SeparatorText("Ground material (procedural splat)");
         ImGui::SliderFloat("Material strength",

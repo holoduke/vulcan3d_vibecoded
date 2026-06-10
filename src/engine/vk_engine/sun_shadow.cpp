@@ -362,29 +362,39 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     }
 
-    // Terrain chunks — frustum-culled, distance-LOD'd. Distance metric is
-    // camera-to-chunk (not light-to-chunk) so terrain casters share the
-    // same LOD selection as the main render — keeps the cost bounded
-    // and matches the resolution the user actually sees.
-    if (!terrain_chunks_.chunks.empty()) {
-        glm::vec3 cam = player_.eye_position();
-        // Shared LOD thresholds with the depth + colour passes -- a
-        // mismatch here would silently break the depth pre-pass's
-        // LESS_OR_EQUAL test. Build the scaled threshold array once
-        // and reuse for every chunk.
-        float thresh[kTerrainLodCount - 1];
-        for (int i = 0; i < kTerrainLodCount - 1; ++i)
-            thresh[i] = rt_.terrain_lod_distance[i] * rt_.terrain_lod_scale;
-        for (const auto& c : terrain_chunks_.chunks) {
-            if (!aabb_visible(light_frustum, c.aabb_min, c.aabb_max)) continue;
-            int lod = pick_terrain_lod(c, cam, thresh, kTerrainLodCount - 1);
-            VkDeviceSize toff = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &c.mesh.vertex_buffer, &toff);
-            VkBuffer ibo = (lod == 0) ? c.mesh.index_buffer : c.ibo_lod[lod - 1];
-            vkCmdBindIndexBuffer(cmd, ibo, 0, VK_INDEX_TYPE_UINT32);
-            push_shadow(glm::mat4(1.0f));
-            vkCmdDrawIndexed(cmd, c.index_count_lod[lod], 1, 0, 0, 0);
-        }
+    // Terrain — quadtree CLOD, ONE instanced draw. The instance list was
+    // selected with the CAMERA's distance metric (same nodes the main
+    // render rasterises) and light-frustum-culled in
+    // update_terrain_clod_instances. terrain_shadow.vert mirrors
+    // terrain.vert's height fetch + geomorph, so caster geometry matches
+    // the visible surface. Needs the MAIN pipeline layout (set 0 for the
+    // heightmap texture + camera pos) unlike the slim brush-caster
+    // layout above — bind both explicitly.
+    if (terrain_clod_shadow_count_ > 0 && terrain_shadow_pipeline_ &&
+        !rt_.terrain_raymarch_enabled && terrain_clod_patch_.vertex_buffer) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          terrain_shadow_pipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipeline_layout_, 0, 1, &scene_desc_set_,
+                                0, nullptr);
+        VkBuffer vbufs[2] = { terrain_clod_patch_.vertex_buffer,
+                              terrain_clod_inst_buf_ };
+        VkDeviceSize voffs[2] = { 0, terrain_clod_shadow_offset_ };
+        vkCmdBindVertexBuffers(cmd, 0, 2, vbufs, voffs);
+        vkCmdBindIndexBuffer(cmd, terrain_clod_patch_.index_buffer, 0,
+                             VK_INDEX_TYPE_UINT32);
+        PushConstants pc{};
+        pc.mvp = vp;                      // light view-proj
+        pc.model = glm::mat4(1.0f);
+        pc.emissive = terrain_clod_hm_params();
+        pc.grass_params = glm::vec4(rt_.terrain_sand_ripple_scale,
+                                    rt_.terrain_grass_line_scale,
+                                    rt_.terrain_disp_amp,
+                                    rt_.terrain_disp_smooth_mip);
+        vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
+                           0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, terrain_clod_patch_.index_count,
+                         terrain_clod_shadow_count_, 0, 0, 0);
     }
 
     vkCmdEndRendering(cmd);

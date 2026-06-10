@@ -373,7 +373,7 @@ void VulkanEngine::destroy_rt() {
     if (merged_static_mesh_.vertex_buffer) destroy_mesh(allocator_, merged_static_mesh_);
     if (terrain_blas_buffer_) vmaDestroyBuffer(allocator_, terrain_blas_buffer_, terrain_blas_alloc_);
     if (terrain_mesh_.vertex_buffer) destroy_mesh(allocator_, terrain_mesh_);
-    destroy_terrain_chunks(device_, allocator_, terrain_chunks_);
+    destroy_terrain_clod();
     tlas_ = blas_ = cylinder_blas_ = merged_static_blas_ = terrain_blas_ = VK_NULL_HANDLE;
     tlas_buffer_ = blas_buffer_ = cylinder_blas_buffer_ = merged_static_blas_buffer_ =
         terrain_blas_buffer_ =
