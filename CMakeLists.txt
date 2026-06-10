@@ -309,6 +309,7 @@ add_library(qlike_engine STATIC
     src/engine/terrain.cpp
     src/engine/terrain_clod.cpp
     src/engine/grass.cpp
+    src/engine/scatter.cpp
 )
 target_include_directories(qlike_engine PUBLIC src)
 target_include_directories(qlike_engine PRIVATE

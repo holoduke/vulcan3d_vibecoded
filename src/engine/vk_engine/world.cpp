@@ -1789,6 +1789,16 @@ void VulkanEngine::init_world() {
             log::info("[grass] raymarch grass enabled — deferring placement "
                       "build (will lazy-build if raymarch grass is toggled off)");
         }
+
+        // Ground clutter (AAA Phase 3): rocks + pebbles scattered by
+        // splat rules. Rendered regardless of which grass path is on.
+        ScatterParams sp{};
+        sp.water_level = rt_.water_level;
+        sp.rock_band_h = rt_.terrain_h_dirt_rock_start;
+        sp.snow_band_h = rt_.terrain_h_rock_snow_start;
+        scatter_ = build_scatter(device_, allocator_,
+                                 graphics_queue_, graphics_queue_family_,
+                                 hm, sp);
     }
 
     physics_ = std::make_unique<PhysicsWorld>();
@@ -4480,6 +4490,35 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         }
         // Restore the world pipeline + cube mesh bindings for the
         // brush loop below.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    }
+
+    // Ground clutter (AAA Phase 3): one instanced draw of the lumpy-rock
+    // mesh. Independent of which grass path is active — clutter is what
+    // breaks the bare-heightfield look between blades.
+    if (scatter_.instance_count > 0 && scatter_pipeline_ != VK_NULL_HANDLE &&
+        !rt_.terrain_raymarch_enabled) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scatter_pipeline_);
+        VkBuffer  sbufs[2]    = { scatter_.rock_mesh.vertex_buffer,
+                                  scatter_.instance_buffer };
+        VkDeviceSize soffs[2] = { 0, 0 };
+        vkCmdBindVertexBuffers(cmd, 0, 2, sbufs, soffs);
+        vkCmdBindIndexBuffer(cmd, scatter_.rock_mesh.index_buffer, 0,
+                             VK_INDEX_TYPE_UINT32);
+        PushConstants spc{};
+        spc.mvp = vp;
+        spc.model = glm::mat4(1.0f);
+        spc.prev_mvp = prev_vp;
+        // .x = clutter draw distance — reuse the grass distance slider
+        // so near-field density follows the user's grass preference.
+        spc.grass_params = glm::vec4(std::max(60.0f, rt_.grass_distance * 1.6f),
+                                     0.0f, 0.0f, 0.0f);
+        vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
+                           0, sizeof(PushConstants), &spc);
+        vkCmdDrawIndexed(cmd, scatter_.rock_mesh.index_count,
+                         scatter_.instance_count, 0, 0, 0);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);

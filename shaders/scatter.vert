@@ -1,0 +1,114 @@
+#version 460
+
+// Ground clutter (AAA Phase 3): instanced lumpy-rock mesh. Same
+// instancing + shadow-sampling pattern as grass.vert; distance fade
+// collapses far instances so the rasteriser drops them.
+
+layout(location = 0) in vec3 inPos;        // rock-local, unit-ish radius
+layout(location = 1) in vec3 inNormal;
+layout(location = 2) in vec2 inUv;
+
+layout(location = 3) in vec4 inPosScale;   // .xyz base world, .w scale
+layout(location = 4) in vec4 inRotTint;    // .x rotY, .yzw tint
+
+layout(set = 0, binding = 0) uniform SceneUBO {
+    vec4  sun_direction;
+    vec4  sun_color;
+    vec4  ambient;
+    vec4  sky_color;
+    ivec4 rt_flags;
+    vec4  rt_params;
+    ivec4 rt_flags2;
+    vec4  rt_params2;
+    vec4  camera_pos;
+    vec4  rt_lod;
+    vec4  viewport;
+    vec4  muzzle_pos;
+    vec4  muzzle_color;
+    vec4  terrain_params;
+    vec4  terrain_h_low;
+    vec4  terrain_h_high;
+    vec4  grass_extra;
+    vec4  grass_extra2;
+    mat4  light_vp;
+} scene;
+
+layout(push_constant) uniform PC {
+    mat4 mvp;
+    mat4 model;
+    mat4 prev_mvp;
+    vec4 color;
+    vec4 emissive;
+    vec4 tex_params;
+    vec4 grass_params;   // .x = max draw distance (m)
+} pc;
+
+layout(location = 0) out vec3 vNormal;
+layout(location = 1) out vec3 vColor;
+layout(location = 2) out vec3 vWorldPos;
+layout(location = 3) out float vSunShadow;
+layout(location = 4) out float vCullKill;
+layout(location = 5) out float vDistToCam;
+layout(location = 6) out vec4 vPrevClip;
+
+layout(set = 0, binding = 6) uniform sampler2D u_terrain_shadow;
+layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
+
+void main() {
+    vec3  base  = inPosScale.xyz;
+    float scale = inPosScale.w;
+    float rot   = inRotTint.x;
+
+    float dist = distance(base, scene.camera_pos.xyz);
+    float max_d = max(pc.grass_params.x, 10.0);
+    // Smooth shrink over the last 25% so the cull never pops; small
+    // pebbles fade earlier than boulders (they're sub-pixel sooner).
+    // Capped tighter than grass: a 0.5 m rock at 120 m is a 2-px dark
+    // dot — pepper, not detail.
+    float reach = max_d * clamp(scale * 2.2 + 0.22, 0.22, 0.85);
+    float fade = 1.0 - smoothstep(reach * 0.75, reach, dist);
+    vCullKill = (fade < 0.03) ? 1.0 : 0.0;
+    if (vCullKill > 0.5) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        vPrevClip   = gl_Position;
+        vNormal = vec3(0, 1, 0); vColor = vec3(0);
+        vWorldPos = vec3(0); vSunShadow = 0.0; vDistToCam = 0.0;
+        return;
+    }
+
+    float c = cos(rot), s = sin(rot);
+    mat3 R = mat3(vec3(c, 0, s), vec3(0, 1, 0), vec3(-s, 0, c));
+    vec3 world = R * (inPos * scale * fade) + base;
+
+    gl_Position = pc.mvp * vec4(world, 1.0);
+    vPrevClip   = pc.prev_mvp * vec4(world, 1.0);
+    vWorldPos   = world;
+    vNormal     = R * inNormal;
+    vColor      = inRotTint.yzw;
+    vDistToCam  = dist;
+
+    // Hybrid sun shadow sampled at the rock's TOP, not its base — the
+    // base sits exactly at the terrain depth in the shadow map, so a
+    // base sample self-shadows (acne) and every rock rendered black.
+    float shadow = 0.0;
+    {
+        vec3 probe = base + vec3(0.0, scale + 0.08, 0.0);
+        vec4 lc = scene.light_vp * vec4(probe, 1.0);
+        vec3 lndc = lc.xyz / lc.w;
+        vec2 luv  = lndc.xy * 0.5 + 0.5;
+        bool inFrustum = lndc.z >= 0.0 && lndc.z <= 1.0 &&
+                         all(greaterThanEqual(luv, vec2(0.0))) &&
+                         all(lessThanEqual(luv, vec2(1.0)));
+        if (inFrustum) {
+            shadow = 1.0 - textureLod(u_sun_shadow_map,
+                                      vec3(luv, lndc.z - 0.00005), 0.0);
+        } else {
+            vec2 buv = (base.xz / 2048.0) + vec2(0.5);
+            if (all(greaterThanEqual(buv, vec2(0.0))) &&
+                all(lessThanEqual(buv, vec2(1.0)))) {
+                shadow = step(0.5, textureLod(u_terrain_shadow, buv, 0.0).r);
+            }
+        }
+    }
+    vSunShadow = shadow;
+}

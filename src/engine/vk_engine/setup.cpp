@@ -1826,6 +1826,64 @@ void VulkanEngine::init_grass_pipeline() {
     log::info("grass pipeline built");
 }
 
+// Ground clutter (AAA Phase 3) — same structure as the grass pipeline:
+// shared cube layout, 4 colour attachments, per-vertex mesh at binding 0
+// + per-instance ScatterInstance (2 vec4) at binding 1.
+void VulkanEngine::init_scatter_pipeline() {
+    std::string sd = QLIKE_SHADER_DIR;
+    scatter_vert_module_ = vkpipe::load_shader_module(device_, sd + "/scatter.vert.spv");
+    scatter_frag_module_ = vkpipe::load_shader_module(device_, sd + "/scatter.frag.spv");
+
+    vkpipe::GraphicsPipelineConfig cfg{};
+    cfg.vert = scatter_vert_module_;
+    cfg.frag = scatter_frag_module_;
+    cfg.layout = pipeline_layout_;
+    cfg.color_formats = { scene_color_format_, motion_vec_format_,
+                          gbuffer0_format_,    gbuffer1_format_ };
+    cfg.depth_format = depth_format_;
+    cfg.cull = VK_CULL_MODE_BACK_BIT;
+    cfg.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    VkVertexInputBindingDescription b0{};
+    b0.binding = 0; b0.stride = sizeof(Vertex);
+    b0.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputBindingDescription b1{};
+    b1.binding = 1; b1.stride = sizeof(ScatterInstance);
+    b1.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+    cfg.vbindings = { b0, b1 };
+
+    auto attr = [](uint32_t loc, uint32_t binding, VkFormat fmt, uint32_t off) {
+        VkVertexInputAttributeDescription a{};
+        a.location = loc; a.binding = binding; a.format = fmt; a.offset = off;
+        return a;
+    };
+    cfg.vattrs = {
+        attr(0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)),
+        attr(1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)),
+        attr(2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(Vertex, uv)),
+        attr(3, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0),
+        attr(4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 16),
+    };
+
+    scatter_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    log::info("scatter pipeline built (ground clutter)");
+}
+
+void VulkanEngine::destroy_scatter_pipeline() {
+    if (scatter_pipeline_) {
+        vkDestroyPipeline(device_, scatter_pipeline_, nullptr);
+        scatter_pipeline_ = VK_NULL_HANDLE;
+    }
+    if (scatter_vert_module_) {
+        vkDestroyShaderModule(device_, scatter_vert_module_, nullptr);
+        scatter_vert_module_ = VK_NULL_HANDLE;
+    }
+    if (scatter_frag_module_) {
+        vkDestroyShaderModule(device_, scatter_frag_module_, nullptr);
+        scatter_frag_module_ = VK_NULL_HANDLE;
+    }
+}
+
 void VulkanEngine::init_grass_raymarch_pipeline() {
     std::string sd = QLIKE_SHADER_DIR;
     grass_rm_frag_module_ = vkpipe::load_shader_module(device_,

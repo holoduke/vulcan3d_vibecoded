@@ -22,6 +22,7 @@
 #include "engine/terrain.h"
 #include "engine/terrain_clod.h"
 #include "engine/grass.h"
+#include "engine/scatter.h"
 #include "engine/texture.h"   // for BackgroundDecodeHandle
 #include "game/level.h"
 #include "game/player.h"
@@ -1072,6 +1073,15 @@ private:
     VkShaderModule   grass_frag_module_    = VK_NULL_HANDLE;
     void init_grass_pipeline();
     void destroy_grass_pipeline();
+
+    // Ground clutter (AAA Phase 3): instanced procedural rocks/pebbles
+    // scattered by splat-style rules. Same pipeline pattern as grass.
+    ScatterSet scatter_{};
+    VkPipeline     scatter_pipeline_    = VK_NULL_HANDLE;
+    VkShaderModule scatter_vert_module_ = VK_NULL_HANDLE;
+    VkShaderModule scatter_frag_module_ = VK_NULL_HANDLE;
+    void init_scatter_pipeline();
+    void destroy_scatter_pipeline();
 
     // Raymarched grass — fullscreen SDF blade field. Drawn into the same
     // color/motion/depth attachments as cube draws after them, so the
