@@ -39,8 +39,12 @@ void build_rock_mesh_data(std::vector<Vertex>& verts,
         3,9,4, 3,4,2, 3,2,6, 3,6,8, 3,8,9,
         4,9,5, 2,4,11, 6,2,10, 8,6,7, 9,8,1,
     };
-    // Two subdivision rounds (no vertex dedup — flat-ish shading wanted).
-    for (int round = 0; round < 2; ++round) {
+    // ONE subdivision round (80 tris / 240 verts). Two rounds looked
+    // marginally rounder but cost 4x the vertex invocations — at tens of
+    // thousands of instances the vertex stage dominated the whole frame
+    // (60k x 960 verts = 58M VS invocations, ~100 ms). Clutter reads at
+    // a glance; nobody counts facets on a fist-sized rock.
+    for (int round = 0; round < 1; ++round) {
         std::vector<glm::vec3> np;
         std::vector<uint32_t>  nf;
         np.reserve(faces.size() * 2);
