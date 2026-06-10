@@ -611,6 +611,19 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     return final_uv;
 }
 
+// Height-aware splat blend (AAA terrain Phase 1). Instead of a linear
+// cross-fade, the layer whose surface sits HIGHER at this texel wins the
+// contested band — grass grows between stones, dirt settles into rock
+// cracks. `w` is the plain blend weight, ha/hb the two layers' height
+// samples (0..1, from the displacement packed in the normal alphas).
+// Squared heights give a moderate sharpening; the 0.04 floor keeps the
+// ratio finite and the blend smooth where height data is flat.
+float height_lerp(float w, float ha, float hb) {
+    float a = (1.0 - w) * (0.04 + ha * ha);
+    float b = w * (0.04 + hb * hb);
+    return b / (a + b);
+}
+
 vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
     // Same pow(abs(N), 4) → squarings trick as triplanar_sample.
     vec3 blend = abs(N); blend *= blend; blend *= blend;
@@ -1681,13 +1694,25 @@ void main() {
         // blend in the rotated copy by `at_blend`. Strict path is exactly
         // the previous code (same two-fetch macro/micro mix) so toggling
         // the slider off restores the previous look bit-for-bit.
-        #define MAT_A(i) ( \
+        // Per-layer relative UV scale (AAA Phase 1): real photogrammetry
+        // sets have different natural feature sizes — one global tile
+        // rate made snow grain match boulder size. Relative so the
+        // user's metres-per-repeat slider still scales everything.
+        const float kScRock  = 1.0;
+        const float kScGrass = 1.5;
+        const float kScDirt  = 1.25;
+        const float kScSand  = 1.85;
+        const float kScSnow  = 2.3;
+        #define MAT_A(i, s) ( \
             mix( \
-                texture(u_albedo[i], uvm  ).rgb * 0.75 + \
-                texture(u_albedo[i], uvM  ).rgb * 0.25, \
-                texture(u_albedo[i], uvm_r).rgb * 0.75 + \
-                texture(u_albedo[i], uvM_r).rgb * 0.25, \
+                texture(u_albedo[i], uvm   * (s)).rgb * 0.75 + \
+                texture(u_albedo[i], uvM   * (s)).rgb * 0.25, \
+                texture(u_albedo[i], uvm_r * (s)).rgb * 0.75 + \
+                texture(u_albedo[i], uvM_r * (s)).rgb * 0.25, \
                 at_blend))
+        // Per-layer surface height for the height-aware blend — the
+        // displacement packed into each layer's normal alpha.
+        #define MAT_H(i, s) (texture(u_normal[i], uvm * (s)).a)
         // Gate the stylized-grass material by the grass eligibility
         // mask -- the kTexGrass slot was painting bright green ground
         // EVERYWHERE the height-band weight was non-zero, including
@@ -1724,16 +1749,43 @@ void main() {
         // alignment (essential for vertex displacement to read).
         vec3 rocky_strict = texture(u_albedo[12], uvm).rgb;
         vec3 grass_albedo = mix(rocky_strict,
-                                 MAT_A(kMatGrass),
+                                 MAT_A(kMatGrass, kScGrass),
                                  _grass_present);
-        vec3 m = MAT_A(kMatSand);
-        m = mix(m, grass_albedo,     t_sand);
-        m = mix(m, MAT_A(kMatDirt),  t_dirt);
-        m = mix(m, MAT_A(kMatRock),  t_rock);
-        m = mix(m, MAT_A(kMatSnow),  t_snow);
-        m = mix(m, MAT_A(kMatRock),  steep);
-        m = mix(m, MAT_A(kMatSand),  beach);   // auto sand at the waterline
+        // Height-aware splat (AAA Phase 1): every transition is contested
+        // by the two layers' surface heights, so boundaries interlock
+        // (grass between stones, dirt in cracks) instead of cross-fading.
+        // `hcur` tracks the accumulated surface height alongside `m`.
+        float h_grassband = mix(textureLod(u_height[5], uvm, 0.0).r,
+                                MAT_H(kMatGrass, kScGrass),
+                                _grass_present);
+        float h_dirt = MAT_H(kMatDirt, kScDirt);
+        float h_rock = MAT_H(kMatRock, kScRock);
+        float h_snow = MAT_H(kMatSnow, kScSnow);
+        float h_sand = MAT_H(kMatSand, kScSand);
+        vec3  m    = MAT_A(kMatSand, kScSand);
+        float hcur = h_sand;
+        // Weights are saved so the detail-normal splat below blends the
+        // normal maps with EXACTLY the same height-aware weights as the
+        // albedo (mismatched weights make lighting drift off the texture).
+        float w_grass = height_lerp(t_sand, hcur, h_grassband);
+        m = mix(m, grass_albedo, w_grass);
+        hcur = mix(hcur, h_grassband, w_grass);
+        float w_dirt = height_lerp(t_dirt, hcur, h_dirt);
+        m = mix(m, MAT_A(kMatDirt, kScDirt), w_dirt);
+        hcur = mix(hcur, h_dirt, w_dirt);
+        float w_rock = height_lerp(t_rock, hcur, h_rock);
+        m = mix(m, MAT_A(kMatRock, kScRock), w_rock);
+        hcur = mix(hcur, h_rock, w_rock);
+        float w_snow = height_lerp(t_snow, hcur, h_snow);
+        m = mix(m, MAT_A(kMatSnow, kScSnow), w_snow);
+        hcur = mix(hcur, h_snow, w_snow);
+        float w_steep = height_lerp(steep, hcur, h_rock);
+        m = mix(m, MAT_A(kMatRock, kScRock), w_steep);
+        hcur = mix(hcur, h_rock, w_steep);
+        float w_beach = height_lerp(beach, hcur, h_sand);
+        m = mix(m, MAT_A(kMatSand, kScSand), w_beach);  // sand at waterline
         #undef MAT_A
+        #undef MAT_H
 
         // Tint the neutral material toward the art-directed band hue so
         // the overall palette stays controlled, keeping the per-texel
@@ -1759,6 +1811,17 @@ void main() {
         float far_fade = smoothstep(450.0, 1500.0, cam_dist);
         albedo = mix(splat, base, far_fade);
 
+        // ---- Macro variation (AAA Phase 1) ----
+        // World-scale moisture/soil tint over every layer so the ground
+        // never reads as one uniform hue at middle distance. Two slow
+        // octaves (~250 m and ~60 m); damp patches darken + cool, dry
+        // patches lift + warm. Applied to the final albedo so it also
+        // survives the far band-colour fade.
+        float mv0 = tnoise(vWorldPos.xz * 0.004 + vec2(53.1, 7.7));
+        float mv1 = tnoise(vWorldPos.xz * 0.017 + vec2(3.3, 77.7));
+        float mv  = clamp(mv0 * 0.7 + mv1 * 0.3, 0.0, 1.0);
+        albedo *= mix(vec3(0.86, 0.89, 0.84), vec3(1.10, 1.06, 0.99), mv);
+
         // ---- Detail normal mapping ----
         // Splat the matching baked normal maps, rotate into world space
         // via a tangent frame built on the geometric terrain normal.
@@ -1774,25 +1837,26 @@ void main() {
         mat2 N_rot_back = at_blend > 0.001
             ? mat2(cos(-at_a), -sin(-at_a), sin(-at_a), cos(-at_a))
             : mat2(1.0);
-        #define MAT_N_STRICT(i) (texture(u_normal[i], uvm).xyz * 2.0 - 1.0)
-        #define MAT_N_ROT(i)    vec3(N_rot_back * \
-            (texture(u_normal[i], uvm_r).xy * 2.0 - 1.0), \
-            texture(u_normal[i], uvm_r).z * 2.0 - 1.0)
-        #define MAT_N(i) mix(MAT_N_STRICT(i), MAT_N_ROT(i), at_blend)
-        vec3 nm = MAT_N(kMatSand);
+        #define MAT_N_STRICT(i, s) (texture(u_normal[i], uvm * (s)).xyz * 2.0 - 1.0)
+        #define MAT_N_ROT(i, s)    vec3(N_rot_back * \
+            (texture(u_normal[i], uvm_r * (s)).xy * 2.0 - 1.0), \
+            texture(u_normal[i], uvm_r * (s)).z * 2.0 - 1.0)
+        #define MAT_N(i, s) mix(MAT_N_STRICT(i, s), MAT_N_ROT(i, s), at_blend)
+        vec3 nm = MAT_N(kMatSand, kScSand);
         // Same un-rotated treatment for the rocky-rugged normal: the
         // tess-side displacement uses the unrotated height-map UV, so
         // the normal map MUST match or lit highlights drift off the
         // displaced bumps.
         vec3 rocky_strict_n = texture(u_normal[12], uvm).xyz * 2.0 - 1.0;
         vec3 grass_nm = mix(rocky_strict_n,
-                            MAT_N(kMatGrass), _grass_present);
-        nm = mix(nm, grass_nm, t_sand);
-        nm = mix(nm, MAT_N(kMatDirt),  t_dirt);
-        nm = mix(nm, MAT_N(kMatRock),  t_rock);
-        nm = mix(nm, MAT_N(kMatSnow),  t_snow);
-        nm = mix(nm, MAT_N(kMatRock),  steep);
-        nm = mix(nm, MAT_N(kMatSand),  beach);   // sand normal at waterline
+                            MAT_N(kMatGrass, kScGrass), _grass_present);
+        // Same height-aware weights as the albedo splat above.
+        nm = mix(nm, grass_nm, w_grass);
+        nm = mix(nm, MAT_N(kMatDirt, kScDirt), w_dirt);
+        nm = mix(nm, MAT_N(kMatRock, kScRock), w_rock);
+        nm = mix(nm, MAT_N(kMatSnow, kScSnow), w_snow);
+        nm = mix(nm, MAT_N(kMatRock, kScRock), w_steep);
+        nm = mix(nm, MAT_N(kMatSand, kScSand), w_beach); // sand at waterline
         #undef MAT_N
         #undef MAT_N_ROT
         #undef MAT_N_STRICT

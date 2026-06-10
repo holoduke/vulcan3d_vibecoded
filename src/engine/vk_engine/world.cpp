@@ -2411,6 +2411,121 @@ void VulkanEngine::init_textures() {
         kill_slot(normal_textures_[kTexProcGrass]);
         normal_textures_[kTexProcGrass] = rr_nrm;
     }
+
+    load_terrain_pbr_overrides();
+}
+
+// ----------------------------------------------------------------------
+// AAA-terrain Phase 1: real photogrammetry PBR sets over the procedural
+// bakes. For each splat layer, assets/terrain_pbr/<Name>/ holds an
+// ambientCG 2K-JPG set; we bake AO into the albedo at load (same trick
+// as the stylized-grass path) and pack Displacement into the normal
+// map's ALPHA — cube.frag's rock POM reads height from
+// u_normal[kMatRock].a, so every layer that ships displacement gets
+// parallax-capable normals for free. Missing sets leave the procedural
+// bake in place (probe-and-fallback like every other asset).
+void VulkanEngine::load_terrain_pbr_overrides() {
+    struct PbrSet { int slot; const char* name; };
+    const PbrSet sets[] = {
+        { kTexRock,  "Rock035"   },
+        { kTexGrass, "Grass004"  },
+        { kTexDirt,  "Ground024" },
+        { kTexSand,  "Ground027" },
+        { kTexSnow,  "Snow006"   },
+    };
+    auto resolve = [](const std::string& tail) -> std::string {
+        const std::string roots[] = {
+            "assets/terrain_pbr/" + tail,
+            "../assets/terrain_pbr/" + tail,
+            "../../assets/terrain_pbr/" + tail,
+        };
+        for (const std::string& p : roots) {
+            std::ifstream f(p);
+            if (f.good()) return p;
+        }
+        return std::string();
+    };
+    auto kill_slot = [&](TextureSlot& s) {
+        if (s.view)  vkDestroyImageView(device_, s.view, nullptr);
+        if (s.image) vmaDestroyImage(allocator_, s.image, s.alloc);
+        s = {};
+    };
+    int loaded = 0;
+    for (const PbrSet& set : sets) {
+        std::string base = std::string(set.name) + "/" + set.name + "_2K-JPG_";
+        std::string p_alb  = resolve(base + "Color.jpg");
+        std::string p_nrm  = resolve(base + "NormalGL.jpg");
+        std::string p_disp = resolve(base + "Displacement.jpg");
+        std::string p_ao   = resolve(base + "AmbientOcclusion.jpg");
+        if (p_alb.empty() || p_nrm.empty()) {
+            log::warnf("[terrain pbr] %s incomplete — keeping procedural slot %d",
+                       set.name, set.slot);
+            continue;
+        }
+        // Albedo × AO.
+        int aw = 0, ah = 0, ac = 0;
+        unsigned char* alb = stbi_load(p_alb.c_str(), &aw, &ah, &ac, 4);
+        if (!alb) continue;
+        if (!p_ao.empty()) {
+            int ow = 0, oh = 0, oc = 0;
+            unsigned char* ao = stbi_load(p_ao.c_str(), &ow, &oh, &oc, 4);
+            if (ao) {
+                for (int y = 0; y < ah; ++y) {
+                    int ay = (oh > 0) ? (y * oh / ah) : 0;
+                    for (int x = 0; x < aw; ++x) {
+                        int ax = (ow > 0) ? (x * ow / aw) : 0;
+                        int ai = (y * aw + x) * 4, oi = (ay * ow + ax) * 4;
+                        unsigned int o = ao[oi];
+                        for (int c = 0; c < 3; ++c) {
+                            alb[ai + c] = static_cast<unsigned char>(
+                                (static_cast<unsigned int>(alb[ai + c]) * o) / 255U);
+                        }
+                    }
+                }
+                stbi_image_free(ao);
+            }
+        }
+        Texture2D t_alb = upload_texture_from_pixels(
+            device_, allocator_, graphics_queue_, graphics_queue_family_,
+            alb, aw, ah, VK_FORMAT_R8G8B8A8_SRGB, set.name);
+        stbi_image_free(alb);
+
+        // Normal with Displacement packed into alpha.
+        int nw = 0, nh = 0, nc = 0;
+        unsigned char* nrm = stbi_load(p_nrm.c_str(), &nw, &nh, &nc, 4);
+        Texture2D t_nrm{};
+        if (nrm) {
+            if (!p_disp.empty()) {
+                int dw = 0, dh = 0, dc = 0;
+                unsigned char* dsp = stbi_load(p_disp.c_str(), &dw, &dh, &dc, 4);
+                if (dsp) {
+                    for (int y = 0; y < nh; ++y) {
+                        int dy = (dh > 0) ? (y * dh / nh) : 0;
+                        for (int x = 0; x < nw; ++x) {
+                            int dx = (dw > 0) ? (x * dw / nw) : 0;
+                            nrm[(y * nw + x) * 4 + 3] = dsp[(dy * dw + dx) * 4];
+                        }
+                    }
+                    stbi_image_free(dsp);
+                }
+            }
+            t_nrm = upload_texture_from_pixels(
+                device_, allocator_, graphics_queue_, graphics_queue_family_,
+                nrm, nw, nh, VK_FORMAT_R8G8B8A8_UNORM, set.name);
+            stbi_image_free(nrm);
+        }
+        if (t_alb.ok) {
+            kill_slot(albedo_textures_[set.slot]);
+            albedo_textures_[set.slot] = { t_alb.image, t_alb.alloc, t_alb.view };
+        }
+        if (t_nrm.ok) {
+            kill_slot(normal_textures_[set.slot]);
+            normal_textures_[set.slot] = { t_nrm.image, t_nrm.alloc, t_nrm.view };
+        }
+        ++loaded;
+    }
+    log::infof("[terrain pbr] %d/5 photogrammetry layer sets loaded "
+               "(AO-baked albedo, displacement in normal alpha)", loaded);
 }
 
 // ----------------------------------------------------------------------

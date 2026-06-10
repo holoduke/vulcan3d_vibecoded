@@ -248,6 +248,10 @@ private:
     // CPU-generate the 5 seamless tiling terrain materials (albedo+normal)
     // into texture-array slots 7-11. Called at the end of init_textures().
     void bake_terrain_materials();
+    // Phase 1 AAA terrain: photogrammetry PBR sets over the procedural
+    // bakes (assets/terrain_pbr). AO baked into albedo, displacement
+    // packed into the normal alpha for the POM marcher.
+    void load_terrain_pbr_overrides();
     void destroy_textures();
     // Recreate texture_sampler_ with the FSR2 mip-bias if applicable.
     // Idempotent — bias resolves to 0 when fsr2 is off or render scale
