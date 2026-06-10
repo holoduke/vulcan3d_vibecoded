@@ -123,14 +123,26 @@ void main() {
     // Rocky-grass detail displacement (replaces tessellation). Same
     // formula and tile size as cube.frag's splat so bumps align with
     // the textured pixels. Up-only: BLAS-safe.
+    // Phase 2: amplitude is banded by altitude to roughly track the
+    // splat layers — calm sand near the waterline, full relief on the
+    // grass band, strongest on the rock band, softened under snow.
     float kRockyAmp = max(0.0, pc.grass_params.z);
     float kDispMip  = clamp(pc.grass_params.w, 0.0, 6.0);
     float fade = 1.0 - smoothstep(60.0, 110.0, dist);
     if (kRockyAmp * fade > 1e-4) {
+        float band_sand = smoothstep(scene.terrain_h_low.x,
+                                     scene.terrain_h_low.y, h);
+        float band_rock = smoothstep(scene.terrain_h_high.x,
+                                     scene.terrain_h_high.y, h);
+        float band_snow = smoothstep(scene.terrain_h_high.z,
+                                     scene.terrain_h_high.w, h);
+        float amp_band = mix(0.35, 1.0, band_sand);   // sand → grass
+        amp_band = mix(amp_band, 1.6, band_rock);     // rock band
+        amp_band = mix(amp_band, 0.8, band_snow);     // snow softens
         float g_tile = max(scene.spom_params.z, 0.25);
         vec2 uvR = pos.xz / g_tile;
         float h0 = textureLod(u_height[5], uvR, kDispMip).r;
-        pos.y += h0 * kRockyAmp * fade;
+        pos.y += h0 * kRockyAmp * amp_band * fade;
     }
 
     // Skirt drop AFTER height/detail so the ring hangs from the real edge.

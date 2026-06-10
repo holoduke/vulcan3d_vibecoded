@@ -1609,6 +1609,14 @@ void main() {
         float pom_w = pom_str * rockiness *
                       (1.0 - smoothstep(35.0, 90.0, cam_dist));
         if (pom_w > 0.01) {
+            // Phase 2: the march height blends rock and dirt by the
+            // local band weight (constant per pixel, so both sampler
+            // indices stay dynamically uniform). Dirt-band ground now
+            // parallaxes its own cracked-soil relief instead of
+            // borrowing the boulder field.
+            float pdw = clamp(t_dirt * (1.0 - max(t_rock, steep)), 0.0, 1.0);
+            #define POM_H(u) mix(texture(u_normal[kMatRock], (u)).a, \
+                                 texture(u_normal[kMatDirt], (u) * 1.25).a, pdw)
             vec3 Vt = vec3(dot(V_pom, Tt), dot(V_pom, Bt), dot(V_pom, N));
             Vt.z = max(abs(Vt.z), 0.20);
             int   steps = int(mix(16.0, 40.0, pom_w));
@@ -1620,7 +1628,7 @@ void main() {
             vec2  uvc   = uvm;
             float curD  = 0.0;
             for (int i = 0; i < steps; ++i) {
-                float hh = texture(u_normal[kMatRock], uvc).a;
+                float hh = POM_H(uvc);
                 if (curD >= 1.0 - hh) break;
                 uvc -= dtex;
                 curD += layer;
@@ -1636,10 +1644,11 @@ void main() {
             for (int b = 0; b < 6; ++b) {
                 vec2  mid  = (lo + hi) * 0.5;
                 float dMid = (dLo + dHi) * 0.5;
-                float hM   = texture(u_normal[kMatRock], mid).a;
+                float hM   = POM_H(mid);
                 if (dMid < 1.0 - hM) { lo = mid; dLo = dMid; }
                 else                 { hi = mid; dHi = dMid; }
             }
+            #undef POM_H
             vec2  duv = (lo + hi) * 0.5 - uvm;
             uvm += duv;
             uvM += duv * 0.125;
@@ -1860,6 +1869,17 @@ void main() {
         #undef MAT_N
         #undef MAT_N_ROT
         #undef MAT_N_STRICT
+
+        // ---- Micro-normal (AAA Phase 2) ----
+        // High-frequency second normal tap in the last metres so the
+        // ground keeps granular relief at boot height where the base
+        // tiling has gone magnified-blurry. Granular dirt detail works
+        // for every layer at this frequency; fades out by ~12 m.
+        float micro_w = (1.0 - smoothstep(3.0, 12.0, cam_dist)) * g_str;
+        if (micro_w > 0.01) {
+            vec3 mn2 = texture(u_normal[kMatDirt], uvm * 5.7).xyz * 2.0 - 1.0;
+            nm = normalize(vec3(nm.xy + mn2.xy * 0.55 * micro_w, nm.z));
+        }
 
         // ---- Shore-following beach ripples ----
         // Real sand ripples, but the phase is HEIGHT ABOVE WATER
