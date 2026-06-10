@@ -104,9 +104,14 @@ void main() {
 
     float h = hm_height(world_xz);
 
-    // Gradient normal from the heightmap (central differences one source
-    // cell apart — pc.emissive.z is 1/cell so step = cell).
-    float step_m = 1.0 / max(pc.emissive.z, 1e-4);
+    // Gradient normal from the heightmap. The step scales with this
+    // node's grid spacing: near nodes sample one source cell apart
+    // (crisp), far nodes widen the stencil to half their own cell so
+    // distant normals low-pass the heightmap instead of picking up
+    // sub-triangle frequencies — fixed-step sampling gave far ridges
+    // per-pixel normal noise that read as dark leaf-like speckle.
+    float src_cell = 1.0 / max(pc.emissive.z, 1e-4);
+    float step_m = max(src_cell, cell_w * 0.5);
     float hx0 = hm_height(world_xz - vec2(step_m, 0.0));
     float hx1 = hm_height(world_xz + vec2(step_m, 0.0));
     float hz0 = hm_height(world_xz - vec2(0.0, step_m));

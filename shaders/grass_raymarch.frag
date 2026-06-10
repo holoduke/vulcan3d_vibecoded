@@ -394,7 +394,7 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
             // ~0.25-0.37 m blades — lawn scale, matching the instanced
             // raster grass. (Was unscaled: every blade was 1.1-1.7 m
             // and read as sparse dark spears towering over the lawn.)
-            float bh = clamp(pc.grass_params.w, 0.05, 3.0) * 0.21;
+            float bh = clamp(pc.grass_params.w, 0.05, 3.0) * 0.28;
             // Wind sway — bend the blade as a function of height (np.y).
             // Per-blade phase + global time. Magnitude scales with wind
             // strength (pc.color.y); profile normalised to blade height.
@@ -563,7 +563,7 @@ void main() {
     // factor) so the base→tip gradient spans the whole blade. The old
     // /1.2 assumed the unscaled 1.2+ m blades — with lawn-scale blades
     // it left every pixel at the dark base colour.
-    float bh_max  = 1.7 * clamp(pc.grass_params.w, 0.05, 3.0) * 0.21;
+    float bh_max  = 1.7 * clamp(pc.grass_params.w, 0.05, 3.0) * 0.28;
     float h_t     = min(h_above / bh_max, 1.0);
     float clump   = hash12(floor(p.xz * 0.5)) * 0.15;   // ±15% per-clump tint shift
     vec3 grassCol = mix(scene.grass_color_bottom.rgb,
