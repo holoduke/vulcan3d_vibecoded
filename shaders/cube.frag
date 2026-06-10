@@ -2536,6 +2536,14 @@ void main() {
     uvec3 seed_base = uvec3(uint(gl_FragCoord.x),
                             uint(gl_FragCoord.y),
                             uint(scene.rt_flags.w) & 7u);
+    // FRAME-STABLE seed for shadows + AO. Those signals have NO
+    // temporal accumulator (unlike GI, which EMA-accumulates via the
+    // history images and NEEDS the cycling seed above to converge), so
+    // per-frame seed variation made penumbras and contact darkening
+    // visibly flicker. A static per-pixel pattern turns that into a
+    // stationary dither the higher tap counts hide.
+    uvec3 seed_stable = uvec3(uint(gl_FragCoord.x),
+                              uint(gl_FragCoord.y), 0u);
 
     // (cam_dist already hoisted at the top of main — single source of
     // truth for distance-from-camera across LOD, terrain blending, AO
@@ -2693,11 +2701,13 @@ void main() {
         // dither for all blocker taps, instead of one sin/cos pair
         // per tap. Mixed with the Vogel constant table this drops the
         // per-pixel trig cost from 2·N to 2.
-        float pp_phi_b = rand(seed_base + uvec3(0, 99u, 0u)) * 6.28318530718;
+        // seed_stable (not seed_base): shadows have no temporal
+        // accumulator, so frame-varying blocker jitter = flicker.
+        float pp_phi_b = rand(seed_stable + uvec3(0, 99u, 0u)) * 6.28318530718;
         float pp_c_b = cos(pp_phi_b);
         float pp_s_b = sin(pp_phi_b);
         for (int i = 0; i < kBlockerSearch; ++i) {
-            float br1 = rand(seed_base + uvec3(i, 91u, 13u));
+            float br1 = rand(seed_stable + uvec3(i, 91u, 13u));
             float r   = sqrt(br1) * kBlockerCone;
             vec2  v   = kVogelDisk[i & 31];
             float vx  = pp_c_b * v.x - pp_s_b * v.y;
@@ -2743,16 +2753,16 @@ void main() {
                                    base_softness * 6.0);
 
             // 3. Stratified shadow rays in the size-adapted cone.
-            // Half-rate PCSS: each frame fire only HALF the ray budget,
-            // alternating which half via a per-pixel checkerboard +
-            // frame-parity. TAA's history blend (cube fragments use the
-            // same TAA pass) accumulates the missing samples over two
-            // frames so steady-state quality matches full-rate. Kicks
-            // ~50% of the per-pixel PCSS cost off the GPU without a
-            // visible quality drop on TAA-on configurations.
-            ivec2 ip2     = ivec2(gl_FragCoord.xy);
-            int   parity  = ((ip2.x + ip2.y) ^ scene.rt_flags.w) & 1;
-            int   N_s_eff = max(1, (N_s + (parity == 0 ? 1 : 0)) / 2);
+            // FULL-RATE, FRAME-STABLE sampling. The old half-rate
+            // checkerboard (alternating ray halves by frame parity)
+            // and frame-cycled seeds both assumed TAA history would
+            // average them out — at the history strengths this game
+            // actually runs, they read as 2-frame shadow flicker.
+            // Every frame now fires the full budget with a static
+            // per-pixel pattern: penumbra noise is a stationary dither
+            // instead of a shimmer.
+            int   parity  = 0;
+            int   N_s_eff = max(1, N_s);
             int strata = int(ceil(sqrt(float(N_s_eff))));
             float inv_strata = 1.0 / float(strata);
             float blocked = 0.0;
@@ -2763,13 +2773,13 @@ void main() {
             // Trig drops from 2·N_s_eff to 2 across the whole shadow
             // pass; on heavy slider settings (32 samples) that's ~60
             // sin/cos ops removed per shadowed pixel.
-            float pp_phi_s = rand(seed_base + uvec3(1, 99u, 0u)) * 6.28318530718;
+            float pp_phi_s = rand(seed_stable + uvec3(1, 99u, 0u)) * 6.28318530718;
             float pp_c_s = cos(pp_phi_s);
             float pp_s_s = sin(pp_phi_s);
             for (int sy = 0; sy < strata && taken < N_s_eff; ++sy) {
                 for (int sx = 0; sx < strata && taken < N_s_eff; ++sx) {
                     int idx = taken * 2 + parity;
-                    float r1 = rand(seed_base + uvec3(idx, 11u, 47u));
+                    float r1 = rand(seed_stable + uvec3(idx, 11u, 47u));
                     float u1 = (float(sx) + r1) * inv_strata;
                     float r   = sqrt(u1) * penumbra;
                     vec2  v   = kVogelDisk[idx & 31];
@@ -3041,7 +3051,9 @@ void main() {
         // The cosine-hemisphere y is still derived from u1 (sqrt-based);
         // only the disk-azimuth trig moves to the table. Saves N_ao
         // sin/cos pairs per pixel.
-        float pp_phi_a = rand(seed_base + uvec3(0, 99u, 1u)) * 6.28318530718;
+        // seed_stable: AO has no temporal accumulator — frame-varying
+        // hemisphere jitter read as crawling noise in corners.
+        float pp_phi_a = rand(seed_stable + uvec3(0, 99u, 1u)) * 6.28318530718;
         float pp_c_a = cos(pp_phi_a);
         float pp_s_a = sin(pp_phi_a);
         if (ao_mode == 3) {
@@ -3113,7 +3125,7 @@ void main() {
             occluded = float(taken) - horizon_sum;
         } else {
         for (int i = 0; i < N_ao; ++i) {
-            float u1 = rand(seed_base + uvec3(i, 7u, 53u));
+            float u1 = rand(seed_stable + uvec3(i, 7u, 53u));
             float r_h = sqrt(u1);
             float y   = sqrt(max(0.0, 1.0 - u1));
             vec2  v   = kVogelDisk[i & 31];
