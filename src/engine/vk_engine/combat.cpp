@@ -462,11 +462,22 @@ void VulkanEngine::update_projectiles(float dt) {
                 if (!drop) {
                     // Tracer afterimage for the path covered this frame
                     // (muzzle -> first position on the spawn frame).
+                    // Range-gated: a bullet lives 8 s (~1.7 km) but only
+                    // the first ~300 m of flight emits trail — without
+                    // the gate, long-lived distant bullets fill the
+                    // segment pool and starve fresh shots ("tracer stops
+                    // appearing after a while").
                     glm::vec3 ta = std::isnan(it->prev_pos.x)
                                        ? it->spawn_origin
                                        : it->prev_pos;
                     if (glm::distance(ta, bp) > 0.05f &&
-                        tracer_segs_.size() < kTracerMax) {
+                        glm::distance(bp, it->spawn_origin) < 300.0f) {
+                        if (tracer_segs_.size() >= kTracerMax) {
+                            // Pool full: drop the oldest (front — pushed
+                            // chronologically, aged uniformly), never the
+                            // new segment near the player.
+                            tracer_segs_.erase(tracer_segs_.begin());
+                        }
                         tracer_segs_.push_back({ta, bp, 0.0f});
                     }
                     it->prev_pos = bp;
@@ -480,8 +491,10 @@ void VulkanEngine::update_projectiles(float dt) {
                 // trail visually reaches the surface it hit.
                 if (!std::isnan(it->prev_pos.x) &&
                     glm::distance(it->prev_pos, hit_pos) < 30.0f &&
-                    glm::distance(it->prev_pos, hit_pos) > 0.05f &&
-                    tracer_segs_.size() < kTracerMax) {
+                    glm::distance(it->prev_pos, hit_pos) > 0.05f) {
+                    if (tracer_segs_.size() >= kTracerMax) {
+                        tracer_segs_.erase(tracer_segs_.begin());
+                    }
                     tracer_segs_.push_back({it->prev_pos, hit_pos, 0.0f});
                 }
                 // Use the bullet's post-impact velocity as the spark spray
@@ -756,15 +769,19 @@ void VulkanEngine::draw_tracers(VkCommandBuffer cmd, const glm::mat4& vp) {
         if (len < 1e-4f) continue;
         glm::vec3 dir = d / len;
         glm::vec3 mid = (t.a + t.b) * 0.5f;
-        float radius = 0.045f * (0.30f + 0.70f * fade);
+        // Thinner than the bullet (4 cm) so the trail reads as a fast
+        // streak behind it, not a laser wall.
+        float radius = 0.016f * (0.30f + 0.70f * fade);
         // +2 cm half-length overlap hides the joints between segments.
         glm::mat4 model = align_local_y_to(mid, dir) *
                           glm::scale(glm::mat4(1.0f),
                                      glm::vec3(radius, len * 0.5f + 0.02f,
                                                radius));
-        // Matches the projectile's red-magenta core, boosted 3x at the
-        // head so the trail flashes and vanishes.
-        glm::vec3 emi = glm::vec3(2.6f, 0.45f, 2.0f) * (fade * fade * 3.0f);
+        // Matches the projectile's red-magenta core, boosted at the
+        // head so the trail flashes and vanishes. Kept moderate — the
+        // bloom halo widens with brightness and would fatten the thin
+        // cylinder right back up.
+        glm::vec3 emi = glm::vec3(2.6f, 0.45f, 2.0f) * (fade * fade * 1.8f);
         PushConstants pc{};
         pc.mvp = vp * model;
         pc.model = model;
