@@ -171,6 +171,14 @@ void VulkanEngine::recreate_taa_targets() {
         deferred_gi_hist_image_[s] = VK_NULL_HANDLE;
         deferred_gi_hist_view_[s]  = VK_NULL_HANDLE;
         deferred_gi_hist_alloc_[s] = nullptr;
+        if (deferred_gi_fast_view_[s])
+            vkDestroyImageView(device_, deferred_gi_fast_view_[s], nullptr);
+        if (deferred_gi_fast_image_[s])
+            vmaDestroyImage(allocator_, deferred_gi_fast_image_[s],
+                            deferred_gi_fast_alloc_[s]);
+        deferred_gi_fast_image_[s] = VK_NULL_HANDLE;
+        deferred_gi_fast_view_[s]  = VK_NULL_HANDLE;
+        deferred_gi_fast_alloc_[s] = nullptr;
     }
     for (int s = 0; s < kHistorySlots; ++s) {
         if (history_view_[s])  vkDestroyImageView(device_, history_view_[s], nullptr);
@@ -264,6 +272,13 @@ void VulkanEngine::recreate_taa_targets() {
                    VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                    deferred_gi_hist_image_[s], deferred_gi_hist_alloc_[s],
                    deferred_gi_hist_view_[s]);
+        // Fast (3-frame) GI luminance history — the anti-ghost
+        // fast/slow divergence detector. Same lifecycle as above.
+        make_image(VK_FORMAT_R16_SFLOAT,
+                   VK_IMAGE_USAGE_STORAGE_BIT |
+                   VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                   deferred_gi_fast_image_[s], deferred_gi_fast_alloc_[s],
+                   deferred_gi_fast_view_[s]);
     }
 
     for (int set = 0; set < kHistorySlots; ++set) {
@@ -330,6 +345,18 @@ void VulkanEngine::recreate_taa_targets() {
             vkinit::transition_image(cb, deferred_gi_hist_image_[s],
                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                      VK_IMAGE_LAYOUT_GENERAL);
+            vkinit::transition_image(cb, deferred_gi_fast_image_[s],
+                                     VK_IMAGE_LAYOUT_UNDEFINED,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            // Clear to -1: the shader treats negative as "no fast
+            // history yet" (0 is a legitimate luminance).
+            VkClearColorValue neg{ { -1.0f, 0.0f, 0.0f, 0.0f } };
+            vkCmdClearColorImage(cb, deferred_gi_fast_image_[s],
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 &neg, 1, &rr);
+            vkinit::transition_image(cb, deferred_gi_fast_image_[s],
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_GENERAL);
         }
     });
 }
@@ -370,6 +397,14 @@ void VulkanEngine::destroy_taa() {
         deferred_gi_hist_image_[s] = VK_NULL_HANDLE;
         deferred_gi_hist_view_[s]  = VK_NULL_HANDLE;
         deferred_gi_hist_alloc_[s] = nullptr;
+        if (deferred_gi_fast_view_[s])
+            vkDestroyImageView(device_, deferred_gi_fast_view_[s], nullptr);
+        if (deferred_gi_fast_image_[s])
+            vmaDestroyImage(allocator_, deferred_gi_fast_image_[s],
+                            deferred_gi_fast_alloc_[s]);
+        deferred_gi_fast_image_[s] = VK_NULL_HANDLE;
+        deferred_gi_fast_view_[s]  = VK_NULL_HANDLE;
+        deferred_gi_fast_alloc_[s] = nullptr;
     }
 
     taa_pipeline_ = VK_NULL_HANDLE;

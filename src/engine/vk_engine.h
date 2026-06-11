@@ -1492,6 +1492,15 @@ private:
     VkImage       deferred_gi_hist_image_[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
     VmaAllocation deferred_gi_hist_alloc_[2] = { nullptr, nullptr };
     VkImageView   deferred_gi_hist_view_[2]  = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    // FAST GI history (R16F luminance, ~3-frame EMA, same ping-pong).
+    // The ReBLUR/Lumen anti-lag pattern: when the fast EMA diverges
+    // from the slow accumulator above, the lighting itself changed
+    // (e.g. a crate's shadow moved off a floor pixel — no motion
+    // vector exists THERE) → rescale slow history to the fast
+    // luminance and shorten it. Kills shadow ghost trails in ~4 frames.
+    VkImage       deferred_gi_fast_image_[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VmaAllocation deferred_gi_fast_alloc_[2] = { nullptr, nullptr };
+    VkImageView   deferred_gi_fast_view_[2]  = { VK_NULL_HANDLE, VK_NULL_HANDLE };
     // Now defaults ON: forward path remains bit-perfect (7/7 SAD PASS)
     // and is reachable via --deferred 0 for A/B testing. Deferred
     // matches forward within 0.8-2.0% mean SAD across the seven

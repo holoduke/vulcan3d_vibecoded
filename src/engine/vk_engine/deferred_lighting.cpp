@@ -42,7 +42,7 @@ void VulkanEngine::init_deferred_lighting() {
         // SAD gap on indoor / shadow-side surfaces. Image is in GENERAL
         // layout when cube.frag writes via imageStore — sampler2D reads
         // are allowed from GENERAL.
-        VkDescriptorSetLayoutBinding b[12]{};
+        VkDescriptorSetLayoutBinding b[14]{};
         b[0].binding = 0;
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         b[0].descriptorCount = 1;
@@ -74,10 +74,19 @@ void VulkanEngine::init_deferred_lighting() {
         b[11].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         b[11].descriptorCount = 1;
         b[11].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        // 12/13: fast (3-frame) GI luminance history ping-pong — the
+        // fast/slow divergence detector that kills lighting-change
+        // ghosts (moving crate shadows) the slow accumulator drags.
+        for (int i = 12; i < 14; ++i) {
+            b[i].binding = i;
+            b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            b[i].descriptorCount = 1;
+            b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
         VkDescriptorSetLayoutCreateInfo dlci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
-            .bindingCount = 12, .pBindings = b,
+            .bindingCount = 14, .pBindings = b,
         };
         vk_check(vkCreateDescriptorSetLayout(device_, &dlci, nullptr,
                                               &deferred_lighting_desc_layout_),
@@ -111,7 +120,7 @@ void VulkanEngine::init_deferred_lighting() {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1 },
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     8 },
-            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              2 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              4 },
         };
         VkDescriptorPoolCreateInfo pci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -240,7 +249,13 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
                                        VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorImageInfo mot_ii{ linear_sampler_, motion_vec_view_,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet w[12]{};
+        VkDescriptorImageInfo gif0_ii{ VK_NULL_HANDLE,
+                                       deferred_gi_fast_view_[0],
+                                       VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo gif1_ii{ VK_NULL_HANDLE,
+                                       deferred_gi_fast_view_[1],
+                                       VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet w[14]{};
         w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[0].dstSet = deferred_lighting_desc_set_; w[0].dstBinding = 0;
         w[0].descriptorCount = 1;
@@ -277,7 +292,15 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[11].descriptorCount = 1;
         w[11].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[11].pImageInfo = &mot_ii;
-        vkUpdateDescriptorSets(device_, 12, w, 0, nullptr);
+        for (int i = 12; i < 14; ++i) {
+            w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[i].dstSet = deferred_lighting_desc_set_; w[i].dstBinding = i;
+            w[i].descriptorCount = 1;
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        }
+        w[12].pImageInfo = &gif0_ii;
+        w[13].pImageInfo = &gif1_ii;
+        vkUpdateDescriptorSets(device_, 14, w, 0, nullptr);
     }
 
     // Transition staging_color into COLOR_ATTACHMENT layout.

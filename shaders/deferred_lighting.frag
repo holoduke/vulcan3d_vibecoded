@@ -86,6 +86,13 @@ layout(set = 0, binding = 10, rgba16f) uniform image2D u_gi_hist1;
 // pass — includes DYNAMIC OBJECT motion that camera reprojection can't
 // see. The GI accumulator shortens history on/near moving pixels.
 layout(set = 0, binding = 11) uniform sampler2D u_motion;
+// Fast (3-frame EMA) GI luminance history — the ReBLUR/Lumen anti-lag
+// pattern. When it diverges from the slow accumulator, the LIGHTING
+// changed (e.g. a crate's shadow moved off a floor pixel, where no
+// motion vector exists): rescale the slow history to the fast
+// luminance and shorten it. Negative = no history yet.
+layout(set = 0, binding = 12, r16f) uniform image2D u_gi_fast0;
+layout(set = 0, binding = 13, r16f) uniform image2D u_gi_fast1;
 
 layout(push_constant) uniform PC {
     mat4 inv_vp;
@@ -704,6 +711,7 @@ void main() {
             // up/down every frame ("broken light" flicker).
             float sv_raw = float(sky_hits) / float(taken_gi);
             float prevSv = sv_raw;
+            float fast_prev = -1.0;   // negative = no fast history
             // Motion factor: 0 = camera static (history fully trusted,
             // no flicker), 1 = fast reprojection (strict rejection, no
             // ghost light "shining through" walls from stale interior
@@ -794,6 +802,12 @@ void main() {
                         prevRgb = acc / wsum;
                         prevM   = Mc;
                     }
+                    // Fast-history fetch (same reprojected pixel).
+                    float fp = parity0 ? imageLoad(u_gi_fast1, ppx).r
+                                       : imageLoad(u_gi_fast0, ppx).r;
+                    if (!(isnan(fp) || isinf(fp)) && fp < 64.0) {
+                        fast_prev = fp;
+                    }
                 }
             }
             // Per-channel disocclusion: history that can't plausibly
@@ -841,6 +855,32 @@ void main() {
             } else if (ratio > thr_lo) {
                 prevM = min(prevM, m_lo);
             }
+            // ---- Fast/slow divergence (anti-lag, ReBLUR-style) ----
+            // The 3-frame fast EMA tracks the TRUE current lighting with
+            // little lag; the slow accumulator is smooth but laggy. When
+            // they disagree beyond noise, the lighting itself changed in
+            // a way single-frame ratio tests can't separate from noise —
+            // e.g. a crate's shadow sliding off a floor pixel (no motion
+            // vector exists THERE). Rescale the slow history's luminance
+            // to the fast value (keeps accumulated chroma) and shorten
+            // it: ghost trails collapse in a few frames instead of
+            // dragging for seconds.
+            float lum_fresh = dot(gi_indirect, vec3(0.299, 0.587, 0.114));
+            float fast_new = (fast_prev < 0.0)
+                                 ? lum_fresh
+                                 : mix(lum_fresh, fast_prev, 0.667);
+            float lum_slow = dot(prevRgb, vec3(0.299, 0.587, 0.114));
+            if (prevM > 8.0 && fast_prev >= 0.0) {
+                float eps_d = 0.05 + 0.25 * lum_slow;
+                float fl = fast_new + eps_d;
+                float sl = lum_slow + eps_d;
+                float divg = max(fl / sl, sl / fl);
+                if (divg > 1.35) {
+                    prevRgb *= clamp(fast_new / max(lum_slow, 1e-3),
+                                     0.25, 4.0);
+                    prevM = min(prevM, 6.0);
+                }
+            }
             // Static cap 64: per-frame fresh-noise fraction drops to
             // ~1.5% — closeup GI stops visibly breathing. Motion cap
             // stays short so lighting still responds while moving.
@@ -866,6 +906,8 @@ void main() {
             vec4 storeVal = vec4(gi_indirect, a_enc);
             if (parity0) imageStore(u_gi_hist0, pix, storeVal);
             else         imageStore(u_gi_hist1, pix, storeVal);
+            if (parity0) imageStore(u_gi_fast0, pix, vec4(fast_new));
+            else         imageStore(u_gi_fast1, pix, vec4(fast_new));
         }
         gi_indirect *= gi_strength;
         // sky_vis was assigned the ACCUMULATED value inside the temporal
