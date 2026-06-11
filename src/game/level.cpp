@@ -1,4 +1,4 @@
-#include "game/level.h"
+﻿#include "game/level.h"
 
 #include <glm/vec2.hpp>
 
@@ -46,7 +46,7 @@ collision::AABB to_render_aabb(const Brush& b) {
     return { b.center - half, b.center + half };
 }
 
-// Sentinel for "no separate fallback" — substitutes `rgb` so brushes added
+// Sentinel for "no separate fallback" вЂ” substitutes `rgb` so brushes added
 // without an explicit fallback look the same in textured and untextured mode
 // (lanterns, lamps, anything whose `rgb` is already the desired color).
 constexpr glm::vec3 kFallbackUseRgb(-1.0f, -1.0f, -1.0f);
@@ -65,7 +65,7 @@ void add(Level& lv, glm::vec3 center, glm::vec3 size, glm::vec3 rgb,
 
 void add_lamp(Level& lv, glm::vec3 center, glm::vec3 size, glm::vec3 rgb,
               glm::vec3 emissive) {
-    // Full-emissive shading bypasses albedo/normal entirely — set fallback
+    // Full-emissive shading bypasses albedo/normal entirely вЂ” set fallback
     // to rgb so the box looks identical in both texture modes.
     Brush b{ center, size, glm::vec4(rgb, 1.0f), emissive, true,
              -1, -1, 1.0f, glm::vec4(rgb, 1.0f) };
@@ -103,24 +103,24 @@ Level make_arena(float r, float wh) {
     constexpr int kTile2  = 6;     // keep interior floor
 
     // For each brush we pass two colors:
-    //   `tint`    — multiplies the texture (near-white so the texture's hue
+    //   `tint`    вЂ” multiplies the texture (near-white so the texture's hue
     //               dominates when textures are on)
-    //   `proto`   — the saturated prototype color used when textures are off
+    //   `proto`   вЂ” the saturated prototype color used when textures are off
     //
     // Without `proto`, switching textures off would leave near-white walls
-    // everywhere, with no distinguishing detail to mask RT GI noise — the
+    // everywhere, with no distinguishing detail to mask RT GI noise вЂ” the
     // user sees that as "stripes / weird texture / flicker on the wall."
     auto T = [](float r, float g, float b) { return glm::vec3(r, g, b); };
 
-    // Floor + arena perimeter walls removed — replaced by the procedural
+    // Floor + arena perimeter walls removed вЂ” replaced by the procedural
     // terrain heightmap (see src/engine/terrain.cpp). The castle below
     // sits on a flattened plateau in the heightmap so the brushes still
     // align at y=0..keep_h.
     (void)r; (void)wh; (void)kGround;
 
     // -----------------------------------------------------------------
-    // Castle (centered at origin). 22×22 m footprint, 5 m walls, four
-    // corner towers (2.4 m square × 10 m tall), a north-facing entrance,
+    // Castle (centered at origin). 22Г—22 m footprint, 5 m walls, four
+    // corner towers (2.4 m square Г— 10 m tall), a north-facing entrance,
     // a stairway up to the wall walkway, full-perimeter wall-top walk,
     // crenelations along all 4 walls, and an inner keep with a doorway.
     // -----------------------------------------------------------------
@@ -134,9 +134,9 @@ Level make_arena(float r, float wh) {
         const auto castle_tint  = T(0.95f, 0.92f, 0.86f);  // warm sandstone
         const auto castle_proto = T(0.55f, 0.50f, 0.42f);
         // Wall texture tiling. Bricks078's rubble stones are ~1/20 of a
-        // tile; at the old 0.35 scale (tile ≈ 2.9 m) each stone was ~7 cm
-        // — sub-pixel past a few metres, so walls read as noisy plaster.
-        // 0.12 (tile ≈ 8.3 m) makes stones ~40 cm: readable masonry at
+        // tile; at the old 0.35 scale (tile в‰€ 2.9 m) each stone was ~7 cm
+        // вЂ” sub-pixel past a few metres, so walls read as noisy plaster.
+        // 0.12 (tile в‰€ 8.3 m) makes stones ~40 cm: readable masonry at
         // gameplay distance, and SPOM relief follows the same UVs.
         const float wall_uv  = 0.12f;
         const float cren_uv  = 0.18f;
@@ -159,12 +159,12 @@ Level make_arena(float r, float wh) {
         add_wall(-seg_x,  cr, seg_w, wt);
         add_wall( seg_x,  cr, seg_w, wt);
         // Arch lintel above the entrance: top of the gap, still lets the
-        // player walk through (clearance = wh - arch_h ≈ 3.6 m).
+        // player walk through (clearance = wh - arch_h в‰€ 3.6 m).
         add(lv, glm::vec3(0.0f, wh - arch_h * 0.5f,  cr),
             glm::vec3(ent_w, arch_h, wt),
             castle_tint, kBrick, kBrick, wall_uv, castle_proto);
 
-        // Crenelations along all 4 walls — small merlons every ~1.4 m on
+        // Crenelations along all 4 walls вЂ” small merlons every ~1.4 m on
         // each wall's outer edge, sitting on top of the wall.
         const float merlon_s   = 0.45f;
         const float merlon_h   = 0.7f;
@@ -192,11 +192,11 @@ Level make_arena(float r, float wh) {
             }
         };
         add_merlons_along_x(-(cr - wt * 0.5f));  // south outer edge (z = -cr + wt/2)
-        add_merlons_along_x( (cr - wt * 0.5f));  // north outer edge — stops short of entrance gap automatically
+        add_merlons_along_x( (cr - wt * 0.5f));  // north outer edge вЂ” stops short of entrance gap automatically
         add_merlons_along_z(-(cr - wt * 0.5f));  // west outer edge
         add_merlons_along_z( (cr - wt * 0.5f));  // east outer edge
 
-        // Four corner towers — taller than the walls so they read as proper
+        // Four corner towers вЂ” taller than the walls so they read as proper
         // towers, with crenelated tops.
         const float tw_s = 2.4f;
         const float tw_h = 10.0f;
@@ -271,7 +271,7 @@ Level make_arena(float r, float wh) {
                 stair_tint, kBrick, kBrick, wall_uv, stair_proto);
         }
 
-        // Inner keep / house — 6×6 m footprint × 4 m tall, centered in the
+        // Inner keep / house вЂ” 6Г—6 m footprint Г— 4 m tall, centered in the
         // back half of the courtyard. Has a doorway on the north face so
         // the player can step inside.
         const float kp_cx = 0.0f;
@@ -286,63 +286,63 @@ Level make_arena(float r, float wh) {
         // Three solid walls + the north wall split around a door gap.
         add(lv, glm::vec3(kp_cx, kp_h * 0.5f, kp_cz - kp_sz * 0.5f + wt * 0.5f),
             glm::vec3(kp_sx, kp_h, wt),
-            keep_tint, kPaint, kPaint, 1.0f, keep_proto);                  // south
+            keep_tint, kBrick, kBrick, wall_uv, keep_proto);                  // south
         add(lv, glm::vec3(kp_cx + kp_sx * 0.5f - wt * 0.5f, kp_h * 0.5f, kp_cz),
             glm::vec3(wt, kp_h, kp_sz),
-            keep_tint, kPaint, kPaint, 1.0f, keep_proto);                  // east
+            keep_tint, kBrick, kBrick, wall_uv, keep_proto);                  // east
         add(lv, glm::vec3(kp_cx - kp_sx * 0.5f + wt * 0.5f, kp_h * 0.5f, kp_cz),
             glm::vec3(wt, kp_h, kp_sz),
-            keep_tint, kPaint, kPaint, 1.0f, keep_proto);                  // west
+            keep_tint, kBrick, kBrick, wall_uv, keep_proto);                  // west
         // North wall split for the door.
         const float kp_seg_w = (kp_sx - door_w) * 0.5f;
         const float kp_seg_x = (kp_sx * 0.5f + door_w * 0.5f) * 0.5f;
         add(lv, glm::vec3(kp_cx - kp_seg_x, kp_h * 0.5f, kp_cz + kp_sz * 0.5f - wt * 0.5f),
             glm::vec3(kp_seg_w, kp_h, wt),
-            keep_tint, kPaint, kPaint, 1.0f, keep_proto);
+            keep_tint, kBrick, kBrick, wall_uv, keep_proto);
         add(lv, glm::vec3(kp_cx + kp_seg_x, kp_h * 0.5f, kp_cz + kp_sz * 0.5f - wt * 0.5f),
             glm::vec3(kp_seg_w, kp_h, wt),
-            keep_tint, kPaint, kPaint, 1.0f, keep_proto);
-        // Lintel above keep door — sits between door_h and kp_h, fills
+            keep_tint, kBrick, kBrick, wall_uv, keep_proto);
+        // Lintel above keep door вЂ” sits between door_h and kp_h, fills
         // the gap above the door so a clean rectangle door is visible.
         const float lintel_h = kp_h - door_h;
         add(lv, glm::vec3(kp_cx, door_h + lintel_h * 0.5f,
                           kp_cz + kp_sz * 0.5f - wt * 0.5f),
             glm::vec3(door_w, lintel_h, wt),
-            keep_tint, kPaint, kPaint, 1.0f, keep_proto);
+            keep_tint, kBrick, kBrick, wall_uv, keep_proto);
         // Roof slab so the keep is visually capped.
         add(lv, glm::vec3(kp_cx, kp_h + 0.05f, kp_cz),
             glm::vec3(kp_sx, 0.1f, kp_sz),
-            keep_tint, kPaint, kPaint, 1.0f, keep_proto);
+            keep_tint, kBrick, kBrick, wall_uv, keep_proto);
 
-        // Floor slabs — courtyard tile inside the perimeter walls, plus a
+        // Floor slabs вЂ” courtyard tile inside the perimeter walls, plus a
         // separate tile for the keep interior. Top surface raised to
         // Y=+0.05 (slab is 0.5 m thick, center at Y=-0.20) so it sits
         // 5 cm above the terrain plateau (at Y=0 in castle-local space,
         // = Y=22 world after the +plateau_height offset). 5 cm is too
         // small to feel as a step but enough to win the depth race
-        // against the procedural raymarched terrain — without it,
+        // against the procedural raymarched terrain вЂ” without it,
         // terrain Z-fights through the floor texture.
         // Floor extent now reaches the inner wall face exactly (the
-        // earlier `−0.4` inset left a visible 20 cm gap of bare terrain
+        // earlier `в€’0.4` inset left a visible 20 cm gap of bare terrain
         // along all 4 inner walls).
         const auto floor_tint   = T(0.96f, 0.94f, 0.90f);
         const auto floor_proto1 = T(0.45f, 0.42f, 0.38f);  // courtyard
         const auto floor_proto2 = T(0.55f, 0.48f, 0.40f);  // keep interior
-        // Wall brushes are added with center at ±cr and thickness wt,
-        // so they span cr−wt/2 to cr+wt/2 — the INNER face sits at
-        // cr−wt/2 = 10.7 (not cr−wt = 10.4 as the previous math
+        // Wall brushes are added with center at В±cr and thickness wt,
+        // so they span crв€’wt/2 to cr+wt/2 вЂ” the INNER face sits at
+        // crв€’wt/2 = 10.7 (not crв€’wt = 10.4 as the previous math
         // assumed; that's why a 30 cm gap of bare terrain was still
         // showing along the inner walls). Push the floor a bit
         // PAST the inner face (into the wall) so any sub-cm
         // alignment slop hides under the wall geometry.
         const float in_ext = cr * 2.0f - 0.05f;
         // Courtyard floor (covers everything inside the walls, spans the
-        // keep too — the keep floor below sits slightly higher and wins
+        // keep too вЂ” the keep floor below sits slightly higher and wins
         // pixel-by-pixel inside its own footprint).
         add(lv, glm::vec3(0.0f, -0.20f, 0.0f),
             glm::vec3(in_ext, 0.5f, in_ext),
             floor_tint, kTile1, kTile1, 0.4f, floor_proto1);
-        // Keep interior floor — 8 cm above terrain (3 cm above the
+        // Keep interior floor вЂ” 8 cm above terrain (3 cm above the
         // courtyard slab) so it wins the depth race inside the keep
         // and shows the dedicated tile texture there. Footprint
         // reaches the keep's inner wall face on each side.
@@ -359,9 +359,10 @@ Level make_arena(float r, float wh) {
     }
 
     // Outer arena lanterns removed along with the floor + perimeter walls
-    // — they used to anchor the corners of the brick arena. With the
+    // вЂ” they used to anchor the corners of the brick arena. With the
     // open terrain there is nothing to corner.
     return lv;
 }
 
 } // namespace qlike::game
+
