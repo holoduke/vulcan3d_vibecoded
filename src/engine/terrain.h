@@ -74,15 +74,16 @@ Mesh build_terrain_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
 
 // CPU-baked sun-shadow map. For each heightmap cell, marches a ray
 // toward `sun_dir` and tests whether the ray dips below the heightmap
-// at any step. Result is a (width × height) byte array, 0 = lit,
-// 255 = in shadow. Used by grass.vert as a pre-baked replacement
-// for per-fragment RT shadow rays — zero per-frame cost, scales to
-// arbitrary grass density.
+// at any step. Result is a (width × height × 2) byte array, RG8
+// interleaved: R = 0 lit / 255 shadowed, G = blocker distance along
+// the sun ray (t / 400 m, 0-255; 0 where lit). Shaders run PCSS on
+// it — penumbra width scales with G — while .r-only consumers
+// (grass.vert, scatter.vert) keep the old binary semantics.
 std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
                                            glm::vec3 sun_dir);
 
 // Bake a single rectangular tile [ix0..ix0+w) × [iz0..iz0+h) of the
-// heightmap into `out_tile` (w*h bytes, row-major). Used by the
+// heightmap into `out_tile` (w*h*2 bytes, row-major RG8). Used by the
 // progressive sun-change re-bake to amortize the work across frames
 // and prioritize tiles near the camera. Cells outside the heightmap
 // bounds are written as 0 (lit) — clamp at sample sites only.

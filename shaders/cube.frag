@@ -2824,35 +2824,51 @@ void main() {
             float sh_bake = 0.0;
             if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
                 all(lessThanEqual(uv_b, vec2(1.0)))) {
-                // The bake is ~1 texel / m and near-binary, so a tight
-                // 3x3 PCF read as hard pixelated blocks close up. Use a
-                // wide 5x5 Gaussian-ish kernel whose spacing is fixed in
-                // WORLD space (≈ kBlurM metres total), so the softness is
-                // constant regardless of bake resolution / supersample —
-                // turns the low-res bake into a smooth shadow gradient.
-                vec2 texel = 1.0 / vec2(sz_b);
-                const float kBlurM = 4.0;                 // ~4 m penumbra
-                float step_uv = (kBlurM / side_b) * 0.5;  // half-extent
-                // Pre-baked exp(-(ox² + oy²) * 0.35) for ox, oy ∈ [-2, +2].
-                // Was 25 exp() per shadowed terrain pixel; now a constant
-                // table lookup. Sum = 6.62 (used as wsum, no need to
-                // recompute per-pixel).
-                const float kW[25] = float[25](
-                    0.0608, 0.1738, 0.2466, 0.1738, 0.0608,
-                    0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
-                    0.2466, 0.7047, 1.0000, 0.7047, 0.2466,
-                    0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
-                    0.0608, 0.1738, 0.2466, 0.1738, 0.0608);
-                const float kWsum = 6.6172;
-                float s = 0.0;
-                for (int oy = -2; oy <= 2; ++oy) {
-                    for (int ox = -2; ox <= 2; ++ox) {
-                        vec2 d = vec2(float(ox), float(oy)) * (step_uv * 0.5);
-                        s += texture(u_terrain_shadow, uv_b + d).r *
-                             kW[(oy + 2) * 5 + (ox + 2)];
+                // PCSS on the baked map (matches deferred_lighting.frag).
+                // G stores blocker distance along the sun ray (t / 400 m).
+                // Blocker search (3x3, 3 m spacing) sets a WORLD-space
+                // kernel radius that grows with blocker distance: tall
+                // tower tops cast wide soft light penumbras, low walls
+                // stay tight and dark at the base. The old constant
+                // 4 m blur inverted this relationship.
+                float cover = 0.0;
+                float dsum  = 0.0;
+                const float kSearchUv = 3.0 / side_b;
+                for (int oy = -1; oy <= 1; ++oy) {
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        vec2 sv = texture(u_terrain_shadow,
+                                          uv_b + vec2(float(ox), float(oy)) *
+                                                 kSearchUv).rg;
+                        cover += sv.r;
+                        dsum  += sv.g * sv.r;
                     }
                 }
-                sh_bake = (s * (1.0 / kWsum)) * scene.rt_params.w;
+                if (cover > 1e-4) {
+                    float avg_d = (dsum / cover) * 400.0;  // metres
+                    float half_w = clamp(avg_d * 0.06, 0.6, 8.0);
+                    float step_uv = (half_w * 0.5) / side_b;
+                    // Pre-baked exp(-(ox² + oy²) * 0.35), ox/oy ∈ [-2,2].
+                    const float kW[25] = float[25](
+                        0.0608, 0.1738, 0.2466, 0.1738, 0.0608,
+                        0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
+                        0.2466, 0.7047, 1.0000, 0.7047, 0.2466,
+                        0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
+                        0.0608, 0.1738, 0.2466, 0.1738, 0.0608);
+                    const float kWsum = 6.6172;
+                    float s = 0.0;
+                    for (int oy = -2; oy <= 2; ++oy) {
+                        for (int ox = -2; ox <= 2; ++ox) {
+                            vec2 d = vec2(float(ox), float(oy)) * step_uv;
+                            s += texture(u_terrain_shadow, uv_b + d).r *
+                                 kW[(oy + 2) * 5 + (ox + 2)];
+                        }
+                    }
+                    sh_bake = s * (1.0 / kWsum);
+                    // Distant blockers also lose peak density (sun-disk
+                    // umbra collapse + open-sky fill): 100 m -> ~18%.
+                    sh_bake *= 1.0 - 0.18 * clamp(avg_d / 100.0, 0.0, 1.0);
+                    sh_bake *= scene.rt_params.w;
+                }
             }
             shadow = max(shadow, sh_bake);
         }

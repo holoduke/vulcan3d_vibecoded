@@ -418,27 +418,58 @@ void main() {
         vec2 uv_b = (world_pos.xz / kSide) + vec2(0.5);
         if (all(greaterThanEqual(uv_b, vec2(0.0))) &&
             all(lessThanEqual(uv_b, vec2(1.0)))) {
-            ivec2 sz_b = textureSize(u_terrain_shadow, 0);
-            vec2 texel = 1.0 / vec2(sz_b);
-            const float kBlurM = 4.0;
-            float step_uv = (kBlurM / kSide) * 0.5;
-            const float kW[25] = float[25](
-                0.0608, 0.1738, 0.2466, 0.1738, 0.0608,
-                0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
-                0.2466, 0.7047, 1.0000, 0.7047, 0.2466,
-                0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
-                0.0608, 0.1738, 0.2466, 0.1738, 0.0608);
-            const float kWsum = 6.6172;
-            float sh_bake = 0.0;
-            for (int j = 0; j < 5; ++j) {
-                for (int i = 0; i < 5; ++i) {
-                    vec2 off2 = vec2(float(i - 2), float(j - 2)) * step_uv;
-                    sh_bake += texture(u_terrain_shadow, uv_b + off2).r *
-                               kW[j * 5 + i];
+            // PCSS on the baked map. G stores the blocker distance along
+            // the sun ray (t / 400 m). Blocker search first (3x3, 3 m
+            // spacing), then a 5x5 PCF whose WORLD radius grows with the
+            // average blocker distance: a tower top 60 m up casts a wide
+            // soft penumbra (physically: penumbra ~ occluder distance x
+            // sun angular size), a low wall stays tight and dark at its
+            // base. The old constant-radius blur inverted this - big
+            // shadows from tall structures pegged at full dark while
+            // thin low-wall bands were blurred lighter.
+            float cover = 0.0;
+            float dsum  = 0.0;
+            const float kSearchUv = 3.0 / kSide;
+            for (int j = -1; j <= 1; ++j) {
+                for (int i = -1; i <= 1; ++i) {
+                    vec2 sv = texture(u_terrain_shadow,
+                                      uv_b + vec2(float(i), float(j)) *
+                                             kSearchUv).rg;
+                    cover += sv.r;
+                    dsum  += sv.g * sv.r;
                 }
             }
-            sh_bake /= kWsum;
-            sh_bake *= clamp(scene.rt_params.w, 0.0, 1.0);
+            float sh_bake = 0.0;
+            if (cover > 1e-4) {
+                float avg_d = (dsum / cover) * 400.0;   // metres to blocker
+                // ~6 cm of penumbra per metre of blocker distance
+                // (exaggerated sun size for readability), clamped so
+                // near-base shadow keeps a crisp >=0.6 m edge and far
+                // tower shadows top out at an 8 m half-width.
+                float half_w = clamp(avg_d * 0.06, 0.6, 8.0);
+                float step_uv = (half_w * 0.5) / kSide;  // kernel = +-2 taps
+                const float kW[25] = float[25](
+                    0.0608, 0.1738, 0.2466, 0.1738, 0.0608,
+                    0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
+                    0.2466, 0.7047, 1.0000, 0.7047, 0.2466,
+                    0.1738, 0.4966, 0.7047, 0.4966, 0.1738,
+                    0.0608, 0.1738, 0.2466, 0.1738, 0.0608);
+                const float kWsum = 6.6172;
+                for (int j = 0; j < 5; ++j) {
+                    for (int i = 0; i < 5; ++i) {
+                        vec2 off2 = vec2(float(i - 2), float(j - 2)) * step_uv;
+                        sh_bake += texture(u_terrain_shadow, uv_b + off2).r *
+                                   kW[j * 5 + i];
+                    }
+                }
+                sh_bake /= kWsum;
+                // Far-blocker shadows also lose a little peak density:
+                // a real sun-disk umbra collapses once the occluder is
+                // distant, and open ground under a tower still sees the
+                // whole sky. 100 m blocker -> ~18% lighter core.
+                sh_bake *= 1.0 - 0.18 * clamp(avg_d / 100.0, 0.0, 1.0);
+                sh_bake *= clamp(scene.rt_params.w, 0.0, 1.0);
+            }
             shadow = max(shadow, sh_bake);
         }
     }

@@ -414,45 +414,60 @@ void gen_full_indices(int sample_dim, std::vector<uint32_t>& out) {
 namespace {
 // Inner ray-march for a single rectangular region. `out` points to the
 // top-left of a wГ—h sub-image with the given row stride (in bytes).
-// 0 = lit, 255 = in shadow. The full-map and tile bake share this loop.
+// RG8 interleaved, 2 bytes per texel:
+//   R: 0 = lit, 255 = in shadow
+//   G: blocker distance along the sun ray, t / 400 m normalised to 0-255
+//      (0 where lit). The shaders run PCSS on this — penumbra width
+//      scales with blocker distance, so a tower top 60 m up casts a
+//      wide soft shadow while a low wall stays tight and dark.
+// The full-map and tile bake share this loop. `stride` is in TEXELS.
 void bake_shadow_region(const Heightmap& hm, glm::vec3 L,
                         int ix0, int iz0, int w, int h,
                         uint8_t* out, int stride) {
+    const float max_t = 400.0f;
     if (L.y < 0.05f) {
-        for (int dz = 0; dz < h; ++dz)
-            std::fill_n(out + static_cast<size_t>(dz) * static_cast<size_t>(stride),
-                        w, uint8_t(255));
+        for (int dz = 0; dz < h; ++dz) {
+            uint8_t* row = out + static_cast<size_t>(dz) *
+                                  static_cast<size_t>(stride) * 2;
+            for (int dx = 0; dx < w; ++dx) {
+                row[2 * dx + 0] = 255;
+                row[2 * dx + 1] = 255;
+            }
+        }
         return;
     }
     const float step = hm.cell * 0.5f;
-    const float max_t = 400.0f;
     const int   max_steps = static_cast<int>(max_t / step);
     const int W = hm.width();
     const int H = hm.height();
     for (int dz = 0; dz < h; ++dz) {
         int iz = iz0 + dz;
+        uint8_t* row = out + static_cast<size_t>(dz) *
+                              static_cast<size_t>(stride) * 2;
         if (iz < 0 || iz >= H) {
-            std::fill_n(out + static_cast<size_t>(dz) * static_cast<size_t>(stride),
-                        w, uint8_t(0));
+            std::fill_n(row, static_cast<size_t>(w) * 2, uint8_t(0));
             continue;
         }
-        uint8_t* row = out + static_cast<size_t>(dz) * static_cast<size_t>(stride);
         for (int dx = 0; dx < w; ++dx) {
             int ix = ix0 + dx;
-            if (ix < 0 || ix >= W) { row[dx] = 0; continue; }
+            if (ix < 0 || ix >= W) { row[2 * dx] = 0; row[2 * dx + 1] = 0; continue; }
             float h0 = hm.at(ix, iz);
             glm::vec3 p0(hm.origin_x + static_cast<float>(ix) * hm.cell,
                          h0 + 0.20f,
                          hm.origin_z + static_cast<float>(iz) * hm.cell);
             bool shadowed = false;
+            float t_hit = 0.0f;
             for (int s = 1; s <= max_steps; ++s) {
                 float t = static_cast<float>(s) * step;
                 glm::vec3 p = p0 + L * t;
                 float h_at_p = hm.sample_world(p.x, p.z);
-                if (p.y < h_at_p) { shadowed = true; break; }
+                if (p.y < h_at_p) { shadowed = true; t_hit = t; break; }
                 if (p.y - h0 > 100.0f) break;
             }
-            row[dx] = shadowed ? 255 : 0;
+            row[2 * dx + 0] = shadowed ? 255 : 0;
+            row[2 * dx + 1] = shadowed
+                ? static_cast<uint8_t>(std::min(t_hit * (255.0f / max_t), 255.0f))
+                : 0;
         }
     }
 }
@@ -469,32 +484,37 @@ void bake_heightmap_shadow_tile_ss(const Heightmap& hm, glm::vec3 sun_dir,
                                     uint8_t* out_tile) {
     if (ss < 1) ss = 1;
     glm::vec3 L = glm::normalize(sun_dir);
+    const float max_t = 400.0f;
     if (L.y < 0.05f) {
-        std::fill_n(out_tile, static_cast<size_t>(w) * static_cast<size_t>(h),
+        std::fill_n(out_tile,
+                     static_cast<size_t>(w) * static_cast<size_t>(h) * 2,
                      uint8_t(255));
         return;
     }
     const float sub_cell = hm.cell / static_cast<float>(ss);
     const float step = sub_cell * 0.5f;
-    const float max_t = 400.0f;
     const int   max_steps = static_cast<int>(max_t / step);
     for (int dz = 0; dz < h; ++dz) {
         uint8_t* row = out_tile + static_cast<size_t>(dz) *
-                                   static_cast<size_t>(w);
+                                   static_cast<size_t>(w) * 2;
         for (int dx = 0; dx < w; ++dx) {
             float wx = hm.origin_x + (static_cast<float>(tx0 + dx) + 0.5f) * sub_cell;
             float wz = hm.origin_z + (static_cast<float>(tz0 + dz) + 0.5f) * sub_cell;
             float h0 = hm.sample_world(wx, wz);
             glm::vec3 p0(wx, h0 + 0.20f, wz);
             bool shadowed = false;
+            float t_hit = 0.0f;
             for (int s = 1; s <= max_steps; ++s) {
                 float t = static_cast<float>(s) * step;
                 glm::vec3 p = p0 + L * t;
                 float h_at_p = hm.sample_world(p.x, p.z);
-                if (p.y < h_at_p) { shadowed = true; break; }
+                if (p.y < h_at_p) { shadowed = true; t_hit = t; break; }
                 if (p.y - h0 > 100.0f) break;
             }
-            row[dx] = shadowed ? 255 : 0;
+            row[2 * dx + 0] = shadowed ? 255 : 0;
+            row[2 * dx + 1] = shadowed
+                ? static_cast<uint8_t>(std::min(t_hit * (255.0f / max_t), 255.0f))
+                : 0;
         }
     }
 }
@@ -503,7 +523,7 @@ std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
                                            glm::vec3 sun_dir) {
     const int W = hm.width();
     const int H = hm.height();
-    std::vector<uint8_t> out(static_cast<size_t>(W) * static_cast<size_t>(H), 0);
+    std::vector<uint8_t> out(static_cast<size_t>(W) * static_cast<size_t>(H) * 2, 0);
     glm::vec3 L = glm::normalize(sun_dir);
 
     // Multi-threaded вЂ” split rows across hardware threads. ~1024ВІ cells
@@ -521,7 +541,7 @@ std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
         if (z_lo >= z_hi) break;
         workers.emplace_back([&, z_lo, z_hi]() {
             uint8_t* row0 = out.data() +
-                static_cast<size_t>(z_lo) * static_cast<size_t>(W);
+                static_cast<size_t>(z_lo) * static_cast<size_t>(W) * 2;
             bake_shadow_region(hm, L, 0, z_lo, W, z_hi - z_lo, row0, W);
         });
     }

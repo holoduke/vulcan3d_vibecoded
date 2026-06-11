@@ -608,7 +608,8 @@ void ensure_shadow_resources(VkDevice device, VmaAllocator alloc,
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = VK_FORMAT_R8_UNORM;
+    // RG8: R = shadow (0/1), G = blocker distance for shader-side PCSS.
+    ici.format = VK_FORMAT_R8G8_UNORM;
     ici.extent = { static_cast<uint32_t>(W),
                    static_cast<uint32_t>(H), 1 };
     ici.mipLevels = 1; ici.arrayLayers = 1;
@@ -627,7 +628,7 @@ void ensure_shadow_resources(VkDevice device, VmaAllocator alloc,
     vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     vci.image = img;
     vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vci.format = VK_FORMAT_R8_UNORM;
+    vci.format = VK_FORMAT_R8G8_UNORM;
     vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     vci.subresourceRange.baseMipLevel = 0;
     vci.subresourceRange.levelCount = 1;
@@ -697,15 +698,17 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
     if (ss == 1) {
         shadow = std::move(base);
     } else {
-        shadow.resize(static_cast<size_t>(W) * static_cast<size_t>(H));
+        shadow.resize(static_cast<size_t>(W) * static_cast<size_t>(H) * 2);
         for (int z = 0; z < H; ++z) {
             for (int x = 0; x < W; ++x) {
                 int sx = x / ss;
                 int sz = z / ss;
-                shadow[static_cast<size_t>(z) * static_cast<size_t>(W) +
-                       static_cast<size_t>(x)] =
-                    base[static_cast<size_t>(sz) * static_cast<size_t>(hm.width()) +
-                         static_cast<size_t>(sx)];
+                size_t dst = (static_cast<size_t>(z) * static_cast<size_t>(W) +
+                              static_cast<size_t>(x)) * 2;
+                size_t src = (static_cast<size_t>(sz) * static_cast<size_t>(hm.width()) +
+                              static_cast<size_t>(sx)) * 2;
+                shadow[dst]     = base[src];
+                shadow[dst + 1] = base[src + 1];
             }
         }
     }
@@ -717,9 +720,9 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
                              terrain_shadow_view_, terrain_shadow_sampler_,
                              terrain_shadow_dim_);
 
-    // Stage upload via a scratch host-visible buffer.
+    // Stage upload via a scratch host-visible buffer (2 bytes/texel RG8).
     const VkDeviceSize bytes =
-        static_cast<VkDeviceSize>(W) * static_cast<VkDeviceSize>(H);
+        static_cast<VkDeviceSize>(W) * static_cast<VkDeviceSize>(H) * 2;
     VkBuffer stage = VK_NULL_HANDLE;
     VmaAllocation stage_alloc = nullptr;
     {
@@ -1361,7 +1364,7 @@ void VulkanEngine::terrain_shadow_worker_loop() {
         ShadowBakeResult r;
         r.ix = job.ix; r.iz = job.iz; r.w = job.w; r.h = job.h; r.ss = job.ss;
         r.sun_dir = job.sun_dir;
-        r.data.resize(static_cast<size_t>(job.w) * static_cast<size_t>(job.h));
+        r.data.resize(static_cast<size_t>(job.w) * static_cast<size_t>(job.h) * 2);
         if (job.ss <= 1) {
             bake_heightmap_shadow_tile(terrain_shadow_baker_hm_, job.sun_dir,
                                         job.ix, job.iz, job.w, job.h, r.data.data());
@@ -1460,7 +1463,7 @@ void VulkanEngine::tick_terrain_shadow_progressive() {
     // Pack tiles into one staging buffer, upload via a single submit.
     size_t total_bytes = 0;
     for (const auto& r : ready) {
-        total_bytes += static_cast<size_t>(r.w) * static_cast<size_t>(r.h);
+        total_bytes += static_cast<size_t>(r.w) * static_cast<size_t>(r.h) * 2;
     }
     VkBuffer stage = VK_NULL_HANDLE;
     VmaAllocation stage_alloc = nullptr;
@@ -1484,7 +1487,7 @@ void VulkanEngine::tick_terrain_shadow_progressive() {
     regions.reserve(ready.size());
     size_t off = 0;
     for (const auto& r : ready) {
-        size_t bytes = static_cast<size_t>(r.w) * static_cast<size_t>(r.h);
+        size_t bytes = static_cast<size_t>(r.w) * static_cast<size_t>(r.h) * 2;
         std::memcpy(mapped + off, r.data.data(), bytes);
         VkBufferImageCopy reg{};
         reg.bufferOffset = off;
