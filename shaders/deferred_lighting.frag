@@ -82,6 +82,10 @@ layout(set = 0, binding = 8) uniform sampler2D u_svgf_gi;
 // per-frame barriers unnecessary (same contract as cube.frag's pair).
 layout(set = 0, binding = 9,  rgba16f) uniform image2D u_gi_hist0;
 layout(set = 0, binding = 10, rgba16f) uniform image2D u_gi_hist1;
+// Per-pixel screen-space motion (current_uv - prev_uv) from the world
+// pass — includes DYNAMIC OBJECT motion that camera reprojection can't
+// see. The GI accumulator shortens history on/near moving pixels.
+layout(set = 0, binding = 11) uniform sampler2D u_motion;
 
 layout(push_constant) uniform PC {
     mat4 inv_vp;
@@ -713,6 +717,24 @@ void main() {
                     vec2 cuv = (vec2(pix) + 0.5) / scene.viewport.xy;
                     float motion_px =
                         length((puv - cuv) * scene.viewport.xy);
+                    // Dilated object motion: 5 taps of the motion-vector
+                    // buffer (centre + 8 px cross). Pixels ON a moving
+                    // object AND the trail it just vacated go strict, so
+                    // crates / doors / debris stop dragging stale GI
+                    // ("ghosting with moving objects"). Camera-only
+                    // reprojection sees none of this.
+                    vec2 inv_vp2 = 1.0 / scene.viewport.xy;
+                    float obj_px = 0.0;
+                    const vec2 kMD[5] = vec2[5](
+                        vec2(0.0), vec2(8.0, 0.0), vec2(-8.0, 0.0),
+                        vec2(0.0, 8.0), vec2(0.0, -8.0));
+                    for (int mi = 0; mi < 5; ++mi) {
+                        vec2 mvec = texture(u_motion,
+                                            cuv + kMD[mi] * inv_vp2).rg;
+                        obj_px = max(obj_px,
+                                     length(mvec * scene.viewport.xy));
+                    }
+                    motion_px = max(motion_px, obj_px);
                     mv = clamp((motion_px - 0.75) / 4.0, 0.0, 1.0);
                     ivec2 ppx = clamp(ivec2(puv * scene.viewport.xy),
                                       ivec2(0),
@@ -806,9 +828,14 @@ void main() {
             // Moving camera: strict tiers + short history, so stale
             // interior light can't ghost onto walls/doors as fake
             // transparency while the view changes.
+            // thr_lo/m_lo tightened (3.5/12 -> 2.8/8) now that the
+            // luminance-scaled eps keeps dark-channel noise out of the
+            // ratio: lighting CHANGES (a crate's shadow moving off a
+            // floor pixel) re-converge in ~8 frames instead of dragging
+            // a ghost trail for half a second.
             float thr_hi = mix(8.0, 3.0, mv);
-            float thr_lo = mix(3.5, 2.0, mv);
-            float m_lo   = mix(12.0, 3.0, mv);
+            float thr_lo = mix(2.8, 2.0, mv);
+            float m_lo   = mix(8.0, 3.0, mv);
             if (ratio > thr_hi) {
                 prevRgb = gi_indirect; prevSv = sv_raw; prevM = 0.0;
             } else if (ratio > thr_lo) {
@@ -820,7 +847,10 @@ void main() {
             // Static cap 48: per-frame fresh-noise fraction ~2%, AND the
             // packed alpha (M*32 + sv*31, max 1567) stays an exact fp16
             // integer. Motion cap stays short for lighting response.
-            float Mnew = min(prevM + 1.0, mix(48.0, 14.0, mv));
+            // Static cap 28 (was 48): measured residual at 48 was 1 LSB,
+            // so there is headroom to halve the lighting-change lag
+            // (ghost trails) and stay invisible (~2 LSB).
+            float Mnew = min(prevM + 1.0, mix(28.0, 12.0, mv));
             float w_h = (Mnew - 1.0) / Mnew;
             gi_indirect = mix(gi_indirect, prevRgb, w_h);
             // Accumulate sky_vis with the SAME weight as the irradiance.
