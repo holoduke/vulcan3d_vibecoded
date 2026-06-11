@@ -143,6 +143,17 @@ void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
 
 void VulkanEngine::update_projectiles(float dt) {
     if (!physics_) return;
+    // Age tracer afterimages (runs even when no projectile is alive —
+    // trails outlive their bullet by kTracerFade seconds).
+    if (!tracer_segs_.empty()) {
+        for (auto& t : tracer_segs_) t.age += dt;
+        tracer_segs_.erase(
+            std::remove_if(tracer_segs_.begin(), tracer_segs_.end(),
+                           [](const TracerSeg& t) {
+                               return t.age >= kTracerFade;
+                           }),
+            tracer_segs_.end());
+    }
     // Per-spacejet AABB half-extents in WORLD space (model is centred,
     // base scale ≈ 6 m / max_side, per-flight scale jitter ±0.4). We
     // use 3.6 m on X (wing axis), 1.0 m on Y (fuselage thickness),
@@ -448,12 +459,31 @@ void VulkanEngine::update_projectiles(float dt) {
                 }
                 // Latch this frame's position so next tick's swept tests
                 // have a valid prev. Only when the bullet survives this tick.
-                if (!drop) it->prev_pos = bp;
+                if (!drop) {
+                    // Tracer afterimage for the path covered this frame
+                    // (muzzle -> first position on the spawn frame).
+                    glm::vec3 ta = std::isnan(it->prev_pos.x)
+                                       ? it->spawn_origin
+                                       : it->prev_pos;
+                    if (glm::distance(ta, bp) > 0.05f &&
+                        tracer_segs_.size() < kTracerMax) {
+                        tracer_segs_.push_back({ta, bp, 0.0f});
+                    }
+                    it->prev_pos = bp;
+                }
             }
         }
 
         if (drop) {
             if (was_impact) {
+                // Final tracer segment up to the impact point so the
+                // trail visually reaches the surface it hit.
+                if (!std::isnan(it->prev_pos.x) &&
+                    glm::distance(it->prev_pos, hit_pos) < 30.0f &&
+                    glm::distance(it->prev_pos, hit_pos) > 0.05f &&
+                    tracer_segs_.size() < kTracerMax) {
+                    tracer_segs_.push_back({it->prev_pos, hit_pos, 0.0f});
+                }
                 // Use the bullet's post-impact velocity as the spark spray
                 // axis — that's the actual reflection direction.
                 glm::vec3 post_vel = physics_->get_linear_velocity_h(it->jolt_handle);
@@ -709,6 +739,42 @@ void VulkanEngine::draw_spark_trails(VkCommandBuffer cmd, const glm::mat4& vp) {
             glm::vec3 emi = spark_blackbody(temp) * spark_bloom;
             draw_segment(pa.trail[i], pa.trail[i + 1], radius, emi);
         }
+    }
+}
+
+void VulkanEngine::draw_tracers(VkCommandBuffer cmd, const glm::mat4& vp) {
+    // Caller binds the cylinder mesh. Newest segments (age ~0) sit right
+    // behind the bullet: full radius, hot emissive. Older ones thin out
+    // and dim with fade^2 — the ribbon reads as motion blur of a fast
+    // glowing bolt rather than a persistent laser wall. Bloom picks the
+    // HDR emissive up for the halo.
+    for (const auto& t : tracer_segs_) {
+        float fade = 1.0f - t.age / kTracerFade;
+        if (fade <= 0.0f) continue;
+        glm::vec3 d = t.b - t.a;
+        float len = glm::length(d);
+        if (len < 1e-4f) continue;
+        glm::vec3 dir = d / len;
+        glm::vec3 mid = (t.a + t.b) * 0.5f;
+        float radius = 0.045f * (0.30f + 0.70f * fade);
+        // +2 cm half-length overlap hides the joints between segments.
+        glm::mat4 model = align_local_y_to(mid, dir) *
+                          glm::scale(glm::mat4(1.0f),
+                                     glm::vec3(radius, len * 0.5f + 0.02f,
+                                               radius));
+        // Matches the projectile's red-magenta core, boosted 3x at the
+        // head so the trail flashes and vanishes.
+        glm::vec3 emi = glm::vec3(2.6f, 0.45f, 2.0f) * (fade * fade * 3.0f);
+        PushConstants pc{};
+        pc.mvp = vp * model;
+        pc.model = model;
+        pc.prev_mvp = pc.mvp;
+        pc.color = glm::vec4(glm::min(emi, glm::vec3(1.0f)), 1.0f);
+        pc.emissive = glm::vec4(emi, 1.0f);    // .a > 0 → unlit emissive
+        vkCmdPushConstants(cmd, pipeline_layout_,
+                           kPushConstantStages,
+                           0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
     }
 }
 

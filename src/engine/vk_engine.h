@@ -724,6 +724,20 @@ private:
     std::vector<Projectile> projectiles_;
     void fire_projectile(glm::vec3 origin, glm::vec3 direction);
     void update_projectiles(float dt);
+    // Bullet tracer afterimage. Every frame a projectile lives, the
+    // segment it travelled is pushed here and fades over kTracerFade
+    // seconds: bright/thick right behind the bullet, dimming and
+    // thinning toward the tail. The HDR emissive feeds bloom (glow);
+    // the fading ribbon along the flight path reads as motion blur.
+    struct TracerSeg {
+        glm::vec3 a{0.0f};
+        glm::vec3 b{0.0f};
+        float age = 0.0f;
+    };
+    std::vector<TracerSeg> tracer_segs_;
+    static constexpr float  kTracerFade = 0.22f;  // seconds to fade out
+    static constexpr size_t kTracerMax  = 768;    // hard cap (rapid fire)
+    void draw_tracers(VkCommandBuffer cmd, const glm::mat4& vp);
     static constexpr float kProjectileTtl     = 8.0f;   // ~1.7 km flight
     static constexpr float kProjectileSpeed   = 220.0f;   // m/s
     // Laser-beam dimensions. Thicker (4 cm radius) + much longer

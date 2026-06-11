@@ -644,11 +644,20 @@ void main() {
             bool parity0 = (scene.rt_flags.w & 1) == 0;
             vec3  prevRgb = gi_indirect;
             float prevM   = 0.0;
+            // Motion factor: 0 = camera static (history fully trusted,
+            // no flicker), 1 = fast reprojection (strict rejection, no
+            // ghost light "shining through" walls from stale interior
+            // history). 0.75 px dead-zone absorbs the TAA jitter.
+            float mv = 1.0;
             vec4 pclip = pc.prev_vp * vec4(world_pos, 1.0);
             if (pclip.w > 1e-3) {
                 vec2 puv = (pclip.xy / pclip.w) * 0.5 + 0.5;
                 if (all(greaterThan(puv, vec2(0.0))) &&
                     all(lessThan(puv, vec2(1.0)))) {
+                    vec2 cuv = (vec2(pix) + 0.5) / scene.viewport.xy;
+                    float motion_px =
+                        length((puv - cuv) * scene.viewport.xy);
+                    mv = clamp((motion_px - 0.75) / 4.0, 0.0, 1.0);
                     ivec2 ppx = clamp(ivec2(puv * scene.viewport.xy),
                                       ivec2(0),
                                       ivec2(scene.viewport.xy) - ivec2(1));
@@ -683,12 +692,13 @@ void main() {
                         float wz = exp(-abs(tz - z) * 800.0);
                         float wn = pow(max(dot(tn, N), 0.0), 16.0);
                         float w_t = (ti == 0 ? 1.0 : 0.6) * wz * wn;
-                        // Centre-tap floor: normal-mapped surfaces can
-                        // fail the tight wn test on ALL taps, which used
-                        // to zero wsum -> silent history reset -> static
-                        // flicker. Geometry mismatch is still caught by
-                        // the ratio test below.
-                        if (ti == 0) w_t = max(w_t, 0.05);
+                        // Centre-tap floor (static camera only):
+                        // normal-mapped surfaces can fail the tight wn
+                        // test on ALL taps, zeroing wsum -> silent
+                        // history reset -> static flicker. Under motion
+                        // the floor is removed so mismatched-surface
+                        // history is rejected instead of ghosting.
+                        if (ti == 0) w_t = max(w_t, 0.05 * (1.0 - mv));
                         acc  += hv.rgb * w_t;
                         wsum += w_t;
                         if (ti == 0) Mc = hv.a;
@@ -707,23 +717,26 @@ void main() {
             // outlier ray bundle must not flash the pixel. Cap the fresh
             // estimate at 3x history + eps BEFORE the ratio test, so noise
             // spikes neither display nor trigger a history reset.
-            if (prevM >= 8.0) {
+            if (prevM >= 8.0 && mv < 0.5) {
                 gi_indirect = min(gi_indirect, prevRgb * 3.0 + vec3(0.05));
             }
             vec3 rcn = (gi_indirect + vec3(0.05)) / (prevRgb + vec3(0.05));
             float ratio = max(max(max(rcn.r, 1.0 / rcn.r),
                                   max(rcn.g, 1.0 / rcn.g)),
                               max(rcn.b, 1.0 / rcn.b));
-            // Rejection tiers are deliberately loose: an 8-ray estimate
-            // routinely lands 2-3x off the converged mean, and clamping M
-            // hard on every such frame held the accumulator at ~4 samples
-            // forever (= 20% fresh noise per frame = static flicker).
-            // Real disocclusions are caught by the 8x tier; lighting
-            // changes (door opens, props move) by the 3.5x tier, which
-            // still re-converges in ~12 frames.
-            if (ratio > 8.0)      { prevRgb = gi_indirect; prevM = 0.0; }
-            else if (ratio > 3.5) { prevM = min(prevM, 12.0); }
-            float Mnew = min(prevM + 1.0, 32.0);
+            // Motion-adaptive rejection. Static camera: deliberately
+            // loose tiers (an 8-ray estimate routinely lands 2-3x off
+            // the converged mean; clamping M hard on every such frame
+            // held the accumulator at ~4 samples = visible flicker).
+            // Moving camera: strict tiers + short history, so stale
+            // interior light can't ghost onto walls/doors as fake
+            // transparency while the view changes.
+            float thr_hi = mix(8.0, 3.0, mv);
+            float thr_lo = mix(3.5, 2.0, mv);
+            float m_lo   = mix(12.0, 3.0, mv);
+            if (ratio > thr_hi)      { prevRgb = gi_indirect; prevM = 0.0; }
+            else if (ratio > thr_lo) { prevM = min(prevM, m_lo); }
+            float Mnew = min(prevM + 1.0, mix(32.0, 14.0, mv));
             gi_indirect = mix(gi_indirect, prevRgb, (Mnew - 1.0) / Mnew);
             vec4 storeVal = vec4(gi_indirect, Mnew);
             if (parity0) imageStore(u_gi_hist0, pix, storeVal);

@@ -4796,6 +4796,14 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         }
     }
 
+    // Bullet tracer afterimages — fading glow ribbon behind each shot.
+    if (!tracer_segs_.empty()) {
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cylinder_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cylinder_mesh_.index_buffer, 0,
+                              VK_INDEX_TYPE_UINT32);
+        draw_tracers(cmd, vp);
+    }
+
     // Raymarched grass вЂ” deferred to here so the alpha blend reads
     // the actual castle/cube/dyn-prop colours instead of the still-
     // cleared sky background. Was running before the brush loops,
