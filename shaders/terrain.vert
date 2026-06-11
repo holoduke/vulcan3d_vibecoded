@@ -129,6 +129,14 @@ void main() {
     float kRockyAmp = max(0.0, pc.grass_params.z);
     float kDispMip  = clamp(pc.grass_params.w, 0.0, 6.0);
     float fade = 1.0 - smoothstep(60.0, 110.0, dist);
+    // Castle-plateau gate: the courtyard floor slab sits only 5 cm
+    // above the terrain, and stairs/walls hug it. Up to 0.45 m of
+    // detail displacement here pokes terrain THROUGH the courtyard
+    // tiles, buries the lower stair steps, and bulges in front of
+    // wall bases (read as "transparent walls at grazing angles").
+    // Fade the displacement to zero inside the plateau footprint.
+    float plat = max(abs(world_xz.x), abs(world_xz.y));
+    fade *= smoothstep(11.5, 16.0, plat);
     if (kRockyAmp * fade > 1e-4) {
         float band_sand = smoothstep(scene.terrain_h_low.x,
                                      scene.terrain_h_low.y, h);

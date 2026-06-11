@@ -2103,6 +2103,18 @@ void main() {
                     // the visual interest; corners stay solid.
                     float parallax_hit_depth = dot(vWorldPos - spom_recessed,
                                                    spom_face_n);
+                    // Face-on gate on the recessed depth write. At
+                    // grazing view angles a few cm of recession along
+                    // the face normal becomes a LARGE depth change,
+                    // opening a screen-space band at wall silhouettes
+                    // where later passes (grass, terrain behind) win
+                    // the depth test and bleed INTO the wall — read as
+                    // "walls are transparent from certain angles".
+                    {
+                        vec3 Vw_g = normalize(scene.camera_pos.xyz - vWorldPos);
+                        float vn_g = abs(dot(Vw_g, spom_face_n));
+                        parallax_hit_depth *= smoothstep(0.30, 0.60, vn_g);
+                    }
                     // Brick reaches up to this fragment -- write
                     // the parallax-hit depth so downstream passes
                     // see the correct brick-top geometry.

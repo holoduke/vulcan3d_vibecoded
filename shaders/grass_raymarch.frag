@@ -342,6 +342,13 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
     float alt_factor = 1.0 - smoothstep(55.0, 75.0, terrainY);
     bool underwater  = ctx.underwater && terrainY < ctx.water_y;
     if (alt_factor <= 0.001 || underwater) return distToTerrain;
+    // Castle keep-out: the courtyard floor slabs sit 5 cm above the
+    // terrain, and blades rooted on the terrain poke up THROUGH them —
+    // the courtyard read as a swampy green weave over the tiles. The
+    // castle footprint is the plateau extent (kPlateauExtent) centred
+    // on origin; no blades inside it.
+    if (abs(p.x) < kPlateauExtent + 0.5 &&
+        abs(p.z) < kPlateauExtent + 0.5) return distToTerrain;
 
     float d = distToTerrain;
     const float kPi2 = 6.28318530718;
