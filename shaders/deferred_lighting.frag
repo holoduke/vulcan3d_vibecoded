@@ -684,14 +684,14 @@ void main() {
                         // Sanitise: NaN/Inf or out-of-range history must
                         // not enter the EMA (NaN survives comparisons).
                         if (any(isnan(hv.rgb)) || any(isinf(hv.rgb)) ||
-                            !(hv.a >= 0.0 && hv.a <= 32.0) ||
+                            !(hv.a >= 0.0 && hv.a <= 64.0) ||
                             any(greaterThan(hv.rgb, vec3(64.0)))) continue;
                         vec2 tuv = (vec2(tp) + 0.5) / scene.viewport.xy;
                         float tz = texture(u_depth, tuv).r;
                         vec3  tn = octa_decode(texture(u_gbuffer1, tuv).rg);
                         float wz = exp(-abs(tz - z) * 800.0);
                         float wn = pow(max(dot(tn, N), 0.0), 16.0);
-                        float w_t = (ti == 0 ? 1.0 : 0.6) * wz * wn;
+                        float w_t = (ti == 0 ? 1.0 : 0.85) * wz * wn;
                         // Centre-tap floor (static camera only):
                         // normal-mapped surfaces can fail the tight wn
                         // test on ALL taps, zeroing wsum -> silent
@@ -736,7 +736,10 @@ void main() {
             float m_lo   = mix(12.0, 3.0, mv);
             if (ratio > thr_hi)      { prevRgb = gi_indirect; prevM = 0.0; }
             else if (ratio > thr_lo) { prevM = min(prevM, m_lo); }
-            float Mnew = min(prevM + 1.0, mix(32.0, 14.0, mv));
+            // Static cap 64: per-frame fresh-noise fraction drops to
+            // ~1.5% — closeup GI stops visibly breathing. Motion cap
+            // stays short so lighting still responds while moving.
+            float Mnew = min(prevM + 1.0, mix(64.0, 14.0, mv));
             gi_indirect = mix(gi_indirect, prevRgb, (Mnew - 1.0) / Mnew);
             vec4 storeVal = vec4(gi_indirect, Mnew);
             if (parity0) imageStore(u_gi_hist0, pix, storeVal);
@@ -773,12 +776,15 @@ void main() {
     vec3 ambient_sky    = sky_tint * 0.45 * ambient_strength;
     // sky_factor: cube.frag uses smoothstep(0, 0.6, sky_vis) floored at
     // 0.10. Same here so deep cracks still pick up a tiny sky leakage.
-    float sky_factor   = mix(0.10, 1.0, smoothstep(0.0, 0.6, sky_vis));
+    // 0.70 upper edge (was 0.60) + lower 0.06 floor: partially enclosed
+    // areas (corners, doorways, under-arches) read noticeably darker
+    // while open ground keeps full sky ambient.
+    float sky_factor   = mix(0.06, 1.0, smoothstep(0.0, 0.7, sky_vis));
     // Non-terrain receivers attenuate the ground term too (else interior
     // brick reads as bright as exterior), but with a 0.25 floor so we
     // never collapse to true black.
     float ground_atten = (material_id == 3) ? 1.0
-                                            : mix(0.25, 1.0, sky_factor);
+                                            : mix(0.18, 1.0, sky_factor);
     vec3 ambient_combined = mix(ambient_ground * ground_atten,
                                  ambient_sky    * sky_factor, up);
     // AO multiplies the combined term. 0.08 floor matches the residual
@@ -787,7 +793,11 @@ void main() {
     // regresses all scenes 0.03-0.05% mean SAD even though cube.frag has
     // no floor of its own РІР‚вЂќ likely because forward's SVGF temporal
     // smoothing averages the per-pixel collapses out where mine can't.
-    float ao_floored = mix(0.08, 1.0, ao);
+    // Quadratic AO response: open areas (ao ~1) keep their brightness,
+    // but occluded corners get pushed much darker before the floor —
+    // the "dark where it should be dark" contact look. Floor lowered
+    // 0.08 -> 0.05 (still above the scattered-black-pixel regime).
+    float ao_floored = mix(0.05, 1.0, ao * ao);
     vec3 ambient_term = albedo * ambient_combined * ao_floored;
     // sky_fill drops out as a separate term РІР‚вЂќ it's been folded into
     // ambient_sky above. Zero it so the addition below stays valid.

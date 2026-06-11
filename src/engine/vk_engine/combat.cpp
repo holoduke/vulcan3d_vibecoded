@@ -138,6 +138,18 @@ void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
     // trail.
     p.color    = glm::vec4(1.0f, 0.20f, 0.55f, 1.0f);  // red-magenta core
     p.emissive = glm::vec3(2.20f, 0.30f, 1.80f);        // HDR bloom feed
+    // Tracer tail starts at the BARREL tip, not the eye: camera-space
+    // (0.18, -0.18, -0.72) — the same anchor the muzzle flash uses —
+    // mapped to world via the camera basis. The first trail segment then
+    // converges from the barrel onto the centerline flight path.
+    {
+        glm::vec3 w_up(0.0f, 1.0f, 0.0f);
+        glm::vec3 right = (std::abs(dir.y) < 0.99f)
+                              ? glm::normalize(glm::cross(dir, w_up))
+                              : glm::vec3(1.0f, 0.0f, 0.0f);
+        glm::vec3 up = glm::cross(right, dir);
+        p.trail_prev = origin + right * 0.18f - up * 0.18f + dir * 0.72f;
+    }
     projectiles_.push_back(p);
 }
 
@@ -467,9 +479,7 @@ void VulkanEngine::update_projectiles(float dt) {
                     // the gate, long-lived distant bullets fill the
                     // segment pool and starve fresh shots ("tracer stops
                     // appearing after a while").
-                    glm::vec3 ta = std::isnan(it->prev_pos.x)
-                                       ? it->spawn_origin
-                                       : it->prev_pos;
+                    glm::vec3 ta = it->trail_prev;
                     if (glm::distance(ta, bp) > 0.05f &&
                         glm::distance(bp, it->spawn_origin) < 300.0f) {
                         if (tracer_segs_.size() >= kTracerMax) {
@@ -480,6 +490,7 @@ void VulkanEngine::update_projectiles(float dt) {
                         }
                         tracer_segs_.push_back({ta, bp, 0.0f});
                     }
+                    it->trail_prev = bp;
                     it->prev_pos = bp;
                 }
             }
@@ -489,13 +500,12 @@ void VulkanEngine::update_projectiles(float dt) {
             if (was_impact) {
                 // Final tracer segment up to the impact point so the
                 // trail visually reaches the surface it hit.
-                if (!std::isnan(it->prev_pos.x) &&
-                    glm::distance(it->prev_pos, hit_pos) < 30.0f &&
-                    glm::distance(it->prev_pos, hit_pos) > 0.05f) {
+                if (glm::distance(it->trail_prev, hit_pos) < 30.0f &&
+                    glm::distance(it->trail_prev, hit_pos) > 0.05f) {
                     if (tracer_segs_.size() >= kTracerMax) {
                         tracer_segs_.erase(tracer_segs_.begin());
                     }
-                    tracer_segs_.push_back({it->prev_pos, hit_pos, 0.0f});
+                    tracer_segs_.push_back({it->trail_prev, hit_pos, 0.0f});
                 }
                 // Use the bullet's post-impact velocity as the spark spray
                 // axis — that's the actual reflection direction.

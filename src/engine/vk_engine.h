@@ -720,6 +720,11 @@ private:
         // ~5.5 m extent. The segment test catches those.
         // Sentinel: any-NaN means "first frame, no swept test yet".
         glm::vec3 prev_pos{ std::numeric_limits<float>::quiet_NaN() };
+        // Tracer trail tail. Starts at the viewmodel BARREL tip (not the
+        // eye/centerline — fire_projectile offsets it to match the muzzle
+        // flash anchor), then follows the bullet. The first segment
+        // therefore converges barrel -> aim line, like every FPS tracer.
+        glm::vec3 trail_prev{0.0f};
     };
     std::vector<Projectile> projectiles_;
     void fire_projectile(glm::vec3 origin, glm::vec3 direction);
