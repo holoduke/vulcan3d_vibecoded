@@ -683,6 +683,12 @@ void main() {
                         float wz = exp(-abs(tz - z) * 800.0);
                         float wn = pow(max(dot(tn, N), 0.0), 16.0);
                         float w_t = (ti == 0 ? 1.0 : 0.6) * wz * wn;
+                        // Centre-tap floor: normal-mapped surfaces can
+                        // fail the tight wn test on ALL taps, which used
+                        // to zero wsum -> silent history reset -> static
+                        // flicker. Geometry mismatch is still caught by
+                        // the ratio test below.
+                        if (ti == 0) w_t = max(w_t, 0.05);
                         acc  += hv.rgb * w_t;
                         wsum += w_t;
                         if (ti == 0) Mc = hv.a;
@@ -697,12 +703,26 @@ void main() {
             // belong to this surface (e.g. sky-blue irradiance on a
             // beige wall РІР‚вЂќ equal LUMINANCE would fool a scalar test)
             // restarts accumulation; moderate mismatch shortens it.
-            vec3 rcn = (gi_indirect + vec3(0.03)) / (prevRgb + vec3(0.03));
+            // Firefly clamp: once history is converged (M >= 8), a single
+            // outlier ray bundle must not flash the pixel. Cap the fresh
+            // estimate at 3x history + eps BEFORE the ratio test, so noise
+            // spikes neither display nor trigger a history reset.
+            if (prevM >= 8.0) {
+                gi_indirect = min(gi_indirect, prevRgb * 3.0 + vec3(0.05));
+            }
+            vec3 rcn = (gi_indirect + vec3(0.05)) / (prevRgb + vec3(0.05));
             float ratio = max(max(max(rcn.r, 1.0 / rcn.r),
                                   max(rcn.g, 1.0 / rcn.g)),
                               max(rcn.b, 1.0 / rcn.b));
-            if (ratio > 6.0)      { prevRgb = gi_indirect; prevM = 0.0; }
-            else if (ratio > 2.5) { prevM = min(prevM, 4.0); }
+            // Rejection tiers are deliberately loose: an 8-ray estimate
+            // routinely lands 2-3x off the converged mean, and clamping M
+            // hard on every such frame held the accumulator at ~4 samples
+            // forever (= 20% fresh noise per frame = static flicker).
+            // Real disocclusions are caught by the 8x tier; lighting
+            // changes (door opens, props move) by the 3.5x tier, which
+            // still re-converges in ~12 frames.
+            if (ratio > 8.0)      { prevRgb = gi_indirect; prevM = 0.0; }
+            else if (ratio > 3.5) { prevM = min(prevM, 12.0); }
             float Mnew = min(prevM + 1.0, 32.0);
             gi_indirect = mix(gi_indirect, prevRgb, (Mnew - 1.0) / Mnew);
             vec4 storeVal = vec4(gi_indirect, Mnew);
