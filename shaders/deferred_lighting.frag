@@ -599,7 +599,16 @@ void main() {
                 if (!skip_gi_inner) {
                     // Sun-shadow at the hit point: one any-hit ray; if
                     // clear, hit gets sun + ambient; otherwise just
-                    // ambient. Mid-grey 0.5 albedo proxy for the bounce.
+                    // ambient.
+                    //
+                    // Bounce-surface albedo proxy with directional
+                    // colour: steep downward rays land on terrain/grass
+                    // (cool green), everything else hits stone/brick
+                    // (warm). A flat grey proxy erased all colour
+                    // bleeding - the single biggest "GI looks flat" tell.
+                    vec3 hit_alb = (dir.y < -0.3 && hit_pos.y < 23.5)
+                                       ? vec3(0.33, 0.45, 0.27)
+                                       : vec3(0.55, 0.50, 0.44);
                     vec3 hit_light = scene.ambient.rgb * 0.6;
                     float n_dot_sun = max(dot(hit_n, L), 0.0);
                     if (n_dot_sun > 0.0 &&
@@ -607,7 +616,48 @@ void main() {
                         hit_light += scene.sun_color.rgb *
                                       scene.sun_color.a * n_dot_sun;
                     }
-                    gi_indirect += vec3(0.5) * hit_light;
+                    // Second bounce on every other ray (x2 compensation
+                    // x0.5 energy damping = net 1.0): lets a sun-lit
+                    // courtyard light a room through the doorway and
+                    // fills corners with soft bounced light instead of
+                    // flat ambient. Near-camera only - distant pixels
+                    // can't resolve the difference.
+                    if ((i & 1) == 0 && cam_dist < 40.0) {
+                        float b1 = hash12(gl_FragCoord.xy + fseed +
+                                          vec2(i * 13.0, 119.0));
+                        float b2 = hash12(gl_FragCoord.xy + fseed +
+                                          vec2(i * 13.0, 167.0));
+                        float brh  = sqrt(b1);
+                        float bphi = 6.28318530718 * b2;
+                        vec3 bup  = abs(hit_n.y) < 0.999 ? vec3(0,1,0)
+                                                         : vec3(1,0,0);
+                        vec3 btan = normalize(cross(bup, hit_n));
+                        vec3 bbit = cross(hit_n, btan);
+                        vec3 bdir = btan * (brh * cos(bphi)) +
+                                    hit_n * sqrt(max(0.0, 1.0 - b1)) +
+                                    bbit * (brh * sin(bphi));
+                        vec3 bro = hit_pos + hit_n * 0.01;
+                        float bt;
+                        vec3 b_rad;
+                        if (closest_hit(bro, bdir, gi_radius, bt)) {
+                            vec3 b_pos = bro + bdir * bt;
+                            vec3 b_n   = -bdir;
+                            vec3 b_light = scene.ambient.rgb * 0.6;
+                            float b_ndl = max(dot(b_n, L), 0.0);
+                            if (b_ndl > 0.0 &&
+                                !any_hit(b_pos + b_n * 0.01, L, 200.0)) {
+                                b_light += scene.sun_color.rgb *
+                                            scene.sun_color.a * b_ndl;
+                            }
+                            b_rad = vec3(0.5) * b_light;
+                        } else {
+                            float bw = clamp(bdir.y, 0.0, 1.0);
+                            b_rad = scene.sky_color.rgb *
+                                    (0.4 + 0.6 * bw);
+                        }
+                        hit_light += b_rad;
+                    }
+                    gi_indirect += hit_alb * hit_light;
                 }
             } else {
                 // Miss РІвЂ вЂ™ sky. Use sky_color tinted by direction.up so
@@ -677,13 +727,15 @@ void main() {
                     // crossing geometry - the spatial half of an
                     // SVGF-class denoiser without extra passes.
                     ivec2 vmax = ivec2(scene.viewport.xy) - ivec2(1);
-                    const ivec2 kTap[5] = ivec2[5](
+                    const ivec2 kTap[9] = ivec2[9](
                         ivec2(0, 0), ivec2( 2, 0), ivec2(-2, 0),
-                        ivec2(0, 2), ivec2( 0,-2));
+                        ivec2(0, 2), ivec2( 0,-2),
+                        ivec2( 1, 1), ivec2(-1, 1),
+                        ivec2( 1,-1), ivec2(-1,-1));
                     vec3  acc = vec3(0.0);
                     float wsum = 0.0;
                     float Mc = 0.0;
-                    for (int ti = 0; ti < 5; ++ti) {
+                    for (int ti = 0; ti < 9; ++ti) {
                         ivec2 tp = clamp(ppx + kTap[ti], ivec2(0), vmax);
                         vec4 hv = parity0 ? imageLoad(u_gi_hist1, tp)
                                           : imageLoad(u_gi_hist0, tp);
