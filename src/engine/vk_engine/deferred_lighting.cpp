@@ -18,10 +18,15 @@ namespace qlike {
 // GPUs expose.
 struct DeferredLightingPC {
     glm::mat4 inv_vp;
+    // Previous frame's view-proj — the GI temporal accumulator
+    // reprojects each pixel's world position into last frame's screen
+    // to fetch its history (in-shader reprojection; static geometry
+    // needs no motion-vector plumbing).
+    glm::mat4 prev_vp;
     glm::vec4 light_pos[4];   // .xyz pos, .w radius (m); .w == 0 disables
     glm::vec4 light_col[4];   // .rgb colour, .a intensity multiplier
 };
-static_assert(sizeof(DeferredLightingPC) == 192,
+static_assert(sizeof(DeferredLightingPC) == 256,
               "DeferredLightingPC layout mismatch — check std140 expectations");
 
 
@@ -37,7 +42,7 @@ void VulkanEngine::init_deferred_lighting() {
         // SAD gap on indoor / shadow-side surfaces. Image is in GENERAL
         // layout when cube.frag writes via imageStore — sampler2D reads
         // are allowed from GENERAL.
-        VkDescriptorSetLayoutBinding b[9]{};
+        VkDescriptorSetLayoutBinding b[11]{};
         b[0].binding = 0;
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         b[0].descriptorCount = 1;
@@ -52,10 +57,18 @@ void VulkanEngine::init_deferred_lighting() {
             b[i].descriptorCount = 1;
             b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         }
+        // 9/10: GI temporal-denoise history ping-pong (storage images,
+        // GENERAL layout — read prev parity, write current parity).
+        for (int i = 9; i < 11; ++i) {
+            b[i].binding = i;
+            b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            b[i].descriptorCount = 1;
+            b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
         VkDescriptorSetLayoutCreateInfo dlci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
-            .bindingCount = 9, .pBindings = b,
+            .bindingCount = 11, .pBindings = b,
         };
         vk_check(vkCreateDescriptorSetLayout(device_, &dlci, nullptr,
                                               &deferred_lighting_desc_layout_),
@@ -89,12 +102,13 @@ void VulkanEngine::init_deferred_lighting() {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1 },
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     7 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              2 },
         };
         VkDescriptorPoolCreateInfo pci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
             .maxSets = 1,
-            .poolSizeCount = 3, .pPoolSizes = sizes,
+            .poolSizeCount = 4, .pPoolSizes = sizes,
         };
         vk_check(vkCreateDescriptorPool(device_, &pci, nullptr,
                                          &deferred_lighting_desc_pool_),
@@ -209,7 +223,13 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         VkImageView svgf_v = svgf_gi_view_ ? svgf_gi_view_ : gbuffer1_view_;
         VkDescriptorImageInfo svgf_ii{ linear_sampler_, svgf_v,
                                        VK_IMAGE_LAYOUT_GENERAL };
-        VkWriteDescriptorSet w[9]{};
+        VkDescriptorImageInfo gih0_ii{ VK_NULL_HANDLE,
+                                       deferred_gi_hist_view_[0],
+                                       VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo gih1_ii{ VK_NULL_HANDLE,
+                                       deferred_gi_hist_view_[1],
+                                       VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet w[11]{};
         w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[0].dstSet = deferred_lighting_desc_set_; w[0].dstBinding = 0;
         w[0].descriptorCount = 1;
@@ -233,7 +253,15 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[6].pImageInfo = &sc_ii;
         w[7].pImageInfo = &ts_ii;
         w[8].pImageInfo = &svgf_ii;
-        vkUpdateDescriptorSets(device_, 9, w, 0, nullptr);
+        for (int i = 9; i < 11; ++i) {
+            w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[i].dstSet = deferred_lighting_desc_set_; w[i].dstBinding = i;
+            w[i].descriptorCount = 1;
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        }
+        w[9].pImageInfo  = &gih0_ii;
+        w[10].pImageInfo = &gih1_ii;
+        vkUpdateDescriptorSets(device_, 11, w, 0, nullptr);
     }
 
     // Transition staging_color into COLOR_ATTACHMENT layout.
@@ -284,6 +312,8 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
     // dynamic lights can take 1..3 once the engine collects them.
     DeferredLightingPC pcd{};
     pcd.inv_vp = current_frame_view_.inv_vp;
+    pcd.prev_vp = prev_view_proj_valid_ ? prev_view_proj_
+                                        : current_frame_view_.vp;
     // Slot 0: muzzle flash. The scene UBO already has muzzle_pos + colour;
     // mirror them here so the deferred path responds to the same trigger.
     if (muzzle_flash_timer_ > 0.0f) {

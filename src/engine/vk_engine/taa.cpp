@@ -162,6 +162,16 @@ void VulkanEngine::recreate_taa_targets() {
     if (staging_color_image_) vmaDestroyImage(allocator_, staging_color_image_, staging_color_alloc_);
     staging_color_image_ = VK_NULL_HANDLE; staging_color_view_ = VK_NULL_HANDLE;
     staging_color_alloc_ = nullptr;
+    for (int s = 0; s < 2; ++s) {
+        if (deferred_gi_hist_view_[s])
+            vkDestroyImageView(device_, deferred_gi_hist_view_[s], nullptr);
+        if (deferred_gi_hist_image_[s])
+            vmaDestroyImage(allocator_, deferred_gi_hist_image_[s],
+                            deferred_gi_hist_alloc_[s]);
+        deferred_gi_hist_image_[s] = VK_NULL_HANDLE;
+        deferred_gi_hist_view_[s]  = VK_NULL_HANDLE;
+        deferred_gi_hist_alloc_[s] = nullptr;
+    }
     for (int s = 0; s < kHistorySlots; ++s) {
         if (history_view_[s])  vkDestroyImageView(device_, history_view_[s], nullptr);
         if (history_image_[s]) vmaDestroyImage(allocator_, history_image_[s], history_alloc_[s]);
@@ -244,6 +254,17 @@ void VulkanEngine::recreate_taa_targets() {
                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                    history_image_[s], history_alloc_[s], history_view_[s]);
     }
+    // Deferred GI temporal-denoise history (ping-pong storage images).
+    // TRANSFER_DST so the init transition can CLEAR them — undefined
+    // initial content (NaNs) would poison the EMA forever (NaN survives
+    // every comparison-based rejection).
+    for (int s = 0; s < 2; ++s) {
+        make_image(VK_FORMAT_R16G16B16A16_SFLOAT,
+                   VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                   VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                   deferred_gi_hist_image_[s], deferred_gi_hist_alloc_[s],
+                   deferred_gi_hist_view_[s]);
+    }
 
     for (int set = 0; set < kHistorySlots; ++set) {
         VkDescriptorImageInfo i_cur{ linear_sampler_, scene_color_view_,
@@ -292,6 +313,24 @@ void VulkanEngine::recreate_taa_targets() {
                                      VK_IMAGE_LAYOUT_UNDEFINED,
                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
+        // Deferred GI history: clear to zero (M=0 → first frame starts
+        // a fresh accumulation), then park in GENERAL permanently
+        // (imageLoad/Store from the lighting pass; parity ping-pong +
+        // the 2-frame fence overlap make per-frame barriers
+        // unnecessary, same trick as cube.frag's SVGF history pair).
+        for (int s = 0; s < 2; ++s) {
+            vkinit::transition_image(cb, deferred_gi_hist_image_[s],
+                                     VK_IMAGE_LAYOUT_UNDEFINED,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            VkClearColorValue zero{};
+            VkImageSubresourceRange rr{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            vkCmdClearColorImage(cb, deferred_gi_hist_image_[s],
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 &zero, 1, &rr);
+            vkinit::transition_image(cb, deferred_gi_hist_image_[s],
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_GENERAL);
+        }
     });
 }
 
@@ -322,6 +361,16 @@ void VulkanEngine::destroy_taa() {
     if (gbuffer1_image_)    vmaDestroyImage(allocator_, gbuffer1_image_, gbuffer1_alloc_);
     if (staging_color_view_)  vkDestroyImageView(device_, staging_color_view_, nullptr);
     if (staging_color_image_) vmaDestroyImage(allocator_, staging_color_image_, staging_color_alloc_);
+    for (int s = 0; s < 2; ++s) {
+        if (deferred_gi_hist_view_[s])
+            vkDestroyImageView(device_, deferred_gi_hist_view_[s], nullptr);
+        if (deferred_gi_hist_image_[s])
+            vmaDestroyImage(allocator_, deferred_gi_hist_image_[s],
+                            deferred_gi_hist_alloc_[s]);
+        deferred_gi_hist_image_[s] = VK_NULL_HANDLE;
+        deferred_gi_hist_view_[s]  = VK_NULL_HANDLE;
+        deferred_gi_hist_alloc_[s] = nullptr;
+    }
 
     taa_pipeline_ = VK_NULL_HANDLE;
     taa_pipeline_layout_ = VK_NULL_HANDLE;

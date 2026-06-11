@@ -1455,6 +1455,14 @@ private:
     VkImage      staging_color_image_ = VK_NULL_HANDLE;
     VmaAllocation staging_color_alloc_ = nullptr;
     VkImageView  staging_color_view_ = VK_NULL_HANDLE;
+    // Deferred GI temporal-denoise history (RGBA16F, render extent,
+    // GENERAL layout, ping-pong by frame parity). .rgb = accumulated
+    // raw GI irradiance, .a = sample count M. Read/written by
+    // deferred_lighting.frag (bindings 9/10 of its set); created and
+    // resized alongside the other render-extent targets in taa.cpp.
+    VkImage       deferred_gi_hist_image_[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VmaAllocation deferred_gi_hist_alloc_[2] = { nullptr, nullptr };
+    VkImageView   deferred_gi_hist_view_[2]  = { VK_NULL_HANDLE, VK_NULL_HANDLE };
     // Now defaults ON: forward path remains bit-perfect (7/7 SAD PASS)
     // and is reachable via --deferred 0 for A/B testing. Deferred
     // matches forward within 0.8-2.0% mean SAD across the seven
