@@ -148,7 +148,9 @@ void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
                               ? glm::normalize(glm::cross(dir, w_up))
                               : glm::vec3(1.0f, 0.0f, 0.0f);
         glm::vec3 up = glm::cross(right, dir);
-        p.trail_prev = origin + right * 0.18f - up * 0.18f + dir * 0.72f;
+        glm::vec3 barrel = origin + right * 0.18f - up * 0.18f + dir * 0.72f;
+        p.trail_prev   = barrel;
+        p.trail_offset = barrel - spawn;
     }
     projectiles_.push_back(p);
 }
@@ -479,18 +481,24 @@ void VulkanEngine::update_projectiles(float dt) {
                     // the gate, long-lived distant bullets fill the
                     // segment pool and starve fresh shots ("tracer stops
                     // appearing after a while").
+                    // Visual trail point: bullet pos + barrel offset that
+                    // decays to zero over the first 12 m, so the polyline
+                    // CURVES from the barrel onto the centerline instead
+                    // of showing a hard corner at the first joint.
+                    float dflown = glm::distance(bp, it->spawn_origin);
+                    float conv = std::max(0.0f, 1.0f - dflown / 12.0f);
+                    glm::vec3 vis = bp + it->trail_offset * conv;
                     glm::vec3 ta = it->trail_prev;
-                    if (glm::distance(ta, bp) > 0.05f &&
-                        glm::distance(bp, it->spawn_origin) < 300.0f) {
+                    if (glm::distance(ta, vis) > 0.05f && dflown < 300.0f) {
                         if (tracer_segs_.size() >= kTracerMax) {
                             // Pool full: drop the oldest (front — pushed
                             // chronologically, aged uniformly), never the
                             // new segment near the player.
                             tracer_segs_.erase(tracer_segs_.begin());
                         }
-                        tracer_segs_.push_back({ta, bp, 0.0f});
+                        tracer_segs_.push_back({ta, vis, 0.0f});
                     }
-                    it->trail_prev = bp;
+                    it->trail_prev = vis;
                     it->prev_pos = bp;
                 }
             }

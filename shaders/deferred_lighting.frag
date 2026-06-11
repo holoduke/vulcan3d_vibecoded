@@ -644,6 +644,12 @@ void main() {
             bool parity0 = (scene.rt_flags.w & 1) == 0;
             vec3  prevRgb = gi_indirect;
             float prevM   = 0.0;
+            // Raw per-frame sky visibility: a 1/N-quantised binomial.
+            // Accumulated below alongside the irradiance (packed into
+            // history alpha) — consumed raw it steps the ambient term
+            // up/down every frame ("broken light" flicker).
+            float sv_raw = float(sky_hits) / float(taken_gi);
+            float prevSv = sv_raw;
             // Motion factor: 0 = camera static (history fully trusted,
             // no flicker), 1 = fast reprojection (strict rejection, no
             // ghost light "shining through" walls from stale interior
@@ -684,7 +690,7 @@ void main() {
                         // Sanitise: NaN/Inf or out-of-range history must
                         // not enter the EMA (NaN survives comparisons).
                         if (any(isnan(hv.rgb)) || any(isinf(hv.rgb)) ||
-                            !(hv.a >= 0.0 && hv.a <= 64.0) ||
+                            !(hv.a >= 0.0 && hv.a <= 1600.0) ||
                             any(greaterThan(hv.rgb, vec3(64.0)))) continue;
                         vec2 tuv = (vec2(tp) + 0.5) / scene.viewport.xy;
                         float tz = texture(u_depth, tuv).r;
@@ -701,7 +707,14 @@ void main() {
                         if (ti == 0) w_t = max(w_t, 0.05 * (1.0 - mv));
                         acc  += hv.rgb * w_t;
                         wsum += w_t;
-                        if (ti == 0) Mc = hv.a;
+                        if (ti == 0) {
+                            // Alpha packs (M, sky_vis): a = M*32 + sv*31,
+                            // exact integers in fp16 up to 2048.
+                            float ai = floor(hv.a + 0.5);
+                            Mc       = floor(ai / 32.0);
+                            prevSv   = clamp((ai - Mc * 32.0) / 31.0,
+                                             0.0, 1.0);
+                        }
                     }
                     if (wsum > 1e-3) {
                         prevRgb = acc / wsum;
@@ -720,7 +733,17 @@ void main() {
             if (prevM >= 8.0 && mv < 0.5) {
                 gi_indirect = min(gi_indirect, prevRgb * 3.0 + vec3(0.05));
             }
-            vec3 rcn = (gi_indirect + vec3(0.05)) / (prevRgb + vec3(0.05));
+            // Offset scales with the pixel's luminance: a flat +0.05 let
+            // the NEAR-ZERO channel dominate the test (warm sunlit wall:
+            // blue ~0.02, so routine 8-ray noise produced ratios of 4-6x
+            // and pinned M at the short tier forever = the "broken light"
+            // shimmer measured in the burst diffs). With eps ~ 0.5*lum a
+            // dark channel can't out-vote the channels that carry the
+            // energy, while a true colour swap (sky-blue vs beige at
+            // equal luminance) still lands well above the thresholds.
+            float plum = dot(prevRgb, vec3(0.299, 0.587, 0.114));
+            vec3 eps3 = vec3(0.05 + 0.5 * plum);
+            vec3 rcn = (gi_indirect + eps3) / (prevRgb + eps3);
             float ratio = max(max(max(rcn.r, 1.0 / rcn.r),
                                   max(rcn.g, 1.0 / rcn.g)),
                               max(rcn.b, 1.0 / rcn.b));
@@ -734,21 +757,37 @@ void main() {
             float thr_hi = mix(8.0, 3.0, mv);
             float thr_lo = mix(3.5, 2.0, mv);
             float m_lo   = mix(12.0, 3.0, mv);
-            if (ratio > thr_hi)      { prevRgb = gi_indirect; prevM = 0.0; }
-            else if (ratio > thr_lo) { prevM = min(prevM, m_lo); }
+            if (ratio > thr_hi) {
+                prevRgb = gi_indirect; prevSv = sv_raw; prevM = 0.0;
+            } else if (ratio > thr_lo) {
+                prevM = min(prevM, m_lo);
+            }
             // Static cap 64: per-frame fresh-noise fraction drops to
             // ~1.5% — closeup GI stops visibly breathing. Motion cap
             // stays short so lighting still responds while moving.
-            float Mnew = min(prevM + 1.0, mix(64.0, 14.0, mv));
-            gi_indirect = mix(gi_indirect, prevRgb, (Mnew - 1.0) / Mnew);
-            vec4 storeVal = vec4(gi_indirect, Mnew);
+            // Static cap 48: per-frame fresh-noise fraction ~2%, AND the
+            // packed alpha (M*32 + sv*31, max 1567) stays an exact fp16
+            // integer. Motion cap stays short for lighting response.
+            float Mnew = min(prevM + 1.0, mix(48.0, 14.0, mv));
+            float w_h = (Mnew - 1.0) / Mnew;
+            gi_indirect = mix(gi_indirect, prevRgb, w_h);
+            // Accumulate sky_vis with the SAME weight as the irradiance.
+            // This was THE static "broken light" flicker: burst-diffs
+            // showed gi_samples=0 bit-stable and the rgb accumulator
+            // fully converged (M debug view), yet frames differed by up
+            // to 12% - the raw 1/N-quantised sky_vis was stepping the
+            // ambient term every frame.
+            float sv_acc = clamp(mix(sv_raw, prevSv, w_h), 0.0, 1.0);
+            sky_vis = sv_acc;
+            float a_enc = clamp(floor(Mnew + 0.5), 0.0, 48.0) * 32.0 +
+                          floor(sv_acc * 31.0 + 0.5);
+            vec4 storeVal = vec4(gi_indirect, a_enc);
             if (parity0) imageStore(u_gi_hist0, pix, storeVal);
             else         imageStore(u_gi_hist1, pix, storeVal);
         }
         gi_indirect *= gi_strength;
-        // sky_vis: fraction of rays that escaped to sky. 0 = fully
-        // enclosed РІвЂ вЂ™ ambient/sky_fill suppressed; 1 = open sky РІвЂ вЂ™ full.
-        sky_vis = float(sky_hits) / float(taken_gi);
+        // sky_vis was assigned the ACCUMULATED value inside the temporal
+        // block above; never consume the raw per-frame ray count here.
     }
 
     // ---------------------------------------------------------------

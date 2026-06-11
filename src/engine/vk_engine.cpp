@@ -1537,8 +1537,20 @@ void VulkanEngine::draw(uint32_t img_index) {
         pending_screenshot_path_.clear();
     } else if (!opts_.screenshot_path.empty() && !screenshot_taken_ &&
                static_cast<int>(frame_number_) >= opts_.screenshot_after_frames) {
-        screenshot_path_this_frame = opts_.screenshot_path;
-        screenshot_is_oneshot = true;
+        if (opts_.screenshot_burst <= 1) {
+            screenshot_path_this_frame = opts_.screenshot_path;
+            screenshot_is_oneshot = true;
+        } else {
+            // Burst: PATH.NN.ppm for N consecutive frames, exit after the
+            // last one (screenshot_is_oneshot latches screenshot_taken_).
+            int idx = static_cast<int>(frame_number_) -
+                      opts_.screenshot_after_frames;
+            char buf[512];
+            std::snprintf(buf, sizeof(buf), "%s.%02d.ppm",
+                          opts_.screenshot_path.c_str(), idx);
+            screenshot_path_this_frame = buf;
+            screenshot_is_oneshot = (idx + 1 >= opts_.screenshot_burst);
+        }
     }
     bool want_screenshot = !screenshot_path_this_frame.empty();
     if (want_screenshot) {

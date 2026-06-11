@@ -46,6 +46,10 @@ struct RunOptions {
     int max_frames = -1;
     std::string screenshot_path;
     int screenshot_after_frames = 5;
+    // > 1: capture this many CONSECUTIVE frames (PATH.NN.ppm) — temporal
+    // artifact diagnostic; lets a frame-diff show flicker that a single
+    // still can't.
+    int screenshot_burst = 1;
     // Auto-demo: if > 0, the engine forces cursor-capture + Playing state and
     // synthesises walk+turn+shoot input for this many wall-clock seconds, then
     // requests window close. Lets us reproduce shoot+hit gameplay crashes
@@ -720,11 +724,14 @@ private:
         // ~5.5 m extent. The segment test catches those.
         // Sentinel: any-NaN means "first frame, no swept test yet".
         glm::vec3 prev_pos{ std::numeric_limits<float>::quiet_NaN() };
-        // Tracer trail tail. Starts at the viewmodel BARREL tip (not the
-        // eye/centerline — fire_projectile offsets it to match the muzzle
-        // flash anchor), then follows the bullet. The first segment
-        // therefore converges barrel -> aim line, like every FPS tracer.
+        // Tracer trail tail (VISUAL polyline point, not physics). Starts
+        // at the viewmodel BARREL tip — the same anchor as the muzzle
+        // flash — and converges smoothly onto the centerline flight path:
+        // each frame's visual point is bullet_pos + trail_offset * decay,
+        // where decay falls to 0 over the first ~12 m of flight. A hard
+        // barrel->centerline join produced a visible corner in the line.
         glm::vec3 trail_prev{0.0f};
+        glm::vec3 trail_offset{0.0f};  // barrel tip minus muzzle spawn
     };
     std::vector<Projectile> projectiles_;
     void fire_projectile(glm::vec3 origin, glm::vec3 direction);
@@ -740,7 +747,10 @@ private:
         float age = 0.0f;
     };
     std::vector<TracerSeg> tracer_segs_;
-    static constexpr float  kTracerFade = 0.22f;  // seconds to fade out
+    // Short fade => short streak: 220 m/s x 0.07 s ~ 15 m comet that
+    // visibly RACES with the bullet. The old 0.22 s left ~50 m of line
+    // that read as a static fading beam.
+    static constexpr float  kTracerFade = 0.07f;  // seconds to fade out
     static constexpr size_t kTracerMax  = 768;    // hard cap (rapid fire)
     void draw_tracers(VkCommandBuffer cmd, const glm::mat4& vp);
     static constexpr float kProjectileTtl     = 8.0f;   // ~1.7 km flight

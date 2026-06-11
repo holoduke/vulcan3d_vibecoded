@@ -35,6 +35,9 @@ bool parse_args(int argc, char** argv, Args& out) {
         } else if (a == "--screenshot-after") {
             const char* v = next("--screenshot-after"); if (!v) return false;
             out.opts.screenshot_after_frames = std::atoi(v);
+        } else if (a == "--screenshot-burst") {
+            const char* v = next("--screenshot-burst"); if (!v) return false;
+            out.opts.screenshot_burst = std::atoi(v);
         } else if (a == "--log") {
             const char* v = next("--log"); if (!v) return false;
             out.log_path = v;
