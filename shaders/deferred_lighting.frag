@@ -516,11 +516,10 @@ void main() {
     // probe whenever N_gi > 0; gi_strength still gates the indirect-
     // light accumulation.
     //
-    // PERF: for non-terrain pixels we overwrite gi_indirect below from
-    // u_svgf_gi, so the inner sun-shadow ray-query is wasted bandwidth.
-    // Skip it on non-terrain — keep the closest_hit for sky_vis but
-    // don't fire the sun-shadow any_hit nor accumulate hit_light.
-    bool skip_gi_inner = (material_id != 3);
+    // The screen-space u_svgf_gi override is gone (it leaked other
+    // surfaces' light into walls — see below), so the inner bounce
+    // lighting now accumulates for EVERY material.
+    bool skip_gi_inner = false;
     if (N_gi > 0) {
         // Distance-LOD scaling — match cube.frag. Close pixels get the
         // full slider, far pixels collapse toward 1. Cap at 16 in the
@@ -572,20 +571,17 @@ void main() {
         }
         gi_indirect /= float(taken_gi);
         gi_indirect *= gi_strength;
-        // For NON-terrain pixels, cube.frag's GI loop already wrote the
-        // raw single-frame irradiance into u_svgf_gi. Replace my 4-ray
-        // approximation with cube.frag's full-quality multi-bounce trace
-        // — material-aware m_color, voxel-tower aware, with sky_fill +
-        // sun-bounce term using the SAME hash seeds. That puts deferred
-        // GI on the same noise floor as forward without porting all the
-        // materials buffer + voxel marcher into this shader.
-        // Terrain (material_id 3) does NOT get written to u_svgf_gi by
-        // cube.frag (its GI is gated off), so the deferred shader keeps
-        // its own loop result for terrain.
-        if (material_id != 3) {
-            vec3 svgf_raw = texture(u_svgf_gi, uv).rgb;
-            gi_indirect = svgf_raw * gi_strength;
-        }
+        // The u_svgf_gi screen-space override that used to replace the
+        // ray-loop result for non-terrain pixels is REMOVED. That image
+        // is written by cube.frag with imageStore from fragments running
+        // LATE-Z (the wall pipeline writes gl_FragDepth, so occluded
+        // fragments still execute their stores), and the deferred read
+        // happened at a plain screen UV — geometry behind a wall could
+        // stamp its irradiance into the wall's pixel and the wall then
+        // shaded with the OTHER surface's light. Users bisected this as
+        // "all walls have some degree of transparency, appears when
+        // gi_samples >= 1". The in-shader ray loop is per-pixel,
+        // image-free, and immune to write-order races.
         // sky_vis: fraction of rays that escaped to sky. 0 = fully
         // enclosed → ambient/sky_fill suppressed; 1 = open sky → full.
         sky_vis = float(sky_hits) / float(taken_gi);
