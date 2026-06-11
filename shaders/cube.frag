@@ -3463,6 +3463,27 @@ void main() {
                     prevM   = prev.a;
                 }
             }
+            // DISOCCLUSION REJECTION. The reprojected history pixel may
+            // have belonged to a DIFFERENT surface (sky/terrain that was
+            // visible at this screen position before the camera moved).
+            // Blindly EMA-blending that history painted the background's
+            // irradiance onto walls — every wall read as semi-transparent
+            // while moving, scaling with gi_samples. If the history
+            // luminance is far outside the current estimate's range,
+            // restart accumulation at this pixel (brief local noise at
+            // disocclusion edges — the standard trade).
+            {
+                float lc = dot(shade_radiance, vec3(0.3333)) + 0.02;
+                float lp = dot(prevRgb,        vec3(0.3333)) + 0.02;
+                float ratio = max(lc / lp, lp / lc);
+                if (ratio > 3.0) {
+                    prevRgb = shade_radiance;
+                    prevM   = 0.0;
+                } else if (ratio > 1.8) {
+                    // Soft zone: shorten history instead of full reset.
+                    prevM = min(prevM, 3.0);
+                }
+            }
             float Mnew = min(prevM + 1.0, kSvgfMmax);
             float wPrev = (Mnew - 1.0) / Mnew;
             svgf_out = mix(shade_radiance, prevRgb, wPrev);
