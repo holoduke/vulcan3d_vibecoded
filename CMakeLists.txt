@@ -293,6 +293,10 @@ add_library(qlike_engine STATIC
     src/engine/vk_engine/ssdm.cpp
     src/engine/vk_engine/voxel.cpp
     src/engine/vk_engine/world.cpp
+    src/engine/vk_engine/world_render.cpp
+    src/engine/vk_engine/world_textures.cpp
+    src/engine/vk_engine/terrain_resources.cpp
+    src/engine/vk_engine/props.cpp
     src/engine/vk_engine/deferred_lighting.cpp
     src/engine/voxel/voxel_world.cpp
     src/engine/vk_ui.cpp
