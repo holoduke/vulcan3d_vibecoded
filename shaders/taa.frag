@@ -174,6 +174,21 @@ void main() {
     // when you start moving — much less objectionable than smear.
     float base_alpha = clamp(taa.params.x, 0.0, 0.98);
     float alpha = mix(base_alpha, 0.0, motion_factor);
+    // Stale-history rejection (colour disocclusion). The velocity-adaptive
+    // alpha above only protects pixels that carry MOTION VECTORS; it is
+    // blind to features that move WITHOUT them - the camera-attached
+    // viewmodel (zero motion by design) and shadows / GI sweeping across
+    // STATIC floor pixels (motion 0). Those blended the full 55% history
+    // and smeared: "the gun ghosts when strafing", the moving-crate
+    // shadow trails. Detect it from how far the reprojected history sat
+    // OUTSIDE the current 5x5 neighbourhood box: heavy clamping means the
+    // history is stale, so drop its weight. A static converged pixel sits
+    // INSIDE the box (no clamping) and keeps full history -> still denoised
+    // and stable. RT noise stays within the box too, so it isn't rejected.
+    vec3  box_half   = (mx - mn) * 0.5;
+    float clamp_dist = length(hist - hist_clamped) / (length(box_half) + 1e-3);
+    float stale      = smoothstep(0.5, 2.0, clamp_dist);
+    alpha *= (1.0 - 0.85 * stale);
     vec3 blended = mix(cur, hist_clamped, alpha);
 
     outColor = vec4(blended, 1.0);
