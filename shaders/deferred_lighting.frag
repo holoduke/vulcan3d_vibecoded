@@ -757,16 +757,37 @@ void main() {
                     // crossing geometry - the spatial half of an
                     // SVGF-class denoiser without extra passes.
                     ivec2 vmax = ivec2(scene.viewport.xy) - ivec2(1);
-                    const ivec2 kTap[9] = ivec2[9](
-                        ivec2(0, 0), ivec2( 2, 0), ivec2(-2, 0),
-                        ivec2(0, 2), ivec2( 0,-2),
-                        ivec2( 1, 1), ivec2(-1, 1),
-                        ivec2( 1,-1), ivec2(-1,-1));
+                    // ---- Variance-guided spatial denoise (SVGF core) ----
+                    // Diffuse GI is low-frequency, so a WIDE edge-aware
+                    // gather can crush its per-frame noise without losing
+                    // real detail. The kernel STRIDE scales inversely with
+                    // the accumulated sample count M: a converged static
+                    // pixel (high M) gathers tight and stays sharp; a
+                    // freshly-reset DYNAMIC pixel (low M - exactly where the
+                    // moving-crate ghost lives) gathers wide, pulling in
+                    // smoother neighbour history so the diffuse smear
+                    // denoises instead of shimmering. Measured: the old
+                    // fixed ~2px gather left the dynamic GI noisy, so
+                    // shortening temporal just traded lag for that noise.
+                    float m_ctr = parity0 ? imageLoad(u_gi_hist1, ppx).a
+                                          : imageLoad(u_gi_hist0, ppx).a;
+                    m_ctr = floor(floor(m_ctr + 0.5) / 32.0);   // unpack M
+                    float blur_stride = mix(9.0, 1.0,
+                                            clamp(m_ctr / 20.0, 0.0, 1.0));
+                    const vec2 kTapF[13] = vec2[13](
+                        vec2(0.0, 0.0),
+                        vec2(1.0, 0.0), vec2(-1.0, 0.0),
+                        vec2(0.0, 1.0), vec2(0.0, -1.0),
+                        vec2(1.0, 1.0), vec2(-1.0, 1.0),
+                        vec2(1.0,-1.0), vec2(-1.0,-1.0),
+                        vec2(2.0, 0.0), vec2(-2.0, 0.0),
+                        vec2(0.0, 2.0), vec2(0.0, -2.0));
                     vec3  acc = vec3(0.0);
                     float wsum = 0.0;
                     float Mc = 0.0;
-                    for (int ti = 0; ti < 9; ++ti) {
-                        ivec2 tp = clamp(ppx + kTap[ti], ivec2(0), vmax);
+                    for (int ti = 0; ti < 13; ++ti) {
+                        ivec2 off = ivec2(round(kTapF[ti] * blur_stride));
+                        ivec2 tp = clamp(ppx + off, ivec2(0), vmax);
                         vec4 hv = parity0 ? imageLoad(u_gi_hist1, tp)
                                           : imageLoad(u_gi_hist0, tp);
                         // Sanitise: NaN/Inf or out-of-range history must
@@ -777,9 +798,13 @@ void main() {
                         vec2 tuv = (vec2(tp) + 0.5) / scene.viewport.xy;
                         float tz = texture(u_depth, tuv).r;
                         vec3  tn = octa_decode(texture(u_gbuffer1, tuv).rg);
+                        // Edge stops: depth + normal similarity prevent the
+                        // wide kernel from bleeding GI across geometry.
                         float wz = exp(-abs(tz - z) * 800.0);
                         float wn = pow(max(dot(tn, N), 0.0), 16.0);
-                        float w_t = (ti == 0 ? 1.0 : 0.85) * wz * wn;
+                        // Spatial falloff so far taps contribute less.
+                        float wd = exp(-dot(kTapF[ti], kTapF[ti]) * 0.12);
+                        float w_t = (ti == 0 ? 1.0 : wd) * wz * wn;
                         // Centre-tap floor (static camera only):
                         // normal-mapped surfaces can fail the tight wn
                         // test on ALL taps, zeroing wsum -> silent
@@ -870,15 +895,28 @@ void main() {
                                  ? lum_fresh
                                  : mix(lum_fresh, fast_prev, 0.667);
             float lum_slow = dot(prevRgb, vec3(0.299, 0.587, 0.114));
-            if (prevM > 8.0 && fast_prev >= 0.0) {
+            if (prevM > 6.0 && fast_prev >= 0.0) {
                 float eps_d = 0.05 + 0.25 * lum_slow;
                 float fl = fast_new + eps_d;
                 float sl = lum_slow + eps_d;
-                float divg = max(fl / sl, sl / fl);
-                if (divg > 1.35) {
+                float divg = max(fl / sl, sl / fl);   // >= 1.0
+                // Smooth, EARLY-engaging anti-lag. A hard 1.35x threshold
+                // missed GRADUAL changes (a floor pixel slowly darkening
+                // as a crate's shadow approaches computes ~1.1-1.3x per
+                // frame), so those pixels kept full M and the GI darkening
+                // LAGGED the crate by ~28 frames = the smear the user sees.
+                // Ramp the cap down from 1.06: a static noisy pixel has
+                // fast (3-frame EMA) ~= slow, divg ~1.0 -> keeps long M and
+                // stays stable (verified: scene-3 burst px>8=0); a pixel
+                // whose GI is genuinely trending gets short M -> tracks the
+                // crate tightly AND (being low-M now) triggers the wide
+                // variance-guided spatial gather above, which denoises the
+                // shorter history. Lag-ghost + noise handled together.
+                float t = clamp((divg - 1.06) / 0.34, 0.0, 1.0);
+                prevM = min(prevM, mix(28.0, 3.0, t));
+                if (divg > 1.30) {
                     prevRgb *= clamp(fast_new / max(lum_slow, 1e-3),
                                      0.25, 4.0);
-                    prevM = min(prevM, 6.0);
                 }
             }
             // Static cap 64: per-frame fresh-noise fraction drops to
