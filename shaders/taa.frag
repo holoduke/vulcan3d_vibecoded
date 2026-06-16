@@ -129,7 +129,13 @@ void main() {
     // contributor. Fade it out for moving pixels — at 8+ px/frame
     // (a typical mouse turn) we drop spatial to ~25% of slider strength.
     // Same smoothstep is used for the alpha blend below — compute once.
-    float motion_factor = smoothstep(0.5, 8.0, motion_pix);
+    // Drop history FAST under motion: full history below 0.5 px/frame
+    // (still -> denoise), none by 3.5 px/frame. Was 8.0, which kept
+    // substantial history through any normal strafe/turn and smeared
+    // moving features for ~10+ frames (the ghosting). Tighter = sharper
+    // and ghost-free in motion at the cost of a little RT noise that the
+    // eye doesn't track while the camera moves anyway.
+    float motion_factor = smoothstep(0.5, 3.5, motion_pix);
     float spatial_falloff = mix(1.0, 0.25, motion_factor);
     float strength = clamp(taa.params.w, 0.0, 1.0) * spatial_falloff;
     // Below 0.02 the atrous result contributes <2% to the mix — visually

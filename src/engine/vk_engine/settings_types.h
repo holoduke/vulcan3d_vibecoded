@@ -583,7 +583,13 @@ struct RtSettings {
         float reflection_strength = 0.5f;
 
         // Temporal + spatial denoiser.
-        float taa_history_blend = 0.95f;  // 0 = no temporal, 1 = full history
+        float taa_history_blend = 0.3f;   // 0 = no temporal, 1 = full history
+        // Lowered from 0.95: with TAA jitter off (taa_jitter_enabled=0) the
+        // history gives no AA benefit, only RT-noise smoothing when still -
+        // and a heavy blend smears every moving feature, worst on the
+        // ZERO-motion-vector ones (camera-attached viewmodel; shadows/GI on
+        // static floor pixels). 0.3 keeps light still-frame denoising while
+        // cutting the ghost trail dramatically.
         // Temporal upsample (TAAU). When true, a second temporal pass runs
         // after TAA: samples LR history bilinearly, reprojects a native-
         // resolution prev frame, neighborhood-clamps to kill ghosts.
