@@ -195,6 +195,31 @@ void main() {
     float clamp_dist = length(hist - hist_clamped) / (length(box_half) + 1e-3);
     float stale      = smoothstep(0.5, 2.0, clamp_dist);
     alpha *= (1.0 - 0.85 * stale);
+
+    // Depth disocclusion rejection (the real "gun ghosts on strafe" fix).
+    // History is fetched at prev_uv. Sample the CURRENT depth THERE: if a
+    // much nearer surface occupies that location now - e.g. the
+    // camera-attached gun, which stays put on screen while the camera
+    // strafes - then the history colour at prev_uv belongs to that
+    // occluder, not to this pixel (background just revealed from behind
+    // the gun's edge). Reject it, and the gun stops smearing onto the
+    // revealed background. Same mechanism kills moving-shadow edge trails.
+    // Uses only the current depth buffer (no prev-depth image needed): the
+    // occluder is static-on-screen so it's still there this frame. A
+    // relative gap is robust to the depth convention + normal camera
+    // motion (same-surface reprojection gives ~0 gap -> untouched, so
+    // static and smooth-tracked pixels are unaffected).
+    float curr_d   = texelFetch(current_depth, ip, 0).r;
+    float reproj_d = texture(current_depth, prev_uv).r;
+    float dgap     = abs(curr_d - reproj_d) / (max(curr_d, reproj_d) + 1e-4);
+    // Threshold high (0.55): only a LARGE relative depth gap counts as a
+    // disocclusion. The gun(near)-vs-background(far) gap is ~0.95; fine
+    // foreground detail (grass blade to blade) stays well under it, so it
+    // keeps its temporal denoise and doesn't shimmer in motion.
+    float reject_t = max(taa.params.y, 0.55);   // depth_reject_threshold
+    float disoccl  = smoothstep(reject_t, 0.92, dgap);
+    alpha *= (1.0 - disoccl);
+
     vec3 blended = mix(cur, hist_clamped, alpha);
 
     outColor = vec4(blended, 1.0);
