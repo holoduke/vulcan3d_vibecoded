@@ -754,7 +754,10 @@ void VulkanEngine::bake_static_brushes() {
         //           hit castle / dyn-props for box-shadow-on-ground.
         // Terrain BLAS keeps bit 0 (non-terrain receivers still see it
         // for mountain-shadow-on-castle) but clears bit 1.
-        tinst.mask = 0x01;
+        // bit 2 (0x04) = "GI occluder" — terrain must bounce GI (the green
+        // ground bounce), so it's set here. Dynamic crates clear bit 2 so
+        // moving crates inject no GI; the GI ray uses cull-mask 0x04.
+        tinst.mask = 0x05;
         tinst.instanceShaderBindingTableRecordOffset = 0;
         tinst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         tinst.accelerationStructureReference = terrain_blas_device_address_;
@@ -967,8 +970,12 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         glm::vec4 dyn_base = tex_on
             ? dyn_props_[i].color
             : dyn_props_[i].fallback_color;
+        // Mask 0xFB: full visibility EXCEPT bit 2 (GI occluder). A moving
+        // crate keeps its direct sun shadow + AO (bit 0) and shows in
+        // reflections (mask 0xFF rays), but injects NO indirect light, so
+        // it can't smear GI across the castle floor as it moves.
         write_instance(dr.model, dr.prev_model, dyn_base, glm::vec3(0.0f),
-                       false, blas_device_address_, tex);
+                       false, blas_device_address_, tex, 0xFBu);
     }
     // Castle gate panels as TLAS instances so RT shadow + GI rays see
     // them. Same cube BLAS the dyn-props use; per-panel hinge-rotated
@@ -1020,7 +1027,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         // line shows up in shiny surfaces.
         write_instance(m, m, p.color, p.emissive,
                        /*full_emissive=*/true, cylinder_blas_device_address_,
-                       kNoTex, 0xFC);
+                       kNoTex, 0xF8);
     }
 
     VkAccelerationStructureGeometryInstancesDataKHR inst_data{};

@@ -604,7 +604,13 @@ void main() {
                            r_h * sin(phi));
             vec3 dir = ld.x * N_tan + ld.y * N + ld.z * N_bit;
             float t;
-            if (closest_hit(ro, dir, gi_radius, t)) {
+            // GI mask 0x04 = STATIC geometry only (brushes + terrain).
+            // Dynamic crates (mask bit 2 cleared) are excluded so a moving
+            // crate injects NO indirect light - it was the crate's GI
+            // occlusion/bounce on the indoor castle floor that the
+            // accumulator lagged into the "floor shadow ghost". Crates
+            // keep their direct sun shadow + AO (those rays use bit 0).
+            if (closest_hit_m(ro, dir, gi_radius, 0x04u, t)) {
                 vec3 hit_pos = ro + dir * t;
                 vec3 hit_n   = -dir;
                 if (!skip_gi_inner) {
@@ -623,7 +629,7 @@ void main() {
                     vec3 hit_light = scene.ambient.rgb * 0.6;
                     float n_dot_sun = max(dot(hit_n, L), 0.0);
                     if (n_dot_sun > 0.0 &&
-                        !any_hit(hit_pos + hit_n * 0.01, L, 200.0)) {
+                        !any_hit_m(hit_pos + hit_n * 0.01, L, 200.0, 0x04u)) {
                         hit_light += scene.sun_color.rgb *
                                       scene.sun_color.a * n_dot_sun;
                     }
@@ -650,13 +656,13 @@ void main() {
                         vec3 bro = hit_pos + hit_n * 0.01;
                         float bt;
                         vec3 b_rad;
-                        if (closest_hit(bro, bdir, gi_radius, bt)) {
+                        if (closest_hit_m(bro, bdir, gi_radius, 0x04u, bt)) {
                             vec3 b_pos = bro + bdir * bt;
                             vec3 b_n   = -bdir;
                             vec3 b_light = scene.ambient.rgb * 0.6;
                             float b_ndl = max(dot(b_n, L), 0.0);
                             if (b_ndl > 0.0 &&
-                                !any_hit(b_pos + b_n * 0.01, L, 200.0)) {
+                                !any_hit_m(b_pos + b_n * 0.01, L, 200.0, 0x04u)) {
                                 b_light += scene.sun_color.rgb *
                                             scene.sun_color.a * b_ndl;
                             }
