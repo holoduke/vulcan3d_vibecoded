@@ -9,7 +9,10 @@
 #include "engine/vk_engine/internal.h"
 #include "engine/vk_pipelines.h"
 
+#include <algorithm>
+#include <cmath>
 #include <string>
+#include <vector>
 
 namespace qlike {
 
@@ -380,6 +383,33 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
     // Slot 0 used to mirror the muzzle flash here - but the shader also
     // applies the UBO muzzle light (shadow-tested, gun-gated), so it was
     // lit twice, through walls, and blew the gun out. UBO light only now.
+    // Slots 0-1: the 2nd and 3rd strongest explosions (the strongest is the
+    // UBO muzzle_pos light, same scoring as update_scene_ubo). The shader
+    // fires one RT shadow ray per light - several simultaneous explosions
+    // (bomb runs, jet crashes) each light and shadow the scene.
+    {
+        struct Cand { float score; glm::vec3 pos; float inten, radius; };
+        std::vector<Cand> cands;
+        const glm::vec3 eye = player_.eye_position();
+        for (const auto& e : explosions_) {
+            if (e.t > 3.5f) continue;
+            float inten = e.size * (e.t < 0.12f ? 70.0f : 22.0f * std::exp(-e.t * 1.2f));
+            float radius = 170.0f * e.size;
+            float d = glm::distance(eye, e.pos);
+            cands.push_back({ inten * std::max(0.05f, 1.0f - d / (radius * 2.5f)),
+                              e.pos + glm::vec3(0.0f, 9.0f * e.size, 0.0f), inten, radius });
+        }
+        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
+        // The top one went to the UBO slot unless the muzzle flash beat it.
+        const float muzzle_score = muzzle_flash_timer_ > 0.0f
+            ? 2.2f * std::min(1.0f, muzzle_flash_timer_ / kMuzzleFlashDuration) * 0.05f : 0.0f;
+        size_t first = (!cands.empty() && cands[0].score > muzzle_score) ? 1 : 0;
+        for (int s = 0; s < 2 && first + size_t(s) < cands.size(); ++s) {
+            const Cand& c = cands[first + size_t(s)];
+            pcd.light_pos[s] = glm::vec4(c.pos, c.radius);
+            pcd.light_col[s] = glm::vec4(1.0f, 0.52f, 0.20f, c.inten);
+        }
+    }
     // Slots 2-3 of light_pos / light_col carry the clutter shadow light-VP
     // (columns 0-1 in light_pos, 2-3 in light_col; shader loop uses 0-1).
     pcd.light_pos[2] = clutter_shadow_vp_[0]; pcd.light_pos[3] = clutter_shadow_vp_[1];
