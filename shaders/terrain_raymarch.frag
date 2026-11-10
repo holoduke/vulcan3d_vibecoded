@@ -671,6 +671,14 @@ float terrainM_lod(vec2 p, float ray_t) {
     // top octave; `frac` is the [0..1] weight that octave gets so the
     // FBM is C0-continuous across the integer threshold.
     float oct_f  = float(oct_full) - lod_f * float(oct_full - oct_min);
+    // Pixel-footprint cap: octave i has wavelength 333 m / 2^i; drop
+    // octaves smaller than ~1.5 pixels at this distance (sub-pixel
+    // detail the march would only alias on). 1.68 = 2 tan(40 deg).
+    {
+        float fp = max(ray_t, 1.0) * 1.68 * scene.viewport.w;
+        float oct_fp = log2(333.333 / (1.5 * fp)) + 1.0;
+        oct_f = min(oct_f, max(oct_fp, float(oct_min)));
+    }
     int   oct    = int(ceil(oct_f));
     float frac   = 1.0 - (float(oct) - oct_f);
     float a = 0.0, b = 1.0;
@@ -1018,13 +1026,34 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
         // to camera, smoothly fading down at distance (sub-pixel
         // detail) for a perf saving on long rays. (Reverted to the
         // plain terrainM_lod; the _d grad variant is unused now.)
-        float h = pos.y - terrainM_lod(pos.xz, t);
+        // Empty-space skipping on the BAKED heightmap: one texture fetch
+        // instead of up to 14 noise octaves. The bake holds octaves 0..8 of
+        // this same FBM at 1 m (plus sculpt + road carving); the full
+        // surface differs from its bilinear sample by the dropped octaves
+        // (<= ~0.5 m) plus interpolation error, so `kHmMargin` above it
+        // is provably clear. Full FBM only in the last stretch.
+        bool coarse = false;
+        float h;
+        {
+            // Distance-LOD drops octaves above `oct`, so the marched surface
+            // can sit BELOW the 9-octave bake by up to 2 * H * 2^-oct.
+            float lod_f = smoothstep(pc.emissive.y, pc.emissive.z, t);
+            int   ofl   = int(pc.tex_params.z);
+            int   omn   = max(2, min(ofl, int(pc.emissive.w)));
+            float oct   = float(ofl) - lod_f * float(ofl - omn);
+            float kHmMargin = 2.0 + 2.0 * TERRAIN_HEIGHT * exp2(-min(floor(oct), 9.0));
+            float hm = 1e9;
+            if (all(lessThan(abs(pos.xz), vec2(kHeightmapSide * 0.5 - 2.0))))
+                hm = pos.y - meshHeight(pos.xz) - kHmMargin;
+            coarse = hm > 0.75;
+            h = coarse ? hm : pos.y - terrainM_lod(pos.xz, t);
+        }
         // P7: loosen the hit threshold with distance. At grazing angle a
         // typical pixel covers 0.3-1 m of world space past 200 m, so
         // demanding sub-millimetre convergence wastes ~30 % of the
         // march steps on far rays. mix 0.0015 → 0.005 over [150, 600] m.
         float hit_eps = mix(0.0015, 0.005, smoothstep(150.0, 600.0, t)) * t;
-        if (abs(h) < hit_eps) break;
+        if (!coarse && abs(h) < hit_eps) break;   // only real-surface steps may hit
         if (t > t_limit) return -1.0;
         // Phase 6 вЂ” relaxation cone-stepping. Step grows with
         // distance so the same ray covers more ground in fewer

@@ -85,6 +85,43 @@ float hm_height(vec2 world_xz) {
     return textureLod(u_heightmap_full, uv, 0.0).r;
 }
 
+// Raymarch-matched FBM detail (octaves 9+ of the baked eroded FBM, same
+// recipe as terrain_raymarch.frag terrainM / cube.frag
+// terrain_fbm_detail). Non-negative by construction (noise >= 0, erosion
+// weight > 0) -> up-only displacement, BLAS-safe. `sp` = vertex spacing
+// (m): octaves shorter than ~2 vertices are faded out.
+float tv_hash21(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.x + p3.y) * p3.z);
+}
+vec3 tv_noised(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f), du = 6.0 * f * (1.0 - f);
+    float a = tv_hash21(i), b = tv_hash21(i + vec2(1, 0));
+    float c = tv_hash21(i + vec2(0, 1)), d = tv_hash21(i + vec2(1, 1));
+    return vec3(a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y,
+                du * (vec2(b - a, c - a) + (a - b - c + d) * u.yx));
+}
+float tv_fbm_detail(vec2 xz, float sp) {
+    const mat2 m2 = mat2(0.8, -0.6, 0.6, 0.8);
+    vec2 p = xz * 0.003;
+    float a = 0.0, b = 1.0, a_base = 0.0;
+    vec2 d = vec2(0.0);
+    for (int i = 0; i < 14; ++i) {
+        float wl = 333.333 * exp2(-float(i));
+        float w = (i < 9) ? 1.0 : smoothstep(sp * 2.0, sp * 4.0, wl);
+        if (w <= 0.0) break;
+        vec3 n = tv_noised(p);
+        d += n.yz;
+        a += b * n.x * w / (1.0 + dot(d, d));
+        if (i == 8) a_base = a;
+        b *= 0.5;
+        p = m2 * p * 2.0;
+    }
+    return (a - a_base) * 120.0;
+}
+
 void main() {
     vec2  origin = inInstA.xy;
     float size   = inInstA.z;
@@ -153,6 +190,15 @@ void main() {
         vec2 uvR = pos.xz / g_tile;
         float h0 = textureLod(u_height[5], uvR, kDispMip).r;
         pos.y += h0 * kRockyAmp * amp_band * fade;
+    }
+
+    // FBM micro-relief as real geometry near the camera. Spacing estimate
+    // from DISTANCE (not this node's cell size) so vertices shared by
+    // neighbouring LOD nodes get the identical offset - no cracks.
+    {
+        float sp = max(0.25, dist * 0.0045);
+        float fw = (1.0 - smoothstep(70.0, 120.0, dist)) * smoothstep(11.5, 16.0, plat);
+        if (fw > 1e-3 && sp < 0.33) pos.y += tv_fbm_detail(pos.xz, sp) * fw;
     }
 
     // Skirt drop AFTER height/detail so the ring hangs from the real edge.
