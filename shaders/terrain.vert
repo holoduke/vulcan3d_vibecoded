@@ -63,7 +63,35 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  _scene_pad[24];
     vec4  restir_params;
     vec4  spom_params;          // .z = ground tile metres (UI slider)
+    // Extended prefix (same as cube.vert) to reach the castle road.
+    vec4  _terrain_local_info;
+    vec4  _terrain_max_grid[256];
+    vec4  _terrain_disp_params;
+    vec4  _terrain_antitile_params;
+    vec4  _grass_shadow_on_terrain_params;
+    vec4  _grass_side_lit_params;
+    vec4  _voxel_origin, _voxel_dims, _voxel_grid;
+    vec4  road_info, road_bbox;   // .x count, .y paved half-width, .z verge
+    vec4  road_pts[64];
 } scene;
+
+// 0 on the paved road + verge, 1 off it: the rocky / FBM ground bumps
+// must not continue under the cobbles (the road is levelled in the
+// heightmap; the bumps made it lumpy and lit it in dark smudges).
+float road_keep(vec2 q) {
+    int rn = int(scene.road_info.x + 0.5);
+    if (rn < 2 || any(lessThan(q, scene.road_bbox.xy)) || any(greaterThan(q, scene.road_bbox.zw)))
+        return 1.0;
+    float best = 1e9;
+    for (int i = 0; i + 1 < rn && i < 63; ++i) {
+        vec2 a = scene.road_pts[i].xz, b = scene.road_pts[i + 1].xz;
+        vec2 ab = b - a;
+        float t = clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+        best = min(best, length(q - (a + ab * t)));
+    }
+    float hw = scene.road_info.y, vw = scene.road_info.z;
+    return smoothstep(hw + 0.3, hw + vw + 1.5, best);
+}
 
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) flat out vec3 vColor;
@@ -176,6 +204,8 @@ void main() {
     // Fade the displacement to zero inside the plateau footprint.
     float plat = max(abs(world_xz.x), abs(world_xz.y));
     fade *= smoothstep(11.5, 16.0, plat);
+    float rk = road_keep(world_xz);
+    fade *= rk;
     if (kRockyAmp * fade > 1e-4) {
         float band_sand = smoothstep(scene.terrain_h_low.x,
                                      scene.terrain_h_low.y, h);
@@ -197,7 +227,7 @@ void main() {
     // neighbouring LOD nodes get the identical offset - no cracks.
     {
         float sp = max(0.25, dist * 0.0045);
-        float fw = (1.0 - smoothstep(70.0, 120.0, dist)) * smoothstep(11.5, 16.0, plat);
+        float fw = (1.0 - smoothstep(70.0, 120.0, dist)) * smoothstep(11.5, 16.0, plat) * rk;
         if (fw > 1e-3 && sp < 0.33) pos.y += tv_fbm_detail(pos.xz, sp) * fw;
     }
 

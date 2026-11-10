@@ -2307,7 +2307,7 @@ void main() {
         float m_lum  = max(dot(m, vec3(0.299, 0.587, 0.114)), 1e-3);
         vec3  tinted = mix(m, m * (base / m_lum), 0.55);
         // Cobbles keep their own grey stone colour (no band tint).
-        tinted = mix(tinted, m, road_w * 0.9);
+        tinted = mix(tinted, m, road_w);   // no band (grass / sand) tint on the cobbles
         // g_str blends old flat band colour ↔ full per-texel material
         // (g_str = 0 is the exact previous look — an A/B toggle).
         vec3  splat = mix(base, tinted, g_str);
@@ -2331,14 +2331,14 @@ void main() {
         float mv0 = tnoise(vWorldPos.xz * 0.004 + vec2(53.1, 7.7));
         float mv1 = tnoise(vWorldPos.xz * 0.017 + vec2(3.3, 77.7));
         float mv  = clamp(mv0 * 0.7 + mv1 * 0.3, 0.0, 1.0);
-        albedo *= mix(vec3(0.86, 0.89, 0.84), vec3(1.10, 1.06, 0.99), mv);
+        albedo *= mix(vec3(1.0), mix(vec3(0.86, 0.89, 0.84), vec3(1.10, 1.06, 0.99), mv), 1.0 - road_w);   // not on the road
 
         // ---- Gully sediment + cavity darkening (AAA Phase 4) ----
         // Concave drainage floors collect sediment (warm-brown tint) and
         // sit lower in the light (cheap baked cavity term). Curvature
         // comes from the heightmap bake, so unlike the old dFdx(N)
         // attempt this is stable across triangle/LOD boundaries.
-        float gully = clamp(-convexity, 0.0, 1.0);
+        float gully = clamp(-convexity, 0.0, 1.0) * (1.0 - road_w);   // the carved road reads as a gully: keep it off the cobbles
         albedo = mix(albedo, albedo * vec3(0.96, 0.88, 0.74), gully * 0.40);
         albedo *= mix(1.0, 0.80, gully * 0.65);
 
@@ -2394,7 +2394,7 @@ void main() {
         // ground keeps granular relief at boot height where the base
         // tiling has gone magnified-blurry. Granular dirt detail works
         // for every layer at this frequency; fades out by ~12 m.
-        float micro_w = (1.0 - smoothstep(3.0, 12.0, cam_dist)) * g_str;
+        float micro_w = (1.0 - smoothstep(3.0, 12.0, cam_dist)) * g_str * (1.0 - road_w);
         if (micro_w > 0.01) {
             vec3 mn2 = texture(u_normal[kMatDirt], uvm * 5.7).xyz * 2.0 - 1.0;
             nm = normalize(vec3(nm.xy + mn2.xy * 0.55 * micro_w, nm.z));
@@ -2432,7 +2432,7 @@ void main() {
             // Smooth (no texture-UV rotation → no per-triangle seams);
             // the normal tilt direction is the tangent-space uphill.
             float s_sc = pc.grass_params.x > 0.01 ? pc.grass_params.x : 9.0;
-            float s_w  = beach * flatv * rip_dist;
+            float s_w  = beach * flatv * rip_dist * (1.0 - road_w);
             if (s_w > 0.001) {
                 float ph = (h - wtr_lvl) * s_sc + wob;
                 albedo  *= 1.0 + sin(ph) * 0.10 * s_w;
@@ -2442,7 +2442,7 @@ void main() {
             float g_sc = pc.grass_params.y;
             if (g_sc > 0.01) {
                 float g_w = t_sand * (1.0 - t_dirt) * (1.0 - steep)
-                            * (1.0 - beach) * flatv * rip_dist;
+                            * (1.0 - beach) * flatv * rip_dist * (1.0 - road_w);
                 if (g_w > 0.001) {
                     float ph = (h - wtr_lvl) * g_sc + wob;
                     albedo *= 1.0 + sin(ph) * 0.05 * g_w;
@@ -2488,7 +2488,7 @@ void main() {
         float above_water = (_wtr_on_far > 0.5)
             ? smoothstep(_wtr_lvl_far - 0.20, _wtr_lvl_far + 0.40, vWorldPos.y)
             : 1.0;
-        float dd_w = smoothstep(250.0, 700.0, cam_dist) * above_water;
+        float dd_w = smoothstep(250.0, 700.0, cam_dist) * above_water * (1.0 - road_w);
         if (dd_w > 0.001) {
             vec3 dn1 = terrain_detail_fbm(vWorldPos.xz, 0.18, 4);
             vec3 dn2 = terrain_detail_fbm(vWorldPos.xz, 0.65, 3);
