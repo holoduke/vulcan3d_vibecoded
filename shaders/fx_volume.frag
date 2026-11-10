@@ -60,10 +60,15 @@ float vnoise(vec3 x) {
                mix(mix(h3(i + vec3(0,0,1)), h3(i + vec3(1,0,1)), f.x),
                    mix(h3(i + vec3(0,1,1)), h3(i + vec3(1,1,1)), f.x), f.y), f.z);
 }
-float fbm(vec3 p, int oct) {
+float fbm(vec3 p, int oct, float tm) {
     float a = 0.5, s = 0.0, norm = 0.0;
     for (int i = 0; i < 5; ++i) {
         if (i >= oct) break;
+        // Boiling: every octave drifts through the noise field over time,
+        // finer octaves faster and in a different direction (octave
+        // offsets below decorrelate them) -> the volume churns from the
+        // inside instead of a texture sliding over a fixed blob.
+        p += vec3(0.13, 0.31, -0.19) * tm * (0.35 + 0.45 * float(i));
         // Billow noise (|2n-1|): rounded puffs with creased gaps between
         // them - the cauliflower look of real fireball / smoke surfaces.
         s += a * (1.0 - abs(vnoise(p) * 2.0 - 1.0));
@@ -93,13 +98,19 @@ float density(vec3 u, int oct) {
     if (r > 1.0) return 0.0;
     float freq = (g_kind == 0) ? 3.4 : (g_kind == 1 ? 2.8 : 3.6);
     vec3 q = u * freq + vec3(g_seed, g_seed * 0.7, -g_seed);
-    q.y -= g_scroll;                       // rolling, rising billows
+    // Coherent expansion: as the puff grows, features grow with it (sample
+    // space shrinks slowly) so billows roll outward rather than shimmer.
+    q *= 1.0 / (1.0 + 0.04 * g_scroll);
     // Domain warp: bends the puffs so they don't sit on a grid.
-    q += (vec3(vnoise(q * 0.5 + 3.1), vnoise(q * 0.5 + 7.7), vnoise(q * 0.5 + 1.3)) - 0.5) * 1.6;
-    float n = fbm(q, oct);
+    // Time-varying domain warp: the big swirls themselves evolve.
+    vec3 wq = q * 0.5 + vec3(0.0, 0.0, g_scroll * 0.22);
+    q += (vec3(vnoise(wq + 3.1), vnoise(wq + 7.7), vnoise(wq + 1.3)) - 0.5) * 1.8;
+    float n = fbm(q, oct, g_scroll);
     // Puffy edge: the billow field carves the sphere boundary so the
     // silhouette is lumpy, not a ball.
     float edge = (g_kind == 2) ? 1.9 : 2.3;
+    // Old smoke frays: the noise eats deeper into the volume with age.
+    if (g_kind == 1) edge += 0.6 + clamp(g_age * 0.12, 0.0, 1.2);   // ragged from birth, frays further
     float d = (1.0 - r) * 3.0 - (1.0 - n) * edge + 0.55;
     // Dust is a ring (torus-ish): thin out the middle, it's pushed outward.
     if (g_kind == 2) d -= (1.0 - smoothstep(0.2, 0.7, length(u.xz))) * 3.2;

@@ -6,7 +6,8 @@
 //                    point light (descriptors.cpp) + camera shake;
 //   * fireball     - raymarched noise volume with blackbody emission that
 //                    cools into soot (fx_volume.frag), ~3 s;
-//   * smoke column - darker, rising, expanding, sun-lit volume, ~18 s;
+//   * smoke        - 5-7 billowing puffs (own velocity, drag, buoyancy,
+//                    wind drift), churning noise, fray out over ~15 s;
 //   * dust ring    - flattened ground-hugging volume racing outward, ~9 s;
 //   * debris       - physics sparks (spawn_hit_particles) in an upward
 //                    45-degree cone (ground bursts reflect upward), plus
@@ -480,44 +481,55 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
             v.dens = 1.7f;
             v.heat = std::exp(-t * 1.1f) * std::min(1.0f, t / 0.04f + 0.3f);
             v.fade = 1.0f - glm::smoothstep(2.3f, 3.4f, t);
-            v.scroll = t * 0.55f;
+            v.scroll = t * 1.6f;
             vols.push_back(v);
         }
-        if (t > 0.25f && t < 19.0f) {   // smoke column
-            float tt = t - 0.25f;
-            Vol v{};
-            v.r = s * (5.5f + 7.5f * std::sqrt(tt)) * (e.ground ? 1.0f : 0.7f);
-            v.c = e.pos + glm::vec3(0.0f, (e.ground ? 9.0f * s : 1.0f) + tt * 4.8f * s, 0.0f);
-            v.squash = 1.0f + std::min(tt * 0.06f, 0.55f);   // grows into a column
-            v.age = tt; v.kind = 1.0f; v.seed = e.seed + 31.0f;
-            v.dens = 1.15f;
-            v.heat = 0.45f * std::exp(-tt * 1.3f);
-            v.fade = glm::smoothstep(0.0f, 0.7f, tt) * (1.0f - glm::smoothstep(9.0f, 18.5f, tt));
-            v.scroll = tt * 0.16f;
-            vols.push_back(v);
+        // Smoke: a cluster of billowing puffs instead of one giant column.
+        // Each puff is shot out of the fireball with its own velocity,
+        // slowed by drag, lifted by buoyancy that decays as it cools,
+        // carried by the wind, grows ~sqrt(age) and thins / frays out.
+        // Positions are closed-form in age (no per-frame state).
+        if (t > 0.15f && t < 16.0f) {
+            const int kPuffs = e.ground ? 7 : 5;
+            for (int k = 0; k < kPuffs; ++k) {
+                float hk  = std::fmod(e.seed * 7.31f + float(k) * 3.77f, 6.2831853f);
+                float hk2 = std::fmod(e.seed * 3.17f + float(k) * 1.93f, 1.0f);
+                float start = 0.15f + 0.12f * float(k);              // staggered release
+                float tt = t - start;
+                if (tt <= 0.0f) continue;
+                // Initial outward + upward velocity (m/s), drag 1/s.
+                float out_v = (k == 0 ? 2.0f : 9.0f + 6.0f * hk2) * s;
+                float up_v  = (k == 0 ? 16.0f : 7.0f + 8.0f * hk2) * s;
+                float drag  = 1.2f;
+                float e1 = (1.0f - std::exp(-drag * tt)) / drag;     // integrated decay
+                glm::vec3 dir(std::cos(hk), 0.0f, std::sin(hk));
+                glm::vec3 p = e.pos + dir * (out_v * e1);
+                // Buoyant rise: initial up velocity + slow, decaying lift.
+                p.y += up_v * e1 + 2.2f * s * std::min(tt, 8.0f) * (1.0f - std::exp(-tt * 0.4f));
+                if (e.ground) p.y += 3.0f * s;
+                // Wind drift ramps in as the puff loses its own momentum.
+                p += wind_vel_ * 0.35f * std::max(0.0f, tt - 0.6f);
+                Vol v{};
+                v.r = s * (2.2f + 1.8f * std::sqrt(tt)) * (k == 0 ? 1.1f : 0.8f + 0.3f * hk2);
+                v.r = std::min(v.r, 8.5f * s);
+                v.c = p;
+                v.squash = 0.85f + 0.2f * hk2;
+                v.age = tt; v.kind = 1.0f; v.seed = e.seed + 31.0f + float(k) * 17.0f;
+                v.dens = 1.0f * (1.0f - glm::smoothstep(1.5f, 12.0f, tt) * 0.7f);
+                v.heat = 0.55f * std::exp(-tt * 1.6f);               // embers glow early on
+                v.fade = glm::smoothstep(0.0f, 0.5f, tt) * (1.0f - glm::smoothstep(8.0f, 15.5f - start, tt));
+                v.scroll = tt;                                        // shader: boiling time
+                vols.push_back(v);
+            }
         }
-        if (e.ground && t > 0.4f && t < 12.0f) {   // smoke stem (ground -> cloud)
-            float tt = t - 0.4f;
+        if (e.ground && t < 6.0f) {    // ground dust ring
             Vol v{};
-            float top = 9.0f * s + tt * 4.8f * s;
-            v.r = s * (2.6f + 1.6f * std::sqrt(tt));
-            v.squash = std::max(1.0f, top * 0.5f / v.r);
-            v.c = e.pos + glm::vec3(0.0f, top * 0.5f, 0.0f);
-            v.age = tt; v.kind = 1.0f; v.seed = e.seed + 53.0f;
-            v.dens = 0.9f;
-            v.heat = 0.6f * std::exp(-tt * 2.0f);
-            v.fade = glm::smoothstep(0.0f, 0.5f, tt) * (1.0f - glm::smoothstep(6.0f, 12.0f, tt));
-            v.scroll = tt * 0.35f;
-            vols.push_back(v);
-        }
-        if (e.ground && t < 9.0f) {    // ground dust ring
-            Vol v{};
-            v.r = s * (5.0f + 36.0f * (1.0f - std::exp(-t * 1.5f)));
-            v.c = e.pos + glm::vec3(0.0f, 2.0f * s, 0.0f);
-            v.squash = 0.2f; v.age = t; v.kind = 2.0f; v.seed = e.seed + 77.0f;
+            v.r = s * (4.0f + 22.0f * (1.0f - std::exp(-t * 2.0f)));
+            v.c = e.pos + glm::vec3(0.0f, 0.6f * s, 0.0f);           // hugs the ground
+            v.squash = 0.12f; v.age = t; v.kind = 2.0f; v.seed = e.seed + 77.0f;
             v.dens = 0.6f; v.heat = 0.0f;
-            v.fade = std::min(1.0f, t / 0.15f) * (1.0f - glm::smoothstep(3.5f, 9.0f, t));
-            v.scroll = t * 0.08f;
+            v.fade = std::min(1.0f, t / 0.15f) * (1.0f - glm::smoothstep(2.0f, 6.0f, t));
+            v.scroll = t * 0.6f;
             vols.push_back(v);
         }
     }
