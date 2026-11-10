@@ -123,6 +123,9 @@ layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 // 9-call noised() storm in the inner loop of map() — that was the
 // dominant cost in this pass per the latest perf review.
 layout(set = 0, binding = 13) uniform sampler2D u_grass_mask;
+// Depth PRE-PASS copy (binding 27). Bounds the march: nothing behind the
+// nearest opaque surface can be visible, so stop there.
+layout(set = 0, binding = 27) uniform sampler2D u_prepass_depth;
 
 layout(push_constant) uniform PC {
     mat4 mvp;          // view_proj — for gl_FragDepth at the hit
@@ -500,12 +503,46 @@ void main() {
     // grass-distance slider keeps working at any value (was hardcoded
     // 60 m / 100 m which capped well before kMaxDist when the slider
     // pushed past 100 m).
+    // Lossless march bound from the prepass depth: past the nearest
+    // opaque surface every hit would fail the depth test anyway. Turns
+    // castle walls / floors / props from a full 96-step march into ~0.
+    float t_limit = kMaxDist;
+    int   i_bias  = 0;
+    {
+        float zpre = texelFetch(u_prepass_depth, ivec2(gl_FragCoord.xy), 0).r;
+        if (zpre < 0.99999) {
+            vec4 sp = pc.model * vec4(ndc.xy, zpre, 1.0);
+            float t_surf = distance(sp.xyz / sp.w, ro);
+            t_limit = min(t_limit, t_surf + 0.05);
+            // Skip the empty air: when the prepass surface IS the terrain,
+            // blades (< ~0.7 m tall) can only touch this ray within a
+            // short distance before it reaches the ground. Start the march
+            // there instead of at the camera. At grazing angles that
+            // stretch is ~0.9 m / cos(angle to the ground normal), capped
+            // at 14 m (blade tips on ridges further back may be skipped -
+            // sub-pixel at those angles). Was the bulk of the march cost:
+            // ~all steps were spent sphere-tracing through air.
+            vec3  ps = sp.xyz / sp.w;
+            float yS = sampleHeight_lod(ps.xz, t_surf);
+            if (abs(ps.y - yS) < 0.6) {
+                vec3  Ns   = calcTerrainNormalApprox(ps.xz, yS, t_surf);
+                float cosg = abs(dot(rd, Ns));
+                float back = min(14.0, 0.9 / max(cosg, 0.06));
+                t = max(t, t_surf - back);
+                // Keep the old far-ray budget: a camera-start march spent
+                // ~24 steps in air before reaching far ground, so the
+                // distance caps below broke those rays early; without this
+                // they converge on sub-pixel far blades (distant sparkle).
+                i_bias = (t > kMaxDist * 0.55) ? 24 : 0;
+            }
+        }
+    }
     float step_cap_a = kMaxDist * 0.55;
     float step_cap_b = kMaxDist * 0.85;
     for (int i = 0; i < kMaxSteps; ++i) {
-        if (t >= kMaxDist) break;
-        if (i >= 32 && t > step_cap_a) break;
-        if (i >= 16 && t > step_cap_b) break;
+        if (t >= t_limit) break;
+        if (i + i_bias >= 32 && t > step_cap_a) break;
+        if (i + i_bias >= 16 && t > step_cap_b) break;
         vec3 p = ro + t * rd;
         bool step_blade;
         float d = map(p, t, ctx, step_blade);

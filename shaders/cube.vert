@@ -16,6 +16,9 @@ layout(push_constant) uniform PC {
     //   z: uv scale (multiplier on inUv before sampling, for tiling)
     //   w: spare
     vec4 tex_params;
+    // .w > 0.5 on static brushes = per-face exposure mask in .z (box
+    // relief path in cube.frag; no shell extrusion needed).
+    vec4 grass_params;
 } pc;
 
 // Scene UBO -- declare only the prefix through spom_params so we can
@@ -141,7 +144,9 @@ void main() {
     // un-extruded geometry — they don't grow walls.
     int   spom_mode_v    = int(scene.grass_side_lit_params.z + 0.5);
     bool  do_extrude     = is_spom_wall && spom_strength > 0.01 &&
-                           spom_mode_v == 2;
+                           spom_mode_v == 2 &&
+                           pc.grass_params.w < 0.5 &&
+                           pc.grass_params.w > -0.5;   // -1 = static castle mesh
 
     vec3 scale = vec3(length(pc.model[0].xyz),
                       length(pc.model[1].xyz),

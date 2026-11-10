@@ -22,6 +22,7 @@
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <vector>
 
 namespace qlike {
 
@@ -76,6 +77,20 @@ struct GrassMesh {
     VkBuffer instance_buffer = VK_NULL_HANDLE;
     VmaAllocation instance_alloc = nullptr;
     uint32_t instance_count = 0;
+
+    // Spatial buckets. Blades are stably sorted by cell (Halton order is
+    // kept inside each cell, so a per-cell prefix is still a uniform
+    // thinning for the density slider). The renderer draws only cells
+    // within grass distance AND in the view frustum — before this every
+    // blade on the 400 m field went through grass.vert each frame just
+    // to be culled there.
+    struct Cell {
+        glm::vec3 aabb_min;
+        uint32_t  first;
+        glm::vec3 aabb_max;
+        uint32_t  count;
+    };
+    std::vector<Cell> cells;
 };
 
 GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,

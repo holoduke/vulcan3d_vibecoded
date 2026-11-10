@@ -283,6 +283,12 @@ void VulkanEngine::render_world_depth_pass(VkCommandBuffer cmd) {
         if (is_spom_albedo(b.tex_albedo)) continue;
         push_depth(static_brush_models_[i]);    // pre-baked, see init_world
     }
+    // Castle mesh parts (no discard in mesh mode -> safe in the prepass).
+    if (!castle_meshes_.empty()) {
+        draw_castle_meshes(cmd, vp, vp, frustum, true, VK_NULL_HANDLE);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    }
     for (size_t i = 0; i < dyn_props_.size(); ++i) {
         const DynRender& dr = i < dyn_render_cache_.size() ? dyn_render_cache_[i]
                                                             : DynRender{};
@@ -397,7 +403,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     VkRect2D scissor{ {0, 0}, render_extent_ };
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, world_pipeline());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
                             0, 1, &scene_desc_set_, 0, nullptr);
 
@@ -415,8 +421,12 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                           const glm::vec4& color,
                           const glm::vec3& emissive, bool full_emissive,
                           int tex_albedo, int tex_normal, float uv_scale,
-                          bool object_space) {
+                          bool object_space, int face_mask = -1) {
         PushConstants pc{};
+        // Static brushes: .z = exposed-face bitmask, .w = 1 -> cube.frag box
+        // relief (real depth at exposed edges, flat at brush-brush seams).
+        if (face_mask >= 0)
+            pc.grass_params = glm::vec4(0.0f, 0.0f, static_cast<float>(face_mask), 1.0f);
         pc.mvp = vp * model;
         pc.model = model;
         pc.prev_mvp = prev_vp * prev_model;
@@ -435,6 +445,8 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     };
 
+    if (brush_face_mask_.size() != world_.brushes.size()) compute_brush_face_masks();
+    prof_mark(cmd, "w_begin");
     int culled_static = 0, culled_dyn = 0, drawn_static = 0, drawn_dyn = 0;
     // Terrain pass Р Р†Р вЂљРІР‚Сњ chunked. Each visible chunk is drawn at full LOD
     // when within `near_lod` metres of the camera, otherwise half LOD.
@@ -452,7 +464,9 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         // LESS_OR_EQUAL prime always matches.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
             (rt_.terrain_wireframe && terrain_wire_pipeline_)
-                ? terrain_wire_pipeline_ : terrain_pipeline_);
+                ? terrain_wire_pipeline_
+                : ((terrain_gbuf_pipeline_ && deferred_owns_lighting())
+                       ? terrain_gbuf_pipeline_ : terrain_pipeline_));
         VkBuffer vbufs[2] = { terrain_clod_patch_.vertex_buffer,
                               terrain_clod_inst_buf_ };
         VkDeviceSize voffs[2] = { 0, terrain_clod_cam_offset_ };
@@ -478,10 +492,11 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdDrawIndexed(cmd, terrain_clod_patch_.index_count,
                          terrain_clod_cam_count_, 0, 0, 0);
         // Switch back to the cube pipeline + cube mesh for the brush loop.
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, world_pipeline());
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }
+    prof_mark(cmd, "w_terrain_mesh");
 
     // Raymarch pass. Runs for the full FBM terrain (raymarch enabled) OR,
     // when the mesh terrain is active, as a water-only pass: the shader
@@ -549,11 +564,12 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdDraw(cmd, 3, 1, 0, 0);
         // Restore cube pipeline + cube mesh for the grass / dust /
         // viewmodel passes that follow.
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, world_pipeline());
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }
 
+    prof_mark(cmd, "w_terrain_raymarch");
     // Voxel buildings rendered BEFORE the rasterised water plane so the
     // water's alpha-blend pass sees the submerged voxel pixels in the
     // scene_color/depth buffer and blends over them. Without this swap,
@@ -561,7 +577,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // entirely вЂ” a submerged tower reads as fully opaque dry stone.
     render_voxels(cmd);
     // Re-bind cube pipeline + mesh: voxel pass swapped them out.
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, world_pipeline());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipeline_layout_, 0, 1, &scene_desc_set_,
                             0, nullptr);
@@ -573,6 +589,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // would also blend correctly. Same cube pipeline, just an extra two
     // draws with per-panel hinge-rotated model matrices.
     draw_doors(cmd, vp, prev_vp);
+    prof_mark(cmd, "w_voxels_doors");
 
     // Mesh-terrain mode + water: draw the REAL rasterised water plane
     // (verbatim ocean shading in water.frag) instead of the fullscreen
@@ -628,11 +645,12 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                              VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(cmd, water_plane_mesh_.index_count, 1, 0, 0, 0);
         // Restore cube pipeline + mesh for the passes that follow.
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, world_pipeline());
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }
 
+    prof_mark(cmd, "w_water");
     // Spacejet РІР‚вЂќ hovering decoration on the plateau. One draw per
     // glTF primitive. Animated via sin(time) for the bob and a
     // slow yaw rotation. Raster-only; no physics, no BLAS.
@@ -698,6 +716,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }
 
+    prof_mark(cmd, "w_jets");
     // Grass Р Р†Р вЂљРІР‚Сњ instanced billboard blades. Single draw call covers
     // every blade; the grass.vert collapses out-of-range blades to
     // a degenerate triangle (NaN clip space) so no fragment work runs
@@ -742,19 +761,34 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         // placement order means any prefix is a uniformly sparser
         // sampling of the field.
         const float frac = std::clamp(rt_.grass_density, 0.0f, 4.0f) * 0.25f;
-        uint32_t inst_n = static_cast<uint32_t>(
-            static_cast<float>(grass_.instance_count) * frac);
-        if (inst_n > 0) {
+        // Per-cell draws: skip cells beyond grass distance (XZ distance to
+        // the cell AABB is <= the shader's 3D distance, so this is
+        // conservative), outside the altitude band grass.vert fades over,
+        // or outside the view frustum. The per-cell prefix keeps the
+        // density slider's uniform-thinning behaviour.
+        const float max_d = rt_.grass_distance + 5.0f;
+        const glm::vec2 cam_xz(fv.eye_pos.x, fv.eye_pos.z);
+        const float alt_lo = rt_.grass_alt_min - 2.0f;
+        const float alt_hi = std::max(rt_.grass_alt_max, rt_.grass_alt_min + 4.0f) + 2.0f;
+        for (const auto& c : grass_.cells) {
+            uint32_t n = static_cast<uint32_t>(std::ceil(static_cast<float>(c.count) * frac));
+            if (n == 0) continue;
+            glm::vec2 q = glm::clamp(cam_xz, glm::vec2(c.aabb_min.x, c.aabb_min.z),
+                                     glm::vec2(c.aabb_max.x, c.aabb_max.z));
+            if (glm::length(q - cam_xz) > max_d) continue;
+            if (c.aabb_max.y < alt_lo || c.aabb_min.y > alt_hi) continue;
+            if (!aabb_visible(frustum, c.aabb_min, c.aabb_max)) continue;
             vkCmdDrawIndexed(cmd, grass_.blade_mesh.index_count,
-                             inst_n, 0, 0, 0);
+                             std::min(n, c.count), 0, 0, c.first);
         }
         // Restore the world pipeline + cube mesh bindings for the
         // brush loop below.
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, world_pipeline());
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }
 
+    prof_mark(cmd, "w_jets_grass");
     // Ground clutter (AAA Phase 3): one instanced draw of the lumpy-rock
     // mesh. Independent of which grass path is active вЂ” clutter is what
     // breaks the bare-heightfield look between blades.
@@ -779,10 +813,11 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                            0, sizeof(PushConstants), &spc);
         vkCmdDrawIndexed(cmd, scatter_.rock_mesh.index_count,
                          scatter_.instance_count, 0, 0, 0);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, world_pipeline());
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }
+    prof_mark(cmd, "w_scatter");
     for (size_t i = 0; i < world_.brushes.size(); ++i) {
         const auto& b = world_.brushes[i];
         const auto& a = world_.render_aabbs[i];
@@ -791,8 +826,14 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         glm::vec4 brush_base = tex_on ? b.color : b.fallback_color;
         // Static brushes don't move Р Р†Р вЂљРІР‚Сњ prev_model = current.
         draw_brush(model, model, brush_base, b.emissive, b.full_emissive,
-                   b.tex_albedo, b.tex_normal, b.uv_scale, false);
+                   b.tex_albedo, b.tex_normal, b.uv_scale, false,
+                   i < brush_face_mask_.size() ? brush_face_mask_[i] : -1);
         ++drawn_static;
+    }
+    if (!castle_meshes_.empty()) {
+        draw_castle_meshes(cmd, vp, prev_vp, frustum, false, VK_NULL_HANDLE);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }
     for (size_t i = 0; i < dyn_props_.size(); ++i) {
         const DynRender& dr = i < dyn_render_cache_.size() ? dyn_render_cache_[i]
@@ -811,6 +852,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         ++drawn_dyn;
     }
 
+    prof_mark(cmd, "w_brushes_dyn");
     // SPOM silhouette shell pass DISABLED. Iterations explored:
     //   1. cube.vert per-face extrusion (offset bug on walls)
     //   2. Paper SSDM screen-space remap (paper assumes outward bumps;
@@ -857,16 +899,39 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             glm::vec3 dir = v_len2 > 1e-6f
                 ? vel * (1.0f / std::sqrt(v_len2))
                 : p.initial_dir;
-            glm::mat4 model = align_local_y_to(pos, dir) *
+            // VISUAL beam, decoupled from the physics cylinder. The body
+            // is 1.8 m long centred 0.5 m ahead of the eye, so drawing it
+            // directly put its tail BEHIND the camera (beam "starting
+            // inside the camera") and its 4 cm radius filled the view.
+            // Head = bullet front tip shifted by the barrel offset (which
+            // decays to 0 over 12 m, same curve as the tracer trail); the
+            // tail never reaches back past the barrel tip.
+            float flown = glm::distance(pos, p.spawn_origin);
+            float conv  = std::max(0.0f, 1.0f - flown / 12.0f);
+            glm::vec3 head = pos + dir * p.half_length + p.trail_offset * conv;
+            glm::vec3 barrel = p.spawn_origin + p.trail_offset;
+            float avail = glm::dot(head - barrel, dir);
+            float len = std::min(2.4f, avail);
+            if (len < 0.02f) continue;
+            glm::vec3 mid = head - dir * (len * 0.5f);
+            // Thin hot core (3 mm), widened with distance to ~0.6 px so a
+            // far beam doesn't break into sub-pixel dashes.
+            // 80 deg vertical FOV -> 2*tan(40 deg)/H radians per pixel.
+            float px_ang = 1.678f / std::max(1.0f,
+                               static_cast<float>(render_extent_.height));
+            float dcam = glm::distance(mid, player_.eye_position());
+            float radius = std::max(0.003f, dcam * px_ang * 0.6f);
+            glm::mat4 model = align_local_y_to(mid, dir) *
                               glm::scale(glm::mat4(1.0f),
-                                         glm::vec3(p.radius, p.half_length, p.radius));
+                                         glm::vec3(radius, len * 0.5f, radius));
             PushConstants pc{};
             pc.mvp = vp * model;
             pc.model = model;
-            // Projectiles don't track a prev_pose yet Р Р†Р вЂљРІР‚Сњ zero-motion approx.
-            pc.prev_mvp = pc.mvp;
-            pc.color = p.color;
-            pc.emissive = glm::vec4(p.emissive, 1.0f);  // full_emissive
+            pc.prev_mvp = pc.mvp;   // no prev pose for bullets yet
+            // Near-white core with the laser hue; the HDR emissive feeds
+            // a small bloom halo (the glow).
+            pc.color = glm::vec4(1.0f, 0.75f, 0.9f, 1.0f);
+            pc.emissive = glm::vec4(p.emissive * 2.2f, 1.0f);  // full_emissive
             vkCmdPushConstants(cmd, pipeline_layout_,
                                kPushConstantStages,
                                0, sizeof(PushConstants), &pc);
@@ -882,6 +947,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         draw_tracers(cmd, vp);
     }
 
+    prof_mark(cmd, "w_fx");
     // Raymarched grass вЂ” deferred to here so the alpha blend reads
     // the actual castle/cube/dyn-prop colours instead of the still-
     // cleared sky background. Was running before the brush loops,
@@ -892,7 +958,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         render_grass_raymarch(cmd);
         // Restore the world cube pipeline + cube mesh for the
         // viewmodel draw immediately below.
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, world_pipeline());
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0,
                               VK_INDEX_TYPE_UINT32);
@@ -903,7 +969,9 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // front of everything in practice.
     // fv.inv_view is cached in compute_frame_view (was a per-frame
     // glm::inverse(fv.view) here -- a full 4x4 mat inverse is ~80 fmuls).
+    prof_mark(cmd, "w_grass_rm");
     draw_viewmodel(cmd, vp, fv.inv_view);
+    prof_mark(cmd, "w_viewmodel");
 
     // (Voxel buildings were drawn earlier, before the water raster, so
     // the water plane's alpha blend correctly tints submerged voxel
@@ -913,6 +981,51 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     last_draw_static_ = drawn_static;
     last_draw_dyn_    = drawn_dyn;
     last_culled_      = culled_static + culled_dyn;
+}
+
+} // namespace qlike
+
+namespace qlike {
+
+void VulkanEngine::compute_brush_face_masks() {
+    const auto& bs = world_.brushes;
+    brush_face_mask_.assign(bs.size(), 0);
+    constexpr float kTouch = 0.02f;   // faces within 2 cm count as touching
+    constexpr float kCovered = 0.6f;  // >= 60 % of the face area covered -> hidden
+    int exposed_total = 0;
+    for (size_t i = 0; i < bs.size(); ++i) {
+        const glm::vec3 lo = bs[i].center - bs[i].size * 0.5f;
+        const glm::vec3 hi = bs[i].center + bs[i].size * 0.5f;
+        int mask = 0;
+        for (int a = 0; a < 3; ++a) {
+            const int u = (a + 1) % 3, v = (a + 2) % 3;
+            const float face_area = bs[i].size[u] * bs[i].size[v];
+            for (int s = 0; s < 2; ++s) {
+                const float plane = s ? hi[a] : lo[a];
+                float covered = 0.0f;
+                for (size_t j = 0; j < bs.size() && face_area > 0.0f; ++j) {
+                    if (j == i) continue;
+                    const glm::vec3 jlo = bs[j].center - bs[j].size * 0.5f;
+                    const glm::vec3 jhi = bs[j].center + bs[j].size * 0.5f;
+                    // j must reach across the face plane and extend past it
+                    // on the outside by more than the touch tolerance.
+                    const bool spans = s ? (jlo[a] <= plane + kTouch && jhi[a] >= plane + kTouch)
+                                         : (jhi[a] >= plane - kTouch && jlo[a] <= plane - kTouch);
+                    if (!spans) continue;
+                    const float ou = std::min(hi[u], jhi[u]) - std::max(lo[u], jlo[u]);
+                    const float ov = std::min(hi[v], jhi[v]) - std::max(lo[v], jlo[v]);
+                    if (ou > 0.0f && ov > 0.0f) covered += ou * ov;
+                }
+                if (covered < kCovered * face_area) {
+                    mask |= 1 << (a * 2 + s);
+                    ++exposed_total;
+                }
+            }
+        }
+        brush_face_mask_[i] = mask;
+    }
+    log::infof("[spom] box relief: %d/%zu brush faces exposed", exposed_total,
+               bs.size() * 6);
 }
 
 } // namespace qlike

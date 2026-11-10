@@ -312,6 +312,9 @@ void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,
         pc.prev_mvp = pc.mvp;
         pc.color = color;
         pc.emissive = glm::vec4(emissive, full_emissive ? 1.0f : 0.0f);
+        // No texture: albedo/normal index -1 (was left at 0, so the gun
+        // was triplanar-tinted with the ground texture), uv scale 1.
+        pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
                            kPushConstantStages,
                            0, sizeof(PushConstants), &pc);
@@ -501,10 +504,12 @@ void VulkanEngine::init_doors() {
         d.angle         = 0.0f;
         return d;
     };
+    // Panels now swing INWARD (toward the courtyard): the gatehouse has a
+    // round-arched front passage that an outward swing would clip into.
     // Left panel: hinge on -X side, swings outward (toward +Z) by ~85В°.
-    doors_.push_back(make_door(-ent_half, +panel_w_half + 0.01f, +1.48f));
+    doors_.push_back(make_door(-ent_half, +panel_w_half + 0.01f, -1.48f));
     // Right panel: hinge on +X side, swings outward by -85В°.
-    doors_.push_back(make_door(+ent_half, -panel_w_half - 0.01f, -1.48f));
+    doors_.push_back(make_door(+ent_half, -panel_w_half - 0.01f, +1.48f));
 }
 
 void VulkanEngine::update_doors(float dt) {

@@ -23,6 +23,7 @@
 #include "engine/terrain_clod.h"
 #include "engine/grass.h"
 #include "engine/scatter.h"
+#include "engine/road.h"
 #include "engine/texture.h"   // for BackgroundDecodeHandle
 #include "engine/vk_engine/settings_types.h"  // RtSettings / GameSettings
 #include "game/level.h"
@@ -328,6 +329,21 @@ private:
     VkImageView depth_view_ = VK_NULL_HANDLE;
     VmaAllocation depth_alloc_ = nullptr;
     VkFormat depth_format_ = VK_FORMAT_D32_SFLOAT;
+    // Copy of the depth PRE-PASS result, sampled (binding 27) by passes
+    // that draw inside the colour pass and therefore cannot read the live
+    // depth attachment — the grass raymarcher bounds its march with it.
+    VkImage       depth_copy_image_ = VK_NULL_HANDLE;
+    VkImageView   depth_copy_view_  = VK_NULL_HANDLE;
+    VmaAllocation depth_copy_alloc_ = nullptr;
+    VkSampler     depth_copy_sampler_ = VK_NULL_HANDLE;
+    void write_depth_copy_binding();
+    // Per static brush: bit (axis*2 + (positive side ? 1 : 0)) set when that
+    // face is EXPOSED (not mostly covered by a touching/overlapping brush).
+    // cube.frag only cuts brick relief into exposed faces, so seams between
+    // adjacent wall brushes stay closed while outer corners get real depth.
+    std::vector<int> brush_face_mask_;
+    void compute_brush_face_masks();
+    bool          depth_copy_layout_valid_ = false;   // false until first copy after (re)create
 
     std::array<FrameData, kFrameOverlap> frames_{};
     uint64_t frame_number_ = 0;
@@ -340,6 +356,19 @@ private:
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     VkShaderModule vert_module_ = VK_NULL_HANDLE;
     VkShaderModule frag_module_ = VK_NULL_HANDLE;
+    // G-buffer-only cube.frag variant (cube_gbuf.frag.spv) + the world /
+    // terrain pipelines built from it. Bound instead of pipeline_ /
+    // terrain_pipeline_ while deferred_owns_lighting() is true.
+    VkShaderModule frag_gbuf_module_ = VK_NULL_HANDLE;
+    VkPipeline pipeline_gbuf_ = VK_NULL_HANDLE;
+    VkPipeline terrain_gbuf_pipeline_ = VK_NULL_HANDLE;
+    bool deferred_owns_lighting() const {
+        return deferred_lighting_active_ && deferred_lighting_pipeline_ &&
+               !rt_.svgf_enabled && !rt_.gi_restir_enabled;
+    }
+    VkPipeline world_pipeline() const {
+        return (pipeline_gbuf_ && deferred_owns_lighting()) ? pipeline_gbuf_ : pipeline_;
+    }
     // Depth-only pipeline used for the early-Z pre-pass; shares pipeline
     // layout + vertex shader with `pipeline_`.
     VkPipeline depth_pipeline_ = VK_NULL_HANDLE;
@@ -577,9 +606,9 @@ private:
     // are procedurally baked seamless terrain materials, splatted in
     // cube.frag's is_terrain block by the height/slope weights.
     static constexpr int kFileTextureCount   = 7;
-    static constexpr int kTerrainMatCount    = 6;     // +1 for kTexProcGrass
+    static constexpr int kTerrainMatCount    = 8;     // +ProcGrass, Roof, Road
     static constexpr int kTextureCount       = kFileTextureCount +
-                                               kTerrainMatCount;   // 13
+                                               kTerrainMatCount;   // 15
     // Albedo/normal-array indices of the baked terrain materials.
     static constexpr int kTexRock  = kFileTextureCount + 0;  // 7
     static constexpr int kTexGrass = kFileTextureCount + 1;  // 8 (stylized PNG)
@@ -592,6 +621,11 @@ private:
     // lerps between slot 12 (no grass blades here) and slot 8 (grass
     // blades grow here), gated by the grass eligibility mask.
     static constexpr int kTexProcGrass = kFileTextureCount + 5;  // 12
+    // 13/14: ambientCG roof tiles (castle tower roofs) and cobblestone
+    // paving (terrain road). Procedural placeholders, overridden by
+    // load_terrain_pbr_overrides() from assets/terrain_pbr/.
+    static constexpr int kTexRoof = kFileTextureCount + 6;  // 13
+    static constexpr int kTexRoad = kFileTextureCount + 7;  // 14
     struct TextureSlot {
         VkImage image = VK_NULL_HANDLE;
         VmaAllocation alloc = nullptr;
@@ -1115,6 +1149,34 @@ private:
     // Ground clutter (AAA Phase 3): instanced procedural rocks/pebbles
     // scattered by splat-style rules. Same pipeline pattern as grass.
     ScatterSet scatter_{};
+    // Castle road (gate -> valley). Built in init_world before the
+    // heightmap is cached; drives carving, grass/scatter keep-out and
+    // the terrain shader road polyline (SceneUBO road_pts).
+    Road castle_road_{};
+    // Castle mesh parts (round towers, roofs, gate arch) from
+    // Level::meshes, lifted to the plateau. Raster through the world
+    // pipeline in "static mesh" mode (grass_params.w = -1: UV texturing,
+    // no box-only paths); one BLAS each, added to the TLAS every rebuild.
+    struct CastleMeshGpu {
+        Mesh mesh{};
+        int tex_albedo = -1, tex_normal = -1;
+        glm::vec3 tint{1.0f}, fallback{0.6f};
+        glm::vec3 bmin{0.0f}, bmax{0.0f};
+        VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
+        VkBuffer blas_buf = VK_NULL_HANDLE;
+        VmaAllocation blas_alloc = nullptr;
+        VkDeviceAddress blas_addr = 0;
+    };
+    std::vector<CastleMeshGpu> castle_meshes_;
+    void init_castle_meshes();       // GPU upload (init_world)
+    void build_castle_mesh_blas();   // BLAS per part (init_rt)
+    void destroy_castle_meshes();
+    // Draws every visible castle mesh with the bound pipeline. `depth_only`
+    // pushes the depth-prepass constants; `shadow_layout` != null pushes
+    // just the light MVP (sun shadow-map pipeline).
+    void draw_castle_meshes(VkCommandBuffer cmd, const glm::mat4& vp,
+                            const glm::mat4& prev_vp, const Frustum& fr,
+                            bool depth_only, VkPipelineLayout shadow_layout);
     VkPipeline     scatter_pipeline_    = VK_NULL_HANDLE;
     VkShaderModule scatter_vert_module_ = VK_NULL_HANDLE;
     VkShaderModule scatter_frag_module_ = VK_NULL_HANDLE;
@@ -1471,7 +1533,7 @@ private:
     VkImage      gbuffer0_image_ = VK_NULL_HANDLE;
     VmaAllocation gbuffer0_alloc_ = nullptr;
     VkImageView  gbuffer0_view_ = VK_NULL_HANDLE;
-    VkFormat     gbuffer0_format_ = VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormat     gbuffer0_format_ = VK_FORMAT_R8G8B8A8_SRGB;   // sRGB: 8-bit linear albedo banded in darks; alpha (material id) stays linear
     VkImage      gbuffer1_image_ = VK_NULL_HANDLE;
     VmaAllocation gbuffer1_alloc_ = nullptr;
     VkImageView  gbuffer1_view_ = VK_NULL_HANDLE;
@@ -1822,6 +1884,24 @@ private:
         float blit_ui_ms = 0.0f;
     } gpu_timers_;
     float gpu_log_timer_ = 0.0f;
+
+    // --- Per-pass GPU profiler ---
+    // prof_mark(cmd, "name") writes a timestamp; the time between mark
+    // i-1 and mark i is attributed to "name". Results are EMA-smoothed
+    // per name and logged once a second alongside the frame total.
+    static constexpr uint32_t kProfMaxMarks = 48;
+    VkQueryPool prof_pool_ = VK_NULL_HANDLE;
+    const char* prof_names_[2][kProfMaxMarks] = {};
+    uint32_t    prof_count_[2] = {0, 0};
+    bool        prof_valid_[2] = {false, false};
+    uint32_t    prof_slot_ = 0;
+    struct ProfEntry { const char* name; float ms; };
+    ProfEntry   prof_ema_[kProfMaxMarks] = {};
+    uint32_t    prof_ema_count_ = 0;
+    void prof_begin_frame(VkCommandBuffer cmd, uint32_t slot);
+    void prof_mark(VkCommandBuffer cmd, const char* name);
+    void prof_read_slot(uint32_t slot);
+    void prof_log();
 
     // Live tuning state. The RtSettings / GameSettings struct definitions
     // were extracted to engine/vk_engine/settings_types.h to shrink this

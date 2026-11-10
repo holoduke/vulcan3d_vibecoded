@@ -1732,6 +1732,8 @@ void VulkanEngine::init_grass_mask_texture() {
     // procedural baseline first so a missing save file is a no-op,
     // then replace bytes if the file is present.
     load_grass_mask();
+    // Keep the road paving + verge clear of blades.
+    clear_grass_mask(castle_road_, grass_mask_data_, dim, kWorldSide);
 
     // Upload as a sampled RG8 image.
     VkImageCreateInfo ici{};

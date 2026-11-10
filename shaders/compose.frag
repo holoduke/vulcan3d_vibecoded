@@ -67,7 +67,14 @@ vec3 aces_fitted(vec3 x) {
     return clamp(out_m * (a / b), 0.0, 1.0);
 }
 
-vec3 to_srgb(vec3 x) { return pow(max(x, vec3(0.0)), vec3(1.0 / 2.2)); }
+// Exact piecewise sRGB OETF (the old pow(1/2.2) lifted near-black:
+// linear 0.01 -> 0.123 instead of 0.0998, which washed out shadows).
+vec3 to_srgb(vec3 x) {
+    x = clamp(x, 0.0, 1.0);
+    vec3 lo = x * 12.92;
+    vec3 hi = 1.055 * pow(x, vec3(1.0 / 2.4)) - 0.055;
+    return mix(lo, hi, step(vec3(0.0031308), x));
+}
 float lum(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
 // Synthetic "feature buffer" for the sun. The bloom mip chain doesn't see the
@@ -733,5 +740,11 @@ void main() {
         mapped *= vig;
     }
 
-    outColor = vec4(to_srgb(mapped), 1.0);
+    // 8-bit output: +-0.5 LSB interleaved-gradient-noise dither after
+    // encoding so sky / fog gradients don't band.
+    vec3 enc = to_srgb(mapped);
+    float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy,
+                                             vec2(0.06711056, 0.00583715))));
+    enc += (ign - 0.5) / 255.0;
+    outColor = vec4(enc, 1.0);
 }

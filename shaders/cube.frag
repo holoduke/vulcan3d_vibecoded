@@ -163,6 +163,10 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  voxel_origin;
     vec4  voxel_dims;
     vec4  voxel_grid;
+    // Castle road (see SceneUBO): .x count, .y paved half-width, .z verge.
+    vec4  road_info;
+    vec4  road_bbox;
+    vec4  road_pts[64];
 } scene;
 
 // Half-rate shadow producer output, sampled when terrain_local_info.z
@@ -227,7 +231,7 @@ layout(set = 0, binding = 25, std430) readonly buffer VoxShapeDir {
 const uint kVoxEmpty = 0xFFFFFFFFu;
 
 // Bound texture arrays (must match kTextureCount on the C++ side).
-const int kTextureCount = 13;     // +1 for kTexProcGrass (slot 12)
+const int kTextureCount = 15;     // +1 for kTexProcGrass (slot 12)
 // Procedurally-baked terrain material slots (see bake_terrain_materials
 // in world.cpp). Must match kTexRock/.. in vk_engine.h.
 const int kMatRock  = 7;
@@ -235,6 +239,8 @@ const int kMatGrass = 8;
 const int kMatDirt  = 9;
 const int kMatSand  = 10;
 const int kMatSnow  = 11;
+const int kMatRoof  = 13;   // ambientCG RoofingTiles012A (castle roofs)
+const int kMatRoad  = 14;   // ambientCG PavingStones131 (castle road)
 layout(set = 0, binding = 3) uniform sampler2D u_albedo[kTextureCount];
 layout(set = 0, binding = 4) uniform sampler2D u_normal[kTextureCount];
 // Pre-baked heightmap sun-shadow texture (R8, 0 = lit, 255 = shadowed).
@@ -627,6 +633,54 @@ float height_lerp(float w, float ha, float hb) {
     float a = (1.0 - w) * (0.04 + ha * ha);
     float b = w * (0.04 + hb * hb);
     return b / (a + b);
+}
+
+// Terrain relief height fields (0 = deepest, 1 = top), in the material
+// repeat UV `u`. MUST match what the splat below actually shows, or the
+// parallax shifts the texture by bumps that aren't in it.
+//   grass band: rocky-rugged (u_height[5]) where no grass grows, the
+//               stylized grass ground (kMatGrass, x1.5 tile) where it does.
+//   rock band : rock (x1) blended toward dirt (x1.25) by `pdw`.
+// Mip level for the relief taps, set once per pixel before the march
+// (explicit LOD: implicit derivatives are undefined inside the
+// divergent march loop, and LOD 0 at range thrashes the texture cache).
+float g_tpom_lod = 0.0;
+float tpom_h_grass(vec2 u, float gp) {
+    // Branch to ONE fetch where the grass mask is saturated (most pixels).
+    if (gp < 0.02) return textureLod(u_height[5], u, g_tpom_lod).r;
+    if (gp > 0.98) return textureLod(u_normal[kMatGrass], u * 1.5, g_tpom_lod).a;
+    return mix(textureLod(u_height[5], u, g_tpom_lod).r,
+               textureLod(u_normal[kMatGrass], u * 1.5, g_tpom_lod).a, gp);
+}
+float tpom_h_rock(vec2 u, float pdw) {
+    if (pdw < 0.02) return textureLod(u_normal[kMatRock], u, g_tpom_lod).a;
+    return mix(textureLod(u_normal[kMatRock], u, g_tpom_lod).a,
+               textureLod(u_normal[kMatDirt], u * 1.25, g_tpom_lod).a, pdw);
+}
+float tpom_h(vec2 u, int kind, float k) {
+    if (kind == 2) return textureLod(u_normal[kMatRoad], u, g_tpom_lod).a;
+    return (kind == 0) ? tpom_h_grass(u, k) : tpom_h_rock(u, k);
+}
+
+// Relief occlusion march (Tatarchuk 2006, "Practical POM" self-shadow):
+// from the hit point, step toward the light through the height field
+// and keep the largest "how far is the terrain above my ray" sample,
+// weighted toward samples near the start (closer occluders = darker).
+// Returns sun visibility 0..1. `Lt` = light dir in tangent space,
+// `D` = relief depth in UV units (same scale the POM march used).
+float tpom_shadow(vec2 uv, float h0, vec3 Lt, float D, int kind, float k) {
+    if (Lt.z <= 0.02 || h0 >= 0.999) return 1.0;
+    const int kN = 6;
+    vec2  span = (Lt.xy / max(Lt.z, 0.15)) * D * (1.0 - h0);
+    float occ = 0.0;
+    for (int i = 1; i <= kN; ++i) {
+        float t  = float(i) / float(kN);
+        float rh = h0 + (1.0 - h0) * t;           // ray height at step
+        float sh = tpom_h(uv + span * t, kind, k);
+        occ = max(occ, (sh - rh) * (1.0 - t));
+    }
+    // ~0.06 of the full relief above the ray already reads as shadow.
+    return 1.0 - smoothstep(0.0, 0.16, occ);
 }
 
 vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
@@ -1100,6 +1154,52 @@ vec3 voxel_albedo(uint pal) {
 const int kStaticBlasSentinel = 0xFFFFFF;
 const int kCubeTrisPerBox     = 12;
 
+// ---------------------------------------------------------------------
+// Box relief: brick relief raymarched through the brush's AABB.
+//
+// Classic POM shifts UVs on a flat face, so the brush silhouette stays a
+// perfectly straight line ("edges have no depth"). Following the bounded-
+// box formulation (GPU Gems 2 ch.8) + POM silhouette clipping (discard
+// rays that leave the surface bounds), the brush is treated as a volume:
+// a point is SOLID when it lies below the height-field surface of every
+// EXPOSED face (per-face mask from the CPU, so brush-brush seams stay
+// closed). The view ray is marched from the rasterised entry point;
+// rays that slip through a mortar groove at an exposed edge exit the box
+// and are discarded -> bricks get a real stepped silhouette at corners
+// and wall tops.
+// ---------------------------------------------------------------------
+vec2 br_face_uv(int f, vec3 w, float uv_scale, vec2 aspect) {
+    int   a = f >> 1;
+    float s = ((f & 1) == 1) ? 1.0 : -1.0;
+    vec3 wp = w * uv_scale;
+    vec2 uv = (a == 0) ? vec2(wp.z * s, wp.y)
+            : (a == 1) ? vec2(wp.x, wp.z * s)
+                       : vec2(wp.x * s, wp.y);
+    return uv * aspect;
+}
+
+// Signed solidity margin (>= 0 -> inside the brick volume). bind_face =
+// the face whose surface constrains this point most (= the face hit).
+float br_margin(vec3 w, vec3 C, vec3 H, int mask, float Dm, int h_idx,
+                float lod, float uv_scale, vec2 aspect, out int bind_face) {
+    vec3 rel = w - C;
+    float m = 1e9;
+    bind_face = 0;
+    for (int f = 0; f < 6; ++f) {
+        int   a = f >> 1;
+        float s = ((f & 1) == 1) ? 1.0 : -1.0;
+        float d = H[a] - s * rel[a];               // depth below face f
+        float mf = d;
+        if (((mask >> f) & 1) != 0 && d < Dm) {
+            float h = textureLod(u_height[h_idx],
+                                 br_face_uv(f, w, uv_scale, aspect), lod).r;
+            mf = d - Dm * (1.0 - h);
+        }
+        if (mf < m) { m = mf; bind_face = f; }
+    }
+    return m;
+}
+
 void main() {
     // Default depth = rasterized depth; SPOM silhouette path may bump
     // to 1.0 below. The depth_greater qualifier on the gl_FragDepth
@@ -1160,6 +1260,9 @@ void main() {
     vec3 shading_pos = vWorldPos;
 
     bool is_terrain_pre = vTexParams.w > 1.5;
+    // Static castle mesh (round towers, roofs, arch): pc.grass_params.w = -1.
+    // Vertex-UV texturing; skips every axis-aligned-box-only path.
+    bool is_mesh_draw = !is_terrain_pre && pc.grass_params.w < -0.5;
 
     // ---- Terrain debug visualisation (set in pause-menu Graphics) ----
     // Bypasses everything except a basic Lambert / normal preview so we
@@ -1331,6 +1434,7 @@ void main() {
     // micro-shadowing (crevices lose grazing sun first) and a glancing
     // specular on rock/snow.
     float terrain_micro_h = 0.6;
+    float terrain_pom_vis = 1.0;   // relief self-shadow (sun visibility)
     float terrain_spec_w  = 0.0;
     if (is_terrain) {
         // ---- Terrain layer blend (height + slope) ----
@@ -1569,117 +1673,114 @@ void main() {
         // Strength comes from the terrain draw's pc.tex_params.x (the
         // terrain path ignores that slot otherwise); 0 = off.
         vec3 Tt = normalize(vec3(1.0, 0.0, 0.0) - N * N.x);
-        vec3 Bt = cross(N, Tt);
+        vec3 Bt = cross(Tt, N);   // +Z, matches uvm.y = world z
         float pom_str = clamp(vTexParams.x, 0.0, 1.0);
         // Camera-to-fragment view direction is identical for both POM
         // branches below (grass POM + rock POM) — was being normalised
         // twice per pixel. Hoist once; both inner gates still early-out
         // before any other work when their weight is below threshold.
         vec3 V_pom = normalize(scene.camera_pos.xyz - vWorldPos);
-        // GRASS-BAND SPOM: extra parallax march driven by the rocky-
-        // rugged-terrain height map (u_height[5]) so the new texture's
-        // micro-relief actually displaces pixels on the grass-band
-        // splat. MUST match terrain_tess.tese's u_height[5] sample
-        // (rocky-rugged) so pixel POM and vertex displacement read
-        // the SAME height field -- otherwise highlights drift off the
-        // displaced bumps. Was u_height[4] (stylized-grass height)
-        // before: that produced bumps at the wrong world position
-        // because tess sampled a different texture for the geometry.
-        // Runs on pixels where the grass weight is non-negligible AND
-        // rock isn't dominating. Same distance ramp as the rock POM.
-        // textureLod(.., 0) -- no mip smoothing on the height fetch
-        // so the high-frequency detail survives (the user explicitly
-        // does NOT want smoothing).
+        // ---- Terrain relief (parallax occlusion + self-shadow) ----
+        // One march over the height field of whichever layer dominates
+        // here (grass band, or rock/dirt/snow), refined by bisection,
+        // then a short march toward the sun through the same field for
+        // per-pixel self-shadow (stones shadow the ground next to them).
+        // Depth is in UV units of the material repeat (uvm); with the
+        // default 1.7 m repeat 0.07 -> ~12 cm, 0.12 -> ~20 cm.
+        //
+        // Grass-present mask, needed here so the grass-band march uses
+        // the SAME height map as the texture the splat shows below.
+        float _grass_present = 0.0;
+        {
+            vec2 _gm_uv = (vWorldPos.xz / 2048.0) + vec2(0.5);
+            if (_gm_uv.x >= 0.0 && _gm_uv.x <= 1.0 &&
+                _gm_uv.y >= 0.0 && _gm_uv.y <= 1.0) {
+                _grass_present = textureLod(u_grass_mask, _gm_uv, 0.0).r;
+            }
+            // Soft edge so the green doesn't stop on a hard line.
+            _grass_present = smoothstep(0.05, 0.55, _grass_present);
+        }
         float grass_w_band = clamp(t_sand * (1.0 - t_dirt) *
                                    (1.0 - max(t_rock, steep)),
                                    0.0, 1.0);
-        float pom_grass_w = pom_str * grass_w_band *
-                            (1.0 - smoothstep(60.0, max(70.0, scene.terrain_disp_params.z), cam_dist));
-        if (pom_grass_w > 0.02) {
+        float rockiness = max(max(t_rock, steep),
+                              max(t_dirt * 0.6, t_snow * 0.7));
+        float pdw = clamp(t_dirt * (1.0 - max(t_rock, steep)), 0.0, 1.0);
+        // ---- Castle road (cobbles + dirt verge) ----
+        // Exact XZ distance to the road polyline (SceneUBO road_pts), so
+        // the paving edge is crisp at any distance. A little noise on
+        // the distance roughens the edge into irregular kerb stones.
+        float road_w = 0.0, verge_w = 0.0;
+        {
+            int rn = int(scene.road_info.x + 0.5);
+            vec2 q = vWorldPos.xz;
+            if (rn >= 2 && all(greaterThan(q, scene.road_bbox.xy)) &&
+                all(lessThan(q, scene.road_bbox.zw))) {
+                float best = 1e9;
+                for (int i = 0; i < 63; ++i) {
+                    if (i + 1 >= rn) break;
+                    vec2 a = scene.road_pts[i].xz, b = scene.road_pts[i + 1].xz;
+                    vec2 ab = b - a;
+                    float t = clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+                    vec2 dv = q - (a + ab * t);
+                    best = min(best, dot(dv, dv));
+                }
+                float rd = sqrt(best);
+                float hw = scene.road_info.y, vw = scene.road_info.z;
+                float jit = (tnoise(q * 1.7) - 0.5) * 0.45 +
+                            (tnoise(q * 0.31 + 17.0) - 0.5) * 0.6;
+                road_w  = 1.0 - smoothstep(hw - 0.12, hw + 0.12, rd + jit);
+                verge_w = (1.0 - smoothstep(hw + 0.4 * vw, hw + vw + 0.5,
+                                            rd + jit * 1.6)) * (1.0 - road_w);
+            }
+        }
+        // Pick the dominant layer's field (one march, not two).
+        bool  pom_grass = grass_w_band >= rockiness;
+        int   pom_kind  = road_w > 0.5 ? 2 : (pom_grass ? 0 : 1);
+        float pom_k     = pom_grass ? _grass_present : pdw;
+        float pom_far   = max(70.0, scene.terrain_disp_params.z);
+        float pom_fade  = 1.0 - smoothstep(0.5 * pom_far, pom_far, cam_dist);
+        float pom_w     = pom_str * pom_fade *
+                          max(pom_grass ? grass_w_band : rockiness, 0.35);
+        if (pom_kind == 2) pom_w = pom_str * pom_fade;
+        float pom_D     = (pom_kind == 2 ? 0.035 : (pom_grass ? 0.05 : 0.10)) * pom_w;
+        g_tpom_lod = pom_kind == 2 ? textureQueryLod(u_normal[kMatRoad], uvm).x
+                   : pom_grass     ? textureQueryLod(u_height[5], uvm).x
+                                   : textureQueryLod(u_normal[kMatRock], uvm).x;
+        if (pom_D > 0.002) {
             vec3 Vt = vec3(dot(V_pom, Tt), dot(V_pom, Bt), dot(V_pom, N));
-            Vt.z = max(abs(Vt.z), 0.20);
-            int   steps = int(mix(10.0, 22.0, pom_grass_w));
+            Vt.z = max(Vt.z, 0.22);
+            // More layers at grazing angles where the shift is long.
+            int   steps = int(mix(24.0, 8.0, Vt.z));
             float layer = 1.0 / float(steps);
-            // Modest peak-to-trough; the texture's height is already
-            // pretty high-contrast, and the vertex displacement in
-            // .tese adds the bulk of the relief silhouette.
-            vec2  Pmax  = (Vt.xy / Vt.z) * (0.06 * pom_grass_w);
-            vec2  dtex  = Pmax * layer;
+            vec2  dtex  = (Vt.xy / Vt.z) * pom_D * layer;
             vec2  uvc   = uvm;
             float curD  = 0.0;
-            for (int i = 0; i < 22; ++i) {
-                if (i >= steps) break;
-                // textureLod 0 -> no mip averaging -> bumps stay crisp.
-                float hh = 1.0 - textureLod(u_height[5], uvc, 0.0).r;
-                if (curD >= hh) break;
+            float hh    = tpom_h(uvc, pom_kind, pom_k);
+            for (int i = 0; i < 24; ++i) {
+                if (i >= steps || curD >= 1.0 - hh) break;
                 uvc -= dtex;
                 curD += layer;
+                hh = tpom_h(uvc, pom_kind, pom_k);
             }
-            vec2  lo = uvc + dtex;   float dLo = curD - layer;
+            // Bisection between the last layer above (lo) and the first
+            // below (hi) the surface: no stair-step banding.
+            vec2  lo = uvc + dtex;   float dLo = max(curD - layer, 0.0);
             vec2  hi = uvc;          float dHi = curD;
             for (int b = 0; b < 4; ++b) {
                 vec2  mid  = (lo + hi) * 0.5;
                 float dMid = (dLo + dHi) * 0.5;
-                float hM   = 1.0 - textureLod(u_height[5], mid, 0.0).r;
-                if (dMid < hM) { lo = mid; dLo = dMid; }
-                else           { hi = mid; dHi = dMid; }
+                if (dMid < 1.0 - tpom_h(mid, pom_kind, pom_k)) { lo = mid; dLo = dMid; }
+                else                                           { hi = mid; dHi = dMid; }
             }
-            vec2  duv = (lo + hi) * 0.5 - uvm;
+            vec2  uv_hit = (lo + hi) * 0.5;
+            float h_hit  = 1.0 - 0.5 * (dLo + dHi);
+            vec2  duv = uv_hit - uvm;
             uvm += duv;
             uvM += duv * 0.125;
-        }
-        // Parallax everywhere rock/dirt/snow contribute (a small base
-        // floor too so even gentle rocky ground gets some), ramped over
-        // a longer range so it doesn't vanish the moment you step back.
-        float rockiness = max(max(t_rock, steep),
-                              max(t_dirt * 0.6, t_snow * 0.7));
-        rockiness = max(rockiness, 0.25 * pom_str);
-        float pom_w = pom_str * rockiness *
-                      (1.0 - smoothstep(35.0, 90.0, cam_dist));
-        if (pom_w > 0.01) {
-            // Phase 2: the march height blends rock and dirt by the
-            // local band weight (constant per pixel, so both sampler
-            // indices stay dynamically uniform). Dirt-band ground now
-            // parallaxes its own cracked-soil relief instead of
-            // borrowing the boulder field.
-            float pdw = clamp(t_dirt * (1.0 - max(t_rock, steep)), 0.0, 1.0);
-            #define POM_H(u) mix(texture(u_normal[kMatRock], (u)).a, \
-                                 texture(u_normal[kMatDirt], (u) * 1.25).a, pdw)
-            vec3 Vt = vec3(dot(V_pom, Tt), dot(V_pom, Bt), dot(V_pom, N));
-            Vt.z = max(abs(Vt.z), 0.20);
-            int   steps = int(mix(16.0, 40.0, pom_w));
-            float layer = 1.0 / float(steps);
-            // Slightly shallower so the staircase isn't exaggerated;
-            // the binary refine below removes the residual banding.
-            vec2  Pmax  = (Vt.xy / Vt.z) * (0.12 * pom_w);  // max uv shift
-            vec2  dtex  = Pmax * layer;
-            vec2  uvc   = uvm;
-            float curD  = 0.0;
-            for (int i = 0; i < steps; ++i) {
-                float hh = POM_H(uvc);
-                if (curD >= 1.0 - hh) break;
-                uvc -= dtex;
-                curD += layer;
-            }
-            // Binary-search refine between the last layer ABOVE the
-            // surface (lo) and the first BELOW it (hi). The previous
-            // single linear interpolation left the ray landing on
-            // discrete march planes — visible as parallel "extrude"
-            // step lines all along the march direction. 6 bisections
-            // converge to the true crossing → no banding.
-            vec2  lo = uvc + dtex;   float dLo = curD - layer;  // above
-            vec2  hi = uvc;          float dHi = curD;          // below
-            for (int b = 0; b < 6; ++b) {
-                vec2  mid  = (lo + hi) * 0.5;
-                float dMid = (dLo + dHi) * 0.5;
-                float hM   = POM_H(mid);
-                if (dMid < 1.0 - hM) { lo = mid; dLo = dMid; }
-                else                 { hi = mid; dHi = dMid; }
-            }
-            #undef POM_H
-            vec2  duv = (lo + hi) * 0.5 - uvm;
-            uvm += duv;
-            uvM += duv * 0.125;
+            vec3 Lt = vec3(dot(L, Tt), dot(L, Bt), dot(L, N));
+            float vis = tpom_shadow(uv_hit, h_hit, Lt, pom_D, pom_kind, pom_k);
+            terrain_pom_vis = mix(1.0, vis, clamp(pom_w * 1.5, 0.0, 1.0));
         }
 
         // Anti-tiling: blend a SECOND sample at a rotated/offset UV with
@@ -1750,26 +1851,6 @@ void main() {
         // Per-layer surface height for the height-aware blend — the
         // displacement packed into each layer's normal alpha.
         #define MAT_H(i, s) (texture(u_normal[i], uvm * (s)).a)
-        // Gate the stylized-grass material by the grass eligibility
-        // mask -- the kTexGrass slot was painting bright green ground
-        // EVERYWHERE the height-band weight was non-zero, including
-        // bare areas with no actual grass blades. Sample the same
-        // mask the blade-spawner reads (binding 13, 2048 m square
-        // centered on origin -- see grass shadow march below) and
-        // scale the grass slot weight by it. Where mask=0 (no grass
-        // here) the splat falls back to the sand-band texture under
-        // the existing band-colour tint, so bare terrain looks like
-        // sand/dirt again.
-        float _grass_present = 0.0;
-        {
-            vec2 _gm_uv = (vWorldPos.xz / 2048.0) + vec2(0.5);
-            if (_gm_uv.x >= 0.0 && _gm_uv.x <= 1.0 &&
-                _gm_uv.y >= 0.0 && _gm_uv.y <= 1.0) {
-                _grass_present = textureLod(u_grass_mask, _gm_uv, 0.0).r;
-            }
-            // Soft edge so the green doesn't stop on a hard line.
-            _grass_present = smoothstep(0.05, 0.55, _grass_present);
-        }
         // Pick the grass-band TEXTURE based on the eligibility mask:
         // slot 8 (stylized PNG, green blade ground) where grass grows,
         // slot 12 (procedural grass, the OLD pre-stylized look) where
@@ -1821,6 +1902,10 @@ void main() {
         hcur = mix(hcur, h_rock, w_steep);
         float w_beach = height_lerp(beach, hcur, h_sand);
         m = mix(m, MAT_A(kMatSand, kScSand), w_beach);  // sand at waterline
+        // Road: trodden dirt verge, then the cobbles (POM-shifted uvm).
+        m = mix(m, MAT_A(kMatDirt, kScDirt) * vec3(0.82, 0.76, 0.68), verge_w);
+        m = mix(m, texture(u_albedo[kMatRoad], uvm).rgb, road_w);
+        hcur = mix(hcur, texture(u_normal[kMatRoad], uvm).a, road_w);
         #undef MAT_A
         #undef MAT_H
         // Carry the final splat height + a rock/snow specular weight to
@@ -1839,6 +1924,8 @@ void main() {
         base = mix(base, sand, beach);
         float m_lum  = max(dot(m, vec3(0.299, 0.587, 0.114)), 1e-3);
         vec3  tinted = mix(m, m * (base / m_lum), 0.55);
+        // Cobbles keep their own grey stone colour (no band tint).
+        tinted = mix(tinted, m, road_w * 0.9);
         // g_str blends old flat band colour ↔ full per-texel material
         // (g_str = 0 is the exact previous look — an A/B toggle).
         vec3  splat = mix(base, tinted, g_str);
@@ -1908,6 +1995,8 @@ void main() {
         nm = mix(nm, MAT_N(kMatSnow, kScSnow), w_snow);
         nm = mix(nm, MAT_N(kMatRock, kScRock), w_steep);
         nm = mix(nm, MAT_N(kMatSand, kScSand), w_beach); // sand at waterline
+        nm = mix(nm, MAT_N(kMatDirt, kScDirt), verge_w);
+        nm = mix(nm, texture(u_normal[kMatRoad], uvm).xyz * 2.0 - 1.0, road_w);
         #undef MAT_N
         #undef MAT_N_ROT
         #undef MAT_N_STRICT
@@ -2042,7 +2131,7 @@ void main() {
         // its own raymarched normal path.
         int spom_h_idx = height_idx_for_albedo(albedo_idx_raw);
         bool spom_path = use_albedo && spom_h_idx >= 0 && !obj_space &&
-                         !is_terrain;
+                         !is_terrain && !is_mesh_draw;
         if (spom_path) {
             // pc.model is translate * scale (no rotation for static brushes,
             // and obj_space — which would rotate — already failed the gate
@@ -2077,6 +2166,101 @@ void main() {
                 // is just the geometric edge (no sky-substitution).
                 spom_uv_off = spom_uv0;
                 spom_world  = vWorldPos;
+            } else
+            if (spom_mode == 2 && pc.grass_params.w > 0.5) {
+                // ---- Box relief (static brushes with a face mask) ----
+                int   br_mask = int(pc.grass_params.z + 0.5);
+                int   br_h    = clamp(spom_h_idx, 0, 5);
+                vec2  br_asp  = (br_h == 0 || br_h == 2) ? vec2(0.5, 1.0)
+                                                         : vec2(1.0);
+                vec3  br_C    = pc.model[3].xyz;
+                vec3  br_H    = face_size * 0.5;
+                float br_dist = distance(vWorldPos, scene.camera_pos.xyz);
+                // Full relief up close, fades out by 60 m (sub-pixel there).
+                // Depth proportional to the texture tile (castle walls tile
+                // every ~8 m -> big stones -> ~20 cm mortar relief; a fixed
+                // 4 cm read as flat). Capped so thin brushes stay solid.
+                float br_Dm   = clamp(0.025 / max(scale, 0.01), 0.04, 0.25);
+                br_Dm = min(br_Dm, 0.3 * min(min(face_size.x, face_size.y),
+                                             face_size.z));
+                br_Dm *= max(0.0, scene.spom_params.x) *
+                         (1.0 - smoothstep(25.0, 60.0, br_dist));
+                if (br_Dm > 0.002) {
+                    vec3  ro = vWorldPos;
+                    vec3  rd = normalize(vWorldPos - scene.camera_pos.xyz);
+                    // Ray-box exit (slab test).
+                    vec3  inv_rd = 1.0 / (abs(rd) + vec3(1e-6)) * sign(rd + vec3(1e-9));
+                    vec3  t1 = (br_C - br_H - ro) * inv_rd;
+                    vec3  t2 = (br_C + br_H - ro) * inv_rd;
+                    vec3  tf = max(t1, t2);
+                    float t_exit = max(0.0, min(min(tf.x, tf.y), tf.z));
+                    // Past depth Dm below the entry face every point is
+                    // solid, so the march never needs to go further.
+                    float cosn  = max(dot(rd, -spom_face_n), 0.05);
+                    float t_deep = br_Dm / cosn * 1.02;
+                    float L = min(t_exit, t_deep);
+                    float lod = textureQueryLod(u_height[br_h], spom_uv0).x;
+                    // More steps at grazing angles (long march, thin
+                    // features) — fewer head-on.
+                    int   kSteps = int(mix(48.0, 16.0, cosn));
+                    float dt = L / float(kSteps);
+                    float t_lo = 0.0, t_hi = -1.0;
+                    int   bf = 0;
+                    for (int i = 0; i <= kSteps; ++i) {
+                        float t = float(i) * dt;
+                        if (br_margin(ro + rd * t, br_C, br_H, br_mask, br_Dm,
+                                      br_h, lod, scale, br_asp, bf) >= 0.0) {
+                            t_hi = t;
+                            break;
+                        }
+                        t_lo = t;
+                    }
+                    if (t_hi < 0.0) {
+                        if (t_exit <= t_deep) {
+                            // Ray left the box through a groove at an
+                            // exposed edge: real silhouette -> see-through.
+                            discard;
+                        }
+                        t_hi = L;   // numerically missed the deep floor
+                    }
+                    // Binary refinement of the surface crossing.
+                    for (int i = 0; i < 5 && t_hi > 0.0; ++i) {
+                        float tm = 0.5 * (t_lo + t_hi);
+                        int bft;
+                        if (br_margin(ro + rd * tm, br_C, br_H, br_mask, br_Dm,
+                                      br_h, lod, scale, br_asp, bft) >= 0.0)
+                            t_hi = tm;
+                        else
+                            t_lo = tm;
+                    }
+                    vec3 p_hit = ro + rd * t_hi;
+                    br_margin(p_hit, br_C, br_H, br_mask, br_Dm, br_h, lod,
+                              scale, br_asp, bf);
+                    // Shade with the frame of the face actually hit (at an
+                    // edge that can be the neighbouring face of the box).
+                    int   fa = bf >> 1;
+                    float fs = ((bf & 1) == 1) ? 1.0 : -1.0;
+                    axis = fa;
+                    if (fa == 0) {
+                        spom_face_n = vec3(fs, 0.0, 0.0);
+                        spom_T = vec3(0.0, 0.0, fs); spom_B = vec3(0.0, 1.0, 0.0);
+                    } else if (fa == 1) {
+                        spom_face_n = vec3(0.0, fs, 0.0);
+                        spom_T = vec3(1.0, 0.0, 0.0); spom_B = vec3(0.0, 0.0, fs);
+                    } else {
+                        spom_face_n = vec3(0.0, 0.0, fs);
+                        spom_T = vec3(fs, 0.0, 0.0); spom_B = vec3(0.0, 1.0, 0.0);
+                    }
+                    spom_uv_off = br_face_uv(bf, p_hit, scale, br_asp);
+                    // (No side-face "anti-smear" UV swap: sampling the
+                    // perpendicular mapping landed in the texture's dark
+                    // mortar and rendered black specks across close walls.)
+                    // Depth + RT origin stay on the rasterised face: the box
+                    // BLAS has culling disabled, so lighting from a point
+                    // recessed INSIDE the box would self-shadow every brick.
+                    // The silhouette comes entirely from the discard above.
+                    spom_world = vWorldPos;
+                }
             } else
             if (spom_mode == 2) {
                 // SSDM mode = shell-mapping silhouette + depth-override
@@ -2413,6 +2597,23 @@ void main() {
                               spom_B  * n_t.y +
                               spom_face_n * n_t.z);
             }
+        } else if (use_albedo && is_mesh_draw) {
+            // Static mesh: real UVs + derivative (cotangent) tangent frame
+            // (Schueler 2013). NormalGL green = image-up = -dP/dv.
+            int  ai  = clamp(albedo_idx_raw, 0, kTextureCount - 1);
+            vec2 muv = vUv * scale;
+            albedo = texture(u_albedo[ai], muv).rgb * vColor;
+            if (use_normal) {
+                int  ni = clamp(normal_idx_raw, 0, kTextureCount - 1);
+                vec3 nt = texture(u_normal[ni], muv).xyz * 2.0 - 1.0;
+                vec3 dp1 = dFdx(vWorldPos), dp2 = dFdy(vWorldPos);
+                vec2 du1 = dFdx(muv),       du2 = dFdy(muv);
+                vec3 dp2p = cross(dp2, N), dp1p = cross(N, dp1);
+                vec3 Tm = dp2p * du1.x + dp1p * du2.x;
+                vec3 Bm = dp2p * du1.y + dp1p * du2.y;
+                float im = inversesqrt(max(max(dot(Tm, Tm), dot(Bm, Bm)), 1e-20));
+                N = normalize(Tm * (im * nt.x) - Bm * (im * nt.y) + N * nt.z);
+            }
         } else if (use_albedo) {
             int  albedo_idx = clamp(albedo_idx_raw, 0, kTextureCount - 1);
             vec3 tex_albedo = triplanar_sample(u_albedo[albedo_idx],
@@ -2436,7 +2637,7 @@ void main() {
     // edge we're close to) inside the last `kCornerWidth` of the
     // brush extent. Costs ~10 ALU per fragment; gives a smooth
     // ~25 m m-scale wrap around outside corners.
-    if (!is_terrain && !obj_space) {
+    if (!is_terrain && !obj_space && !is_mesh_draw) {
         vec3 face_size_w = vec3(length(pc.model[0].xyz),
                                 length(pc.model[1].xyz),
                                 length(pc.model[2].xyz));
@@ -2561,6 +2762,29 @@ void main() {
     // truth for distance-from-camera across LOD, terrain blending, AO
     // distance fade, GI sampling, etc.)
 
+    // ---- Deferred fast path ----
+    // When the deferred lighting pass owns material 1 (opaque world /
+    // viewmodel) and 3 (mesh terrain) pixels it re-shades them from the
+    // G-buffer and DISCARDS this shader's lit colour. Everything below
+    // (PCSS shadow, path-traced GI, AO, muzzle light, fog) was ~200+ ray
+    // queries per pixel of pure waste. Write the G-buffer and leave.
+    // Emissive (mat 5) still needs the forward colour, so it falls through.
+    // QLIKE_GBUFFER_ONLY (cube_gbuf.frag.spv) takes this path
+    // unconditionally so the compiler strips every ray query, the GI
+    // loops and the SSBO/image side-effect stores below.
+#ifdef QLIKE_GBUFFER_ONLY
+    if (true) {
+#else
+    if (scene.terrain_disp_params.w > 0.5 && vEmissive.a <= 0.5) {
+#endif
+        int fast_mat = is_terrain_pre ? 3 : 1;
+        outColor    = vec4(albedo, 1.0);
+        outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)),
+                           float(fast_mat) / 255.0);
+        outGBuffer1 = vec4(octa_encode(N), is_terrain_pre ? terrain_pom_vis : 0.5, 0.0);
+        return;
+    }
+
     // --- Sun shadow (RT, contact-hardening / PCSS-style) ---
     // 1. BLOCKER SEARCH: a handful of cheap closest-hit rays in a wide cone
     //    around L; record the average distance to the occluder.
@@ -2666,7 +2890,7 @@ void main() {
         // along the face. Terrain keeps the FBM normal (its surfaces
         // aren't axis-aligned).
         vec3 bias_n = N;
-        if (!is_terrain_pre) {
+        if (!is_terrain_pre && !is_mesh_draw) {
             vec3 absN = abs(N);
             if (absN.x >= absN.y && absN.x >= absN.z) {
                 bias_n = vec3(sign(N.x), 0.0, 0.0);
@@ -2948,6 +3172,8 @@ void main() {
         float micro = 1.0 - (1.0 - clamp(terrain_micro_h, 0.0, 1.0))
                             * graze2 * 0.65;
         direct *= clamp(micro, 0.3, 1.0);
+        // Relief self-shadow from the POM sun march.
+        direct *= terrain_pom_vis;
         // Glancing Blinn specular on rock/snow — low sun glints off
         // wet-looking stone and snow crust; pure-Lambert terrain reads
         // chalky by comparison.
@@ -3703,6 +3929,6 @@ void main() {
     if (vEmissive.a > 0.5) mat_id = 5;     // emissive — handled above too
     outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)),
                        float(mat_id) / 255.0);
-    outGBuffer1 = vec4(octa_encode(N), 0.5, 0.0);
+    outGBuffer1 = vec4(octa_encode(N), is_terrain_pre ? terrain_pom_vis : 0.5, 0.0);
 }
 

@@ -595,6 +595,8 @@ void VulkanEngine::load_terrain_pbr_overrides() {
         { kTexDirt,  "Ground024" },
         { kTexSand,  "Ground027" },
         { kTexSnow,  "Snow006"   },
+        { kTexRoof,  "RoofingTiles012A" },
+        { kTexRoad,  "PavingStones131" },
     };
     auto resolve = [](const std::string& tail) -> std::string {
         const std::string roots[] = {
@@ -648,6 +650,50 @@ void VulkanEngine::load_terrain_pbr_overrides() {
                 stbi_image_free(ao);
             }
         }
+        // Albedo floor. Rock035 is a near-black basalt (mean sRGB ~23/255
+        // ≈ 0.9% linear reflectance) — rendered as pitch-black clutter
+        // rocks and cliffs. Real weathered rock sits ~15-30%. Scale in
+        // LINEAR space so the texture's contrast is kept, only exposure
+        // shifts. Sets already brighter than the floor are untouched.
+        if (set.slot == kTexRock) {
+            float lut[256];
+            for (int i = 0; i < 256; ++i) {
+                float c = i / 255.0f;
+                lut[i] = c <= 0.04045f ? c / 12.92f
+                                       : std::pow((c + 0.055f) / 1.055f, 2.4f);
+            }
+            double sum = 0.0;
+            const size_t px = static_cast<size_t>(aw) * ah;
+            for (size_t i = 0; i < px; ++i)
+                sum += 0.2126 * lut[alb[i * 4]] + 0.7152 * lut[alb[i * 4 + 1]] +
+                       0.0722 * lut[alb[i * 4 + 2]];
+            const float mean = static_cast<float>(sum / std::max<size_t>(px, 1));
+            const float kFloor = 0.15f;
+            if (mean > 1e-4f && mean < kFloor) {
+                const float k = kFloor / mean;
+                // Basalt is cool-tinted; the 13x lift turned that into a
+                // teal cast. Pull 60% toward per-pixel luminance so the
+                // rock reads as neutral grey stone.
+                const float kDesat = 0.6f;
+                for (size_t i = 0; i < px; ++i) {
+                    const float lr = lut[alb[i * 4]], lg = lut[alb[i * 4 + 1]],
+                                lb = lut[alb[i * 4 + 2]];
+                    const float y = 0.2126f * lr + 0.7152f * lg + 0.0722f * lb;
+                    const float ch[3] = { lr + (y - lr) * kDesat,
+                                          lg + (y - lg) * kDesat,
+                                          lb + (y - lb) * kDesat };
+                    for (int c = 0; c < 3; ++c) {
+                        float l = std::min(1.0f, ch[c] * k);
+                        float s = l <= 0.0031308f ? l * 12.92f
+                                  : 1.055f * std::pow(l, 1.0f / 2.4f) - 0.055f;
+                        alb[i * 4 + c] = static_cast<unsigned char>(
+                            std::clamp(s * 255.0f + 0.5f, 0.0f, 255.0f));
+                    }
+                }
+                log::infof("[terrain pbr] %s albedo lifted: mean %.3f -> %.2f linear",
+                           set.name, mean, kFloor);
+            }
+        }
         Texture2D t_alb = upload_texture_from_pixels(
             device_, allocator_, graphics_queue_, graphics_queue_family_,
             alb, aw, ah, VK_FORMAT_R8G8B8A8_SRGB, set.name);
@@ -687,7 +733,7 @@ void VulkanEngine::load_terrain_pbr_overrides() {
         }
         ++loaded;
     }
-    log::infof("[terrain pbr] %d/5 photogrammetry layer sets loaded "
+    log::infof("[terrain pbr] %d/7 photogrammetry layer sets loaded "
                "(AO-baked albedo, displacement in normal alpha)", loaded);
 }
 
@@ -997,6 +1043,10 @@ void VulkanEngine::bake_terrain_materials() {
         // PNG; slot 12 keeps the procedural grass so cube.frag can
         // lerp grass-mask=0 -> procedural, grass-mask=1 -> stylized.
         { TM_GRASS, kTexProcGrass, "terrain/proc_grass" },
+        // Placeholders for the roof / road slots (replaced by the
+        // ambientCG sets in load_terrain_pbr_overrides()).
+        { TM_ROCK,  kTexRoof,      "terrain/roof_placeholder" },
+        { TM_DIRT,  kTexRoad,      "terrain/road_placeholder" },
     };
     std::vector<unsigned char> alb, nrm;
     for (const Mat& m : mats) {

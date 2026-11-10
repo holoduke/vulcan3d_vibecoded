@@ -18,7 +18,7 @@ layout(location = 1) out vec2 outMotion;
 layout(location = 2) out vec4 outGBuffer0;
 layout(location = 3) out vec4 outGBuffer1;
 
-const int kTextureCount = 13;
+const int kTextureCount = 15;
 layout(set = 0, binding = 3) uniform sampler2D u_albedo[kTextureCount];
 
 layout(set = 0, binding = 0) uniform SceneUBO {

@@ -86,6 +86,14 @@ void VulkanEngine::init_pipeline() {
     cfg.alpha_blend_color0_only = false;
 
     pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    {
+        frag_gbuf_module_ = vkpipe::load_shader_module(device_, sd + "/cube_gbuf.frag.spv");
+        if (frag_gbuf_module_) {
+            vkpipe::GraphicsPipelineConfig gcfg = cfg;
+            gcfg.frag = frag_gbuf_module_;
+            pipeline_gbuf_ = vkpipe::build_graphics_pipeline(device_, gcfg);
+        }
+    }
 
     // Depth-only pre-pass pipeline. draw() runs render_world_depth_pass()
     // before the color pass to populate depth_image_ so the color pass's
@@ -164,6 +172,11 @@ void VulkanEngine::init_terrain_pipelines() {
         cfg.vbindings = { b0, b1 };
         cfg.vattrs = vattrs;
         terrain_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+        if (frag_gbuf_module_) {
+            vkpipe::GraphicsPipelineConfig gcfg = cfg;
+            gcfg.frag = frag_gbuf_module_;
+            terrain_gbuf_pipeline_ = vkpipe::build_graphics_pipeline(device_, gcfg);
+        }
         // Wireframe variant (debug mesh-density view).
         {
             vkpipe::GraphicsPipelineConfig wcfg = cfg;
@@ -213,6 +226,8 @@ void VulkanEngine::init_terrain_pipelines() {
 
 void VulkanEngine::destroy_terrain_pipelines() {
     if (terrain_pipeline_)        vkDestroyPipeline(device_, terrain_pipeline_, nullptr);
+    if (terrain_gbuf_pipeline_)   vkDestroyPipeline(device_, terrain_gbuf_pipeline_, nullptr);
+    terrain_gbuf_pipeline_ = VK_NULL_HANDLE;
     if (terrain_depth_pipeline_)  vkDestroyPipeline(device_, terrain_depth_pipeline_, nullptr);
     if (terrain_wire_pipeline_)   vkDestroyPipeline(device_, terrain_wire_pipeline_, nullptr);
     if (terrain_shadow_pipeline_) vkDestroyPipeline(device_, terrain_shadow_pipeline_, nullptr);
@@ -1319,6 +1334,10 @@ void VulkanEngine::destroy_grass_pipeline() {
 
 void VulkanEngine::destroy_pipeline() {
     if (pipeline_)         vkDestroyPipeline(device_, pipeline_, nullptr);
+    if (pipeline_gbuf_)    vkDestroyPipeline(device_, pipeline_gbuf_, nullptr);
+    if (frag_gbuf_module_) vkDestroyShaderModule(device_, frag_gbuf_module_, nullptr);
+    pipeline_gbuf_ = VK_NULL_HANDLE;
+    frag_gbuf_module_ = VK_NULL_HANDLE;
     if (depth_pipeline_)   vkDestroyPipeline(device_, depth_pipeline_, nullptr);
     if (shadow_lr_pipeline_) vkDestroyPipeline(device_, shadow_lr_pipeline_, nullptr);
     if (pipeline_layout_)  vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);

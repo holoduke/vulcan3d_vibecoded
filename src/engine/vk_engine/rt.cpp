@@ -154,6 +154,7 @@ void VulkanEngine::init_rt() {
     // and (more importantly) keeps RT load below the GPU TDR threshold
     // when many dyn props + projectiles + particles share the TLAS.
     bake_merged_static_blas();
+    build_castle_mesh_blas();
 
     // --- Allocate TLAS storage + scratch + instance buffer (rebuilt each frame) ---
     // Sized for the FIFO box cap (200) + ~32 static brushes/lanterns +
@@ -997,6 +998,22 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
                        false, blas_device_address_, door_tex);
     }
 
+    // Castle mesh parts (round towers, roofs, gate arch): static, world-
+    // space BLAS each, identity transform, full mask like the brushes.
+    // GI hits shade them with world triplanar (tex .w = 0); .z = repeat
+    // scale for that hit lookup.
+    for (const auto& g : castle_meshes_) {
+        if (!g.blas_addr) continue;
+        const glm::mat4 I(1.0f);
+        glm::vec4 tex = tex_on
+            ? glm::vec4(static_cast<float>(g.tex_albedo),
+                        static_cast<float>(g.tex_normal),
+                        g.tex_albedo == 1 ? 0.12f : 0.55f, 0.0f)
+            : kNoTex;
+        write_instance(I, I, glm::vec4(tex_on ? g.tint : g.fallback, 1.0f),
+                       glm::vec3(0.0f), false, g.blas_addr, tex);
+    }
+
     // Sparks are intentionally NOT added to the TLAS. With kMaxParticles=384
     // and high fire rates, including them costs ~hundreds of instance writes
     // + AS-build work per frame, plus they get traversed by every GI and
@@ -1017,7 +1034,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
             : p.initial_dir;
         glm::mat4 align = align_local_y_to(pos, dir);
         glm::mat4 scale_m = glm::scale(glm::mat4(1.0f),
-                                       glm::vec3(p.radius, p.half_length, p.radius));
+                                       glm::vec3(0.006f, p.half_length, 0.006f));
         glm::mat4 m = align * scale_m;
         // Mask 0xFC: clears bit 0 (no shadow-caster for non-terrain
         // receivers) AND bit 1 (no shadow-caster for terrain receivers).

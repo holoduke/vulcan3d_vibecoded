@@ -44,6 +44,8 @@ struct ScatterParams {
     float snow_band_h   = 110.0f;   // density tapers off into snow
     // Castle keep-out (same as grass).
     glm::vec2 keep_out_xz = glm::vec2(14.0f, 14.0f);
+    // Optional extra keep-out (the castle road). Null = none.
+    const struct Road* road = nullptr;
 };
 
 // Builds the rock mesh + places instances. Boulders: 0.15-0.55 m on

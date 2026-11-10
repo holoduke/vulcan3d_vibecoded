@@ -177,6 +177,19 @@ void walk_node(const tinygltf::Model& model, int node_idx,
                         static_cast<float>(mat.pbrMetallicRoughness.baseColorFactor[2]),
                         static_cast<float>(mat.pbrMetallicRoughness.baseColorFactor[3]));
                 }
+                // Spec-gloss assets (e.g. the gun) carry their colour in
+                // KHR_materials_pbrSpecularGlossiness.diffuseFactor and
+                // leave baseColorFactor at tinygltf's default white —
+                // which rendered every gun part pure white.
+                auto ext = mat.extensions.find("KHR_materials_pbrSpecularGlossiness");
+                if (ext != mat.extensions.end() && ext->second.Has("diffuseFactor")) {
+                    const auto& df = ext->second.Get("diffuseFactor");
+                    if (df.IsArray() && df.ArrayLen() == 4) {
+                        for (int c = 0; c < 4; ++c)
+                            p.base_color[c] = static_cast<float>(
+                                df.Get(c).GetNumberAsDouble());
+                    }
+                }
             }
             process_primitive(model, prim, xform, p);
             if (!p.vertices.empty() && !p.indices.empty()) {

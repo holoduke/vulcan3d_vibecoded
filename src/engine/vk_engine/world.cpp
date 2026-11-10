@@ -146,6 +146,12 @@ void VulkanEngine::init_world() {
                 }
             }
         }
+        // Castle road: levelled spline from the gate into the valley.
+        // Carved into the SOURCE heights here so raster, BLAS, Jolt, the
+        // shadow/aux bakes and grass all agree with the shader paving.
+        castle_road_ = make_castle_road(hm, rt_.water_level, hp.plateau_height + 0.05f);
+        carve_heights(castle_road_, hm);
+        log::infof("[road] %zu centreline points carved", castle_road_.pts.size());
         // Cache for collision + Phase 4 sculpt access.
         terrain_data_.dim = hm.dim;
         terrain_data_.cell = hm.cell;
@@ -228,6 +234,13 @@ void VulkanEngine::init_world() {
         // y=plateau_height -> all walls culled out at most camera angles.
         for (auto& a : world_.render_aabbs) { a.min.y += hp.plateau_height;
                                               a.max.y += hp.plateau_height; }
+        // Castle mesh parts (round towers, roofs, arch): same lift, then upload.
+        for (auto& m : world_.meshes) {
+            for (auto& v : m.verts) v.p.y += hp.plateau_height;
+            m.bmin.y += hp.plateau_height;
+            m.bmax.y += hp.plateau_height;
+        }
+        init_castle_meshes();
         // Lift player's default spawn point above the new ground.
         player_.position.y += hp.plateau_height;
 
@@ -295,6 +308,7 @@ void VulkanEngine::init_world() {
         sp.water_level = rt_.water_level;
         sp.rock_band_h = rt_.terrain_h_dirt_rock_start;
         sp.snow_band_h = rt_.terrain_h_rock_snow_start;
+        sp.road = &castle_road_;
         scatter_ = build_scatter(device_, allocator_,
                                  graphics_queue_, graphics_queue_family_,
                                  hm, sp);
@@ -309,6 +323,11 @@ void VulkanEngine::init_world() {
     sboxes.reserve(world_.brushes.size());
     for (const auto& b : world_.brushes) {
         sboxes.push_back({b.center, b.size * 0.5f});
+    }
+    // Castle mesh colliders (round towers) sit after the brush AABBs.
+    for (size_t i = world_.brushes.size(); i < world_.aabbs.size(); ++i) {
+        const auto& a = world_.aabbs[i];
+        sboxes.push_back({(a.min + a.max) * 0.5f, (a.max - a.min) * 0.5f});
     }
     physics_->add_static_boxes(sboxes.data(), sboxes.size());
     // Heightfield collision for terrain. Player + crates collide cleanly

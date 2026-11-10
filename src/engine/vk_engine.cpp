@@ -43,6 +43,7 @@
 #include "engine/vk_initializers.h"
 #include "engine/vk_pipelines.h"
 
+#include <cstdlib>
 #include <VkBootstrap.h>
 #include <GLFW/glfw3.h>
 
@@ -183,6 +184,7 @@ void VulkanEngine::init() {
                                      // buf[1 - write_slot] / buf[write_slot] here.
                                      reservoir_buf_[0],
                                      reservoir_buf_[0]);
+        write_depth_copy_binding();   // binding 27 (prepass depth copy)
     }
     present_loader_frame("Compiling pipelines",   0.70f);
     init_pipeline();
@@ -473,6 +475,26 @@ void VulkanEngine::run(const RunOptions& opts) {
             in.mouse_dx = 0.0;
             in.mouse_dy = 0.0;
         }
+        // Dev hook for headless captures of weapon visuals: QLIKE_TEST_FIRE=1
+        // pulls the trigger every 8th frame (pair with --screenshot).
+        {
+            static const bool test_fire = std::getenv("QLIKE_TEST_FIRE") != nullptr;
+            static int test_fire_n = 0;
+            if (test_fire && (++test_fire_n % 8) == 0) {
+                in.fire = true;
+                in.fire_held = true;
+            }
+            // QLIKE_TEST_HOLD=1: pin the camera at the restored settings
+            // pose (no gravity) for aerial / overview captures.
+            static const bool test_hold = std::getenv("QLIKE_TEST_HOLD") != nullptr;
+            static bool hold_init = false;
+            static glm::vec3 hold_pos{0.0f};
+            if (test_hold) {
+                if (!hold_init) { hold_pos = player_.position; hold_init = true; }
+                player_.position = hold_pos;
+                player_.velocity = glm::vec3(0.0f);
+            }
+        }
         // --scene N teleport works WITHOUT --autodemo too. Pin the camera
         // each frame so headless captures (--frames N --screenshot) hit the
         // intended pose; without this the camera kept whatever position the
@@ -580,7 +602,8 @@ void VulkanEngine::run(const RunOptions& opts) {
         if (fire_cooldown_ > 0.0f) fire_cooldown_ -= frame_dt;
         if (muzzle_flash_timer_ > 0.0f) muzzle_flash_timer_ -= frame_dt;
         if (recoil_timer_       > 0.0f) recoil_timer_       -= frame_dt;
-        if (state_ == State::Playing && window_->cursor_captured()) {
+        if (state_ == State::Playing && (window_->cursor_captured() ||
+                                           std::getenv("QLIKE_TEST_FIRE"))) {
             // Raymarch terrain reads FBM directly in the shader — sculpting
             // the heightmap has no visual effect and only triggers wasted
             // chunk rebuilds / BLAS rebuilds / texture uploads.
@@ -800,6 +823,7 @@ void VulkanEngine::run(const RunOptions& opts) {
                 if (gpu_query_pool_) {
                     log::infof("gpu    frame=%.2f ms (TDR limit ~2000 ms)",
                                gpu_timers_.scene_ms);
+                    prof_log();
                 }
             }
         }
@@ -847,7 +871,9 @@ void VulkanEngine::run(const RunOptions& opts) {
                           std::cos(y_rad) * std::cos(p_rad));
             enqueue_terrain_shadow_rebake(cur);
         }
-        update_scene_ubo();
+        // update_scene_ubo() moved into draw(), after the prev-frame fence
+        // wait: writing it here raced the GPU still reading it for the
+        // previous frame (single host-visible UBO shared by both slots).
         // Heightmap sun-shadow is sun-direction-dependent. Instead of
         // re-baking the whole 1024² texture in one go (~100 ms hitch),
         // we tile the bake (kShadowTileSize per side), sort tiles by
@@ -965,6 +991,7 @@ void VulkanEngine::run(const RunOptions& opts) {
             // timestamps are safe to read non-blocking. Internally
             // logs a WARN at >1500 ms (Windows TDR is ~2 s).
             read_gpu_timestamps_for_slot(frame_number_ % kFrameOverlap);
+            prof_read_slot(frame_number_ % kFrameOverlap);
 
             uint32_t img_index = 0;
             VkResult acq = acquire_next_image(UINT64_MAX,
@@ -1077,6 +1104,7 @@ void VulkanEngine::shutdown() {
     // matrices (TLAS instance buffer) BEFORE destroying the physics world that
     // owns those bodies. Otherwise the renderer's deferred destruction could
     // deref freed Jolt body data.
+    guarded("destroy_castle", [&]{ destroy_castle_meshes(); });
     guarded("destroy_rt",     [&]{ destroy_rt(); });
     guarded("physics_.reset", [&]{ physics_.reset(); });
     guarded("destroy_descriptors", [&]{ destroy_descriptors(); });

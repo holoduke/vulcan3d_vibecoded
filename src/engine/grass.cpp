@@ -234,9 +234,66 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
 
     if (blades.empty()) return g;
 
-    // Upload instance buffer. Host-visible so we can update in-place
-    // for the Phase 2 sculpt-aware re-placement (not yet wired). Stays
-    // mapped persistently — cheap for ~5 MB max.
+    // Bucket into 16 m cells (stable sort keeps the Halton order inside
+    // each cell, so a per-cell prefix stays a uniform density thinning).
+    {
+        constexpr float kCell = 16.0f;
+        float min_x = blades[0].pos_pad.x, min_z = blades[0].pos_pad.z;
+        float max_x = min_x, max_z = min_z;
+        for (const auto& b : blades) {
+            min_x = std::min(min_x, b.pos_pad.x); max_x = std::max(max_x, b.pos_pad.x);
+            min_z = std::min(min_z, b.pos_pad.z); max_z = std::max(max_z, b.pos_pad.z);
+        }
+        const int nx = std::max(1, static_cast<int>((max_x - min_x) / kCell) + 1);
+        const int nz = std::max(1, static_cast<int>((max_z - min_z) / kCell) + 1);
+        auto cell_of = [&](const GrassBlade& b) {
+            int cx = std::clamp(static_cast<int>((b.pos_pad.x - min_x) / kCell), 0, nx - 1);
+            int cz = std::clamp(static_cast<int>((b.pos_pad.z - min_z) / kCell), 0, nz - 1);
+            return cz * nx + cx;
+        };
+        // Sort an index array (std::stable_sort on the over-aligned
+        // GrassBlade trips MSVC's aligned_storage static_assert).
+        std::vector<int>      cell_ids(blades.size());
+        std::vector<uint32_t> order(blades.size());
+        for (uint32_t i = 0; i < blades.size(); ++i) {
+            cell_ids[i] = cell_of(blades[i]);
+            order[i] = i;
+        }
+        std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+            return cell_ids[a] != cell_ids[b] ? cell_ids[a] < cell_ids[b] : a < b;
+        });
+        std::vector<GrassBlade> sorted;
+        sorted.reserve(blades.size());
+        for (uint32_t i : order) sorted.push_back(blades[i]);
+        blades.swap(sorted);
+        // Blades are at most ~1 m tall incl. height slider + sway.
+        constexpr float kPadY = 1.5f, kPadXZ = 1.0f;
+        int cur = -1;
+        for (uint32_t i = 0; i < blades.size(); ++i) {
+            const auto& p = blades[i].pos_pad;
+            int c = cell_of(blades[i]);
+            if (c != cur) {
+                cur = c;
+                GrassMesh::Cell cell{};
+                cell.first = i;
+                cell.count = 0;
+                cell.aabb_min = glm::vec3(p) - glm::vec3(kPadXZ, kPadY, kPadXZ);
+                cell.aabb_max = glm::vec3(p) + glm::vec3(kPadXZ, kPadY, kPadXZ);
+                g.cells.push_back(cell);
+            }
+            auto& cell = g.cells.back();
+            ++cell.count;
+            cell.aabb_min = glm::min(cell.aabb_min, glm::vec3(p) - glm::vec3(kPadXZ, kPadY, kPadXZ));
+            cell.aabb_max = glm::max(cell.aabb_max, glm::vec3(p) + glm::vec3(kPadXZ, kPadY, kPadXZ));
+        }
+        log::infof("[grass] bucketed into %zu cells (%dx%d grid, %.0f m)",
+                   g.cells.size(), nx, nz, kCell);
+    }
+
+    // Upload instance buffer. PREFER_DEVICE + sequential-write: on a
+    // ReBAR system VMA picks device-local host-visible memory, otherwise
+    // it falls back to host memory. Was PREFER_HOST, which made the GPU
+    // pull the instance data over PCIe on every draw.
     const VkDeviceSize size = sizeof(GrassBlade) *
                               static_cast<VkDeviceSize>(blades.size());
     VkBufferCreateInfo bci{
@@ -248,7 +305,7 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
         .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
     };
     VmaAllocationCreateInfo aci{};
-    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                 VMA_ALLOCATION_CREATE_MAPPED_BIT;
     if (vmaCreateBuffer(alloc, &bci, &aci,

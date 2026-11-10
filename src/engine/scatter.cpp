@@ -1,4 +1,5 @@
 #include "engine/scatter.h"
+#include "engine/road.h"
 #include "engine/terrain.h"
 #include "engine/log.h"
 
@@ -124,6 +125,10 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
         float wz = (u01(rng) * 2.0f - 1.0f) * params.half_extent;
         if (std::abs(wx) < params.keep_out_xz.x &&
             std::abs(wz) < params.keep_out_xz.y) continue;
+        if (params.road && wx > params.road->bb_min.x && wx < params.road->bb_max.x &&
+            wz > params.road->bb_min.y && wz < params.road->bb_max.y &&
+            params.road->distance(wx, wz) <
+                params.road->half_width + params.road->shoulder + 0.6f) continue;
         float h = h_at(wx, wz);
         if (h < params.water_level + 0.4f) continue;     // not in/at water
         float ny = n_y_at(wx, wz);

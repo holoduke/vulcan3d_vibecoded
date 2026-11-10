@@ -79,6 +79,11 @@ void VulkanEngine::draw(uint32_t img_index) {
         vk_check(vkWaitForFences(device_, 1, &prev, VK_TRUE, UINT64_MAX),
                  "prev-frame fence (TLAS hazard)");
     }
+    // Scene UBO is a single host-visible buffer read by both frame slots.
+    // Only now (both slots' GPU work finished) is it safe to overwrite;
+    // writing it earlier in the main loop changed camera/sun data under
+    // the previous frame while it was still being shaded.
+    update_scene_ubo();
 
     // ---------- Compute queue: per-frame TLAS rebuild ----------
     // Recorded onto a separate compute command buffer and submitted on the
@@ -147,6 +152,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     // Capture per-frame camera state once for all three render passes
     // (terrain raymarch LR, depth pre-pass, color pass). Replaces three
     // identical aspect/lerp/view/proj/Halton-jitter rebuilds per frame.
+    prof_begin_frame(frame.command_buffer, gpu_query_slot);
     current_frame_view_ = compute_frame_view();
 
     // Quadtree CLOD terrain: select nodes + fill this frame's instance
@@ -170,6 +176,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     if (sun_shadow_needed) {
         render_sun_shadow_pass(frame.command_buffer);
     }
+    prof_mark(frame.command_buffer, "sun_shadow_map");
 
     // Batch the world-pass attachment transitions into a single
     // vkCmdPipelineBarrier2 — was 3 separate barrier calls each
@@ -233,6 +240,43 @@ void VulkanEngine::draw(uint32_t img_index) {
         render_world_depth_pass(frame.command_buffer);
         vkCmdEndRendering(frame.command_buffer);
     }
+    prof_mark(frame.command_buffer, "depth_prepass");
+
+    // Snapshot the prepass depth into a sampled image (binding 27). The
+    // grass raymarcher draws INSIDE the colour pass, where the live depth
+    // attachment cannot be sampled; with this copy it stops marching at
+    // the nearest opaque surface instead of walking 96 steps through the
+    // blade field behind castle walls. ~5 MB copy, negligible.
+    if (depth_copy_image_) {
+        VkCommandBuffer c = frame.command_buffer;
+        const vkinit::ImageTransition pre[] = {
+            { depth_image_, VK_IMAGE_ASPECT_DEPTH_BIT,
+              VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL },
+            { depth_copy_image_, VK_IMAGE_ASPECT_DEPTH_BIT,
+              depth_copy_layout_valid_ ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                       : VK_IMAGE_LAYOUT_UNDEFINED,
+              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL },
+        };
+        vkinit::transition_images_batch(c, pre, 2);
+        VkImageCopy region{};
+        region.srcSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
+        region.dstSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
+        region.extent = { render_extent_.width, render_extent_.height, 1 };
+        vkCmdCopyImage(c, depth_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       depth_copy_image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &region);
+        const vkinit::ImageTransition post[] = {
+            { depth_image_, VK_IMAGE_ASPECT_DEPTH_BIT,
+              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+              VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL },
+            { depth_copy_image_, VK_IMAGE_ASPECT_DEPTH_BIT,
+              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+        };
+        vkinit::transition_images_batch(c, post, 2);
+        depth_copy_layout_valid_ = true;
+    }
 
     // ---------- Pass 0.25: half-rate sun shadow producer ----------
     // Roadmap item #4 Phase 2 — when rt_.half_rate_shadows is on, fire
@@ -267,6 +311,7 @@ void VulkanEngine::draw(uint32_t img_index) {
                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
+    prof_mark(frame.command_buffer, "shadow_lr");
     // ---------- Pass 0.5: low-res raymarch terrain (when scale < 1) ----------
     // Renders the FBM raymarch into tr_lr_* attachments at a fraction of
     // the main resolution. Compose pass at the start of the world color
@@ -356,6 +401,7 @@ void VulkanEngine::draw(uint32_t img_index) {
                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                         VK_IMAGE_ASPECT_DEPTH_BIT);
     }
+    prof_mark(frame.command_buffer, "terrain_raymarch_lr");
 
     auto color_att = vkinit::color_attachment_info(scene_color_view_,
                                                    &clear_color,
@@ -432,6 +478,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     }
     render_world(frame.command_buffer);
     vkCmdEndRendering(frame.command_buffer);
+    prof_mark(frame.command_buffer, "world_tail");
 
     // ---------- Pass 1b: SSDM displacement vector ----------
     // Runs BEFORE the post-world transition batch flips depth to
@@ -442,7 +489,11 @@ void VulkanEngine::draw(uint32_t img_index) {
     // consumers. No effect downstream yet (Phase 1 only populates the
     // image; the mip-pyramid + remap passes that consume it are Phases
     // 2-4 still to land).
-    render_world_ssdm_disp(frame.command_buffer);
+    // DISABLED: nothing consumes the SSDM images (compose_ssdm and the
+    // shell pass are both commented out) and it cost ~7% of the frame:
+    // a re-draw of every SPOM brush plus two pyramid passes. The image
+    // stays in SHADER_READ_ONLY from init, so re-enabling is one line.
+    // render_world_ssdm_disp(frame.command_buffer);
 
     // ---------- Pass 2: TAA into history_image_[history_write_slot_] ----------
     // Flip scene_color + depth into shader-read for TAA in one batched
@@ -497,6 +548,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     // false (default until Phase 4 promotes this to the canonical scene
     // colour writer).
     render_deferred_lighting(frame.command_buffer);
+    prof_mark(frame.command_buffer, "deferred_lighting");
     // When the toggle is on, blit the deferred output back into
     // scene_color so the downstream chain (SVGF, TAA, FSR3, compose)
     // sees the deferred result without descriptor surgery. scene_color
@@ -532,7 +584,9 @@ void VulkanEngine::draw(uint32_t img_index) {
     // a-trous compounds rather than competes. No-op when
     // rt_.svgf_enabled is false (per-frame branch -- pipelines stand
     // up unconditionally so the toggle is allocation-free).
+    prof_mark(frame.command_buffer, "deferred_blit");
     render_svgf(frame.command_buffer, static_cast<uint32_t>(frame_number_));
+    prof_mark(frame.command_buffer, "svgf");
     // Both history slots end the previous frame in SHADER_READ_ONLY (write slot
     // exited at frame end; read slot wasn't touched). Read slot needs no
     // transition; write slot moves into COLOR_ATTACHMENT.
@@ -606,6 +660,8 @@ void VulkanEngine::draw(uint32_t img_index) {
     vkinit::transition_image(frame.command_buffer, history_image_[history_write_slot_],
                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    prof_mark(frame.command_buffer, "taa");
 
     // ---------- Pass 2.2: FSR2 dispatch (optional, replaces TAAU) ----------
     // When FSR2 is on, the SDK does its own temporal accumulation +
@@ -733,6 +789,7 @@ void VulkanEngine::draw(uint32_t img_index) {
         taau_history_valid_ = false;
     }
 
+    prof_mark(frame.command_buffer, "fsr_taau");
     // ---------- Copy denoised history → swapchain ----------
     // ---------- Pass 2.5: Compose history (HDR) into swapchain (LDR) with ACES tonemap ----------
 
@@ -744,6 +801,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     // which is fine because compose multiplies by bloom_params.x and the
     // strength slider is the user-facing toggle.
     run_bloom_chain(frame.command_buffer);
+    prof_mark(frame.command_buffer, "bloom");
     // src stage = COLOR_ATTACHMENT_OUTPUT (NOT the default TOP_OF_PIPE
     // for UNDEFINED) so this layout write chains with the acquire
     // semaphore wait (also COLOR_ATTACHMENT_OUTPUT, see the submit's
@@ -882,6 +940,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     // Captures the post-compose, pre-ImGui swapchain to a private image
     // the SDK uses for HUD extraction. No-op when FSR3 SwapChain proxy
     // isn't active.
+    prof_mark(frame.command_buffer, "compose");
     capture_hudless_snapshot(frame.command_buffer, img_index);
 
     // ---------- Pass 3: ImGui directly on swapchain (still in COLOR_ATTACHMENT) ----------
@@ -902,6 +961,8 @@ void VulkanEngine::draw(uint32_t img_index) {
         if (dd) ImGui_ImplVulkan_RenderDrawData(dd, frame.command_buffer);
         vkCmdEndRendering(frame.command_buffer);
     }
+
+    prof_mark(frame.command_buffer, "imgui");
 
     // Two screenshot triggers: the --screenshot CLI one-shot AND F12 in-game.
     std::string screenshot_path_this_frame;

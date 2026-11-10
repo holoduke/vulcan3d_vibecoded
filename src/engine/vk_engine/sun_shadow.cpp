@@ -328,6 +328,11 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
         push_shadow(static_brush_models_[i]);   // pre-baked, see init_world
         vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     }
+    if (!castle_meshes_.empty()) {
+        draw_castle_meshes(cmd, vp, vp, light_frustum, true, sun_shadow_pipeline_layout_);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &cube_off);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    }
 
     // Dyn-props — same cube BLAS is the cube mesh; cylinders use their
     // own mesh. Light-frustum cull mirrors the brushes path.

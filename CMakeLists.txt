@@ -282,6 +282,7 @@ add_library(qlike_engine STATIC
     src/engine/vk_engine/settings.cpp
     src/engine/vk_engine/descriptors.cpp
     src/engine/vk_engine/rt.cpp
+    src/engine/vk_engine/castle_mesh.cpp
     src/engine/vk_engine/post.cpp
     src/engine/vk_engine/bloom.cpp
     src/engine/vk_engine/taa.cpp
@@ -317,6 +318,7 @@ add_library(qlike_engine STATIC
     src/engine/terrain_clod.cpp
     src/engine/grass.cpp
     src/engine/scatter.cpp
+    src/engine/road.cpp
 )
 target_include_directories(qlike_engine PUBLIC src)
 target_include_directories(qlike_engine PRIVATE
@@ -415,6 +417,21 @@ foreach(SHADER ${SHADER_SOURCES})
         VERBATIM)
     list(APPEND COMPILED_SHADERS ${SPV_OUT})
 endforeach()
+
+# G-buffer-only variant of cube.frag: all forward lighting (RT shadows,
+# path-traced GI, AO, fog) compiled out. Used for brushes / props / mesh
+# terrain whenever the deferred lighting pass owns their shading — lower
+# register pressure, no side-effect stores, far cheaper per fragment.
+set(CUBE_GBUF_SPV "${SHADER_OUTPUT_DIR}/cube_gbuf.frag.spv")
+add_custom_command(
+    OUTPUT ${CUBE_GBUF_SPV}
+    COMMAND ${Vulkan_GLSLC_EXECUTABLE} --target-env=vulkan1.3 -O
+            -DQLIKE_GBUFFER_ONLY=1 -fshader-stage=frag
+            ${CMAKE_SOURCE_DIR}/shaders/cube.frag -o ${CUBE_GBUF_SPV}
+    DEPENDS ${CMAKE_SOURCE_DIR}/shaders/cube.frag
+    COMMENT "Compiling shader cube_gbuf.frag (G-buffer-only variant)"
+    VERBATIM)
+list(APPEND COMPILED_SHADERS ${CUBE_GBUF_SPV})
 
 if(COMPILED_SHADERS)
     add_custom_target(shaders ALL DEPENDS ${COMPILED_SHADERS})

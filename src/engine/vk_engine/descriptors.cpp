@@ -64,7 +64,7 @@ void VulkanEngine::init_descriptors() {
         // +1 (now 11) for the terrain aux bake (curvature + sky-vis)
         // at binding 26 — AAA terrain Phases 4/5.
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            kTextureCount * 2 + 11 + kSpomMaterialCount },
+            kTextureCount * 2 + 12 + kSpomMaterialCount },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -84,7 +84,7 @@ void VulkanEngine::init_descriptors() {
     //              terrain_raymarch_scale < 1.
     //          15=ReSTIR reservoir SSBO (read prev), 16=write cur.
     //              Owned by restir.cpp; cube.frag's GI loop reads/writes.
-    VkDescriptorSetLayoutBinding bindings[27]{};
+    VkDescriptorSetLayoutBinding bindings[28]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -289,10 +289,18 @@ void VulkanEngine::init_descriptors() {
     bindings[26].descriptorCount = 1;
     bindings[26].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Binding 27: copy of the depth PRE-PASS (D32, sampled). Read by the
+    // grass raymarcher (inside the colour pass) to stop its march at the
+    // nearest opaque surface. Rewritten on swapchain recreate.
+    bindings[27].binding = 27;
+    bindings[27].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[27].descriptorCount = 1;
+    bindings[27].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 27, .pBindings = bindings,
+        .bindingCount = 28, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),
@@ -529,7 +537,11 @@ void VulkanEngine::update_scene_ubo() {
         std::max(0.0f, rt_.terrain_disp_amp),
         glm::clamp(rt_.terrain_disp_smooth_mip, 0.0f, 6.0f),
         std::max(20.0f, rt_.terrain_pom_far_m),
-        0.0f);
+        // .w = 1 when the deferred pass owns lighting for material 1/3
+        // pixels: cube.frag then writes the G-buffer and skips its own
+        // shadow/GI/AO/fog (deferred overwrites that colour anyway).
+        // Kept 0 when SVGF or ReSTIR need cube.frag's GI side outputs.
+        deferred_owns_lighting() ? 1.0f : 0.0f);
     // Anti-tile blend params -- gates the rotated extra sample inside
     // cube.frag's terrain splat. .x is the master toggle; .y the blend
     // weight of the rotated sample (0 = single sample, 1 = full blend).
@@ -693,6 +705,18 @@ void VulkanEngine::update_scene_ubo() {
             voxel::kBrickSize);
     } else {
         data.voxel_origin = glm::vec4(0.0f);  // .w = 0 → disabled
+    }
+
+    // Castle road polyline (static after init_world; cached once).
+    {
+        static std::vector<glm::vec4> road_gpu;
+        if (road_gpu.empty() && !castle_road_.empty())
+            road_gpu = road_gpu_points(castle_road_, 64);
+        const int n = static_cast<int>(std::min<size_t>(road_gpu.size(), 64));
+        data.road_info = glm::vec4(static_cast<float>(n), castle_road_.half_width,
+                                   castle_road_.shoulder, 0.0f);
+        data.road_bbox = glm::vec4(castle_road_.bb_min, castle_road_.bb_max);
+        for (int i = 0; i < n; ++i) data.road_pts[i] = road_gpu[size_t(i)];
     }
 
     VmaAllocationInfo ai{};

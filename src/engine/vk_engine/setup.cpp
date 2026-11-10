@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -83,6 +85,10 @@ void VulkanEngine::init_vulkan() {
     base_feats.samplerAnisotropy = VK_TRUE;
     // Wireframe debug view (terrain mesh / tessellation density).
     base_feats.fillModeNonSolid = VK_TRUE;
+    // Water + raymarched grass blend colour attachment 0 only (motion /
+    // G-buffer stay opaque) — mixed blend states need independentBlend
+    // (validation VUID-...-pAttachments-00605 without it).
+    base_feats.independentBlend = VK_TRUE;
 
     vkb::PhysicalDeviceSelector selector{ vkb_inst };
     auto phys_ret = selector.set_minimum_version(1, 3)
@@ -361,7 +367,8 @@ void VulkanEngine::init_depth_image() {
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-                 VK_IMAGE_USAGE_SAMPLED_BIT,
+                 VK_IMAGE_USAGE_SAMPLED_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
@@ -387,6 +394,32 @@ void VulkanEngine::init_depth_image() {
     };
     vk_check(vkCreateImageView(device_, &vci, nullptr, &depth_view_),
              "vkCreateImageView depth");
+
+    // Prepass depth copy (sampled). Same format so vkCmdCopyImage works.
+    {
+        VkImageCreateInfo cci = ici;
+        cci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        VmaAllocationCreateInfo caci{};
+        caci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        vk_check(vmaCreateImage(allocator_, &cci, &caci, &depth_copy_image_,
+                                &depth_copy_alloc_, nullptr),
+                 "vmaCreateImage depth copy");
+        VkImageViewCreateInfo cvci = vci;
+        cvci.image = depth_copy_image_;
+        vk_check(vkCreateImageView(device_, &cvci, nullptr, &depth_copy_view_),
+                 "vkCreateImageView depth copy");
+        if (!depth_copy_sampler_) {
+            VkSamplerCreateInfo sci{};
+            sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+            sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            sci.addressModeU = sci.addressModeV = sci.addressModeW =
+                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            sci.maxLod = 0.0f;
+            vk_check(vkCreateSampler(device_, &sci, nullptr, &depth_copy_sampler_),
+                     "depth copy sampler");
+        }
+    }
     log::info("depth image created");
 }
 
@@ -396,6 +429,24 @@ void VulkanEngine::destroy_depth_image() {
     depth_view_ = VK_NULL_HANDLE;
     depth_image_ = VK_NULL_HANDLE;
     depth_alloc_ = nullptr;
+    if (depth_copy_view_) vkDestroyImageView(device_, depth_copy_view_, nullptr);
+    if (depth_copy_image_) vmaDestroyImage(allocator_, depth_copy_image_, depth_copy_alloc_);
+    depth_copy_view_ = VK_NULL_HANDLE;
+    depth_copy_image_ = VK_NULL_HANDLE;
+    depth_copy_alloc_ = nullptr;
+    depth_copy_layout_valid_ = false;
+}
+
+void VulkanEngine::write_depth_copy_binding() {
+    if (!scene_desc_set_ || !depth_copy_view_ || !depth_copy_sampler_) return;
+    VkDescriptorImageInfo bi{ depth_copy_sampler_, depth_copy_view_,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = scene_desc_set_; w.dstBinding = 27; w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &bi;
+    vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
 }
 
 void VulkanEngine::recreate_swapchain() {
@@ -410,6 +461,7 @@ void VulkanEngine::recreate_swapchain() {
     destroy_depth_image();
     init_swapchain();
     init_depth_image();
+    write_depth_copy_binding();   // depth copy image was recreated
     if (taa_desc_pool_) recreate_taa_targets();
     // TAAU targets depend on swapchain_extent_; rebuild after swapchain change.
     if (taau_desc_pool_) recreate_taau_targets();
@@ -539,7 +591,84 @@ void VulkanEngine::init_gpu_query_pool() {
                kQueriesPerFrame * kFrameOverlap, gpu_timestamp_period_ns_);
 }
 
+void VulkanEngine::prof_begin_frame(VkCommandBuffer cmd, uint32_t slot) {
+    if (!prof_pool_) {
+        VkQueryPoolCreateInfo qpci{
+            .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .queryType = VK_QUERY_TYPE_TIMESTAMP,
+            .queryCount = kProfMaxMarks * 2,
+            .pipelineStatistics = 0,
+        };
+        if (vkCreateQueryPool(device_, &qpci, nullptr, &prof_pool_) != VK_SUCCESS) {
+            prof_pool_ = VK_NULL_HANDLE;
+            return;
+        }
+    }
+    prof_slot_ = slot & 1u;
+    prof_count_[prof_slot_] = 0;
+    vkCmdResetQueryPool(cmd, prof_pool_, prof_slot_ * kProfMaxMarks, kProfMaxMarks);
+    prof_mark(cmd, "<start>");
+}
+
+void VulkanEngine::prof_mark(VkCommandBuffer cmd, const char* name) {
+    if (!prof_pool_) return;
+    uint32_t& n = prof_count_[prof_slot_];
+    if (n >= kProfMaxMarks) return;
+    prof_names_[prof_slot_][n] = name;
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, prof_pool_,
+                        prof_slot_ * kProfMaxMarks + n);
+    ++n;
+    prof_valid_[prof_slot_] = true;
+}
+
+void VulkanEngine::prof_read_slot(uint32_t slot) {
+    slot &= 1u;
+    if (!prof_pool_ || !prof_valid_[slot] || prof_count_[slot] < 2) return;
+    uint64_t ts[kProfMaxMarks] = {};
+    const uint32_t n = prof_count_[slot];
+    if (vkGetQueryPoolResults(device_, prof_pool_, slot * kProfMaxMarks, n,
+                              sizeof(ts), ts, sizeof(uint64_t),
+                              VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+    for (uint32_t i = 1; i < n; ++i) {
+        const char* nm = prof_names_[slot][i];
+        float ms = (ts[i] > ts[i - 1])
+            ? static_cast<float>(double(ts[i] - ts[i - 1]) *
+                                 double(gpu_timestamp_period_ns_) * 1e-6)
+            : 0.0f;
+        uint32_t k = 0;
+        for (; k < prof_ema_count_; ++k)
+            if (std::strcmp(prof_ema_[k].name, nm) == 0) break;
+        if (k == prof_ema_count_) {
+            if (prof_ema_count_ >= kProfMaxMarks) continue;
+            prof_ema_[prof_ema_count_++] = { nm, ms };
+        } else {
+            prof_ema_[k].ms = prof_ema_[k].ms * 0.9f + ms * 0.1f;
+        }
+    }
+}
+
+void VulkanEngine::prof_log() {
+    if (prof_ema_count_ == 0) return;
+    std::string s = "gpu-passes";
+    char buf[96];
+    float total = 0.0f;
+    for (uint32_t k = 0; k < prof_ema_count_; ++k) {
+        total += prof_ema_[k].ms;
+        if (prof_ema_[k].ms < 0.05f) continue;
+        std::snprintf(buf, sizeof(buf), " %s=%.2f", prof_ema_[k].name, prof_ema_[k].ms);
+        s += buf;
+    }
+    std::snprintf(buf, sizeof(buf), " | sum=%.2f", total);
+    s += buf;
+    log::info(s.c_str());
+}
+
 void VulkanEngine::destroy_gpu_query_pool() {
+    if (prof_pool_) {
+        vkDestroyQueryPool(device_, prof_pool_, nullptr);
+        prof_pool_ = VK_NULL_HANDLE;
+    }
     if (gpu_query_pool_) {
         vkDestroyQueryPool(device_, gpu_query_pool_, nullptr);
         gpu_query_pool_ = VK_NULL_HANDLE;

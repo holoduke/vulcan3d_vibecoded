@@ -1,6 +1,7 @@
 #pragma once
 
 #include <glm/vec3.hpp>
+#include <cstdint>
 #include <glm/vec4.hpp>
 #include <vector>
 
@@ -28,8 +29,30 @@ struct Brush {
     glm::vec4 fallback_color = glm::vec4(0.7f, 0.7f, 0.7f, 1.0f);
 };
 
+// Non-box castle geometry (round towers, conical roofs, the gate arch).
+// Same vertex layout as the engine's Vertex (pos, normal, uv) so it can be
+// uploaded as-is. UVs are pre-scaled to texture repeats (uv_scale = 1).
+struct LevelVertex {
+    glm::vec3 p;
+    glm::vec3 n;
+    float u, v;
+};
+struct LevelMesh {
+    std::vector<LevelVertex> verts;
+    std::vector<uint32_t>    idx;
+    int       tex_albedo = -1;
+    int       tex_normal = -1;
+    glm::vec3 tint{1.0f};
+    glm::vec3 fallback{0.6f};
+    glm::vec3 bmin{1e9f}, bmax{-1e9f};
+};
+
 struct Level {
     std::vector<Brush> brushes;
+    // Mesh parts (castle towers / roofs / arch). Their player collision
+    // boxes are appended to `aabbs` AFTER the brush entries (index
+    // >= brushes.size()); render_aabbs stays brush-aligned.
+    std::vector<LevelMesh> meshes;
     std::vector<collision::AABB> aabbs;  // mirrored from brushes for collision
     // Render-cull AABBs. Identical to `aabbs` for most brushes, but
     // SPOM-wall brushes carry a small per-axis inflation to cover the

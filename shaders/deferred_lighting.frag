@@ -483,6 +483,9 @@ void main() {
             }
             shadow = max(shadow, sh_bake);
         }
+        // Per-pixel relief self-shadow from cube.frag's terrain POM sun
+        // march, packed into gbuffer1.b (1 = fully lit) for material 3.
+        shadow = 1.0 - (1.0 - shadow) * clamp(roughness, 0.0, 1.0);
     }
 
     // ---------------------------------------------------------------
@@ -498,7 +501,14 @@ void main() {
     // because the LACK of darkening was the issue. Wait, opposite: my
     // AO was darkening pixels forward DOESN'T darken, making deferred
     // dimmer. ...let me just match the gate.
-    if (ao_mode > 0 && scene.rt_flags.z > 0) {
+    // Contact AO (~10 cm rays) is sub-pixel past a few tens of metres, but
+    // its per-pixel random taps turned distant terrain into a field of
+    // dark 2x2 blocks that crawled with every sub-pixel camera move (the
+    // "flicker in the distance"); far terrain rays also false-hit the BLAS
+    // detail that sits above the rasterised LOD surface. Fade it out by
+    // 45 m and skip the rays entirely beyond.
+    float ao_w = 1.0 - smoothstep(18.0, 45.0, cam_dist);
+    if (ao_mode > 0 && scene.rt_flags.z > 0 && ao_w > 0.01) {
         // 2-tap "fast" AO as default; full mode could expand to 4-8 taps.
         int n_taps = (ao_mode == 1) ? 2 : 4;
         float ao_radius = max(0.05, scene.rt_params.y);
@@ -506,9 +516,16 @@ void main() {
         vec3 t_u = abs(N.y) < 0.999 ? normalize(cross(vec3(0,1,0), N))
                                      : vec3(1,0,0);
         vec3 t_v = cross(N, t_u);
-        vec3 origin = world_pos + N * 0.01;
+        // Terrain: lift the origin over the BLAS-vs-raster height gap.
+        float lift = (material_id == 3) ? mix(0.02, 0.25, clamp(cam_dist / 45.0, 0.0, 1.0))
+                                        : 0.01;
+        vec3 origin = world_pos + N * lift;
+        // Azimuths stratified around the circle with ONE random rotation
+        // per pixel (was independent random phi per tap: 4 taps could all
+        // land on one side, the main source of salt-and-pepper AO).
+        float rot = hash12(gl_FragCoord.xy + vec2(5.0, 23.0));
         for (int i = 0; i < n_taps; ++i) {
-            float r1 = hash12(gl_FragCoord.xy + vec2(i * 7.0, 23.0));
+            float r1 = (float(i) + rot) / float(n_taps);
             float r2 = hash12(gl_FragCoord.xy + vec2(i * 7.0, 91.0));
             float phi = r1 * 6.28318530718;
             float ct = sqrt(r2);              // cosine-weighted hemisphere
@@ -517,7 +534,7 @@ void main() {
                 t_u * (cos(phi) * st) + t_v * (sin(phi) * st) + N * ct);
             if (any_hit(origin, dir, ao_radius)) hits += 1.0;
         }
-        ao = 1.0 - (hits / float(n_taps));
+        ao = mix(1.0, 1.0 - (hits / float(n_taps)), ao_w);
     }
 
     // ---------------------------------------------------------------

@@ -340,6 +340,13 @@ struct SceneUBO {
     glm::vec4  voxel_origin;
     glm::vec4  voxel_dims;
     glm::vec4  voxel_grid;
+    // Castle road polyline for the terrain shader (cube.frag is_terrain).
+    //   road_info.x = point count (0 = no road), .y = paved half-width (m),
+    //   .z = verge width (m), .w = reserved.
+    //   road_pts[i].xyz = centreline point (world), .w = 0.
+    glm::vec4  road_info;
+    glm::vec4  road_bbox;      // xz min (xy), xz max (zw) incl. verge
+    glm::vec4  road_pts[64];
 };
 
 // ---- KHR ray tracing entry points ----

@@ -787,9 +787,13 @@ void VulkanEngine::draw_tracers(VkCommandBuffer cmd, const glm::mat4& vp) {
         if (len < 1e-4f) continue;
         glm::vec3 dir = d / len;
         glm::vec3 mid = (t.a + t.b) * 0.5f;
-        // Thinner than the bullet (4 cm) so the trail reads as a fast
-        // streak behind it, not a laser wall.
-        float radius = 0.016f * (0.30f + 0.70f * fade);
+        // Thin (2.5 mm) fading streak, floored to ~0.5 px so a distant
+        // trail does not alias into dashes (80 deg FOV).
+        float px_ang = 1.678f / std::max(1.0f,
+                           static_cast<float>(render_extent_.height));
+        float dcam = glm::distance(mid, player_.eye_position());
+        float radius = std::max(0.0025f * (0.40f + 0.60f * fade),
+                                dcam * px_ang * 0.5f);
         // +2 cm half-length overlap hides the joints between segments.
         glm::mat4 model = align_local_y_to(mid, dir) *
                           glm::scale(glm::mat4(1.0f),

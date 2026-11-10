@@ -1,6 +1,11 @@
 ﻿#include "game/level.h"
 
 #include <glm/vec2.hpp>
+#include <glm/common.hpp>
+#include <glm/geometric.hpp>
+
+#include <algorithm>
+#include <cmath>
 
 namespace qlike::game {
 
@@ -87,6 +92,210 @@ void add_lantern(Level& lv, glm::vec3 base) {
              glm::vec3(1.00f, 0.78f, 0.40f),
              glm::vec3(2.5f, 1.8f, 0.7f));
 }
+
+// ---------------------------------------------------------------------
+// Mesh builders for the non-box castle parts. Everything is built in
+// castle-local space (y = 0 at the courtyard floor) and lifted with the
+// brushes in init_world. UVs are in texture repeats (tile_m metres per
+// repeat), V pointing DOWN the world so NormalGL's green = world-up.
+// ---------------------------------------------------------------------
+constexpr float kPi = 3.14159265358979f;
+
+void mesh_push(LevelMesh& m, const LevelVertex& v) {
+    m.verts.push_back(v);
+    m.bmin = glm::min(m.bmin, v.p);
+    m.bmax = glm::max(m.bmax, v.p);
+}
+void mesh_quad(LevelMesh& m, const LevelVertex& a, const LevelVertex& b,
+               const LevelVertex& c, const LevelVertex& d) {
+    // The world pipelines cull back faces with the engine's cube winding
+    // (front = cross(b - a, c - a) pointing outward). Builders pass the
+    // intended outward normal per vertex; flip the winding whenever the
+    // quad's geometric normal disagrees, so every builder is cull-safe.
+    glm::vec3 g = glm::cross(b.p - a.p, c.p - a.p);
+    if (glm::dot(g, g) < 1e-12f) g = glm::cross(c.p - a.p, d.p - a.p);
+    const bool flip = glm::dot(g, a.n + b.n + c.n + d.n) < 0.0f;
+    uint32_t base = static_cast<uint32_t>(m.verts.size());
+    mesh_push(m, a); mesh_push(m, b); mesh_push(m, c); mesh_push(m, d);
+    if (flip) m.idx.insert(m.idx.end(), { base, base + 2, base + 1, base, base + 3, base + 2 });
+    else      m.idx.insert(m.idx.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });
+}
+
+// Revolve a (radius, y) profile around the vertical axis through `c`.
+// Hard edges between profile segments (flat along the profile, smooth
+// around it). The number of texture repeats around is rounded to an
+// integer so the seam wraps cleanly.
+void lathe(LevelMesh& m, glm::vec3 c, const std::vector<glm::vec2>& prof,
+           int segs, float tile_m) {
+    float max_r = 0.0f;
+    for (const auto& p : prof) max_r = (std::max)(max_r, p.x);
+    const float tiles_around =
+        (std::max)(1.0f, std::round(2.0f * kPi * max_r / tile_m));
+    float s = 0.0f;
+    for (size_t j = 0; j + 1 < prof.size(); ++j) {
+        glm::vec2 p0 = prof[j], p1 = prof[j + 1];
+        glm::vec2 d = p1 - p0;
+        float len = glm::length(d);
+        if (len < 1e-5f) continue;
+        glm::vec2 n2 = glm::vec2(d.y, -d.x) / len;   // outward in (r, y)
+        for (int i = 0; i < segs; ++i) {
+            float a0 = 2.0f * kPi * float(i) / float(segs);
+            float a1 = 2.0f * kPi * float(i + 1) / float(segs);
+            auto vtx = [&](float a, glm::vec2 p, float sv, float ui) {
+                glm::vec2 dir(std::cos(a), std::sin(a));
+                return LevelVertex{
+                    c + glm::vec3(dir.x * p.x, p.y, dir.y * p.x),
+                    glm::normalize(glm::vec3(dir.x * n2.x, n2.y, dir.y * n2.x)),
+                    ui, -sv / tile_m };
+            };
+            float u0 = tiles_around * float(i) / float(segs);
+            float u1 = tiles_around * float(i + 1) / float(segs);
+            mesh_quad(m, vtx(a0, p0, s, u0), vtx(a1, p0, s, u1),
+                         vtx(a1, p1, s + len, u1), vtx(a0, p1, s + len, u0));
+        }
+        s += len;
+    }
+}
+
+// Solid ring sector (merlon / corbel on a round tower).
+void ring_sector(LevelMesh& m, glm::vec3 c, float r_in, float r_out,
+                 float a0, float a1, float y0, float y1, int segs, float tile_m) {
+    auto P = [&](float a, float r, float y) {
+        return c + glm::vec3(std::cos(a) * r, y, std::sin(a) * r);
+    };
+    const glm::vec3 up(0, 1, 0);
+    for (int i = 0; i < segs; ++i) {
+        float b0 = a0 + (a1 - a0) * float(i) / float(segs);
+        float b1 = a0 + (a1 - a0) * float(i + 1) / float(segs);
+        glm::vec3 n0(std::cos(b0), 0, std::sin(b0)), n1(std::cos(b1), 0, std::sin(b1));
+        float u0 = b0 * r_out / tile_m, u1 = b1 * r_out / tile_m;
+        float v0 = -y0 / tile_m, v1 = -y1 / tile_m;
+        mesh_quad(m, {P(b0, r_out, y0), n0, u0, v0}, {P(b1, r_out, y0), n1, u1, v0},
+                     {P(b1, r_out, y1), n1, u1, v1}, {P(b0, r_out, y1), n0, u0, v1});
+        mesh_quad(m, {P(b1, r_in, y0), -n1, u1, v0}, {P(b0, r_in, y0), -n0, u0, v0},
+                     {P(b0, r_in, y1), -n0, u0, v1}, {P(b1, r_in, y1), -n1, u1, v1});
+        float ri = r_in / tile_m, ro = r_out / tile_m;
+        mesh_quad(m, {P(b0, r_in, y1), up, u0, ri}, {P(b0, r_out, y1), up, u0, ro},
+                     {P(b1, r_out, y1), up, u1, ro}, {P(b1, r_in, y1), up, u1, ri});
+        mesh_quad(m, {P(b1, r_in, y0), -up, u1, ri}, {P(b1, r_out, y0), -up, u1, ro},
+                     {P(b0, r_out, y0), -up, u0, ro}, {P(b0, r_in, y0), -up, u0, ri});
+    }
+    auto cap = [&](float a, float side) {
+        glm::vec3 n = glm::vec3(-std::sin(a), 0, std::cos(a)) * side;
+        float ri = r_in / tile_m, ro = r_out / tile_m;
+        mesh_quad(m, {P(a, r_in, y0), n, ri, -y0 / tile_m}, {P(a, r_out, y0), n, ro, -y0 / tile_m},
+                     {P(a, r_out, y1), n, ro, -y1 / tile_m}, {P(a, r_in, y1), n, ri, -y1 / tile_m});
+    };
+    cap(a0, -1.0f);
+    cap(a1, +1.0f);
+}
+
+// Crenellated ring: `count` merlons evenly spaced, `duty` = merlon share.
+void merlon_ring(LevelMesh& m, glm::vec3 c, float r_in, float r_out,
+                 float y0, float y1, int count, float duty, float tile_m) {
+    for (int k = 0; k < count; ++k) {
+        float a = 2.0f * kPi * float(k) / float(count);
+        float w = 2.0f * kPi / float(count) * duty;
+        ring_sector(m, c, r_in, r_out, a - w * 0.5f, a + w * 0.5f, y0, y1, 3, tile_m);
+    }
+}
+
+// Corbels under a parapet: small radial brackets.
+void corbel_ring(LevelMesh& m, glm::vec3 c, float r_in, float r_out,
+                 float y0, float y1, int count, float tile_m) {
+    for (int k = 0; k < count; ++k) {
+        float a = 2.0f * kPi * (float(k) + 0.5f) / float(count);
+        float w = 0.30f / r_out;
+        ring_sector(m, c, r_in, r_out, a - w * 0.5f, a + w * 0.5f, y0, y1, 1, tile_m);
+    }
+}
+
+// Round-arched gate passage: the part of the rectangular opening
+// [-R, R] x [ys, ys + R] OUTSIDE the semicircle of radius R, extruded
+// z0..z1, plus the curved soffit (vault underside).
+void arch_infill(LevelMesh& m, float ys, float R, float z0, float z1, float tile_m) {
+    const int N = 20;
+    auto rect_pt = [&](float a) {
+        float ca = std::cos(a), sa = std::sin(a);
+        float t = 1e9f;
+        if (std::abs(ca) > 1e-4f) t = (std::min)(t, R / std::abs(ca));
+        if (sa > 1e-4f)           t = (std::min)(t, R / sa);
+        return glm::vec2(ca * t, ys + sa * t);
+    };
+    auto V = [&](glm::vec2 q, float z, glm::vec3 n) {
+        return LevelVertex{ glm::vec3(q.x, q.y, z), n, q.x / tile_m, -q.y / tile_m };
+    };
+    const glm::vec3 fz(0, 0, 1);
+    float arc = 0.0f;
+    for (int i = 0; i < N; ++i) {
+        float a0 = kPi * float(i) / float(N), a1 = kPi * float(i + 1) / float(N);
+        glm::vec2 c0(R * std::cos(a0), ys + R * std::sin(a0));
+        glm::vec2 c1(R * std::cos(a1), ys + R * std::sin(a1));
+        glm::vec2 p0 = rect_pt(a0), p1 = rect_pt(a1);
+        mesh_quad(m, V(c0, z1, fz), V(p0, z1, fz), V(p1, z1, fz), V(c1, z1, fz));
+        mesh_quad(m, V(c1, z0, -fz), V(p1, z0, -fz), V(p0, z0, -fz), V(c0, z0, -fz));
+        glm::vec3 n0(-std::cos(a0), -std::sin(a0), 0), n1(-std::cos(a1), -std::sin(a1), 0);
+        float seg = glm::length(c1 - c0);
+        mesh_quad(m, {glm::vec3(c0, z0), n0, z0 / tile_m, -arc / tile_m},
+                     {glm::vec3(c0, z1), n0, z1 / tile_m, -arc / tile_m},
+                     {glm::vec3(c1, z1), n1, z1 / tile_m, -(arc + seg) / tile_m},
+                     {glm::vec3(c1, z0), n1, z0 / tile_m, -(arc + seg) / tile_m});
+        arc += seg;
+    }
+}
+
+// Raised voussoir band framing the arch on a wall face (XY plane at z0,
+// protruding to z1).
+void arch_band(LevelMesh& m, float ys, float r_in, float r_out,
+               float z0, float z1, float tile_m) {
+    const int N = 20;
+    auto V = [&](glm::vec3 p, glm::vec3 n) {
+        return LevelVertex{ p, n, p.x / tile_m, -p.y / tile_m };
+    };
+    const glm::vec3 o(0, ys, 0), fz(0, 0, 1), Z0(0, 0, z0), Z1(0, 0, z1);
+    for (int i = 0; i < N; ++i) {
+        float a0 = kPi * float(i) / float(N), a1 = kPi * float(i + 1) / float(N);
+        glm::vec3 d0(std::cos(a0), std::sin(a0), 0), d1(std::cos(a1), std::sin(a1), 0);
+        mesh_quad(m, V(o + d0 * r_in + Z1, fz), V(o + d0 * r_out + Z1, fz),
+                     V(o + d1 * r_out + Z1, fz), V(o + d1 * r_in + Z1, fz));
+        mesh_quad(m, V(o + d0 * r_out + Z0, d0), V(o + d1 * r_out + Z0, d1),
+                     V(o + d1 * r_out + Z1, d1), V(o + d0 * r_out + Z1, d0));
+        mesh_quad(m, V(o + d1 * r_in + Z0, -d1), V(o + d0 * r_in + Z0, -d0),
+                     V(o + d0 * r_in + Z1, -d0), V(o + d1 * r_in + Z1, -d1));
+    }
+}
+
+// Four-sided hip (pyramid) roof over a rectangle, with eave underside.
+void hip_roof(LevelMesh& m, glm::vec3 c, float hx, float hz, float y0,
+              float apex_h, float tile_m) {
+    glm::vec3 apex = c + glm::vec3(0, y0 + apex_h, 0);
+    glm::vec3 k[4] = { c + glm::vec3(-hx, y0, hz), c + glm::vec3(hx, y0, hz),
+                       c + glm::vec3(hx, y0, -hz), c + glm::vec3(-hx, y0, -hz) };
+    for (int f = 0; f < 4; ++f) {
+        glm::vec3 a = k[f], b = k[(f + 1) % 4];
+        glm::vec3 n = glm::normalize(glm::cross(b - a, apex - a));
+        if (n.y < 0.0f) n = -n;
+        glm::vec3 e = glm::normalize(b - a);
+        float slant = glm::length(apex - (a + b) * 0.5f);
+        auto V = [&](glm::vec3 p, float vs) {
+            return LevelVertex{ p, n, glm::dot(p - a, e) / tile_m, -vs / tile_m };
+        };
+        mesh_quad(m, V(a, 0.0f), V(b, 0.0f), V(apex, slant), V(apex, slant));
+    }
+    const glm::vec3 dn(0, -1, 0);
+    mesh_quad(m, {k[3], dn, 0, 0}, {k[2], dn, 1, 0}, {k[1], dn, 1, 1}, {k[0], dn, 0, 1});
+}
+
+// Player collision for a round tower: octagon-ish union of 3 boxes.
+void tower_colliders(std::vector<collision::AABB>& out, glm::vec3 c, float r,
+                     float y0, float y1) {
+    const glm::vec3 ext[3] = { {r * 0.92f, 0, r * 0.38f}, {r * 0.38f, 0, r * 0.92f},
+                               {r * 0.71f, 0, r * 0.71f} };
+    for (const auto& e : ext) {
+        out.push_back({ glm::vec3(c.x - e.x, c.y + y0, c.z - e.z),
+                             glm::vec3(c.x + e.x, c.y + y1, c.z + e.z) });
+    }
+}
 }
 
 Level make_arena(float r, float wh) {
@@ -119,243 +328,237 @@ Level make_arena(float r, float wh) {
     (void)r; (void)wh; (void)kGround;
 
     // -----------------------------------------------------------------
-    // Castle (centered at origin). 22Г—22 m footprint, 5 m walls, four
-    // corner towers (2.4 m square Г— 10 m tall), a north-facing entrance,
-    // a stairway up to the wall walkway, full-perimeter wall-top walk,
-    // crenelations along all 4 walls, and an inner keep with a doorway.
+    // Castle (centered at origin, entrance facing +Z).
+    //   * 1.6 m thick, 7 m curtain walls with a walkable top, a plinth
+    //     course along the outer faces and real crenellations.
+    //   * Four ROUND corner towers (mesh): battered base, string course,
+    //     corbelled parapet, merlon ring, conical tile roof.
+    //   * Gatehouse: deep block with a round-arched passage (mesh arch +
+    //     voussoir band), flanked by two round towers with overhanging
+    //     conical roofs. The gate doors (props.cpp) sit at z = 11.
+    //   * Keep: 8 x 8 m, 11 m tall, hip roof, four corbelled bartizans.
+    // Straight walls stay brushes (box relief gives them real masonry
+    // depth); everything curved is a LevelMesh.
     // -----------------------------------------------------------------
     {
-        const float cr      = 11.0f;  // half-extent of outer wall (22 m wide)
-        const float wh      = 5.0f;   // wall height
-        const float wt      = 0.6f;   // wall thickness
-        const float ent_w   = 3.2f;   // entrance opening width (north)
-        const float arch_h  = 1.4f;   // arch lintel height (sits above the gap)
+        const float cr     = 11.0f;  // wall centre line half-extent
+        const float wh     = 7.0f;   // wall-walk height
+        const float wt     = 1.6f;   // wall thickness
+        const float base_y = -1.5f;  // walls run below grade (uneven ground)
+        const float ent_w  = 3.2f;   // gate opening width
+        const float ent_h  = 3.6f;   // gate opening height (rect part)
 
         const auto castle_tint  = T(0.95f, 0.92f, 0.86f);  // warm sandstone
         const auto castle_proto = T(0.55f, 0.50f, 0.42f);
-        // Wall texture tiling. Bricks078's rubble stones are ~1/20 of a
-        // tile; at the old 0.35 scale (tile в‰€ 2.9 m) each stone was ~7 cm
-        // вЂ” sub-pixel past a few metres, so walls read as noisy plaster.
-        // 0.12 (tile в‰€ 8.3 m) makes stones ~40 cm: readable masonry at
-        // gameplay distance, and SPOM relief follows the same UVs.
-        const float wall_uv  = 0.12f;
+        const float wall_uv  = 0.12f;          // ~8.3 m texture repeat
         const float cren_uv  = 0.18f;
+        const float stone_tile = 1.0f / wall_uv;
         const auto stair_tint   = T(0.92f, 0.85f, 0.75f);
         const auto stair_proto  = T(0.50f, 0.35f, 0.20f);
         const auto crenel_proto = T(0.45f, 0.42f, 0.35f);
+        constexpr int kRoof = 13;              // engine kTexRoof
 
-        // Helper: add a continuous 4-side wall ring with one wall split
-        // around an entrance gap. North wall (player-facing) gets the gap.
-        auto add_wall = [&](float cx, float cz, float sx, float sz) {
-            add(lv, glm::vec3(cx, wh * 0.5f, cz), glm::vec3(sx, wh, sz),
-                castle_tint, kBrick, kBrick, wall_uv, castle_proto);
+        auto wall = [&](glm::vec3 c, glm::vec3 s) {
+            add(lv, c, s, castle_tint, kBrick, kBrick, wall_uv, castle_proto);
         };
-        add_wall(0.0f, -cr, 2.0f * cr, wt);                 // south
-        add_wall( cr, 0.0f, wt, 2.0f * cr);                 // east
-        add_wall(-cr, 0.0f, wt, 2.0f * cr);                 // west
-        // North split:
-        const float seg_w = (2.0f * cr - ent_w) * 0.5f;
-        const float seg_x = (cr + ent_w * 0.5f) * 0.5f;
-        add_wall(-seg_x,  cr, seg_w, wt);
-        add_wall( seg_x,  cr, seg_w, wt);
-        // Arch lintel above the entrance: top of the gap, still lets the
-        // player walk through (clearance = wh - arch_h в‰€ 3.6 m).
-        add(lv, glm::vec3(0.0f, wh - arch_h * 0.5f,  cr),
-            glm::vec3(ent_w, arch_h, wt),
-            castle_tint, kBrick, kBrick, wall_uv, castle_proto);
+        auto merlon = [&](glm::vec3 c, glm::vec3 s) {
+            add(lv, c, s, castle_tint, kBrick, kBrick, cren_uv, crenel_proto);
+        };
 
-        // Crenelations along all 4 walls вЂ” small merlons every ~1.4 m on
-        // each wall's outer edge, sitting on top of the wall.
-        const float merlon_s   = 0.45f;
-        const float merlon_h   = 0.7f;
-        const float merlon_gap = 1.4f;   // step between merlons (centre-to-centre)
-        const float wall_top_y = wh + merlon_h * 0.5f;
-        // Span along a wall, in the wall's tangent dimension. crenelations
-        // skip the corner tower zones since towers carry their own tops.
-        const float corner_keep = 1.5f;  // metres from each corner to skip
-        auto add_merlons_along_x = [&](float cz_outer) {
-            for (float x = -cr + corner_keep + 0.6f;
-                 x <  cr - corner_keep;
-                 x += merlon_gap) {
-                add(lv, glm::vec3(x, wall_top_y, cz_outer),
-                    glm::vec3(merlon_s, merlon_h, merlon_s),
-                    castle_tint, kBrick, kBrick, cren_uv, crenel_proto);
-            }
-        };
-        auto add_merlons_along_z = [&](float cx_outer) {
-            for (float z = -cr + corner_keep + 0.6f;
-                 z <  cr - corner_keep;
-                 z += merlon_gap) {
-                add(lv, glm::vec3(cx_outer, wall_top_y, z),
-                    glm::vec3(merlon_s, merlon_h, merlon_s),
-                    castle_tint, kBrick, kBrick, cren_uv, crenel_proto);
-            }
-        };
-        add_merlons_along_x(-(cr - wt * 0.5f));  // south outer edge (z = -cr + wt/2)
-        add_merlons_along_x( (cr - wt * 0.5f));  // north outer edge вЂ” stops short of entrance gap automatically
-        add_merlons_along_z(-(cr - wt * 0.5f));  // west outer edge
-        add_merlons_along_z( (cr - wt * 0.5f));  // east outer edge
+        // Tower layout (needed to trim walls / merlons).
+        const float tw_r   = 3.2f;                       // corner tower radius
+        const float gt_r   = 2.4f;                       // gatehouse tower radius
+        const float gt_x   = 4.4f;                       // gatehouse tower |x| (clear of the passage)
+        const float gt_z   = cr + 0.9f;                  // gatehouse tower z
+        const float gh_z0  = cr - wt * 0.5f;             // gatehouse block inner face
+        const float gh_z1  = cr + 2.0f;                  // gatehouse block outer face
+        const float gh_h   = 9.0f;
 
-        // Four corner towers вЂ” taller than the walls so they read as proper
-        // towers, with crenelated tops.
-        const float tw_s = 2.4f;
-        const float tw_h = 10.0f;
-        glm::vec3 tower_centers[4] = {
-            glm::vec3( cr,  tw_h * 0.5f,  cr),  // NE
-            glm::vec3(-cr,  tw_h * 0.5f,  cr),  // NW
-            glm::vec3( cr,  tw_h * 0.5f, -cr),  // SE
-            glm::vec3(-cr,  tw_h * 0.5f, -cr),  // SW
-        };
-        for (int i = 0; i < 4; ++i) {
-            add(lv, tower_centers[i],
-                glm::vec3(tw_s, tw_h, tw_s),
-                castle_tint, kBrick, kBrick, wall_uv, castle_proto);
-            // Crenelations around the tower top: 8 merlons (corners + mid-
-            // edges) form a battlement ring.
-            const float c_s = 0.4f;
-            const float c_h = 0.7f;
-            const float c_y = tw_h + c_h * 0.5f;
-            const float c_o = (tw_s - c_s) * 0.5f;
-            glm::vec3 base = tower_centers[i];
-            base.y = c_y;
-            // 4 corners + 4 mid-edges
-            const glm::vec2 offs[8] = {
-                glm::vec2(-1,-1), glm::vec2(-1, 1),
-                glm::vec2( 1,-1), glm::vec2( 1, 1),
-                glm::vec2(-1, 0), glm::vec2( 1, 0),
-                glm::vec2( 0,-1), glm::vec2( 0, 1),
+        // ---- Curtain walls ----
+        const float wy = (wh + base_y) * 0.5f, wsy = wh - base_y;
+        wall(glm::vec3(0.0f, wy, -cr), glm::vec3(2.0f * cr, wsy, wt));   // south
+        wall(glm::vec3( cr, wy, 0.0f), glm::vec3(wt, wsy, 2.0f * cr));   // east
+        wall(glm::vec3(-cr, wy, 0.0f), glm::vec3(wt, wsy, 2.0f * cr));   // west
+        {   // north, either side of the gatehouse
+            float x0 = gt_x, x1 = cr;
+            float w = x1 - x0, cx = (x0 + x1) * 0.5f;
+            wall(glm::vec3(-cx, wy, cr), glm::vec3(w, wsy, wt));
+            wall(glm::vec3( cx, wy, cr), glm::vec3(w, wsy, wt));
+        }
+        // Plinth course: 0.45 m skirt along every outer face.
+        {
+            const float ph = 0.8f - base_y, py = (0.8f + base_y) * 0.5f, pd = 0.45f;
+            const float po = cr + wt * 0.5f + pd * 0.5f;
+            wall(glm::vec3(0.0f, py, -po), glm::vec3(2.0f * cr, ph, pd));
+            wall(glm::vec3( po, py, 0.0f), glm::vec3(pd, ph, 2.0f * cr));
+            wall(glm::vec3(-po, py, 0.0f), glm::vec3(pd, ph, 2.0f * cr));
+            float x0 = gt_x, x1 = cr, cx = (x0 + x1) * 0.5f;
+            wall(glm::vec3(-cx, py, po), glm::vec3(x1 - x0, ph, pd));
+            wall(glm::vec3( cx, py, po), glm::vec3(x1 - x0, ph, pd));
+        }
+        // Crenellations on the outer edge of the wall-walk.
+        {
+            const float m_w = 0.95f, m_h = 1.15f, m_d = 0.5f, pitch = 1.65f;
+            const float my = wh + m_h * 0.5f;
+            const float edge = cr + wt * 0.5f - m_d * 0.5f;
+            const float lim = cr - tw_r - 0.35f;          // stop at the towers
+            auto run = [&](bool along_x, float fixed, float sign, float skip_lo) {
+                for (float t = -lim + m_w * 0.5f; t <= lim - m_w * 0.5f + 1e-3f; t += pitch) {
+                    if (std::abs(t) < skip_lo) continue;
+                    glm::vec3 c = along_x ? glm::vec3(t, my, fixed * sign)
+                                          : glm::vec3(fixed * sign, my, t);
+                    glm::vec3 s = along_x ? glm::vec3(m_w, m_h, m_d)
+                                          : glm::vec3(m_d, m_h, m_w);
+                    merlon(c, s);
+                }
             };
-            for (int k = 0; k < 8; ++k) {
-                const glm::vec2& o = offs[k];
-                add(lv, base + glm::vec3(o.x * c_o, 0.0f, o.y * c_o),
-                    glm::vec3(c_s, c_h, c_s),
-                    castle_tint, kBrick, kBrick, cren_uv, crenel_proto);
+            run(true,  edge, -1.0f, 0.0f);                 // south
+            run(false, edge, +1.0f, 0.0f);                 // east
+            run(false, edge, -1.0f, 0.0f);                 // west
+            run(true,  edge, +1.0f, gt_x + gt_r + 0.4f);   // north (gatehouse gap)
+        }
+
+        // ---- Gatehouse block with arched passage ----
+        {
+            const float d = gh_z1 - gh_z0, cz = (gh_z0 + gh_z1) * 0.5f;
+            const float gy = (gh_h + base_y) * 0.5f, gsy = gh_h - base_y;
+            const float side_w = gt_x - ent_w * 0.5f;
+            const float side_x = ent_w * 0.5f + side_w * 0.5f;
+            wall(glm::vec3(-side_x, gy, cz), glm::vec3(side_w, gsy, d));
+            wall(glm::vec3( side_x, gy, cz), glm::vec3(side_w, gsy, d));
+            wall(glm::vec3(0.0f, (gh_h + ent_h) * 0.5f, cz),
+                 glm::vec3(ent_w, gh_h - ent_h, d));                  // over the passage
+            // Battlement on the gatehouse front + back edges.
+            for (float x : { -1.1f, 1.1f }) {
+                merlon(glm::vec3(x, gh_h + 0.55f, gh_z1 - 0.25f), glm::vec3(0.95f, 1.1f, 0.5f));
+                merlon(glm::vec3(x, gh_h + 0.55f, gh_z0 + 0.25f), glm::vec3(0.95f, 1.1f, 0.5f));
+            }
+            // Paved passage floor (the courtyard slab stops at the wall).
+            add(lv, glm::vec3(0.0f, -0.20f, cz - 0.2f), glm::vec3(ent_w, 0.5f, d + 0.4f),
+                T(0.96f, 0.94f, 0.90f), kTile1, kTile1, 0.4f, T(0.45f, 0.42f, 0.38f));
+        }
+
+        // ---- Mesh parts ----
+        LevelMesh stone;  stone.tex_albedo = kBrick; stone.tex_normal = kBrick;
+        stone.tint = castle_tint; stone.fallback = castle_proto;
+        LevelMesh roof;   roof.tex_albedo = kRoof; roof.tex_normal = kRoof;
+        roof.tint = T(0.92f, 0.86f, 0.82f); roof.fallback = T(0.55f, 0.25f, 0.18f);
+        std::vector<collision::AABB> mesh_cols;
+        const float roof_tile = 1.7f;
+
+        // Corner towers.
+        const glm::vec3 corners[4] = {
+            { cr, 0.0f,  cr}, {-cr, 0.0f,  cr}, { cr, 0.0f, -cr}, {-cr, 0.0f, -cr} };
+        for (const glm::vec3& c : corners) {
+            const float r = tw_r, top = 12.0f;
+            lathe(stone, c, {
+                { r + 0.55f, -4.0f }, { r + 0.55f, 0.0f },           // buried footing
+                { r, 2.6f },                                          // battered base
+                { r, 6.8f }, { r + 0.14f, 6.8f }, { r + 0.14f, 7.1f },// string course
+                { r, 7.1f }, { r, top - 0.6f },
+                { r + 0.45f, top },                                   // machicolation
+                { r + 0.45f, top + 0.55f }, { r - 0.4f, top + 0.55f },// parapet top
+                { r - 0.4f, top + 0.2f }, { 0.0f, top + 0.2f },       // tower top
+            }, 64, stone_tile);
+            corbel_ring(stone, c, r - 0.05f, r + 0.42f, top - 1.15f, top - 0.45f, 28, stone_tile);
+            merlon_ring(stone, c, r - 0.4f, r + 0.45f, top + 0.55f, top + 1.6f, 12, 0.55f, stone_tile);
+            lathe(roof, c, { { r - 0.25f, top + 0.4f }, { 0.0f, top + 7.2f } }, 64, roof_tile);
+            tower_colliders(mesh_cols, c, r + 0.2f, base_y, top + 1.6f);
+        }
+
+        // Gatehouse towers (overhanging conical roofs).
+        for (float sx : { -1.0f, 1.0f }) {
+            const glm::vec3 c(sx * gt_x, 0.0f, gt_z);
+            const float r = gt_r, top = 10.4f;
+            lathe(stone, c, {
+                { r + 0.45f, -3.0f }, { r + 0.45f, 0.0f }, { r, 2.2f },
+                { r, top - 0.7f }, { r + 0.35f, top - 0.2f }, { r + 0.35f, top },
+                { 0.0f, top },
+            }, 56, stone_tile);
+            corbel_ring(stone, c, r - 0.05f, r + 0.33f, top - 1.25f, top - 0.6f, 22, stone_tile);
+            lathe(roof, c, {
+                { r + 0.35f, top - 0.1f }, { r + 0.75f, top - 0.1f },   // eave underside
+                { 0.0f, top + 6.0f } }, 56, roof_tile);
+            tower_colliders(mesh_cols, c, r + 0.2f, base_y, top);
+        }
+
+        // Arched gate passage (front half, outside the doors at z = 11)
+        // + raised voussoir band on the gatehouse face.
+        arch_infill(stone, ent_h - ent_w * 0.5f, ent_w * 0.5f, cr + 0.25f, gh_z1, stone_tile);
+        arch_band(stone, ent_h - ent_w * 0.5f, ent_w * 0.5f, ent_w * 0.5f + 0.55f,
+                  gh_z1, gh_z1 + 0.14f, stone_tile);
+
+        // ---- Keep (donjon) ----
+        const float kp_cx = 0.0f, kp_cz = -4.0f;
+        const float kp_s = 8.0f, kp_wt = 1.0f, kp_h = 11.0f;
+        const float door_w = 1.4f, door_h = 2.6f;
+        {
+            const float ky = (kp_h - 0.5f) * 0.5f, ksy = kp_h + 0.5f;
+            const float h2 = kp_s * 0.5f;
+            wall(glm::vec3(kp_cx, ky, kp_cz - h2 + kp_wt * 0.5f), glm::vec3(kp_s, ksy, kp_wt)); // S
+            wall(glm::vec3(kp_cx + h2 - kp_wt * 0.5f, ky, kp_cz), glm::vec3(kp_wt, ksy, kp_s - 2.0f * kp_wt)); // E
+            wall(glm::vec3(kp_cx - h2 + kp_wt * 0.5f, ky, kp_cz), glm::vec3(kp_wt, ksy, kp_s - 2.0f * kp_wt)); // W
+            const float seg_w = (kp_s - door_w) * 0.5f;
+            const float seg_x = (door_w + seg_w) * 0.5f;
+            const float nz = kp_cz + h2 - kp_wt * 0.5f;
+            wall(glm::vec3(kp_cx - seg_x, ky, nz), glm::vec3(seg_w, ksy, kp_wt));
+            wall(glm::vec3(kp_cx + seg_x, ky, nz), glm::vec3(seg_w, ksy, kp_wt));
+            wall(glm::vec3(kp_cx, (kp_h + door_h) * 0.5f, nz),
+                 glm::vec3(door_w, kp_h - door_h, kp_wt));                  // over the door
+            // Ceiling slab (the hip roof sits on it).
+            wall(glm::vec3(kp_cx, kp_h - 0.15f, kp_cz), glm::vec3(kp_s - 2.0f * kp_wt, 0.3f, kp_s - 2.0f * kp_wt));
+            // Interior floor.
+            add(lv, glm::vec3(kp_cx, -0.17f, kp_cz),
+                glm::vec3(kp_s - 2.0f * kp_wt, 0.5f, kp_s - 2.0f * kp_wt),
+                T(0.96f, 0.94f, 0.90f), kTile2, kTile2, 0.5f, T(0.55f, 0.48f, 0.40f));
+            hip_roof(roof, glm::vec3(kp_cx, 0.0f, kp_cz), h2 + 0.45f, h2 + 0.45f,
+                     kp_h, 4.6f, roof_tile);
+            // Corbelled corner bartizans with their own cone roofs.
+            for (float sx : { -1.0f, 1.0f }) {
+                for (float sz : { -1.0f, 1.0f }) {
+                    glm::vec3 c(kp_cx + sx * (h2 + 0.15f), 0.0f, kp_cz + sz * (h2 + 0.15f));
+                    lathe(stone, c, {
+                        { 0.15f, kp_h - 4.2f }, { 1.05f, kp_h - 2.6f },
+                        { 1.05f, kp_h + 1.0f }, { 0.0f, kp_h + 1.0f } }, 40, stone_tile);
+                    lathe(roof, c, { { 1.0f, kp_h + 0.9f }, { 1.3f, kp_h + 0.9f },
+                                     { 0.0f, kp_h + 3.9f } }, 40, roof_tile);
+                }
             }
         }
 
-        // Wall-top walkway: a thin platform along the inside of all four
-        // walls, forming a square ring at y = wh. Built from 4 strips,
-        // slightly inset so it doesn't conflict with the merlons.
-        const float walk_w = 1.2f;
-        const float walk_in = wt + walk_w * 0.5f;
-        const float walk_y  = wh + 0.05f;
-        // North + south strips (full inside length minus tower bases)
-        add(lv, glm::vec3(0.0f, walk_y,  cr - walk_in),
-            glm::vec3(2.0f * cr - 2.0f * tw_s, 0.1f, walk_w),
-            stair_tint, kBrick, kBrick, wall_uv, stair_proto);
-        add(lv, glm::vec3(0.0f, walk_y, -cr + walk_in),
-            glm::vec3(2.0f * cr - 2.0f * tw_s, 0.1f, walk_w),
-            stair_tint, kBrick, kBrick, wall_uv, stair_proto);
-        // East + west strips
-        add(lv, glm::vec3( cr - walk_in, walk_y, 0.0f),
-            glm::vec3(walk_w, 0.1f, 2.0f * cr - 2.0f * tw_s),
-            stair_tint, kBrick, kBrick, wall_uv, stair_proto);
-        add(lv, glm::vec3(-cr + walk_in, walk_y, 0.0f),
-            glm::vec3(walk_w, 0.1f, 2.0f * cr - 2.0f * tw_s),
-            stair_tint, kBrick, kBrick, wall_uv, stair_proto);
-
-        // Stairway up to the walkway. East wall inside, climbing south to
-        // north. step_h stays under collision::kStepHeight (0.45) so the
-        // player walks up smoothly without jumping.
-        const int   n_steps = 13;
-        const float step_h  = wh / float(n_steps);
-        const float step_d  = 0.55f;
-        const float stair_w = 2.4f;
-        const float stair_x = cr - wt - walk_w - 0.6f - stair_w * 0.5f;
-        const float stair_z0 = -(float(n_steps) * 0.5f) * step_d;
-        for (int i = 0; i < n_steps; ++i) {
-            float h = step_h * float(i + 1);
-            float z = stair_z0 + float(i) * step_d;
-            add(lv, glm::vec3(stair_x, h * 0.5f, z),
-                glm::vec3(stair_w, h, step_d),
-                stair_tint, kBrick, kBrick, wall_uv, stair_proto);
+        // ---- Stairway to the wall-walk (east wall, inside) ----
+        {
+            const int   n_steps = 17;                    // 0.41 m risers
+            const float step_h  = wh / float(n_steps);
+            const float step_d  = 0.5f;
+            const float stair_w = 2.0f;
+            const float stair_x = cr - wt * 0.5f - stair_w * 0.5f;
+            const float z0 = -(float(n_steps) * 0.5f) * step_d;
+            for (int i = 0; i < n_steps; ++i) {
+                float h = step_h * float(i + 1);
+                add(lv, glm::vec3(stair_x, (h + base_y) * 0.5f, z0 + float(i) * step_d),
+                    glm::vec3(stair_w, h - base_y, step_d),
+                    stair_tint, kBrick, kBrick, wall_uv, stair_proto);
+            }
         }
 
-        // Inner keep / house вЂ” 6Г—6 m footprint Г— 4 m tall, centered in the
-        // back half of the courtyard. Has a doorway on the north face so
-        // the player can step inside.
-        const float kp_cx = 0.0f;
-        const float kp_cz = -4.5f;
-        const float kp_sx = 6.0f;
-        const float kp_sz = 6.0f;
-        const float kp_h  = 4.0f;
-        const float door_w = 1.2f;
-        const float door_h = 2.4f;
-        const auto  keep_tint  = T(0.92f, 0.84f, 0.72f);
-        const auto  keep_proto = T(0.55f, 0.40f, 0.25f);
-        // Three solid walls + the north wall split around a door gap.
-        add(lv, glm::vec3(kp_cx, kp_h * 0.5f, kp_cz - kp_sz * 0.5f + wt * 0.5f),
-            glm::vec3(kp_sx, kp_h, wt),
-            keep_tint, kBrick, kBrick, wall_uv, keep_proto);                  // south
-        add(lv, glm::vec3(kp_cx + kp_sx * 0.5f - wt * 0.5f, kp_h * 0.5f, kp_cz),
-            glm::vec3(wt, kp_h, kp_sz),
-            keep_tint, kBrick, kBrick, wall_uv, keep_proto);                  // east
-        add(lv, glm::vec3(kp_cx - kp_sx * 0.5f + wt * 0.5f, kp_h * 0.5f, kp_cz),
-            glm::vec3(wt, kp_h, kp_sz),
-            keep_tint, kBrick, kBrick, wall_uv, keep_proto);                  // west
-        // North wall split for the door.
-        const float kp_seg_w = (kp_sx - door_w) * 0.5f;
-        const float kp_seg_x = (kp_sx * 0.5f + door_w * 0.5f) * 0.5f;
-        add(lv, glm::vec3(kp_cx - kp_seg_x, kp_h * 0.5f, kp_cz + kp_sz * 0.5f - wt * 0.5f),
-            glm::vec3(kp_seg_w, kp_h, wt),
-            keep_tint, kBrick, kBrick, wall_uv, keep_proto);
-        add(lv, glm::vec3(kp_cx + kp_seg_x, kp_h * 0.5f, kp_cz + kp_sz * 0.5f - wt * 0.5f),
-            glm::vec3(kp_seg_w, kp_h, wt),
-            keep_tint, kBrick, kBrick, wall_uv, keep_proto);
-        // Lintel above keep door вЂ” sits between door_h and kp_h, fills
-        // the gap above the door so a clean rectangle door is visible.
-        const float lintel_h = kp_h - door_h;
-        add(lv, glm::vec3(kp_cx, door_h + lintel_h * 0.5f,
-                          kp_cz + kp_sz * 0.5f - wt * 0.5f),
-            glm::vec3(door_w, lintel_h, wt),
-            keep_tint, kBrick, kBrick, wall_uv, keep_proto);
-        // Roof slab so the keep is visually capped.
-        add(lv, glm::vec3(kp_cx, kp_h + 0.05f, kp_cz),
-            glm::vec3(kp_sx, 0.1f, kp_sz),
-            keep_tint, kBrick, kBrick, wall_uv, keep_proto);
+        // ---- Courtyard floor (inside the curtain walls) ----
+        {
+            const float in_ext = (cr - wt * 0.5f) * 2.0f + 0.1f;
+            add(lv, glm::vec3(0.0f, -0.20f, 0.0f), glm::vec3(in_ext, 0.5f, in_ext),
+                T(0.96f, 0.94f, 0.90f), kTile1, kTile1, 0.4f, T(0.45f, 0.42f, 0.38f));
+        }
 
-        // Floor slabs вЂ” courtyard tile inside the perimeter walls, plus a
-        // separate tile for the keep interior. Top surface raised to
-        // Y=+0.05 (slab is 0.5 m thick, center at Y=-0.20) so it sits
-        // 5 cm above the terrain plateau (at Y=0 in castle-local space,
-        // = Y=22 world after the +plateau_height offset). 5 cm is too
-        // small to feel as a step but enough to win the depth race
-        // against the procedural raymarched terrain вЂ” without it,
-        // terrain Z-fights through the floor texture.
-        // Floor extent now reaches the inner wall face exactly (the
-        // earlier `в€’0.4` inset left a visible 20 cm gap of bare terrain
-        // along all 4 inner walls).
-        const auto floor_tint   = T(0.96f, 0.94f, 0.90f);
-        const auto floor_proto1 = T(0.45f, 0.42f, 0.38f);  // courtyard
-        const auto floor_proto2 = T(0.55f, 0.48f, 0.40f);  // keep interior
-        // Wall brushes are added with center at В±cr and thickness wt,
-        // so they span crв€’wt/2 to cr+wt/2 вЂ” the INNER face sits at
-        // crв€’wt/2 = 10.7 (not crв€’wt = 10.4 as the previous math
-        // assumed; that's why a 30 cm gap of bare terrain was still
-        // showing along the inner walls). Push the floor a bit
-        // PAST the inner face (into the wall) so any sub-cm
-        // alignment slop hides under the wall geometry.
-        const float in_ext = cr * 2.0f - 0.05f;
-        // Courtyard floor (covers everything inside the walls, spans the
-        // keep too вЂ” the keep floor below sits slightly higher and wins
-        // pixel-by-pixel inside its own footprint).
-        add(lv, glm::vec3(0.0f, -0.20f, 0.0f),
-            glm::vec3(in_ext, 0.5f, in_ext),
-            floor_tint, kTile1, kTile1, 0.4f, floor_proto1);
-        // Keep interior floor вЂ” 8 cm above terrain (3 cm above the
-        // courtyard slab) so it wins the depth race inside the keep
-        // and shows the dedicated tile texture there. Footprint
-        // reaches the keep's inner wall face on each side.
-        add(lv, glm::vec3(kp_cx, -0.17f, kp_cz),
-            glm::vec3(kp_sx, 0.5f, kp_sz),
-            floor_tint, kTile2, kTile2, 0.5f, floor_proto2);
+        // Lanterns: inside the gate, and either side of the keep door.
+        add_lantern(lv, glm::vec3( ent_w * 0.5f + 1.2f, 0.0f, gh_z0 - 1.2f));
+        add_lantern(lv, glm::vec3(-ent_w * 0.5f - 1.2f, 0.0f, gh_z0 - 1.2f));
+        add_lantern(lv, glm::vec3( door_w * 0.5f + 0.8f, 0.0f, kp_cz + kp_s * 0.5f + 0.8f));
+        add_lantern(lv, glm::vec3(-door_w * 0.5f - 0.8f, 0.0f, kp_cz + kp_s * 0.5f + 0.8f));
 
-        // Lanterns: pair flanking the entrance + pair near the keep door,
-        // and one inside the keep so the interior isn't pitch-black.
-        add_lantern(lv, glm::vec3( ent_w * 0.5f + 0.9f, 0.0f, cr - wt - 1.0f));
-        add_lantern(lv, glm::vec3(-ent_w * 0.5f - 0.9f, 0.0f, cr - wt - 1.0f));
-        add_lantern(lv, glm::vec3( door_w * 0.5f + 0.6f, 0.0f, kp_cz + kp_sz * 0.5f + 0.6f));
-        add_lantern(lv, glm::vec3(-door_w * 0.5f - 0.6f, 0.0f, kp_cz + kp_sz * 0.5f + 0.6f));
+        lv.meshes.push_back(std::move(stone));
+        lv.meshes.push_back(std::move(roof));
+        // Mesh colliders go AFTER every brush AABB (see Level::meshes).
+        for (const auto& a : mesh_cols) lv.aabbs.push_back(a);
     }
 
     // Outer arena lanterns removed along with the floor + perimeter walls
