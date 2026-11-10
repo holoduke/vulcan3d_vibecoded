@@ -64,7 +64,7 @@ void VulkanEngine::init_descriptors() {
         // +1 (now 11) for the terrain aux bake (curvature + sky-vis)
         // at binding 26 — AAA terrain Phases 4/5.
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            kTextureCount * 2 + 12 + kSpomMaterialCount },
+            kTextureCount * 2 + 14 + kSpomMaterialCount },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -84,7 +84,7 @@ void VulkanEngine::init_descriptors() {
     //              terrain_raymarch_scale < 1.
     //          15=ReSTIR reservoir SSBO (read prev), 16=write cur.
     //              Owned by restir.cpp; cube.frag's GI loop reads/writes.
-    VkDescriptorSetLayoutBinding bindings[28]{};
+    VkDescriptorSetLayoutBinding bindings[29]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -297,10 +297,18 @@ void VulkanEngine::init_descriptors() {
     bindings[27].descriptorCount = 1;
     bindings[27].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Binding 28: clutter (small-object) sun shadow map, D32 - the
+    // raymarched terrain samples it (it is pre-shaded, so the deferred
+    // pass cannot apply it there).
+    bindings[28].binding = 28;
+    bindings[28].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[28].descriptorCount = 1;
+    bindings[28].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 28, .pBindings = bindings,
+        .bindingCount = 29, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),
@@ -333,6 +341,8 @@ void VulkanEngine::update_scene_ubo() {
     // Per-frame: only update the UBO contents (memcpy to mapped buffer).
     // Descriptor set bindings are written once after init_rt().
     SceneUBO data{};
+    update_clutter_shadow_vp();
+    data.clutter_vp = clutter_shadow_vp_;
     float pitch = glm::radians(rt_.sun_pitch_deg);
     float yaw   = glm::radians(rt_.sun_yaw_deg);
     glm::vec3 sun(std::cos(pitch) * std::sin(yaw),

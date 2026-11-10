@@ -59,11 +59,13 @@ void VulkanEngine::init_vulkan() {
     f13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     f13.dynamicRendering = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
+    f13.shaderDemoteToHelperInvocation = VK_TRUE;   // GLSL demote (alpha-tested shaders)
 
     VkPhysicalDeviceVulkan12Features f12{};
     f12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     f12.bufferDeviceAddress = VK_TRUE;
     f12.descriptorIndexing = VK_TRUE;
+    f12.shaderFloat16 = VK_TRUE;   // some shaders declare Float16
 
     VkPhysicalDeviceAccelerationStructureFeaturesKHR as_features{};
     as_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
@@ -93,6 +95,10 @@ void VulkanEngine::init_vulkan() {
     // buckets, each with its own firstInstance (visible-list offset).
     base_feats.multiDrawIndirect = VK_TRUE;
     base_feats.drawIndirectFirstInstance = VK_TRUE;
+    // cube.frag writes SSBOs / storage images from the fragment stage and
+    // some shaders use 16-bit ints; both were used without the features.
+    base_feats.fragmentStoresAndAtomics = VK_TRUE;
+    base_feats.shaderInt16 = VK_TRUE;
 
     vkb::PhysicalDeviceSelector selector{ vkb_inst };
     auto phys_ret = selector.set_minimum_version(1, 3)

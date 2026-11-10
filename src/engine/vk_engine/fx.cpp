@@ -401,11 +401,36 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
                     if (sp.empty() && !p.empty()) {   // bridge from the contrail
                         sp.push_back(p.back()); sw.push_back(w.back()); sa.push_back(a.back());
                     }
-                    sp.push_back(tp.p + glm::vec3(0.0f, age * 1.4f, 0.0f) + wind_vel_ * (0.25f * age));
-                    float wd = (1.2f + age * 2.1f) * f.scale;
+                    // Real smoke plumes don't fade uniformly: turbulence tears
+                    // the column into clumps with clear gaps, and each clump
+                    // wanders off on its own (divergence) while it spreads and
+                    // thins. Everything keys off the sample's birth time, so a
+                    // clump keeps its identity frame to frame (no flicker).
+                    auto vn1 = [](float x) {   // 1D value noise, 0..1
+                        auto h = [](float n) { return glm::fract(std::sin(n * 127.1f) * 43758.5453f); };
+                        float i = std::floor(x), fr = x - i;
+                        fr = fr * fr * (3.0f - 2.0f * fr);
+                        return glm::mix(h(i), h(i + 1.0f), fr);
+                    };
+                    const float key = tp.t * 2.6f + float(f.id) * 17.3f;
+                    float clump = vn1(key);
+                    float clump2 = vn1(key * 2.3f + 5.1f);
+                    // Gaps open up as the smoke ages (young smoke is solid).
+                    float gap_thr = glm::mix(0.0f, 0.55f, glm::clamp(age / 1.2f, 0.0f, 1.0f));
+                    float gap = glm::smoothstep(gap_thr, gap_thr + 0.18f, clump * 0.7f + clump2 * 0.3f);
+                    // Divergence: each clump drifts sideways / up in its own
+                    // direction, growing with age.
+                    float ang = vn1(key * 0.7f + 31.0f) * 12.566f;
+                    glm::vec3 div(std::cos(ang), 0.35f + 0.65f * vn1(key + 77.0f), std::sin(ang));
+                    glm::vec3 pos = tp.p + glm::vec3(0.0f, age * 1.2f, 0.0f) + wind_vel_ * (0.3f * age) +
+                                    div * (age * age * 1.6f * f.scale);
+                    if (sp.empty() && !p.empty()) pos = p.back();
+                    sp.push_back(pos);
+                    float wd = (1.1f + age * 2.6f) * f.scale * (0.75f + 0.5f * clump2);
                     sw.push_back(min_w(tp.p, wd, 1.2f));
-                    float life = 1.0f - age / 6.0f;
-                    sa.push_back(std::max(0.0f, life) * std::min(1.0f, age * 4.0f + 0.3f) * 0.95f);
+                    // ~2.5 s life; alpha also thins as the plume spreads.
+                    float life = glm::clamp(1.0f - age / 2.6f, 0.0f, 1.0f);
+                    sa.push_back(life * life * gap * std::min(1.0f, age * 4.0f + 0.3f) * 0.9f);
                     continue;
                 }
                 p.push_back(tp.p + glm::vec3(0.0f, age * 0.6f, 0.0f));   // slow rise

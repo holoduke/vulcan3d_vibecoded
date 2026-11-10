@@ -265,11 +265,21 @@ void VulkanEngine::init_terrain_raymarch_pipeline() {
     cfg.enable_vrs = vrs_supported_;
 
     terrain_raymarch_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    {
+        vkpipe::GraphicsPipelineConfig lr = cfg;
+        lr.color_formats = { scene_color_format_, motion_vec_format_ };
+        lr.enable_vrs = false;
+        terrain_raymarch_lr_pipeline_ = vkpipe::build_graphics_pipeline(device_, lr);
+    }
     log::infof("terrain raymarch pipeline built (vrs=%s)",
                vrs_supported_ ? "on" : "off");
 }
 
 void VulkanEngine::destroy_terrain_raymarch_pipeline() {
+    if (terrain_raymarch_lr_pipeline_) {
+        vkDestroyPipeline(device_, terrain_raymarch_lr_pipeline_, nullptr);
+        terrain_raymarch_lr_pipeline_ = VK_NULL_HANDLE;
+    }
     if (terrain_raymarch_pipeline_) {
         vkDestroyPipeline(device_, terrain_raymarch_pipeline_, nullptr);
         terrain_raymarch_pipeline_ = VK_NULL_HANDLE;
@@ -1003,10 +1013,22 @@ void VulkanEngine::init_svgf_targets() {
                                      VK_IMAGE_LAYOUT_UNDEFINED,
                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
+        // Full barrier around the clears: the generic GENERAL transition
+        // does not order against TRANSFER writes (sync-validation WAW).
+        auto full_barrier = [&]() {
+            VkMemoryBarrier2 mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, nullptr,
+                                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT };
+            VkDependencyInfo di{}; di.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            di.memoryBarrierCount = 1; di.pMemoryBarriers = &mb;
+            vkCmdPipelineBarrier2(cb, &di);
+        };
         VkClearColorValue zero{};
         VkImageSubresourceRange sub{
             VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
         };
+        full_barrier();
         vkCmdClearColorImage(cb, svgf_gi_image_,
                              VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &sub);
         for (int s = 0; s < 2; ++s) {
@@ -1015,6 +1037,7 @@ void VulkanEngine::init_svgf_targets() {
             vkCmdClearColorImage(cb, svgf_moments_image_[s],
                                  VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &sub);
         }
+        full_barrier();
     });
 
     // Initial descriptor writes at bindings 19 / 20 / 21 / 22 / 23.

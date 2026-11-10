@@ -95,12 +95,12 @@ inline glm::vec2 rm_rotate(glm::vec2 p) {
                      -0.6f * p.x + 0.8f * p.y);
 }
 
-float rm_terrain(glm::vec2 worldXZ, const HeightmapParams& p) {
+float rm_terrain(glm::vec2 worldXZ, const HeightmapParams& p, int octaves = 9) {
     glm::vec2 wp = worldXZ;
     glm::vec2 q  = worldXZ * kRmTerrainScale;
     float a = 0.0f, b = 1.0f;
     glm::vec2 d(0.0f);
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < octaves; i++) {
         glm::vec2 deriv;
         float n = rm_noised(q, deriv);
         d += deriv;
@@ -121,6 +121,21 @@ float rm_terrain(glm::vec2 worldXZ, const HeightmapParams& p) {
 }
 
 } // namespace
+
+float raymarch_fine_correction(const Heightmap& hm, const HeightmapParams& p,
+                               float x, float z, int octaves) {
+    // Exact high-octave FBM minus the bilinear 9-octave grid the CPU
+    // heightmap stores (sculpt deltas cancel out of the difference).
+    float fx = (x - hm.origin_x) / hm.cell, fz = (z - hm.origin_z) / hm.cell;
+    float ix = std::floor(fx), iz = std::floor(fz);
+    float tx = fx - ix, tz = fz - iz;
+    auto g = [&](float gx, float gz) {
+        return rm_terrain(glm::vec2(hm.origin_x + gx * hm.cell, hm.origin_z + gz * hm.cell), p, 9);
+    };
+    float bil = (g(ix, iz) * (1.0f - tx) + g(ix + 1.0f, iz) * tx) * (1.0f - tz) +
+                (g(ix, iz + 1.0f) * (1.0f - tx) + g(ix + 1.0f, iz + 1.0f) * tx) * tz;
+    return rm_terrain(glm::vec2(x, z), p, octaves) - bil;
+}
 
 Heightmap generate_heightmap_raymarch(const HeightmapParams& p) {
     Heightmap hm;

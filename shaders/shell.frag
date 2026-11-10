@@ -25,9 +25,9 @@ layout(location = 6) in float vOrigDepth;
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
 
-const int kTextureCount = 16;
+const int kTextureCount = 15;     // == VulkanEngine::kTextureCount
 layout(set = 0, binding = 3) uniform sampler2D u_albedo[kTextureCount];
-layout(set = 0, binding = 12) uniform sampler2D u_spom_height[kTextureCount];
+layout(set = 0, binding = 12) uniform sampler2D u_spom_height[6];   // == kSpomMaterialCount (descriptor count)
 
 // Depth buffer sampler. Bound in set 1 to avoid touching scene_desc_set_layout_.
 layout(set = 1, binding = 0) uniform sampler2D u_depth_buffer;

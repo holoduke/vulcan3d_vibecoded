@@ -166,6 +166,9 @@ void VulkanEngine::draw(uint32_t img_index) {
     current_frame_view_ = compute_frame_view();
     // Scene UBO: written only after the prev-frame fence (both slots idle)
     // and after this frame's camera so camera_pos / jitter are current.
+    // Ground clutter follows the active terrain surface (raymarch FBM is
+    // finer than the CPU heightmap) - no-op unless the mode was toggled.
+    scatter_set_raymarch_surface(scatter_, rt_.terrain_raymarch_enabled);
     update_scene_ubo();
     // GPU vegetation: cull + LOD-select every instance, fill indirect draws.
     cull_vegetation(frame.command_buffer);
@@ -384,7 +387,9 @@ void VulkanEngine::draw(uint32_t img_index) {
         }
         VkRenderingInfo lr_ri{
             .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-            .pNext = (vrs_supported_ && vrs_view_) ? &vrs_info : nullptr,
+            // No VRS here: the rate image maps full-res pixels, so on the
+            // low-res target it put coarse shading in the wrong places.
+            .pNext = nullptr,
             .flags = 0,
             .renderArea = { {0, 0}, tr_lr_extent_ },
             .layerCount = 1, .viewMask = 0,

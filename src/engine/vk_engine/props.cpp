@@ -334,9 +334,10 @@ void VulkanEngine::tick_spacejet(float dt) {
         if (f.dead) continue;
 
         const float half_len = 3.0f * f.scale;   // asset normalised to 6 m
-        // Test hook: QLIKE_TEST_SHOOTDOWN=<s> downs every jet after <s> s of flight.
+        // Test hook: QLIKE_TEST_SHOOTDOWN=<s> downs every jet after <s> s of flight once it is within 450 m of the camera.
         static const float kTestDown = [] { const char* e = std::getenv("QLIKE_TEST_SHOOTDOWN"); return e ? float(std::atof(e)) : -1.0f; }();
-        if (kTestDown >= 0.0f && !f.destroying && f.t > kTestDown) {
+        if (kTestDown >= 0.0f && !f.destroying && f.t > kTestDown &&
+            glm::distance(f.pos, current_frame_view_.eye_pos) < 450.0f) {   // near the camera
             f.destroying = true; f.destroy_t = 0.0f; spawn_explosion(f.pos, 0.55f, false);
         }
         if (f.destroying) {

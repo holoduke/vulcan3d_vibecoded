@@ -14,10 +14,12 @@
 #include <glm/vec4.hpp>
 
 #include <cstdint>
+#include <vector>
 
 namespace qlike {
 
 struct Heightmap;
+struct HeightmapParams;
 
 // Per-instance data — layout consumed by scatter.vert at binding 1.
 struct ScatterInstance {
@@ -40,6 +42,13 @@ struct ScatterSet {
     uint32_t      plant_count[kPlantSpecies]{};
     VkBuffer      plant_buffer = VK_NULL_HANDLE;
     VmaAllocation plant_alloc  = nullptr;
+    // Persistently-mapped instance data + per-instance height offset to
+    // the raymarched surface (finer FBM than the CPU heightmap). Applied
+    // / removed in place by scatter_set_raymarch_surface().
+    void*              inst_mapped  = nullptr;
+    void*              plant_mapped = nullptr;
+    std::vector<float> inst_dy, plant_dy;
+    bool               rm_surface = false;
 };
 
 struct ScatterParams {
@@ -55,6 +64,10 @@ struct ScatterParams {
     glm::vec2 keep_out_xz = glm::vec2(14.0f, 14.0f);
     // Optional extra keep-out (the castle road). Null = none.
     const struct Road* road = nullptr;
+    // When set, per-instance offsets to the raymarched surface are
+    // precomputed (`rm_octaves` FBM octaves, the near-camera detail).
+    const HeightmapParams* rm_params = nullptr;
+    int   rm_octaves = 14;
 };
 
 // Builds the rock mesh + places instances. Boulders: 0.15-0.55 m on
@@ -66,5 +79,9 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
                          const ScatterParams& params);
 
 void destroy_scatter(VmaAllocator alloc, ScatterSet& s);
+
+// Move all instances onto the raymarched surface (on) or back onto the
+// CPU heightmap surface (off). Cheap: rewrites the mapped buffers.
+void scatter_set_raymarch_surface(ScatterSet& s, bool on);
 
 } // namespace qlike

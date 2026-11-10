@@ -404,6 +404,9 @@ private:
     // it composites with rasterised cubes / castle / dyn-props.
     // Toggled by rt_.terrain_raymarch_enabled.
     VkPipeline      terrain_raymarch_pipeline_   = VK_NULL_HANDLE;
+    // Low-res variant: colour + motion only (the low-res pass has 2
+    // attachments), no VRS (the VRS image is laid out for full res).
+    VkPipeline      terrain_raymarch_lr_pipeline_ = VK_NULL_HANDLE;
     VkShaderModule  terrain_raymarch_vert_module_ = VK_NULL_HANDLE;
     VkShaderModule  terrain_raymarch_frag_module_ = VK_NULL_HANDLE;
     void init_terrain_raymarch_pipeline();
@@ -1328,6 +1331,7 @@ private:
     void init_clutter_shadow();
     void destroy_clutter_shadow();
     void render_clutter_shadow(VkCommandBuffer cmd);
+    void update_clutter_shadow_vp();
     float hitch_prev_[6] = {};   // main-loop section ms of the previous frame
     float hitch_draw_[3] = {};   // draw(): tlas fence wait, cpu build, record+submit
     VkImage       veg_hiz_image_ = VK_NULL_HANDLE;

@@ -1197,6 +1197,10 @@ void VulkanEngine::shutdown() {
     });
 
     guarded("destroy_depth_image", [&]{ destroy_depth_image(); });
+    guarded("depth_copy_sampler", [&]{
+        if (depth_copy_sampler_) vkDestroySampler(device_, depth_copy_sampler_, nullptr);
+        depth_copy_sampler_ = VK_NULL_HANDLE;
+    });
     guarded("destroy_swapchain",   [&]{ destroy_swapchain(); });
 
     guarded("vmaDestroyAllocator", [&]{

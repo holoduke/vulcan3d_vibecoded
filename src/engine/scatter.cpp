@@ -327,6 +327,12 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             s.plant_count[sp] = uint32_t(per[sp].size());
             all.insert(all.end(), per[sp].begin(), per[sp].end());
         }
+        if (params.rm_params) {
+            s.plant_dy.resize(all.size());
+            for (size_t i = 0; i < all.size(); ++i)
+                s.plant_dy[i] = raymarch_fine_correction(hm, *params.rm_params, all[i].pos_scale.x,
+                                                         all[i].pos_scale.z, params.rm_octaves);
+        }
         if (!all.empty()) {
             VkBufferCreateInfo pb{};
             pb.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -339,6 +345,7 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             VmaAllocationInfo pai{};
             if (vmaCreateBuffer(alloc, &pb, &pa, &s.plant_buffer, &s.plant_alloc, &pai) == VK_SUCCESS) {
                 std::memcpy(pai.pMappedData, all.data(), sizeof(ScatterInstance) * all.size());
+                s.plant_mapped = pai.pMappedData;
             }
         }
         log::infof("[scatter] plants: %u ferns, %u daisies, %u poppies, %u bluebells",
@@ -364,6 +371,13 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
         return s;
     }
     std::memcpy(ai.pMappedData, inst.data(), size_t(bytes));
+    s.inst_mapped = ai.pMappedData;
+    if (params.rm_params) {
+        s.inst_dy.resize(inst.size());
+        for (size_t i = 0; i < inst.size(); ++i)
+            s.inst_dy[i] = raymarch_fine_correction(hm, *params.rm_params, inst[i].pos_scale.x,
+                                                    inst[i].pos_scale.z, params.rm_octaves);
+    }
     s.instance_count = uint32_t(inst.size());
     log::infof("[scatter] %u clutter instances placed (rock mesh %u tris)",
                s.instance_count, s.rock_mesh.index_count / 3);
@@ -385,4 +399,19 @@ void destroy_scatter(VmaAllocator alloc, ScatterSet& s) {
     s.instance_count = 0;
 }
 
+} // namespace qlike
+
+namespace qlike {
+void scatter_set_raymarch_surface(ScatterSet& s, bool on) {
+    if (s.rm_surface == on) return;
+    const float sign = on ? 1.0f : -1.0f;
+    auto apply = [&](void* mapped, const std::vector<float>& dy) {
+        if (!mapped) return;
+        auto* p = static_cast<ScatterInstance*>(mapped);
+        for (size_t i = 0; i < dy.size(); ++i) p[i].pos_scale.y += sign * dy[i];
+    };
+    apply(s.inst_mapped, s.inst_dy);
+    apply(s.plant_mapped, s.plant_dy);
+    s.rm_surface = on;
+}
 } // namespace qlike

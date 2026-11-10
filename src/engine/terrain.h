@@ -66,6 +66,12 @@ Heightmap generate_heightmap(const HeightmapParams& p);
 // — ~38 M FBM evaluations at 2048² takes ~2-3 s on a desktop CPU.
 Heightmap generate_heightmap_raymarch(const HeightmapParams& p);
 
+// Height offset from the CPU heightmap (bilinear 9-octave FBM) to the
+// surface the raymarcher draws near the camera (`octaves` FBM octaves).
+// Used to sit ground clutter on the raymarched terrain.
+float raymarch_fine_correction(const Heightmap& hm, const HeightmapParams& p,
+                               float x, float z, int octaves);
+
 // Builds a single triangulated terrain mesh covering the whole heightmap.
 // Used by the merged BLAS for ray traversal — RT shadows / GI / AO see
 // the full-resolution surface regardless of raster LOD.

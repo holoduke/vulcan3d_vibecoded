@@ -77,6 +77,8 @@ layout(set = 0, binding = 13) uniform sampler2D u_grass_mask;
 // loops used to compute per-tap. UV maps q→texture as `q / 16.0` so
 // the texture tiles every 16 q-units (≈800 m of world space).
 layout(set = 0, binding = 14) uniform sampler2D u_fog_wisp;
+// Small-object (flowers / ferns / clutter rocks) sun shadow map, D32.
+layout(set = 0, binding = 28) uniform sampler2D u_clutter_shadow;
 const float kHeightmapSide = 2048.0;
 // Forward decl — terrainDetailNoise is defined after `noised` + `m2`
 // (further down in the file) so we can reuse them. We use a forward
@@ -371,6 +373,13 @@ layout(set = 0, binding = 0) uniform Scene {
     vec4 voxel_origin;   // .xyz = world origin, .w = enabled (0/1)
     vec4 voxel_dims;     // .xyz = world extent (m), .w = voxel size (m)
     vec4 voxel_grid;     // .xyz = brick grid dims, .w = brick size (m)
+    // Must mirror cube.frag / SceneUBO tail exactly.
+    vec4 road_info;
+    vec4 road_bbox;
+    vec4 road_pts[64];
+    vec4 grass_rm_params;    // .x blade height, .y wind, .z time, .w density
+    vec4 grass_rm_params2;   // .x slope_max, .y shadow on, .z strength
+    mat4 clutter_vp;         // small-object shadow map light VP ([3].w = 0: off)
 } scene;
 
 // Slab-test ray vs AABB. Used to check sun occlusion through the voxel
@@ -1236,6 +1245,77 @@ float calcShadow(vec3 pos, vec3 sunDir) {
 // shadow inaccuracy. Returns 0..1 (0 = no grass shadow, 1 = fully
 // in a grass cell's shadow). Caller multiplies the diffuse term by
 // (1 - grass_shadow * strength).
+// ---- Exact grass blade shadows (shared with cube.frag) ----
+vec4 gs_hash42(vec2 p) {
+    vec4 p4 = fract(vec4(p.xyxy) * vec4(0.1031, 0.1030, 0.0973, 0.1099));
+    p4 += dot(p4, p4.wzxy + 33.33);
+    return fract((p4.xxyz + p4.yzzw) * p4.zywx);
+}
+float gs_blade2d(vec2 p) {
+    float d = length(p - vec2(1.7, -1.3)) - 2.0;
+    d = max(d, -(length(p - vec2(1.7, -1.0)) - 1.8));
+    d = max(d, -(p.y + 1.0));
+    d = max(d, -(-p.x + 1.7));
+    return d;
+}
+float gs_blade(vec3 p, float th) {
+    p.y -= 1.0;
+    float d2 = max(0.0, gs_blade2d(p.xy));
+    return sqrt(d2 * d2 + p.z * p.z) - th;
+}
+// Distance to the nearest blade; `gy` = ground height (blade roots).
+float gs_map(vec3 p, float gy) {
+    const float kPeriod = 0.17;
+    const float kPi2 = 6.28318530718;
+    vec3 lp = p; lp.y -= gy;
+    if (lp.y > 0.9) return lp.y - 0.6;
+    vec2 cellId = floor((lp.xz + 0.5 * kPeriod) / kPeriod);
+    lp.xz = mod(lp.xz + 0.5 * kPeriod, kPeriod) - 0.5 * kPeriod;
+    float bh = clamp(scene.grass_rm_params.x, 0.05, 3.0) * 0.36;
+    float d = 1e3;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            vec2 nId = cellId + vec2(float(dx), float(dy));
+            vec2 muv = (nId * kPeriod / 2048.0) + vec2(0.5);
+            vec2 mg = textureLod(u_grass_mask, muv, 0.0).rg;
+            float sm = scene.grass_rm_params2.x;
+            float elig = mg.r * (1.0 - smoothstep(sm * 0.7, sm * 1.2, mg.g * 2.0));
+            if (elig < 0.10) continue;
+            vec4 r = gs_hash42(nId);
+            if (r.x > scene.grass_rm_params.w) continue;
+            vec3 np = lp - vec3(float(dx), 0.0, float(dy)) * kPeriod;
+            float a = r.z * kPi2;
+            float c = cos(a), s = sin(a);
+            np.xz = mat2(c, -s, s, c) * np.xz;
+            np.xz += (r.xy - 0.5) * kPeriod;
+            float wind_t = scene.grass_rm_params.z + r.w * kPi2;
+            np.x += sin(wind_t * 1.4) * scene.grass_rm_params.y * 0.025 *
+                    smoothstep(0.0, 1.7 * bh, np.y);
+            float sc = max(0.65, sqrt(r.w)) * bh;
+            d = min(d, gs_blade(np / sc, 0.002 / sc) * sc);
+        }
+    }
+    return d;
+}
+// Sun visibility 0..1 at ground point `p` (on the terrain surface).
+float grass_blade_shadow(vec3 p, vec3 L) {
+    if (L.y < 0.05) return 1.0;
+    float bh = clamp(scene.grass_rm_params.x, 0.05, 3.0) * 0.36;
+    float t_max = min((bh * 1.05) / L.y, 3.0);
+    float res = 1.0;
+    float t = 0.01;
+    for (int i = 0; i < 12; ++i) {
+        if (t > t_max) break;
+        vec3 q = p + L * t;
+        float d = gs_map(q, p.y);
+        res = min(res, 10.0 * max(d, 0.0) / t);
+        if (res < 0.02) break;
+        t += clamp(d, 0.015, 0.14);
+    }
+    return smoothstep(0.0, 1.0, res);
+}
+
+
 float grassCastShadow(vec3 pos, vec3 sunDir) {
     float strength = scene.grass_shadow_params.x;
     int   N        = int(scene.grass_shadow_params.y);
@@ -2355,7 +2435,8 @@ void main() {
     // the diffuse term. Strength + sample count + reach are all UI
     // sliders (0 strength = entirely off, no taps).
     float gcs_strength = scene.grass_shadow_params.x;
-    float grass_shadow = grassCastShadow(pos, sunDir);
+    // Legacy mask-probe shadow only when the exact blade march is off.
+    float grass_shadow = (scene.grass_rm_params2.y > 0.5) ? 0.0 : grassCastShadow(pos, sunDir);
     // Combine multiplicatively with self_shadow as transmittances.
     // shadow_amount=1 → light_through=0, so combined-blocked
     // = 1 - (1-self)*(1-grass) (union of independent occluders).
@@ -2363,6 +2444,46 @@ void main() {
     // also have grass nearby — the comment was right, the code wasn't.
     self_shadow = 1.0 - (1.0 - self_shadow) *
                         (1.0 - grass_shadow * gcs_strength);
+    // Flowers / ferns / clutter rocks: dedicated small-caster depth map
+    // around the camera (same test as deferred_lighting.frag).
+    if (scene.clutter_vp[3].w > 0.5 && dif > 0.0) {
+        vec4 lc = scene.clutter_vp * vec4(pos, 1.0);
+        vec2 luv = lc.xy * 0.5 + 0.5;
+        if (all(greaterThan(luv, vec2(0.002))) && all(lessThan(luv, vec2(0.998))) &&
+            lc.z > 0.0 && lc.z < 1.0) {
+            vec2 ts = 1.0 / vec2(textureSize(u_clutter_shadow, 0));
+            float occ = 0.0;
+            for (int y = -1; y <= 1; ++y)
+                for (int x = -1; x <= 1; ++x) {
+                    float zc = textureLod(u_clutter_shadow, luv + vec2(x, y) * ts, 0.0).r;
+                    occ += (zc < lc.z - 0.0004) ? 1.0 : 0.0;
+                }
+            occ /= 9.0;
+            float edge = min(min(luv.x, luv.y), min(1.0 - luv.x, 1.0 - luv.y));
+            occ *= smoothstep(0.0, 0.08, edge) * 0.85;
+            self_shadow = 1.0 - (1.0 - self_shadow) * (1.0 - occ);
+        }
+    }
+    // Exact blade shadows (same blade field as grass_raymarch.frag and
+    // the mesh terrain in cube.frag): sphere-traced near the camera,
+    // averaged mask darkening further out where blades are sub-pixel.
+    if (scene.grass_rm_params2.y > 0.5 && dif > 0.0 &&
+        !(scene.water_params.x > 0.5 && pos.y < scene.water_params.y + 0.05)) {
+        float gp = grassEligibility(pos.xz, pos.y);
+        if (gp > 0.02) {
+            float gstr = scene.grass_rm_params2.z;
+            float cdist = distance(pos, scene.camera_pos.xyz);
+            float near_w = 1.0 - smoothstep(13.0, 26.0, cdist);
+            float far_vis = 1.0 - 0.45 * gstr * gp *
+                            smoothstep(0.1, 0.6, sunDir.y) * scene.grass_rm_params.w;
+            float gvis = far_vis;
+            if (near_w > 0.01) {
+                float exact = grass_blade_shadow(pos, sunDir);
+                gvis = mix(far_vis, mix(1.0, exact, gstr * 0.85 + 0.15), near_w);
+            }
+            self_shadow = 1.0 - (1.0 - self_shadow) * gvis;
+        }
+    }
 
     // RT PCSS for castle / boxes / dyn-props. Mirrors cube.frag's
     // terrain-receiver shadow path 1:1 вЂ” the cube.frag terrain

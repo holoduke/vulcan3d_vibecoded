@@ -27,8 +27,8 @@ layout(location = 9) in vec3 vShellBase;
 
 layout(location = 0) out vec2 outDisp;
 
-const int kTextureCount = 16;
-layout(set = 0, binding = 12) uniform sampler2D u_spom_height[kTextureCount];
+const int kTextureCount = 15;     // == VulkanEngine::kTextureCount
+layout(set = 0, binding = 12) uniform sampler2D u_spom_height[6];   // == kSpomMaterialCount (descriptor count)
 
 // Subset of the scene UBO we need -- camera_pos for view dir, spom_params
 // for strength. Layout must match cube.vert/cube.frag's UBO declaration

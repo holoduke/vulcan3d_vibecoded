@@ -352,6 +352,9 @@ struct SceneUBO {
     glm::vec4  grass_rm_params;
     // .x slope_max (grass eligibility), .y shadow on (0/1), .z strength.
     glm::vec4  grass_rm_params2;
+    // Clutter (flowers / ferns / small rocks) sun-shadow light VP; [3].w = 0
+    // when the map is not rendered this frame. Read by terrain_raymarch.frag.
+    glm::mat4  clutter_vp;
 };
 
 // ---- KHR ray tracing entry points ----

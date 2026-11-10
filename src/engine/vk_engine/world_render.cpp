@@ -120,7 +120,8 @@ void VulkanEngine::render_terrain_raymarch_lr(VkCommandBuffer cmd) {
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                       terrain_raymarch_pipeline_);
+                       terrain_raymarch_lr_pipeline_ ? terrain_raymarch_lr_pipeline_
+                                                     : terrain_raymarch_pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                              pipeline_layout_, 0, 1, &scene_desc_set_,
                              0, nullptr);
@@ -813,8 +814,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // Ground clutter (AAA Phase 3): one instanced draw of the lumpy-rock
     // mesh. Independent of which grass path is active вЂ” clutter is what
     // breaks the bare-heightfield look between blades.
-    if (scatter_.instance_count > 0 && scatter_pipeline_ != VK_NULL_HANDLE &&
-        !rt_.terrain_raymarch_enabled) {
+    if (scatter_.instance_count > 0 && scatter_pipeline_ != VK_NULL_HANDLE) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scatter_pipeline_);
         VkBuffer  sbufs[2]    = { scatter_.rock_mesh.vertex_buffer,
                                   scatter_.instance_buffer };

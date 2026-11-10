@@ -215,10 +215,11 @@ void VulkanEngine::present_loader_frame(const char* label, float progress) {
     // is missing.
     bool used_bg = (loader_bg_image_ != VK_NULL_HANDLE);
     if (used_bg) {
-        vkinit::transition_image(frame.command_buffer,
+        vkinit::transition_image_src_stage(frame.command_buffer,
                                   swapchain_images_[img_idx],
                                   VK_IMAGE_LAYOUT_UNDEFINED,
-                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);   // chains with the acquire wait
         VkImageBlit blit{};
         blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.srcSubresource.layerCount = 1;
@@ -241,10 +242,11 @@ void VulkanEngine::present_loader_frame(const char* label, float progress) {
                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     } else {
-        vkinit::transition_image(frame.command_buffer,
+        vkinit::transition_image_src_stage(frame.command_buffer,
                                   swapchain_images_[img_idx],
                                   VK_IMAGE_LAYOUT_UNDEFINED,
-                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);   // chains with the acquire wait
     }
 
     VkClearValue clear_bg{};
@@ -432,7 +434,7 @@ void VulkanEngine::present_loader_frame(const char* label, float progress) {
                    "loader: vkEndCommandBuffer");
 
     auto wait = vkinit::semaphore_submit_info(
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,   // blit (transfer) also writes the image
         frame.swapchain_semaphore);
     auto signal = vkinit::semaphore_submit_info(
         VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,

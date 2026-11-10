@@ -79,6 +79,15 @@ void VulkanEngine::init_clutter_shadow() {
     VkVertexInputAttributeDescription a4{ 4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 16 };
     cfg.vattrs = { a0, a3, a4 };
     clutter_shadow_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    {
+        VkDescriptorImageInfo ii{ linear_sampler_, clutter_shadow_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w{};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = scene_desc_set_; w.dstBinding = 28; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &ii;
+        vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+    }
     clutter_shadow_vp_ = glm::mat4(0.0f);
     log::info("[clutter shadow] 2048^2 map, 64 m around the camera");
 }
@@ -94,8 +103,12 @@ void VulkanEngine::destroy_clutter_shadow() {
     clutter_shadow_image_ = VK_NULL_HANDLE;
 }
 
-void VulkanEngine::render_clutter_shadow(VkCommandBuffer cmd) {
-    if (!clutter_shadow_pipeline_ || scatter_.instance_count == 0 || rt_.terrain_raymarch_enabled) {
+// Computed in update_scene_ubo() (before any pass) so the deferred pass
+// AND the raymarched terrain (via the scene UBO) use the same matrix the
+// map is rendered with this frame.
+static const bool kNoClutter = std::getenv("QLIKE_NO_CLUTTER_SHADOW") != nullptr;   // A/B test hook
+void VulkanEngine::update_clutter_shadow_vp() {
+    if (!clutter_shadow_pipeline_ || scatter_.instance_count == 0 || kNoClutter) {
         clutter_shadow_vp_ = glm::mat4(0.0f);
         return;
     }
@@ -114,6 +127,11 @@ void VulkanEngine::render_clutter_shadow(VkCommandBuffer cmd) {
     glm::mat4 proj = glm::ortho(-kClutterHalf, kClutterHalf, -kClutterHalf, kClutterHalf, 0.0f, 2.0f * kClutterDepth);
     proj[1][1] *= -1.0f;
     clutter_shadow_vp_ = proj * view;
+}
+
+void VulkanEngine::render_clutter_shadow(VkCommandBuffer cmd) {
+    if (clutter_shadow_vp_[3][3] < 0.5f) return;
+    const glm::vec3 cam = current_frame_view_.eye_pos;
 
     vkinit::transition_image_aspect(cmd, clutter_shadow_image_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);

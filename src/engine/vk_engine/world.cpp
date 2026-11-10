@@ -334,9 +334,11 @@ void VulkanEngine::init_world() {
         sp.rock_band_h = rt_.terrain_h_dirt_rock_start;
         sp.snow_band_h = rt_.terrain_h_rock_snow_start;
         sp.road = &castle_road_;
+        sp.rm_params = &hp;   // offsets onto the raymarched surface
         scatter_ = build_scatter(device_, allocator_,
                                  graphics_queue_, graphics_queue_family_,
                                  hm, sp);
+        scatter_set_raymarch_surface(scatter_, rt_.terrain_raymarch_enabled);
     }
 
     physics_ = std::make_unique<PhysicsWorld>();
