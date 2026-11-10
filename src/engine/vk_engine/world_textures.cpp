@@ -619,22 +619,32 @@ void VulkanEngine::load_terrain_pbr_overrides() {
         if (s.image) vmaDestroyImage(allocator_, s.image, s.alloc);
         s = {};
     };
-    int loaded = 0;
-    for (const PbrSet& set : sets) {
+    // Phase 1 (worker threads): decode + AO bake + albedo lift + displacement
+    // pack for every set in parallel - ~21 2K JPG decodes were ~1.2 s of
+    // serial startup. Phase 2 (this thread): GPU uploads in order.
+    struct CpuSet {
+        unsigned char* alb = nullptr; int aw = 0, ah = 0;
+        unsigned char* nrm = nullptr; int nw = 0, nh = 0;
+    };
+    constexpr int kSets = int(sizeof(sets) / sizeof(sets[0]));
+    CpuSet cpu[kSets];
+    auto prepare = [&](int si) {
+        const PbrSet& set = sets[si];
+        CpuSet& out = cpu[si];
         std::string base = std::string(set.name) + "/" + set.name + "_2K-JPG_";
         std::string p_alb  = resolve(base + "Color.jpg");
         std::string p_nrm  = resolve(base + "NormalGL.jpg");
         std::string p_disp = resolve(base + "Displacement.jpg");
         std::string p_ao   = resolve(base + "AmbientOcclusion.jpg");
         if (p_alb.empty() || p_nrm.empty()) {
-            log::warnf("[terrain pbr] %s incomplete вЂ” keeping procedural slot %d",
+            log::warnf("[terrain pbr] %s incomplete - keeping procedural slot %d",
                        set.name, set.slot);
-            continue;
+            return;
         }
-        // Albedo Г— AO.
+        // Albedo x AO.
         int aw = 0, ah = 0, ac = 0;
         unsigned char* alb = stbi_load(p_alb.c_str(), &aw, &ah, &ac, 4);
-        if (!alb) continue;
+        if (!alb) return;
         if (!p_ao.empty()) {
             int ow = 0, oh = 0, oc = 0;
             unsigned char* ao = stbi_load(p_ao.c_str(), &ow, &oh, &oc, 4);
@@ -655,7 +665,7 @@ void VulkanEngine::load_terrain_pbr_overrides() {
             }
         }
         // Albedo floor. Rock035 is a near-black basalt (mean sRGB ~23/255
-        // ≈ 0.9% linear reflectance) — rendered as pitch-black clutter
+        // ~ 0.9% linear reflectance) - rendered as pitch-black clutter
         // rocks and cliffs. Real weathered rock sits ~15-30%. Scale in
         // LINEAR space so the texture's contrast is kept, only exposure
         // shifts. Sets already brighter than the floor are untouched.
@@ -679,6 +689,13 @@ void VulkanEngine::load_terrain_pbr_overrides() {
                 // teal cast. Pull 60% toward per-pixel luminance so the
                 // rock reads as neutral grey stone.
                 const float kDesat = 0.6f;
+                // linear -> sRGB byte via a 4096-entry table (was 12 M pow()).
+                unsigned char enc[4096];
+                for (int i = 0; i < 4096; ++i) {
+                    float l = (float(i) + 0.5f) / 4096.0f;
+                    float s = l <= 0.0031308f ? l * 12.92f : 1.055f * std::pow(l, 1.0f / 2.4f) - 0.055f;
+                    enc[i] = static_cast<unsigned char>(std::clamp(s * 255.0f + 0.5f, 0.0f, 255.0f));
+                }
                 for (size_t i = 0; i < px; ++i) {
                     const float lr = lut[alb[i * 4]], lg = lut[alb[i * 4 + 1]],
                                 lb = lut[alb[i * 4 + 2]];
@@ -687,56 +704,71 @@ void VulkanEngine::load_terrain_pbr_overrides() {
                                           lg + (y - lg) * kDesat,
                                           lb + (y - lb) * kDesat };
                     for (int c = 0; c < 3; ++c) {
-                        float l = std::min(1.0f, ch[c] * k);
-                        float s = l <= 0.0031308f ? l * 12.92f
-                                  : 1.055f * std::pow(l, 1.0f / 2.4f) - 0.055f;
-                        alb[i * 4 + c] = static_cast<unsigned char>(
-                            std::clamp(s * 255.0f + 0.5f, 0.0f, 255.0f));
+                        float l = std::clamp(ch[c] * k, 0.0f, 1.0f);
+                        alb[i * 4 + c] = enc[std::min(4095, int(l * 4096.0f))];
                     }
                 }
                 log::infof("[terrain pbr] %s albedo lifted: mean %.3f -> %.2f linear",
                            set.name, mean, kFloor);
             }
         }
-        Texture2D t_alb = upload_texture_from_pixels(
-            device_, allocator_, graphics_queue_, graphics_queue_family_,
-            alb, aw, ah, VK_FORMAT_R8G8B8A8_SRGB, set.name);
-        stbi_image_free(alb);
+        out.alb = alb; out.aw = aw; out.ah = ah;
 
         // Normal with Displacement packed into alpha.
         int nw = 0, nh = 0, nc = 0;
         unsigned char* nrm = stbi_load(p_nrm.c_str(), &nw, &nh, &nc, 4);
-        Texture2D t_nrm{};
-        if (nrm) {
-            if (!p_disp.empty()) {
-                int dw = 0, dh = 0, dc = 0;
-                unsigned char* dsp = stbi_load(p_disp.c_str(), &dw, &dh, &dc, 4);
-                if (dsp) {
-                    for (int y = 0; y < nh; ++y) {
-                        int dy = (dh > 0) ? (y * dh / nh) : 0;
-                        for (int x = 0; x < nw; ++x) {
-                            int dx = (dw > 0) ? (x * dw / nw) : 0;
-                            nrm[(y * nw + x) * 4 + 3] = dsp[(dy * dw + dx) * 4];
-                        }
+        if (nrm && !p_disp.empty()) {
+            int dw = 0, dh = 0, dc = 0;
+            unsigned char* dsp = stbi_load(p_disp.c_str(), &dw, &dh, &dc, 4);
+            if (dsp) {
+                for (int y = 0; y < nh; ++y) {
+                    int dy = (dh > 0) ? (y * dh / nh) : 0;
+                    for (int x = 0; x < nw; ++x) {
+                        int dx = (dw > 0) ? (x * dw / nw) : 0;
+                        nrm[(y * nw + x) * 4 + 3] = dsp[(dy * dw + dx) * 4];
                     }
-                    stbi_image_free(dsp);
                 }
+                stbi_image_free(dsp);
             }
+        }
+        out.nrm = nrm; out.nw = nw; out.nh = nh;
+    };
+    {
+        std::vector<std::future<void>> futs;
+        for (int si = 0; si < kSets; ++si)
+            futs.push_back(std::async(std::launch::async, prepare, si));
+        for (auto& f : futs) f.get();
+    }
+    // Replaced procedural slots are destroyed after ONE batch sync at the end
+    // (they may still be in a pending batched upload).
+    std::vector<TextureSlot> retired;
+    int loaded = 0;
+    for (int si = 0; si < kSets; ++si) {
+        const PbrSet& set = sets[si];
+        CpuSet& c = cpu[si];
+        if (!c.alb) { if (c.nrm) stbi_image_free(c.nrm); continue; }
+        Texture2D t_alb = upload_texture_from_pixels(
+            device_, allocator_, graphics_queue_, graphics_queue_family_,
+            c.alb, c.aw, c.ah, VK_FORMAT_R8G8B8A8_SRGB, set.name);
+        stbi_image_free(c.alb);
+        Texture2D t_nrm{};
+        if (c.nrm) {
             t_nrm = upload_texture_from_pixels(
                 device_, allocator_, graphics_queue_, graphics_queue_family_,
-                nrm, nw, nh, VK_FORMAT_R8G8B8A8_UNORM, set.name);
-            stbi_image_free(nrm);
+                c.nrm, c.nw, c.nh, VK_FORMAT_R8G8B8A8_UNORM, set.name);
+            stbi_image_free(c.nrm);
         }
         if (t_alb.ok) {
-            kill_slot(albedo_textures_[set.slot]);
+            retired.push_back(albedo_textures_[set.slot]);
             albedo_textures_[set.slot] = { t_alb.image, t_alb.alloc, t_alb.view };
         }
         if (t_nrm.ok) {
-            kill_slot(normal_textures_[set.slot]);
+            retired.push_back(normal_textures_[set.slot]);
             normal_textures_[set.slot] = { t_nrm.image, t_nrm.alloc, t_nrm.view };
         }
         ++loaded;
     }
+    for (TextureSlot& s : retired) kill_slot(s);   // first one syncs the batch
     log::infof("[terrain pbr] %d/7 photogrammetry layer sets loaded "
                "(AO-baked albedo, displacement in normal alpha)", loaded);
 }
@@ -1052,9 +1084,21 @@ void VulkanEngine::bake_terrain_materials() {
         { TM_ROCK,  kTexRoof,      "terrain/roof_placeholder" },
         { TM_DIRT,  kTexRoad,      "terrain/road_placeholder" },
     };
-    std::vector<unsigned char> alb, nrm;
-    for (const Mat& m : mats) {
-        tm_generate(m.kind, W, H, alb, nrm);
+    // CPU generation of all materials in parallel (pure functions of
+    // kind + size); uploads stay on this thread (queue owner).
+    std::vector<unsigned char> albs[kTerrainMatCount], nrms[kTerrainMatCount];
+    {
+        std::vector<std::future<void>> futs;
+        for (int i = 0; i < kTerrainMatCount; ++i)
+            futs.push_back(std::async(std::launch::async, [&, i]() {
+                tm_generate(mats[i].kind, W, H, albs[i], nrms[i]);
+            }));
+        for (auto& f : futs) f.get();
+    }
+    for (int i = 0; i < kTerrainMatCount; ++i) {
+        const Mat& m = mats[i];
+        std::vector<unsigned char>& alb = albs[i];
+        std::vector<unsigned char>& nrm = nrms[i];
         Texture2D a = upload_texture_from_pixels(
             device_, allocator_, graphics_queue_, graphics_queue_family_,
             alb.data(), W, H, VK_FORMAT_R8G8B8A8_SRGB, m.name);
