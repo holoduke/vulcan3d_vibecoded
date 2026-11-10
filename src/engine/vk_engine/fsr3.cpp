@@ -361,7 +361,7 @@ void VulkanEngine::init_fsr3_swapchain() {
     sc_info.surface          = surface_;
     sc_info.minImageCount    = static_cast<uint32_t>(swapchain_images_.size());
     sc_info.imageFormat      = swapchain_format_;
-    sc_info.imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    sc_info.imageColorSpace  = swapchain_colorspace_;
     sc_info.imageExtent      = swapchain_extent_;
     sc_info.imageArrayLayers = 1;
     sc_info.imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT |

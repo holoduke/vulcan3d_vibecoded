@@ -249,6 +249,9 @@ void VulkanEngine::save_settings() const {
     f << "cloud_density = " << rt_.cloud_density << "\n";
     f << "cloud_speed = " << rt_.cloud_speed << "\n";
     f << "tonemap_mode = " << rt_.tonemap_mode << "\n";
+    f << "hdr_output = " << rt_.hdr_output << "\n";
+    f << "hdr_paper_nits = " << rt_.hdr_paper_nits << "\n";
+    f << "hdr_peak_nits = " << rt_.hdr_peak_nits << "\n";
     f << "fog_volumetric = " << rt_.fog_volumetric << "\n";
     f << "fog_density = " << rt_.fog_density << "\n";
     f << "fog_height_falloff = " << rt_.fog_height_falloff << "\n";
@@ -694,6 +697,9 @@ void VulkanEngine::load_settings() {
             if (key == "cloud_density")        { rt_.cloud_density = std::stof(val); ++loaded; continue; }
             if (key == "cloud_speed")          { rt_.cloud_speed = std::stof(val); ++loaded; continue; }
             if (key == "tonemap_mode")         { rt_.tonemap_mode = std::stoi(val); ++loaded; continue; }
+            if (key == "hdr_output")     { rt_.hdr_output = std::stoi(val); ++loaded; continue; }
+            if (key == "hdr_paper_nits") { rt_.hdr_paper_nits = std::stof(val); ++loaded; continue; }
+            if (key == "hdr_peak_nits")  { rt_.hdr_peak_nits = std::stof(val); ++loaded; continue; }
             if (key == "fog_volumetric")       { rt_.fog_volumetric = std::stoi(val); ++loaded; continue; }
             if (key == "fog_density")          { rt_.fog_density = std::stof(val); ++loaded; continue; }
             if (key == "fog_height_falloff")   { rt_.fog_height_falloff = std::stof(val); ++loaded; continue; }

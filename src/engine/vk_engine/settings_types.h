@@ -86,6 +86,11 @@ struct RtSettings {
         int   sky_mode = 1;
         float atmosphere_intensity = 5.0f;   // calibrated vs the old HDRI sky brightness
         int   tonemap_mode = 0;   // 0 ACES fitted (tuned look), 1 AgX (Sobotka), 2 Khronos PBR Neutral
+        // HDR10 output (BT.2020 + PQ swapchain). Used only when the surface
+        // offers A2B10G10R10 + HDR10_ST2084; falls back to SDR otherwise.
+        int   hdr_output = 1;
+        float hdr_paper_nits = 200.0f;   // SDR-white / UI brightness
+        float hdr_peak_nits  = 1000.0f;  // display peak (tonemap shoulder)
         float aerial_scale = 6.0f;
         float aerial_max_km = 8.0f;
         // Volumetric clouds (physical sky only).

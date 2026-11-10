@@ -336,6 +336,8 @@ private:
 
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     VkFormat swapchain_format_ = VK_FORMAT_UNDEFINED;
+    VkColorSpaceKHR swapchain_colorspace_ = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    bool hdr_active_ = false;   // swapchain is A2B10G10R10 + HDR10 PQ
     VkExtent2D swapchain_extent_{};
     // Resolution at which the world / TAA / bloom passes render. Equals
     // swapchain_extent_ × rt_.render_scale (clamped to ≥ 1×1). Scene-color,

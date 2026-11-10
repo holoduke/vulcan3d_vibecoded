@@ -998,7 +998,8 @@ void VulkanEngine::draw(uint32_t img_index) {
         pc_data.inv_view_proj = last_inv_view_proj_;   // cached
         pc_data.tone = glm::vec4(float(rt_.tonemap_mode),
                                  (rt_.fog_volumetric && fog_pipeline_) ? std::max(20.0f, rt_.fog_max_dist) : 0.0f,
-                                 0.0f, 0.0f);
+                                 hdr_active_ ? std::max(80.0f, rt_.hdr_paper_nits) : 0.0f,
+                                 std::max(rt_.hdr_peak_nits, rt_.hdr_paper_nits));
         pc_data.atmo = glm::vec4((rt_.sky_mode == 1 && atmo_pipeline_) ? 1.0f : 0.0f,
                                  std::max(0.0f, rt_.atmosphere_intensity),
                                  6360.0f + std::max(current_frame_view_.eye_pos.y, 1.0f) * 0.001f,
@@ -1032,6 +1033,33 @@ void VulkanEngine::draw(uint32_t img_index) {
         };
         vkCmdBeginRendering(frame.command_buffer, &ri);
         ImDrawData* dd = ImGui::GetDrawData();
+        if (dd && hdr_active_) {
+            // HDR10 swapchain: ImGui vertex colours are sRGB code values;
+            // re-encode them as PQ at paper-white so the UI keeps its SDR
+            // brightness instead of being read as up-to-10000-nit PQ.
+            static uint8_t lut[256];
+            static float lut_paper = -1.0f;
+            const float paper = std::max(80.0f, rt_.hdr_paper_nits);
+            if (lut_paper != paper) {
+                lut_paper = paper;
+                for (int i = 0; i < 256; ++i) {
+                    float c = i / 255.0f;
+                    float lin = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+                    float lp = std::pow(lin * paper / 10000.0f, 0.1593017578125f);
+                    float pq = std::pow((0.8359375f + 18.8515625f * lp) / (1.0f + 18.6875f * lp), 78.84375f);
+                    lut[i] = static_cast<uint8_t>(std::clamp(pq * 255.0f + 0.5f, 0.0f, 255.0f));
+                }
+            }
+            for (int l = 0; l < dd->CmdListsCount; ++l) {
+                for (ImDrawVert& v : dd->CmdLists[l]->VtxBuffer) {
+                    ImU32 c = v.col;
+                    v.col = (c & 0xFF000000u) |
+                            (ImU32(lut[(c >> 16) & 0xFF]) << 16) |
+                            (ImU32(lut[(c >> 8) & 0xFF]) << 8) |
+                             ImU32(lut[c & 0xFF]);
+                }
+            }
+        }
         if (dd) ImGui_ImplVulkan_RenderDrawData(dd, frame.command_buffer);
         vkCmdEndRendering(frame.command_buffer);
     }

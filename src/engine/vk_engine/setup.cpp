@@ -31,6 +31,7 @@ void VulkanEngine::init_vulkan() {
     auto& b = builder.set_app_name("quake-like")
                   .request_validation_layers(vk_validation_enabled())
                   .require_api_version(1, 3, 0)
+                  .enable_extension("VK_EXT_swapchain_colorspace")
                   .set_debug_callback(&debug_callback)
                   .set_debug_messenger_severity(
                       VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
@@ -302,10 +303,34 @@ void VulkanEngine::init_swapchain() {
     uint32_t w = 0, h = 0;
     window_->framebuffer_size(w, h);
 
+    // HDR10: pick A2B10G10R10/A2R10G10B10 + ST2084 when the surface offers
+    // it (Windows HDR on). Screenshots decode PQ back to sRGB.
+    VkSurfaceFormatKHR want{ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR };
+    hdr_active_ = false;
+    {
+        uint32_t nf = 0;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device_, surface_, &nf, nullptr);
+        std::vector<VkSurfaceFormatKHR> fmts(nf);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device_, surface_, &nf, fmts.data());
+        std::string list;
+        for (const auto& f : fmts) {
+            list += " " + std::to_string(int(f.format)) + "/" + std::to_string(int(f.colorSpace));
+            if (f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+                (f.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
+                 f.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32) &&
+                rt_.hdr_output != 0 && !hdr_active_) {
+                want = f;
+                hdr_active_ = true;
+            }
+        }
+        log::infof("surface formats (fmt/colorspace):%s -> %s", list.c_str(),
+                   hdr_active_ ? "HDR10 PQ" : "SDR sRGB");
+    }
+    swapchain_colorspace_ = want.colorSpace;
+
     vkb::SwapchainBuilder sb{ physical_device_, device_, surface_ };
     auto sc_ret = sb
-        .set_desired_format(VkSurfaceFormatKHR{ VK_FORMAT_B8G8R8A8_UNORM,
-                                                VK_COLOR_SPACE_SRGB_NONLINEAR_KHR })
+        .set_desired_format(want)
         .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
         .set_desired_extent(w, h)
         .add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT |

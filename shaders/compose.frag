@@ -914,11 +914,33 @@ void main() {
         mapped *= vig;
     }
 
+    float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy,
+                                             vec2(0.06711056, 0.00583715))));
+    if (pc.tone.z > 0.0) {
+        // HDR10 output. `mapped` is the SDR display-linear image (same
+        // look as SDR); expand only its highlights toward the display
+        // peak with y / (1 - a*y^4) on luminance (slope 1 and identity
+        // through the midtones, f(1) = peak / paper), then BT.709 ->
+        // BT.2020, scale to nits and PQ-encode (SMPTE ST 2084).
+        float P = max(pc.tone.w / pc.tone.z, 1.0);
+        float Y = dot(mapped, vec3(0.2126, 0.7152, 0.0722));
+        float y = clamp(Y, 0.0, 1.0);
+        float y4 = y * y; y4 *= y4;
+        float Yh = y / max(1.0 - (1.0 - 1.0 / P) * y4, 1.0 / P);
+        vec3 lin = mapped * (Yh / max(Y, 1e-5));
+        const mat3 to2020 = mat3(0.6274, 0.0691, 0.0164,
+                                 0.3293, 0.9195, 0.0880,
+                                 0.0433, 0.0114, 0.8956);
+        vec3 nits = max(to2020 * lin, vec3(0.0)) * pc.tone.z;
+        vec3 Lp = pow(clamp(nits / 10000.0, 0.0, 1.0), vec3(0.1593017578125));
+        vec3 pq = pow((0.8359375 + 18.8515625 * Lp) / (1.0 + 18.6875 * Lp),
+                      vec3(78.84375));
+        outColor = vec4(pq + (ign - 0.5) / 1023.0, 1.0);
+        return;
+    }
     // 8-bit output: +-0.5 LSB interleaved-gradient-noise dither after
     // encoding so sky / fog gradients don't band.
     vec3 enc = to_srgb(mapped);
-    float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy,
-                                             vec2(0.06711056, 0.00583715))));
     enc += (ign - 0.5) / 255.0;
     outColor = vec4(enc, 1.0);
 }
