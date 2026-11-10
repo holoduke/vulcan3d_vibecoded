@@ -666,6 +666,18 @@ void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,
         // which is what we want for SVGF (the gun shouldn't smear when the
         // camera turns even though world points "moved").
         pc.prev_mvp = pc.mvp;
+        // Plus the jitter change: the gun is rendered with this frame's
+        // jittered projection, so its previous-frame position is the same
+        // clip point under the PREVIOUS jitter (clip.xy += (jc - jp) * w).
+        // The shader's jitter cancel then yields exactly 0 (prev = mvp gave
+        // -jitter delta and the gun edges shimmered under DLSS).
+        if (rt_.fsr2_enabled) {
+            glm::mat4 J(1.0f);
+            const glm::vec2 dj = current_frame_view_.jitter - prev_jitter_;
+            J[3][0] = dj.x;
+            J[3][1] = dj.y;
+            pc.prev_mvp = J * pc.mvp;
+        }
         pc.color = color;
         pc.emissive = glm::vec4(emissive, full_emissive ? 1.0f : 0.0f);
         // No texture: albedo/normal index -1 (was left at 0, so the gun

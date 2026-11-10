@@ -431,7 +431,11 @@ void VulkanEngine::update_scene_ubo() {
     //      vec, would freeze if subtracted unconditionally).
     glm::vec2 jdelta_uv(0.0f, 0.0f);
     if (rt_.fsr2_enabled) {
-        jdelta_uv = (current_frame_view_.jitter - prev_jitter_) * 0.5f;
+        // proj[2][xy] += j shifts clip.xy by -j*w (GLM w = -z_view), i.e. the
+        // image moves by -j in NDC: the jitter part of raw motion is
+        // -(cur - prev) * 0.5 in uv. (Was +: static scenes got 2x the jitter
+        // delta as motion and DLSS shimmered while standing still.)
+        jdelta_uv = -(current_frame_view_.jitter - prev_jitter_) * 0.5f;
     }
     // .x re-enabled in ReSTIR session 5. It is consumed ONLY by the two
     // temporal/spatial reservoir gates in cube.frag (verified — no other

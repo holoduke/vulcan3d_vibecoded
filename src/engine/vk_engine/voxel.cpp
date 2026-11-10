@@ -831,7 +831,17 @@ void VulkanEngine::update_voxel_camera_ubo() {
     VoxelCameraUboData data{};
     const FrameView& fv = current_frame_view_;
     data.view_proj      = fv.vp;
+    // voxel.frag writes raw (cur - prev) motion with no jitter cancel, so
+    // re-jitter the previous VP with THIS frame's jitter: the difference is
+    // then pure geometric motion (the tower's edges shimmered under DLSS).
     data.prev_view_proj = prev_view_proj_;
+    if (rt_.fsr2_enabled) {
+        glm::mat4 J(1.0f);
+        const glm::vec2 dj = prev_jitter_ - fv.jitter;
+        J[3][0] = dj.x;
+        J[3][1] = dj.y;
+        data.prev_view_proj = J * prev_view_proj_;
+    }
     data.camera_pos     = glm::vec4(fv.eye_pos, 1.0f);
 
     // Match the sun direction computation used by descriptors.cpp /

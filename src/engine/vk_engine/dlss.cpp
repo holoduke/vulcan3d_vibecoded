@@ -13,6 +13,8 @@
 #include "engine/vk_initializers.h"
 #include "engine/log.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <cstring>
 #define WIN32_LEAN_AND_MEAN
@@ -219,8 +221,11 @@ void VulkanEngine::dispatch_dlss(VkCommandBuffer cmd) {
     c.clipToLensClip = to_sl(glm::mat4(1.0f));
     c.clipToPrevClip = to_sl(clip_to_prev);
     c.prevClipToClip = to_sl(glm::inverse(clip_to_prev));
-    c.jitterOffset = sl::float2(fv.jitter.x * 0.5f * float(render_extent_.width),
-                                fv.jitter.y * 0.5f * float(render_extent_.height));
+    // The projection jitter moves the image by -j in NDC (GLM w = -z_view),
+    // so the pixel-space sample offset DLSS needs is -j * 0.5 * size on both
+    // axes (measured: + made the output shimmer while standing still).
+    c.jitterOffset = sl::float2(-fv.jitter.x * 0.5f * float(render_extent_.width),
+                                -fv.jitter.y * 0.5f * float(render_extent_.height));
     // Engine motion = current_uv - prev_uv (uv units); DLSS wants
     // prev - current normalised to the render size.
     c.mvecScale = sl::float2(-1.0f, -1.0f);
