@@ -50,6 +50,7 @@ layout(location = 3) out float vSunShadow;
 layout(location = 4) out float vCullKill;
 layout(location = 5) out float vDistToCam;
 layout(location = 6) out vec4 vPrevClip;
+layout(location = 7) out vec2 vUv;
 
 layout(set = 0, binding = 6) uniform sampler2D u_terrain_shadow;
 layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
@@ -73,12 +74,23 @@ void main() {
         vPrevClip   = gl_Position;
         vNormal = vec3(0, 1, 0); vColor = vec3(0);
         vWorldPos = vec3(0); vSunShadow = 0.0; vDistToCam = 0.0;
+        vUv = vec2(0.0);
         return;
     }
 
     float c = cos(rot), s = sin(rot);
     mat3 R = mat3(vec3(c, 0, s), vec3(0, 1, 0), vec3(-s, 0, c));
     vec3 world = R * (inPos * scale * fade) + base;
+    // Plants: wind sway weighted by uv.y (0 at the root, 1 at the tips).
+    if (pc.grass_params.y > 0.5 && inUv.y > 0.0) {
+        float t = pc.grass_params.z;
+        float ph = dot(base.xz, vec2(0.37, 0.23));
+        vec2 wd = normalize(vec2(0.8, 0.45));
+        float s = sin(t * 2.1 + ph) * 0.7 + sin(t * 4.7 + ph * 1.9) * 0.3 + 0.25;
+        world.xz += wd * (s * 0.06 * scale * inUv.y * inUv.y);
+        world.y  -= abs(s) * 0.015 * scale * inUv.y;
+    }
+    vUv = inUv;
 
     gl_Position = pc.mvp * vec4(world, 1.0);
     vPrevClip   = pc.prev_mvp * vec4(world, 1.0);

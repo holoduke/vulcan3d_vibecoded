@@ -147,8 +147,17 @@ VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig
     for (uint32_t ai = 0; ai < resolved_color_count; ++ai) {
         VkPipelineColorBlendAttachmentState& blend = blends[ai];
         bool alpha_blend = cfg.alpha_blend_color0_only && ai == 0;
-        blend.blendEnable = (cfg.additive_blend || alpha_blend) ? VK_TRUE : VK_FALSE;
-        if (cfg.additive_blend) {
+        blend.blendEnable = (cfg.additive_blend || alpha_blend || cfg.premultiplied_blend) ? VK_TRUE : VK_FALSE;
+        if (cfg.premultiplied_blend) {
+            blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend.colorBlendOp        = VK_BLEND_OP_ADD;
+            // Alpha tracks TRANSMITTANCE (dst.a *= 1 - src.a): compose uses
+            // it to put the real sky behind FX drawn over sky pixels.
+            blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend.alphaBlendOp        = VK_BLEND_OP_ADD;
+        } else if (cfg.additive_blend) {
             blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
             blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
             blend.colorBlendOp        = VK_BLEND_OP_ADD;

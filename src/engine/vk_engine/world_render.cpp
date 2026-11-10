@@ -42,6 +42,19 @@ VulkanEngine::FrameView VulkanEngine::compute_frame_view() {
     glm::vec3 saved = player_.position;
     player_.position = fv.render_pos;
     fv.view = player_.view_matrix();
+    // Explosion camera shake: small, fast, decaying rotational jitter
+    // (sum of incommensurate sines = smooth noise, no RNG state).
+    if (cam_shake_ > 1e-4f) {
+        float tt = static_cast<float>(glfwGetTime());
+        float a = cam_shake_;
+        float rx = a * 0.020f * (std::sin(tt * 37.0f) + 0.6f * std::sin(tt * 71.0f + 1.3f));
+        float ry = a * 0.016f * (std::sin(tt * 43.0f + 2.1f) + 0.5f * std::sin(tt * 89.0f));
+        float rz = a * 0.010f * std::sin(tt * 29.0f + 0.7f);
+        glm::mat4 shake = glm::rotate(glm::mat4(1.0f), rx, glm::vec3(1, 0, 0)) *
+                          glm::rotate(glm::mat4(1.0f), ry, glm::vec3(0, 1, 0)) *
+                          glm::rotate(glm::mat4(1.0f), rz, glm::vec3(0, 0, 1));
+        fv.view = shake * fv.view;
+    }
     // Capture eye position with the lerped body pos still active so
     // raymarched passes (camera_pos in scene UBO) match the smoothed
     // view matrix. Without this the raw physics-tick eye is ahead of
@@ -656,26 +669,22 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // slow yaw rotation. Raster-only; no physics, no BLAS.
     if (!spacejet_meshes_.empty() && !spacejet_flights_.empty()) {
         for (const auto& f : spacejet_flights_) {
-            // Asset's nose points -Z in glTF space; we need it pointing
-            // along the heading direction +Z(rotated). Yaw value
-            // (heading + pi) flips so rotY puts -Z in line with fwd.
-            const float yaw_now  = f.heading      + kPi;
-            const float yaw_prev = f.prev_heading + kPi;
-            // Bank roll proportional to turn rate РІР‚вЂќ banked-into-the-turn
-            // look. Cap at Р’В±35Р’В° so even tight turns stay readable.
-            const float bank_now  = glm::clamp(-f.turn_rate * 4.0f,
-                                                -0.61f, 0.61f);
-            const float bank_prev = bank_now;     // bank changes very slowly
-            auto build_model = [&](glm::vec3 pos, float yaw, float bank) {
-                return glm::translate(glm::mat4(1.0f), pos) *
-                       glm::rotate   (glm::mat4(1.0f), yaw,  glm::vec3(0,1,0)) *
-                       glm::rotate   (glm::mat4(1.0f), bank, glm::vec3(0,0,1)) *
+            if (f.dead) continue;
+            // Full 3D attitude from the AI's fwd/up basis. The asset's
+            // nose points -Z, so local Z = -fwd, Y = up, X = fwd x up.
+            auto build_model = [&](glm::vec3 pos, glm::vec3 fwd, glm::vec3 up) {
+                glm::vec3 z = -glm::normalize(fwd);
+                glm::vec3 x = glm::normalize(glm::cross(up, z));
+                glm::vec3 y = glm::cross(z, x);
+                glm::mat4 basis(glm::vec4(x, 0.0f), glm::vec4(y, 0.0f),
+                                glm::vec4(z, 0.0f), glm::vec4(pos, 1.0f));
+                return basis *
                        glm::scale    (glm::mat4(1.0f),
                                        glm::vec3(spacejet_base_scale_ * f.scale)) *
                        glm::translate(glm::mat4(1.0f), spacejet_centre_offset_);
             };
-            glm::mat4 model      = build_model(f.pos,      yaw_now,  bank_now);
-            glm::mat4 prev_model = build_model(f.prev_pos, yaw_prev, bank_prev);
+            glm::mat4 model      = build_model(f.pos,      f.fwd,      f.up);
+            glm::mat4 prev_model = build_model(f.prev_pos, f.prev_fwd, f.prev_up);
 
             // Red hit-flash: emissive bumps to bright red for the
             // hit_flash_t window (~0.2 s) so the player sees damage
@@ -813,6 +822,25 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                            0, sizeof(PushConstants), &spc);
         vkCmdDrawIndexed(cmd, scatter_.rock_mesh.index_count,
                          scatter_.instance_count, 0, 0, 0);
+        // Flowers + ferns: per-species mesh, instance ranges in one buffer.
+        if (scatter_.plant_buffer && scatter_plant_pipeline_) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scatter_plant_pipeline_);
+            PushConstants ppc = spc;
+            ppc.grass_params = glm::vec4(std::max(45.0f, rt_.grass_distance * 0.9f), 1.0f,
+                                         static_cast<float>(frame_number_) * 0.016f, 0.0f);
+            vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
+                               0, sizeof(PushConstants), &ppc);
+            for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {
+                if (scatter_.plant_count[sp] == 0) continue;
+                VkBuffer pb[2] = { scatter_.plant_mesh[sp].vertex_buffer, scatter_.plant_buffer };
+                VkDeviceSize po[2] = { 0, 0 };
+                vkCmdBindVertexBuffers(cmd, 0, 2, pb, po);
+                vkCmdBindIndexBuffer(cmd, scatter_.plant_mesh[sp].index_buffer, 0,
+                                     VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, scatter_.plant_mesh[sp].index_count,
+                                 scatter_.plant_count[sp], 0, 0, scatter_.plant_first[sp]);
+            }
+        }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, world_pipeline());
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -882,69 +910,56 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     // Shadow debug overlay (gated by rt_.shadow_debug_overlay).
     draw_shadow_debug(cmd, vp);
 
-    // Projectiles: switch to cylinder mesh, draw each in-flight bullet.
-    if (!projectiles_.empty() && physics_) {
+    // Laser bolts + tracer streaks are drawn as glow ribbons in the FX
+    // pass (fx.cpp, after deferred lighting). Falling bombs: dark body
+    // with a lighter nose band, aligned to the velocity.
+    // Flag poles (cloth itself is drawn in the FX pass).
+    if (!flags_.empty()) {
         vkCmdBindVertexBuffers(cmd, 0, 1, &cylinder_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cylinder_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
-        for (const auto& p : projectiles_) {
-            glm::mat4 world;
-            // _h handle path skips the unordered_map.find that the
-            // id-keyed overload does (rebuild_tlas already uses _h here).
-            if (!physics_->get_body_world_matrix_h(p.jolt_handle, world)) continue;
-            glm::vec3 pos(world[3]);
-            glm::vec3 vel = physics_->get_linear_velocity_h(p.jolt_handle);
-            // Single sqrt for both length-test + normalize (was length()
-            // then normalize() which is another sqrt internally).
-            float v_len2 = glm::dot(vel, vel);
-            glm::vec3 dir = v_len2 > 1e-6f
-                ? vel * (1.0f / std::sqrt(v_len2))
-                : p.initial_dir;
-            // VISUAL beam, decoupled from the physics cylinder. The body
-            // is 1.8 m long centred 0.5 m ahead of the eye, so drawing it
-            // directly put its tail BEHIND the camera (beam "starting
-            // inside the camera") and its 4 cm radius filled the view.
-            // Head = bullet front tip shifted by the barrel offset (which
-            // decays to 0 over 12 m, same curve as the tracer trail); the
-            // tail never reaches back past the barrel tip.
-            float flown = glm::distance(pos, p.spawn_origin);
-            float conv  = std::max(0.0f, 1.0f - flown / 12.0f);
-            glm::vec3 head = pos + dir * p.half_length + p.trail_offset * conv;
-            glm::vec3 barrel = p.spawn_origin + p.trail_offset;
-            float avail = glm::dot(head - barrel, dir);
-            float len = std::min(2.4f, avail);
-            if (len < 0.02f) continue;
-            glm::vec3 mid = head - dir * (len * 0.5f);
-            // Thin hot core (3 mm), widened with distance to ~0.6 px so a
-            // far beam doesn't break into sub-pixel dashes.
-            // 80 deg vertical FOV -> 2*tan(40 deg)/H radians per pixel.
-            float px_ang = 1.678f / std::max(1.0f,
-                               static_cast<float>(render_extent_.height));
-            float dcam = glm::distance(mid, player_.eye_position());
-            float radius = std::max(0.003f, dcam * px_ang * 0.6f);
-            glm::mat4 model = align_local_y_to(mid, dir) *
-                              glm::scale(glm::mat4(1.0f),
-                                         glm::vec3(radius, len * 0.5f, radius));
-            PushConstants pc{};
-            pc.mvp = vp * model;
-            pc.model = model;
-            pc.prev_mvp = pc.mvp;   // no prev pose for bullets yet
-            // Near-white core with the laser hue; the HDR emissive feeds
-            // a small bloom halo (the glow).
-            pc.color = glm::vec4(1.0f, 0.75f, 0.9f, 1.0f);
-            pc.emissive = glm::vec4(p.emissive * 2.2f, 1.0f);  // full_emissive
-            vkCmdPushConstants(cmd, pipeline_layout_,
-                               kPushConstantStages,
-                               0, sizeof(PushConstants), &pc);
-            vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
+        for (const auto& f : flags_) {
+            auto push = [&](glm::vec3 c, float r, float hl, glm::vec4 col) {
+                glm::mat4 model = glm::translate(glm::mat4(1.0f), c) *
+                                  glm::scale(glm::mat4(1.0f), glm::vec3(r, hl, r));
+                PushConstants pc{};
+                pc.mvp = vp * model;
+                pc.model = model;
+                pc.prev_mvp = prev_vp * model;
+                pc.color = col;
+                pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 1.0f);
+                vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
+                                   0, sizeof(PushConstants), &pc);
+                vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
+            };
+            push(f.pole_base + glm::vec3(0.0f, f.pole_h * 0.5f, 0.0f), 0.045f, f.pole_h * 0.5f,
+                 glm::vec4(0.22f, 0.16f, 0.10f, 1.0f));                 // wooden pole
+            push(f.pole_base + glm::vec3(0.0f, f.pole_h + 0.06f, 0.0f), 0.08f, 0.06f,
+                 glm::vec4(0.75f, 0.55f, 0.15f, 1.0f));                 // gilt finial
         }
     }
-
-    // Bullet tracer afterimages — fading glow ribbon behind each shot.
-    if (!tracer_segs_.empty()) {
+    if (!bombs_.empty()) {
         vkCmdBindVertexBuffers(cmd, 0, 1, &cylinder_mesh_.vertex_buffer, &offset);
-        vkCmdBindIndexBuffer(cmd, cylinder_mesh_.index_buffer, 0,
-                              VK_INDEX_TYPE_UINT32);
-        draw_tracers(cmd, vp);
+        vkCmdBindIndexBuffer(cmd, cylinder_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+        for (const auto& b : bombs_) {
+            glm::vec3 d = glm::normalize(b.vel + glm::vec3(1e-4f));
+            auto push = [&](glm::vec3 c, float r, float hl, glm::vec4 col) {
+                glm::mat4 model = align_local_y_to(c, d) *
+                                  glm::scale(glm::mat4(1.0f), glm::vec3(r, hl, r));
+                PushConstants pc{};
+                pc.mvp = vp * model;
+                pc.model = model;
+                pc.prev_mvp = pc.mvp;
+                pc.color = col;
+                pc.emissive = glm::vec4(0.0f);
+                pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 1.0f);
+                vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
+                                   0, sizeof(PushConstants), &pc);
+                vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
+            };
+            push(b.pos, 0.22f, 0.85f, glm::vec4(0.16f, 0.17f, 0.15f, 1.0f));
+            push(b.pos + d * 0.95f, 0.16f, 0.12f, glm::vec4(0.55f, 0.45f, 0.12f, 1.0f));
+            push(b.pos - d * 0.95f, 0.30f, 0.08f, glm::vec4(0.12f, 0.12f, 0.12f, 1.0f));
+        }
     }
 
     prof_mark(cmd, "w_fx");

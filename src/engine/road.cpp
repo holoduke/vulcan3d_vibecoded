@@ -183,7 +183,12 @@ std::vector<glm::vec4> road_gpu_points(const Road& road, int max_pts) {
     if (road.empty() || max_pts < 2) return out;
     const size_t m = road.pts.size();
     if (static_cast<int>(m) <= max_pts) {
-        for (const auto& p : road.pts) out.emplace_back(p, 0.0f);
+        float acc = 0.0f;
+        for (size_t k = 0; k < m; ++k) {
+            if (k > 0) acc += glm::length(glm::vec2(road.pts[k].x - road.pts[k - 1].x,
+                                                    road.pts[k].z - road.pts[k - 1].z));
+            out.emplace_back(road.pts[k], acc);
+        }
         return out;
     }
     std::vector<float> s(m, 0.0f);
@@ -197,6 +202,12 @@ std::vector<glm::vec4> road_gpu_points(const Road& road, int max_pts) {
         float seg = (std::max)(s[j + 1] - s[j], 1e-6f);
         float t = std::clamp((target - s[j]) / seg, 0.0f, 1.0f);
         out.emplace_back(road.pts[j] + (road.pts[j + 1] - road.pts[j]) * t, 0.0f);
+    }
+    // .w = cumulative XZ arc length (road-space V coordinate for the shader).
+    float acc = 0.0f;
+    for (size_t k = 0; k < out.size(); ++k) {
+        if (k > 0) acc += glm::length(glm::vec2(out[k].x - out[k - 1].x, out[k].z - out[k - 1].z));
+        out[k].w = acc;
     }
     return out;
 }

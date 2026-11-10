@@ -58,6 +58,10 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  _terrain_antitile_params;
     vec4  _grass_shadow_on_terrain_params;
     vec4  grass_side_lit_params;   // .z = spom_mode (0=Flat,1=SPOM,2=SSDM,3=POM-curved)
+    vec4  _voxel_origin, _voxel_dims, _voxel_grid;
+    vec4  _road_info, _road_bbox;
+    vec4  _road_pts[64];
+    vec4  grass_rm_params;   // .y wind, .z time (s)
 } scene;
 
 layout(location = 0) out vec3 vNormal;
@@ -161,6 +165,21 @@ void main() {
 
     // Lateral push: extend each side face's in-plane footprint outward
     // by lateral_world_t toward the vert's own corner.
+    // Vegetation wind sway (static world props, grass_params.y = 1):
+    // uv.x = sway weight (0 at the trunk base), uv.y = per-plant phase.
+    // Model is identity for these meshes, so object = world space.
+    if (pc.grass_params.w < -0.5 && pc.grass_params.y > 0.5 && inUv.x > 0.001) {
+        float t  = scene.grass_rm_params.z;
+        float ws = 0.35 + clamp(scene.grass_rm_params.y, 0.0, 3.0);
+        vec2  wd = normalize(vec2(0.8, 0.45));
+        float ph = inUv.y + dot(inPosition.xz, vec2(0.05, 0.03));
+        float sway = sin(t * 1.3 + ph) * 0.6 + sin(t * 2.9 + ph * 1.7) * 0.25 + 0.35;
+        float flutter = sin(t * 9.0 + dot(inPosition, vec3(1.7, 2.3, 1.9))) * 0.04;
+        float w = inUv.x * inUv.x;
+        inPos_ext.xz += wd * (sway * 0.22 * ws * w);
+        inPos_ext += vec3(flutter * ws * w);
+    }
+
     if (do_extrude) {
         if (abs(inNormal.x) < 0.5 && scale.x > 0.001)
             inPos_ext.x += sign(inPosition.x) * lateral_world_t / scale.x;

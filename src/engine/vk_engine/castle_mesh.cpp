@@ -22,6 +22,7 @@ static_assert(sizeof(game::LevelVertex) == sizeof(Vertex),
               "LevelVertex must match the engine Vertex layout");
 
 void VulkanEngine::init_castle_meshes() {
+    size_t total_tris = 0;
     for (const auto& lm : world_.meshes) {
         if (lm.verts.empty() || lm.idx.empty()) continue;
         CastleMeshGpu g{};
@@ -36,10 +37,13 @@ void VulkanEngine::init_castle_meshes() {
         g.fallback = lm.fallback;
         g.bmin = lm.bmin;
         g.bmax = lm.bmax;
+        g.triplanar = lm.triplanar;
+        g.sway = lm.sway;
+        g.uv_scale = lm.uv_scale;
         castle_meshes_.push_back(g);
-        log::infof("[castle] mesh part: %zu verts, %zu tris (albedo %d)",
-                   lm.verts.size(), lm.idx.size() / 3, lm.tex_albedo);
+        total_tris += lm.idx.size() / 3;
     }
+    log::infof("[castle] %zu static mesh parts, %zu tris", castle_meshes_.size(), total_tris);
 }
 
 void VulkanEngine::build_castle_mesh_blas() {
@@ -157,13 +161,15 @@ void VulkanEngine::draw_castle_meshes(VkCommandBuffer cmd, const glm::mat4& vp,
             pc.model = glm::mat4(1.0f);
             pc.prev_mvp = prev_vp;
             // Static-mesh mode flag (see file header).
-            pc.grass_params = glm::vec4(0.0f, 0.0f, 0.0f, -1.0f);
+            // .y = wind sway (uv = weight, phase), .z = world triplanar.
+            pc.grass_params = glm::vec4(0.0f, g.sway ? 1.0f : 0.0f,
+                                        g.triplanar ? 1.0f : 0.0f, -1.0f);
             if (!depth_only) {
                 pc.color = glm::vec4(tex_on ? g.tint : g.fallback, 1.0f);
                 pc.emissive = glm::vec4(0.0f);
                 pc.tex_params = tex_on
                     ? glm::vec4(static_cast<float>(g.tex_albedo),
-                                static_cast<float>(g.tex_normal), 1.0f, 0.0f)
+                                static_cast<float>(g.tex_normal), g.uv_scale, 0.0f)
                     : glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
             }
             vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,

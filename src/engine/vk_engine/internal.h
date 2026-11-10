@@ -347,6 +347,11 @@ struct SceneUBO {
     glm::vec4  road_info;
     glm::vec4  road_bbox;      // xz min (xy), xz max (zw) incl. verge
     glm::vec4  road_pts[64];
+    // Raymarched-grass params for the terrain blade-shadow march in
+    // cube.frag: .x blade height scale, .y wind, .z time (s), .w density.
+    glm::vec4  grass_rm_params;
+    // .x slope_max (grass eligibility), .y shadow on (0/1), .z strength.
+    glm::vec4  grass_rm_params2;
 };
 
 // ---- KHR ray tracing entry points ----

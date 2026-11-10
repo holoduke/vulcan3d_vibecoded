@@ -282,6 +282,13 @@ void main() {
     vec3 cam_pos = scene.camera_pos.xyz;
     vec3 view_vec = cam_pos - world_pos;
     float cam_dist = length(view_vec);
+    // Depth-reconstruction error grows ~quadratically with distance (D32F,
+    // near 0.05 / far 1500: ~10 cm at 200 m). Ray origins rebuilt from
+    // depth then sit INSIDE the surface and every shadow / AO / GI ray
+    // self-hits -> distant props and castle went near-black. Pull all ray
+    // origins back toward the camera by the expected error.
+    vec3 wp_safe = world_pos + (view_vec / max(cam_dist, 1e-3)) *
+                   min(0.002 + cam_dist * cam_dist * 4.0e-6, 2.5);
 
     // ---------------------------------------------------------------
     //  Sun direct
@@ -332,7 +339,7 @@ void main() {
         } else {
             bias = 0.005 + 0.02 * (1.0 - ndl_raw);
         }
-        vec3 origin = world_pos + N * bias;
+        vec3 origin = wp_safe + N * bias;
         float base_softness = scene.rt_params.x;
         float kBlockerCone = base_softness * 4.0;
         float kBlockerTMax = clamp(cam_dist * 4.0, 30.0, 200.0);
@@ -519,7 +526,7 @@ void main() {
         // Terrain: lift the origin over the BLAS-vs-raster height gap.
         float lift = (material_id == 3) ? mix(0.02, 0.25, clamp(cam_dist / 45.0, 0.0, 1.0))
                                         : 0.01;
-        vec3 origin = world_pos + N * lift;
+        vec3 origin = wp_safe + N * lift;
         // Azimuths stratified around the circle with ONE random rotation
         // per pixel (was independent random phi per tap: 4 taps could all
         // land on one side, the main source of salt-and-pepper AO).
@@ -604,7 +611,7 @@ void main() {
         vec3 N_up  = abs(N.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0);
         vec3 N_tan = normalize(cross(N_up, N));
         vec3 N_bit = cross(N, N_tan);
-        vec3 ro    = world_pos + N * 0.01;
+        vec3 ro    = wp_safe + N * 0.01;
         float gi_radius = max(8.0, scene.rt_params2.y);
         int sky_hits = 0;
         // Frame-cycled seed offset: the temporal accumulator below needs
@@ -1094,6 +1101,32 @@ void main() {
     //  Master gate on dfog_col.a so the menu's fog-strength slider
     //  controls it the same way for both renderers.
     // ---------------------------------------------------------------
+    // ---------------------------------------------------------------
+    //  Dynamic point light: muzzle flash OR the brightest explosion
+    //  (CPU picks one per frame into muzzle_pos/colour). One RT shadow
+    //  ray so blasts don't light through walls.
+    // ---------------------------------------------------------------
+    // cam_dist > 1.5: the first-person gun sits ~0.3 m from the muzzle
+    // light and was blown out to white (+ bloom haze) on every shot.
+    if (scene.muzzle_pos.w > 0.0 && cam_dist > 1.5) {
+        vec3  lv = scene.muzzle_pos.xyz - world_pos;
+        float d  = length(lv);
+        float r  = max(scene.muzzle_color.w, 0.1);
+        if (d < r) {
+            vec3  Lp  = lv / max(d, 1e-3);
+            float att = 1.0 - d / r;
+            att *= att;
+            float ndl = max(dot(N, Lp), 0.0) * 0.85 + 0.15;
+            if (att * scene.muzzle_pos.w > 0.01) {
+                bool occl = any_hit_m(wp_safe + N * 0.06, Lp,
+                                      max(d - 0.8, 0.05), 0x01u);
+                if (!occl)
+                    lit += albedo * scene.muzzle_color.rgb *
+                           (scene.muzzle_pos.w * att * ndl);
+            }
+        }
+    }
+
     {
         vec4 dfog_col = scene.distance_fog_color;
         vec4 dfog_par = scene.distance_fog_params;

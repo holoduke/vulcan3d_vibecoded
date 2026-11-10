@@ -34,7 +34,8 @@ static_assert(sizeof(PushConstants) == 256, "push constant layout");
 //             grass_side_lit_params, 3 vec4 trailing batch).
 //     → 5008 (voxel_origin + voxel_dims + voxel_grid, Session B voxel RT).
 //     → 6064 (road_info + road_bbox + road_pts[64], castle road polyline).
-static_assert(sizeof(SceneUBO) == 6064, "scene ubo layout");
+//     → 6096 (grass_rm_params + grass_rm_params2, grass blade shadows).
+static_assert(sizeof(SceneUBO) == 6096, "scene ubo layout");
 
 RtFuncs g_rt;
 

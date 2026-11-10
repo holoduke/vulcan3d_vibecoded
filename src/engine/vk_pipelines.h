@@ -57,6 +57,10 @@ struct GraphicsPipelineConfig {
     // unblended motion read). Mutually exclusive with additive_blend.
     bool alpha_blend_color0_only = false;
 
+    // Premultiplied alpha (ONE, ONE_MINUS_SRC_ALPHA) on all colour
+    // attachments. Output alpha 0 = purely additive. Used by the FX pass.
+    bool premultiplied_blend = false;
+
     // Enables VK_DYNAMIC_STATE_DEPTH_BIAS so the caller can drive depth
     // bias per-frame via vkCmdSetDepthBias. Required for the shadow-map
     // depth-only pipeline (slope-scale + constant bias to combat acne).

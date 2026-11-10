@@ -7,6 +7,7 @@
 //   - world_render.cpp       (compute_frame_view + the raster render passes)
 
 #include "engine/vk_engine/internal.h"
+#include "engine/world_props.h"
 #include "engine/grass.h"
 #include "engine/terrain.h"
 #include "engine/texture.h"
@@ -239,6 +240,18 @@ void VulkanEngine::init_world() {
             for (auto& v : m.verts) v.p.y += hp.plateau_height;
             m.bmin.y += hp.plateau_height;
             m.bmax.y += hp.plateau_height;
+        }
+        // Procedural rock formations, trees and bushes (world space, already
+        // on the carved heightmap) - same static-mesh path as the castle.
+        {
+            WorldPropParams wp{};
+            wp.water_level  = rt_.water_level;
+            wp.rock_band_lo = rt_.terrain_h_dirt_rock_start;
+            std::vector<collision::AABB> pcols;
+            WorldPropStats ws = build_world_props(hm, &castle_road_, wp, world_.meshes, pcols);
+            for (const auto& a : pcols) world_.aabbs.push_back(a);
+            log::infof("[props] %d rock formations, %d boulders, %d pines, %d broadleaf, %d bushes",
+                       ws.formations, ws.boulders, ws.pines, ws.broadleaf, ws.bushes);
         }
         init_castle_meshes();
         // Lift player's default spawn point above the new ground.

@@ -167,6 +167,8 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  road_info;
     vec4  road_bbox;
     vec4  road_pts[64];
+    vec4  grass_rm_params;    // .x blade height, .y wind, .z time, .w density
+    vec4  grass_rm_params2;   // .x slope_max, .y shadow on, .z strength
 } scene;
 
 // Half-rate shadow producer output, sampled when terrain_local_info.z
@@ -660,6 +662,80 @@ float tpom_h_rock(vec2 u, float pdw) {
 float tpom_h(vec2 u, int kind, float k) {
     if (kind == 2) return textureLod(u_normal[kMatRoad], u, g_tpom_lod).a;
     return (kind == 0) ? tpom_h_grass(u, k) : tpom_h_rock(u, k);
+}
+
+// ---- Grass blade shadows on the terrain ----
+// Mirrors grass_raymarch.frag's blade field exactly (0.17 m cell grid,
+// hash42 per cell, rotation, sub-cell jitter, height, wind sway) so the
+// blades the player sees cast their shadows on the ground. Soft-shadow
+// sphere trace toward the sun (IQ penumbra estimate, k * d / t).
+vec4 gs_hash42(vec2 p) {
+    vec4 p4 = fract(vec4(p.xyxy) * vec4(0.1031, 0.1030, 0.0973, 0.1099));
+    p4 += dot(p4, p4.wzxy + 33.33);
+    return fract((p4.xxyz + p4.yzzw) * p4.zywx);
+}
+float gs_blade2d(vec2 p) {
+    float d = length(p - vec2(1.7, -1.3)) - 2.0;
+    d = max(d, -(length(p - vec2(1.7, -1.0)) - 1.8));
+    d = max(d, -(p.y + 1.0));
+    d = max(d, -(-p.x + 1.7));
+    return d;
+}
+float gs_blade(vec3 p, float th) {
+    p.y -= 1.0;
+    float d2 = max(0.0, gs_blade2d(p.xy));
+    return sqrt(d2 * d2 + p.z * p.z) - th;
+}
+// Distance to the nearest blade; `gy` = ground height (blade roots).
+float gs_map(vec3 p, float gy) {
+    const float kPeriod = 0.17;
+    const float kPi2 = 6.28318530718;
+    vec3 lp = p; lp.y -= gy;
+    if (lp.y > 0.9) return lp.y - 0.6;
+    vec2 cellId = floor((lp.xz + 0.5 * kPeriod) / kPeriod);
+    lp.xz = mod(lp.xz + 0.5 * kPeriod, kPeriod) - 0.5 * kPeriod;
+    float bh = clamp(scene.grass_rm_params.x, 0.05, 3.0) * 0.36;
+    float d = 1e3;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            vec2 nId = cellId + vec2(float(dx), float(dy));
+            vec2 muv = (nId * kPeriod / 2048.0) + vec2(0.5);
+            vec2 mg = textureLod(u_grass_mask, muv, 0.0).rg;
+            float sm = scene.grass_rm_params2.x;
+            float elig = mg.r * (1.0 - smoothstep(sm * 0.7, sm * 1.2, mg.g * 2.0));
+            if (elig < 0.10) continue;
+            vec4 r = gs_hash42(nId);
+            if (r.x > scene.grass_rm_params.w) continue;
+            vec3 np = lp - vec3(float(dx), 0.0, float(dy)) * kPeriod;
+            float a = r.z * kPi2;
+            float c = cos(a), s = sin(a);
+            np.xz = mat2(c, -s, s, c) * np.xz;
+            np.xz += (r.xy - 0.5) * kPeriod;
+            float wind_t = scene.grass_rm_params.z + r.w * kPi2;
+            np.x += sin(wind_t * 1.4) * scene.grass_rm_params.y * 0.025 *
+                    smoothstep(0.0, 1.7 * bh, np.y);
+            float sc = max(0.65, sqrt(r.w)) * bh;
+            d = min(d, gs_blade(np / sc, 0.002 / sc) * sc);
+        }
+    }
+    return d;
+}
+// Sun visibility 0..1 at ground point `p` (on the terrain surface).
+float grass_blade_shadow(vec3 p, vec3 L) {
+    if (L.y < 0.05) return 1.0;
+    float bh = clamp(scene.grass_rm_params.x, 0.05, 3.0) * 0.36;
+    float t_max = min((bh * 1.05) / L.y, 3.0);
+    float res = 1.0;
+    float t = 0.01;
+    for (int i = 0; i < 12; ++i) {
+        if (t > t_max) break;
+        vec3 q = p + L * t;
+        float d = gs_map(q, p.y);
+        res = min(res, 10.0 * max(d, 0.0) / t);
+        if (res < 0.02) break;
+        t += clamp(d, 0.015, 0.14);
+    }
+    return smoothstep(0.0, 1.0, res);
 }
 
 // Relief occlusion march (Tatarchuk 2006, "Practical POM" self-shadow):
@@ -1711,6 +1787,10 @@ void main() {
         // the paving edge is crisp at any distance. A little noise on
         // the distance roughens the edge into irregular kerb stones.
         float road_w = 0.0, verge_w = 0.0;
+        // Road-space UV (x = across, y = along the road, metres / g_tile) and
+        // the road frame, so the cobble rows follow the curve.
+        vec2  road_uv  = uvm;
+        vec3  road_T   = Tt, road_B = Bt;
         {
             int rn = int(scene.road_info.x + 0.5);
             vec2 q = vWorldPos.xz;
@@ -1726,6 +1806,38 @@ void main() {
                     best = min(best, dot(dv, dv));
                 }
                 float rd = sqrt(best);
+                // Bisector-partitioned segments: q belongs to segment i
+                // when it lies between the corner bisectors at i and i+1;
+                // along = s_i + fraction * len is then continuous through
+                // every bend (no seams in the cobble rows).
+                float best_lat = 1e9, r_along = 0.0, r_side = 0.0;
+                vec2  r_dir = vec2(0.0, 1.0);
+                for (int i = 0; i < 63; ++i) {
+                    if (i + 1 >= rn) break;
+                    vec2 a = scene.road_pts[i].xz, b = scene.road_pts[i + 1].xz;
+                    vec2 ta = normalize(b - scene.road_pts[max(i - 1, 0)].xz);
+                    vec2 tb = normalize(scene.road_pts[min(i + 2, rn - 1)].xz - a);
+                    float da = dot(q - a, ta), db = dot(q - b, tb);
+                    if (da < 0.0 && i > 0) continue;
+                    if (db > 0.0 && i + 2 < rn) continue;
+                    vec2 sd = normalize(b - a);
+                    float lat = sd.x * (q - a).y - sd.y * (q - a).x;   // signed
+                    if (abs(lat) < abs(best_lat)) {
+                        best_lat = lat;
+                        float f = da / max(da - db, 1e-4);
+                        r_along = mix(scene.road_pts[i].w, scene.road_pts[i + 1].w, f);
+                        r_dir = normalize(mix(ta, tb, clamp(f, 0.0, 1.0)));
+                    }
+                }
+                if (best_lat < 1e8) {
+                    road_uv = vec2(best_lat, r_along) / g_tile;
+                    // Frame matching road_uv: U grows to the road-left
+                    // (lat sign), V along the travel direction.
+                    vec3 dirw  = vec3(r_dir.x, 0.0, r_dir.y);
+                    vec3 sidew = vec3(-r_dir.y, 0.0, r_dir.x);
+                    road_T = normalize(sidew - N * dot(sidew, N));
+                    road_B = normalize(dirw  - N * dot(dirw,  N));
+                }
                 float hw = scene.road_info.y, vw = scene.road_info.z;
                 float jit = (tnoise(q * 1.7) - 0.5) * 0.45 +
                             (tnoise(q * 0.31 + 17.0) - 0.5) * 0.6;
@@ -1744,17 +1856,21 @@ void main() {
                           max(pom_grass ? grass_w_band : rockiness, 0.35);
         if (pom_kind == 2) pom_w = pom_str * pom_fade;
         float pom_D     = (pom_kind == 2 ? 0.035 : (pom_grass ? 0.05 : 0.10)) * pom_w;
-        g_tpom_lod = pom_kind == 2 ? textureQueryLod(u_normal[kMatRoad], uvm).x
+        // Road parallax runs in road space (road_uv + road frame).
+        vec2 pom_uv0 = (pom_kind == 2) ? road_uv : uvm;
+        vec3 pT = (pom_kind == 2) ? road_T : Tt;
+        vec3 pB = (pom_kind == 2) ? road_B : Bt;
+        g_tpom_lod = pom_kind == 2 ? textureQueryLod(u_normal[kMatRoad], road_uv).x
                    : pom_grass     ? textureQueryLod(u_height[5], uvm).x
                                    : textureQueryLod(u_normal[kMatRock], uvm).x;
         if (pom_D > 0.002) {
-            vec3 Vt = vec3(dot(V_pom, Tt), dot(V_pom, Bt), dot(V_pom, N));
+            vec3 Vt = vec3(dot(V_pom, pT), dot(V_pom, pB), dot(V_pom, N));
             Vt.z = max(Vt.z, 0.22);
             // More layers at grazing angles where the shift is long.
             int   steps = int(mix(24.0, 8.0, Vt.z));
             float layer = 1.0 / float(steps);
             vec2  dtex  = (Vt.xy / Vt.z) * pom_D * layer;
-            vec2  uvc   = uvm;
+            vec2  uvc   = pom_uv0;
             float curD  = 0.0;
             float hh    = tpom_h(uvc, pom_kind, pom_k);
             for (int i = 0; i < 24; ++i) {
@@ -1775,12 +1891,35 @@ void main() {
             }
             vec2  uv_hit = (lo + hi) * 0.5;
             float h_hit  = 1.0 - 0.5 * (dLo + dHi);
-            vec2  duv = uv_hit - uvm;
-            uvm += duv;
-            uvM += duv * 0.125;
-            vec3 Lt = vec3(dot(L, Tt), dot(L, Bt), dot(L, N));
+            vec2  duv = uv_hit - pom_uv0;
+            if (pom_kind == 2) {
+                road_uv += duv;
+            } else {
+                uvm += duv;
+                uvM += duv * 0.125;
+            }
+            vec3 Lt = vec3(dot(L, pT), dot(L, pB), dot(L, N));
             float vis = tpom_shadow(uv_hit, h_hit, Lt, pom_D, pom_kind, pom_k);
             terrain_pom_vis = mix(1.0, vis, clamp(pom_w * 1.5, 0.0, 1.0));
+        }
+
+        // Grass blade shadows (raymarched grass on): exact blade-shadow
+        // march near the camera, fading to an averaged mask darkening
+        // (blades become sub-pixel) further out. Rides the same sun-
+        // visibility channel as the relief self-shadow (gbuffer1.b ->
+        // deferred_lighting), so it works in the deferred path too.
+        if (scene.grass_rm_params2.y > 0.5 && _grass_present > 0.02 &&
+            (scene._scene_pad[0].x < 0.5 || vWorldPos.y > scene._scene_pad[0].y + 0.05)) {
+            float gstr = scene.grass_rm_params2.z;
+            float near_w = 1.0 - smoothstep(13.0, 26.0, cam_dist);
+            float far_vis = 1.0 - 0.45 * gstr * _grass_present *
+                            smoothstep(0.1, 0.6, L.y) * scene.grass_rm_params.w;
+            float gvis = far_vis;
+            if (near_w > 0.01) {
+                float exact = grass_blade_shadow(vWorldPos, L);
+                gvis = mix(far_vis, mix(1.0, exact, gstr * 0.85 + 0.15), near_w);
+            }
+            terrain_pom_vis *= gvis;
         }
 
         // Anti-tiling: blend a SECOND sample at a rotated/offset UV with
@@ -1904,8 +2043,8 @@ void main() {
         m = mix(m, MAT_A(kMatSand, kScSand), w_beach);  // sand at waterline
         // Road: trodden dirt verge, then the cobbles (POM-shifted uvm).
         m = mix(m, MAT_A(kMatDirt, kScDirt) * vec3(0.82, 0.76, 0.68), verge_w);
-        m = mix(m, texture(u_albedo[kMatRoad], uvm).rgb, road_w);
-        hcur = mix(hcur, texture(u_normal[kMatRoad], uvm).a, road_w);
+        m = mix(m, texture(u_albedo[kMatRoad], road_uv).rgb, road_w);
+        hcur = mix(hcur, texture(u_normal[kMatRoad], road_uv).a, road_w);
         #undef MAT_A
         #undef MAT_H
         // Carry the final splat height + a rock/snow specular weight to
@@ -1996,7 +2135,13 @@ void main() {
         nm = mix(nm, MAT_N(kMatRock, kScRock), w_steep);
         nm = mix(nm, MAT_N(kMatSand, kScSand), w_beach); // sand at waterline
         nm = mix(nm, MAT_N(kMatDirt, kScDirt), verge_w);
-        nm = mix(nm, texture(u_normal[kMatRoad], uvm).xyz * 2.0 - 1.0, road_w);
+        {
+            // Road normal is in road space; rotate its XY into the terrain
+            // tangent frame (Tt, Bt) the splat normal is expressed in.
+            vec3 rn = texture(u_normal[kMatRoad], road_uv).xyz * 2.0 - 1.0;
+            vec3 rw = road_T * rn.x + road_B * rn.y;
+            nm = mix(nm, vec3(dot(rw, Tt), dot(rw, Bt), rn.z), road_w);
+        }
         #undef MAT_N
         #undef MAT_N_ROT
         #undef MAT_N_STRICT
@@ -2597,7 +2742,7 @@ void main() {
                               spom_B  * n_t.y +
                               spom_face_n * n_t.z);
             }
-        } else if (use_albedo && is_mesh_draw) {
+        } else if (use_albedo && is_mesh_draw && pc.grass_params.z < 0.5) {
             // Static mesh: real UVs + derivative (cotangent) tangent frame
             // (Schueler 2013). NormalGL green = image-up = -dP/dv.
             int  ai  = clamp(albedo_idx_raw, 0, kTextureCount - 1);
@@ -2627,6 +2772,19 @@ void main() {
             int  normal_idx = clamp(normal_idx_raw, 0, kTextureCount - 1);
             N = triplanar_normal(u_normal[normal_idx], sample_pos, N);
         }
+    }
+
+    // Untextured world props (foliage): procedural leaf-cluster variation
+    // - large-scale hue drift between plants + fine clumpy light/dark
+    // breakup, and a darker interior (approximated by the normal facing
+    // down / sideways) so canopies don't read as flat-coloured blobs.
+    if (is_mesh_draw && pc.grass_params.z > 0.5 && !use_albedo) {
+        float big  = tnoise(vWorldPos.xz * 0.07 + vec2(3.1, 7.7));
+        float fine = tnoise(vWorldPos.xz * 2.6 + vWorldPos.y * 1.9) * 0.6 +
+                     tnoise(vWorldPos.xz * 7.3 - vWorldPos.y * 5.1) * 0.4;
+        albedo *= mix(vec3(0.85, 1.05, 0.80), vec3(1.15, 0.95, 1.10), big);
+        albedo *= 0.65 + 0.7 * fine;
+        albedo *= mix(0.55, 1.0, clamp(N.y * 0.5 + 0.6, 0.0, 1.0));
     }
 
     // Corner softening for axis-aligned brushes. Cube meshes have one

@@ -1008,7 +1008,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         glm::vec4 tex = tex_on
             ? glm::vec4(static_cast<float>(g.tex_albedo),
                         static_cast<float>(g.tex_normal),
-                        g.tex_albedo == 1 ? 0.12f : 0.55f, 0.0f)
+                        g.triplanar ? g.uv_scale : (g.tex_albedo == 1 ? 0.12f : 0.55f), 0.0f)
             : kNoTex;
         write_instance(I, I, glm::vec4(tex_on ? g.tint : g.fallback, 1.0f),
                        glm::vec3(0.0f), false, g.blas_addr, tex);

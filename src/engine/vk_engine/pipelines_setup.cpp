@@ -1262,10 +1262,17 @@ void VulkanEngine::init_scatter_pipeline() {
     };
 
     scatter_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    // Plants (flowers / ferns): thin two-sided cards and fronds.
+    cfg.cull = VK_CULL_MODE_NONE;
+    scatter_plant_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
     log::info("scatter pipeline built (ground clutter)");
 }
 
 void VulkanEngine::destroy_scatter_pipeline() {
+    if (scatter_plant_pipeline_) {
+        vkDestroyPipeline(device_, scatter_plant_pipeline_, nullptr);
+        scatter_plant_pipeline_ = VK_NULL_HANDLE;
+    }
     if (scatter_pipeline_) {
         vkDestroyPipeline(device_, scatter_pipeline_, nullptr);
         scatter_pipeline_ = VK_NULL_HANDLE;

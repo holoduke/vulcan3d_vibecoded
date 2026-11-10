@@ -213,7 +213,7 @@ void VulkanEngine::update_projectiles(float dt) {
                 const glm::vec3 seg_mid = 0.5f * (bp + b_prev);
                 const float     seg_half_len = 0.5f * glm::length(bp - b_prev);
                 for (auto& f : spacejet_flights_) {
-                    if (f.destroying || f.hp <= 0) continue;
+                    if (f.dead || f.destroying || f.hp <= 0) continue;
                     glm::vec3 mn, mx;
                     spacejet_aabb(f, mn, mx);
                     // Distance pre-reject: skip the 6-plane slab math if
@@ -277,6 +277,9 @@ void VulkanEngine::update_projectiles(float dt) {
                             // kill flash + louder/deeper audio.
                             f.destroying = true;
                             f.destroy_t  = 0.0f;
+                            // Mid-air fireball; the wreck then crashes and
+                            // explodes again on the ground (tick_spacejet).
+                            spawn_explosion(f.pos, 0.55f, false);
                             glm::vec3 dirs[6] = {
                                 glm::vec3( 1, 0, 0),
                                 glm::vec3(-1, 0, 0),

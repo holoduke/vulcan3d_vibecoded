@@ -45,6 +45,12 @@ struct LevelMesh {
     glm::vec3 tint{1.0f};
     glm::vec3 fallback{0.6f};
     glm::vec3 bmin{1e9f}, bmax{-1e9f};
+    // World props: world-space triplanar texturing (uv_scale = repeats
+    // per metre) instead of vertex UVs; the UVs then carry wind sway
+    // (u = sway weight, v = phase) when `sway` is set.
+    bool  triplanar = false;
+    bool  sway      = false;
+    float uv_scale  = 1.0f;
 };
 
 struct Level {

@@ -498,12 +498,29 @@ void VulkanEngine::update_scene_ubo() {
             float t = std::min(1.0f, muzzle_flash_timer_ / kMuzzleFlashDuration);
             glm::vec3 fwd = player_.forward();
             glm::vec3 pos = player_.eye_position() + fwd * 0.35f;
-            float intensity = 14.0f * t;       // strong HDR pop
+            float intensity = 2.2f * t;        // HDR pop (deferred applies it to the gun + surroundings)
             data.muzzle_pos   = glm::vec4(pos, intensity);
             data.muzzle_color = glm::vec4(1.00f, 0.85f, 0.55f, 6.0f);  // 6 m radius
         } else {
             data.muzzle_pos   = glm::vec4(0.0f);
             data.muzzle_color = glm::vec4(0.0f);
+        }
+        // Explosions share the single dynamic point light: take the one
+        // that is brightest at the camera (flash, then decaying fireball
+        // glow) if it beats the muzzle flash.
+        float best = data.muzzle_pos.w * 0.05f;
+        const glm::vec3 eye = player_.eye_position();
+        for (const auto& e : explosions_) {
+            if (e.t > 3.5f) continue;
+            float inten = e.size * (e.t < 0.12f ? 70.0f : 22.0f * std::exp(-e.t * 1.2f));
+            float radius = 170.0f * e.size;
+            float d = glm::distance(eye, e.pos);
+            float score = inten * std::max(0.05f, 1.0f - d / (radius * 2.5f));
+            if (score > best) {
+                best = score;
+                data.muzzle_pos   = glm::vec4(e.pos + glm::vec3(0.0f, 9.0f * e.size, 0.0f), inten);
+                data.muzzle_color = glm::vec4(1.0f, 0.52f, 0.20f, radius);
+            }
         }
     }
     data.terrain_params = glm::vec4(rt_.terrain_fog_strength,
@@ -557,6 +574,19 @@ void VulkanEngine::update_scene_ubo() {
                                        1, 8)),
         std::max(0.1f, rt_.grass_shadow_on_terrain_dist),
         rt_.grass_shadow_on_terrain ? 1.0f : 0.0f);
+    // Blade-shadow march (cube.frag terrain): same blade field as
+    // grass_raymarch.frag (height scale, wind, time, density, slope gate).
+    {
+        float sn = std::max(rt_.grass_slope_n_min, 1e-2f);
+        float slope_max = std::sqrt(std::max(1e-4f, 1.0f / (sn * sn) - 1.0f));
+        data.grass_rm_params = glm::vec4(rt_.grass_height_scale, rt_.grass_wind,
+                                         static_cast<float>(frame_number_) * 0.016f,
+                                         glm::clamp(rt_.grass_density, 0.0f, 1.0f));
+        data.grass_rm_params2 = glm::vec4(
+            slope_max,
+            (rt_.grass_shadow_on_terrain && rt_.grass_raymarch_enabled) ? 1.0f : 0.0f,
+            glm::clamp(rt_.grass_shadow_on_terrain_strength, 0.0f, 1.0f), 0.0f);
+    }
     // Side-lit grass shading. .z is reused (was reserved) as the
     // cube.frag wall-displacement mode: 0 = legacy SPOM, 1 = SSDM
     // depth-override relief. grass.frag / grass_raymarch.frag only read

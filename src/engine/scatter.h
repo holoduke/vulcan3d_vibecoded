@@ -31,6 +31,15 @@ struct ScatterSet {
     VkBuffer      instance_buffer = VK_NULL_HANDLE;
     VmaAllocation instance_alloc  = nullptr;
     uint32_t      instance_count  = 0;
+    // Small plants (flowers / ferns): one mesh per species, instances in
+    // one buffer sorted by species. Vertex uv.x = part (0 leaf / stem,
+    // 1 petal, 2 flower centre), uv.y = wind sway weight.
+    static constexpr int kPlantSpecies = 4;      // fern, daisy, poppy, bluebell
+    Mesh          plant_mesh[kPlantSpecies]{};
+    uint32_t      plant_first[kPlantSpecies]{};
+    uint32_t      plant_count[kPlantSpecies]{};
+    VkBuffer      plant_buffer = VK_NULL_HANDLE;
+    VmaAllocation plant_alloc  = nullptr;
 };
 
 struct ScatterParams {

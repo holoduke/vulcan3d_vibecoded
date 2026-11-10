@@ -910,32 +910,109 @@ private:
         Mesh mesh;
         glm::vec4 base_color = glm::vec4(0.7f, 0.72f, 0.78f, 1.0f);
     };
+    // Full 3D flight state, driven by the plane AI in props.cpp
+    // (tick_spacejet): a behaviour state machine (ingress, orbit, bomb
+    // run, loop, break turn, egress) on top of a pursuit-steering core
+    // that turns the velocity toward a desired direction under a turn-
+    // rate limit, banks into the turn (up = lateral accel + gravity) and
+    // keeps terrain clearance. Wingmen fly formation slots on a leader.
+    enum class JetMode : uint8_t {
+        Ingress, Orbit, BombRun, Loop, Turn, Egress, Crash
+    };
     struct SpacejetFlight {
-        glm::vec3 pos{};          // current world position (XZ tracked, Y constant)
-        float     heading = 0.0f; // current yaw (radians, 0 = +Z)
-        float     turn_rate = 0.0f; // rad/sec (signed; 0 = straight line)
-        float     speed   = 90.0f;
+        glm::vec3 pos{};
+        glm::vec3 fwd{0.0f, 0.0f, 1.0f};   // unit velocity direction
+        glm::vec3 up{0.0f, 1.0f, 0.0f};    // unit, perpendicular to fwd
+        float     speed   = 110.0f;
         float     scale   = 1.0f;
-        float     t       = 0.0f;
-        float     ttl     = 30.0f;
-        glm::vec3 prev_pos{};     // previous-frame pos for TAA motion vec
-        float     prev_heading = 0.0f;
-        // Combat state: 3 hits to kill. hit_flash_t > 0 → tint red for
-        // ~0.2 s after each impact. destroying = true once hp hits 0;
-        // explosion already spawned, flight stays in the list for a
-        // short fade so the HUD bar can fade out and TAA can resolve
-        // motion vectors.
+        float     t       = 0.0f;           // age (s)
+        glm::vec3 prev_pos{};
+        glm::vec3 prev_fwd{0.0f, 0.0f, 1.0f};
+        glm::vec3 prev_up{0.0f, 1.0f, 0.0f};
+        // AI
+        JetMode   mode        = JetMode::Ingress;
+        float     mode_t      = 0.0f;       // seconds in current mode
+        int       sorties     = 0;          // maneuvers flown so far
+        int       sortie_max  = 4;
+        int       leader      = -1;         // index of leader (-1 = lead)
+        uint32_t  id          = 0;          // stable id (leader linking)
+        uint32_t  leader_id   = 0;
+        glm::vec3 slot{0.0f};               // formation offset (leader frame)
+        glm::vec3 target{0.0f};             // waypoint / bomb aim point
+        float     orbit_dir   = 1.0f;       // +1 CCW, -1 CW
+        float     orbit_r     = 400.0f;
+        float     cruise_alt  = 140.0f;
+        float     loop_rate   = 0.0f;       // rad/s pitch during a loop
+        float     loop_done   = 0.0f;       // accumulated loop angle
+        float     turn_g      = 0.0f;       // current lateral load (for vapour)
+        bool      bomb_dropped = false;
+        // Contrail: exhaust positions sampled every ~40 ms (newest last).
+        struct TrailPt { glm::vec3 p; float t; float g; };
+        std::vector<TrailPt> trail;
+        float     trail_acc = 0.0f;
+        // Combat state: 3 hits to kill. hit_flash_t > 0 -> red tint.
+        // destroying = shot down: the jet tumbles into the ground and
+        // explodes on impact (mode Crash).
         int       hp           = 3;
         float     hit_flash_t  = 0.0f;
         bool      destroying   = false;
         float     destroy_t    = 0.0f;
-        // post_castle_t = seconds elapsed since the plane crossed the
-        // castle midflight. -1 until detected (tick_spacejet flips it
-        // to 0 when prev/cur straddle the origin along the heading).
-        // Hard removal at 20 s post-cross so flights don't drift off
-        // into the horizon for the rest of their natural TTL.
-        float     post_castle_t = -1.0f;
+        bool      dead         = false;     // remove next tick
     };
+    // Free-falling bomb dropped by a jet near the castle.
+    struct Bomb {
+        glm::vec3 pos{};
+        glm::vec3 vel{};
+        glm::vec3 prev_pos{};
+        float     t = 0.0f;
+    };
+    std::vector<Bomb> bombs_;
+    // Explosion instance (fx.cpp). Rendered as layered effects: flash
+    // billboard, raymarched fireball + smoke + ground dust volumes, spark
+    // debris (spawn_hit_particles), point light, camera shake, scorch.
+    struct Explosion {
+        glm::vec3 pos{};
+        float     t     = 0.0f;
+        float     size  = 1.0f;     // 1 = bomb-sized (fireball ~14 m)
+        float     seed  = 0.0f;
+        bool      ground = true;    // ground burst: dust ring + scorch
+    };
+    std::vector<Explosion> explosions_;
+    // Cloth flags on selected tower tops (fx.cpp): Verlet grid pinned to
+    // a pole, gravity + per-triangle aerodynamic wind force + gusts.
+    struct Flag {
+        glm::vec3 pole_base{0.0f};
+        float     pole_h = 4.6f;
+        int       nx = 20, ny = 12;     // grid points (along fly, along hoist)
+        float     w = 3.6f, h = 2.2f;   // cloth size (m)
+        int       design = 0;
+        std::vector<glm::vec3> p, pp;   // current / previous positions
+        float     acc = 0.0f;           // fixed-step accumulator
+    };
+    std::vector<Flag> flags_;
+    glm::vec3 wind_vel_{6.0f, 0.0f, 2.0f};
+    float     wind_t_ = 0.0f;
+    void init_flags();
+    void tick_flags(float dt);
+    float     cam_shake_ = 0.0f;    // decaying shake amplitude
+    void spawn_explosion(glm::vec3 pos, float size, bool ground);
+    void tick_fx(float dt);
+    // FX pass (after deferred lighting, before TAA): premultiplied-alpha
+    // blended ribbons (contrails, laser beams, flash) + volumetric
+    // explosion volumes into scene_color, depth-tested read-only.
+    VkShaderModule fx_vert_module_       = VK_NULL_HANDLE;
+    VkShaderModule fx_ribbon_frag_module_ = VK_NULL_HANDLE;
+    VkShaderModule fx_volume_frag_module_ = VK_NULL_HANDLE;
+    VkPipeline     fx_ribbon_pipeline_   = VK_NULL_HANDLE;
+    VkPipeline     fx_volume_pipeline_   = VK_NULL_HANDLE;
+    VkPipeline     fx_volume_inside_pipeline_ = VK_NULL_HANDLE;
+    static constexpr uint32_t kFxMaxVerts = 65536;
+    VkBuffer       fx_vbuf_[2]{};        // per frame-slot host-visible ribbon verts
+    VmaAllocation  fx_valloc_[2]{};
+    void*          fx_vmapped_[2]{};
+    void init_fx();
+    void destroy_fx();
+    void render_fx(VkCommandBuffer cmd);
     std::vector<SpacejetMesh>   spacejet_meshes_;
     std::vector<SpacejetFlight> spacejet_flights_;
     // Last-target HUD state (top-center damage indicator). Set when a
@@ -954,6 +1031,7 @@ private:
     float     spacejet_base_scale_      = 1.0f;   // gltf-bbox-derived scale
     float     spacejet_spawn_timer_     = 2.0f;   // first wave after 2s
     uint32_t  spacejet_rng_state_       = 0xC0DEFEEDu;
+    uint32_t  spacejet_next_id_         = 0;
     void init_spacejet();
     void destroy_spacejet();
     void tick_spacejet(float dt);                 // move + spawn + despawn
@@ -1162,6 +1240,8 @@ private:
         int tex_albedo = -1, tex_normal = -1;
         glm::vec3 tint{1.0f}, fallback{0.6f};
         glm::vec3 bmin{0.0f}, bmax{0.0f};
+        bool triplanar = false, sway = false;
+        float uv_scale = 1.0f;
         VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
         VkBuffer blas_buf = VK_NULL_HANDLE;
         VmaAllocation blas_alloc = nullptr;
@@ -1178,6 +1258,7 @@ private:
                             const glm::mat4& prev_vp, const Frustum& fr,
                             bool depth_only, VkPipelineLayout shadow_layout);
     VkPipeline     scatter_pipeline_    = VK_NULL_HANDLE;
+    VkPipeline     scatter_plant_pipeline_ = VK_NULL_HANDLE;
     VkShaderModule scatter_vert_module_ = VK_NULL_HANDLE;
     VkShaderModule scatter_frag_module_ = VK_NULL_HANDLE;
     void init_scatter_pipeline();

@@ -175,124 +175,400 @@ void VulkanEngine::destroy_spacejet() {
     spacejet_flights_.clear();
 }
 
+// ---------------------------------------------------------------------
+// Jet AI.
+//
+// Layered the way flight-game bots usually are:
+//   * decision layer  - per-leader state machine picking the next
+//                       maneuver (orbit pass, bomb run, loop, reversal,
+//                       egress) with weighted randomness so sorties don't
+//                       repeat the same pattern;
+//   * maneuver layer  - each mode outputs a desired flight direction
+//                       (pursuit of a waypoint / circle tangent / loop
+//                       pitch program);
+//   * flight core     - turns the velocity toward the desired direction
+//                       under a g-limited turn rate, banks so lift (up)
+//                       points along lateral accel + gravity (correct
+//                       coordinated turns and inverted loop tops), trades
+//                       speed for altitude, and enforces terrain clearance.
+// Wingmen fly formation slots in their leader's frame and copy its bomb
+// release. Shot-down jets tumble into the ground and explode.
+// ---------------------------------------------------------------------
+namespace {
+constexpr float kG = 9.81f;
+
+glm::vec3 rotate_toward(const glm::vec3& from, const glm::vec3& to, float max_angle) {
+    float c = glm::clamp(glm::dot(from, to), -1.0f, 1.0f);
+    float ang = std::acos(c);
+    if (ang <= max_angle || ang < 1e-5f) return to;
+    glm::vec3 axis = glm::cross(from, to);
+    float al = glm::length(axis);
+    if (al < 1e-5f) {   // opposite: pick any perpendicular (prefer up)
+        axis = glm::cross(from, glm::vec3(0, 1, 0));
+        if (glm::length(axis) < 1e-5f) axis = glm::vec3(1, 0, 0);
+        al = glm::length(axis);
+    }
+    axis /= al;
+    // Rodrigues
+    return glm::normalize(from * std::cos(max_angle) +
+                          glm::cross(axis, from) * std::sin(max_angle) +
+                          axis * glm::dot(axis, from) * (1.0f - std::cos(max_angle)));
+}
+glm::vec3 rotate_axis(const glm::vec3& v, const glm::vec3& axis, float a) {
+    return v * std::cos(a) + glm::cross(axis, v) * std::sin(a) +
+           axis * glm::dot(axis, v) * (1.0f - std::cos(a));
+}
+}  // namespace
+
 void VulkanEngine::tick_spacejet(float dt) {
-    // Decay the top-center damage HUD ttl regardless of whether any
-    // flights exist (we want it to fade out cleanly after the last
-    // plane in a wave is destroyed and the list is emptied).
     if (last_target_hud_ttl_ > 0.0f) last_target_hud_ttl_ -= dt;
     if (kill_flash_t_       > 0.0f) kill_flash_t_       -= dt;
-    if (spacejet_meshes_.empty()) return;
+    if (spacejet_meshes_.empty() || dt <= 0.0f) return;
+    dt = std::min(dt, 0.05f);
 
-    // Per-tick: integrate heading (turn_rate * dt), then position
-    // along the new heading. Despawn when ttl elapses.
-    constexpr float kDestroyFade  = 0.6f;   // seconds before removal
-    constexpr float kPostCastleMax = 20.0f; // seconds after passing castle
-    for (auto& f : spacejet_flights_) {
-        f.prev_pos     = f.pos;
-        f.prev_heading = f.heading;
-        // Destroying flights pitch down + decelerate so the explosion
-        // burst reads as "the plane was killed". 0.6 s window matches
-        // the spark TTL so the wreckage disappears as sparks fade.
-        if (f.destroying) {
-            f.destroy_t += dt;
-            f.speed     *= std::max(0.0f, 1.0f - dt * 1.5f);
-            f.pos.y     -= dt * 14.0f * f.destroy_t;     // accelerating fall
+    auto& R = spacejet_rng_state_;
+    auto ground_h = [&](float x, float z) {
+        return std::max(sample_terrain_height(x, z), rt_.water_level);
+    };
+
+    // Leader decision: pick the next maneuver.
+    auto choose_next = [&](SpacejetFlight& f) {
+        f.mode_t = 0.0f;
+        ++f.sorties;
+        if (f.sorties > f.sortie_max) {
+            f.mode = JetMode::Egress;
+            glm::vec3 h(f.fwd.x, 0.0f, f.fwd.z);
+            if (glm::length(h) < 1e-3f) h = glm::vec3(1, 0, 0);
+            f.target = glm::normalize(h) * 3000.0f;
+            return;
         }
-        f.heading += f.turn_rate * dt;
-        glm::vec3 fwd{ std::sin(f.heading), 0.0f, std::cos(f.heading) };
-        glm::vec3 prev = f.pos;
-        f.pos += fwd * (f.speed * dt);
-        f.t   += dt;
-        if (f.hit_flash_t > 0.0f) f.hit_flash_t -= dt;
-        // Detect castle pass: dot(pos, fwd) goes from negative (before
-        // origin) to positive (past origin). The castle sits at world
-        // origin. Once detected, start counting post-castle seconds
-        // toward the 20 s hard removal.
-        if (f.post_castle_t < 0.0f) {
-            float dot_prev = glm::dot(prev,  fwd);
-            float dot_cur  = glm::dot(f.pos, fwd);
-            if (dot_prev <= 0.0f && dot_cur > 0.0f) f.post_castle_t = 0.0f;
+        float agl = f.pos.y - ground_h(f.pos.x, f.pos.z);
+        float r = frand(R);
+        if (r < 0.36f) {
+            f.mode = JetMode::BombRun;
+            f.bomb_dropped = false;
+            // Aim point: 60..500 m from the castle, avoiding the keep itself.
+            float a = frand(R) * 6.2831853f;
+            float d = frand_range(R, 60.0f, 500.0f);
+            f.target = glm::vec3(std::cos(a) * d, 0.0f, std::sin(a) * d);
+            f.target.y = ground_h(f.target.x, f.target.z);
+        } else if (r < 0.60f) {
+            f.mode = JetMode::Orbit;
+            f.orbit_r = frand_range(R, 260.0f, 520.0f);
+            // Orbit in the direction we're already turning toward.
+            glm::vec3 rad = f.pos; rad.y = 0.0f;
+            glm::vec3 tang = glm::cross(glm::vec3(0, 1, 0), glm::normalize(rad + glm::vec3(1e-3f)));
+            f.orbit_dir = glm::dot(tang, f.fwd) >= 0.0f ? 1.0f : -1.0f;
+            f.target.x = frand_range(R, 14.0f, 24.0f);     // orbit duration
+        } else if (r < 0.80f && agl > 85.0f && agl < 320.0f) {
+            f.mode = JetMode::Loop;
+            f.loop_done = 0.0f;
+            f.loop_rate = 6.2831853f / frand_range(R, 7.0f, 9.0f);   // ~8 g, r ~150 m
         } else {
-            f.post_castle_t += dt;
+            // Reversal: fly on briefly, then a hard climbing 180 back
+            // over the castle.
+            f.mode = JetMode::Turn;
+            glm::vec3 back(-f.fwd.x, 0.0f, -f.fwd.z);
+            f.target = glm::normalize(back + glm::vec3(1e-3f, 0.0f, 0.0f));
+            f.orbit_dir = (xorshift32(R) & 1u) ? 1.0f : -1.0f;
+        }
+    };
+
+    // ---- Spawn waves ----
+    int alive = 0;
+    for (const auto& f : spacejet_flights_) if (!f.dead && !f.destroying) ++alive;
+    spacejet_spawn_timer_ -= dt;
+    if (spacejet_spawn_timer_ <= 0.0f && alive < 5) {
+        spacejet_spawn_timer_ = frand_range(R, 9.0f, 18.0f);
+        int wave = 1 + int(xorshift32(R) % 3u);              // 1..3 jets
+        float bearing = frand(R) * 6.2831853f;
+        glm::vec3 from(std::cos(bearing), 0.0f, std::sin(bearing));
+        SpacejetFlight lead{};
+        lead.cruise_alt = frand_range(R, 110.0f, 170.0f);
+        lead.pos = from * 1350.0f;
+        lead.pos.y = ground_h(lead.pos.x, lead.pos.z) + lead.cruise_alt;
+        lead.target = glm::vec3(frand_range(R, -150.0f, 150.0f), 0.0f,
+                                frand_range(R, -150.0f, 150.0f));
+        lead.fwd = glm::normalize(glm::vec3(lead.target.x, 0, lead.target.z) - glm::vec3(lead.pos.x, 0, lead.pos.z));
+        lead.up = glm::vec3(0, 1, 0);
+        lead.speed = frand_range(R, 105.0f, 125.0f);
+        lead.scale = 1.0f + frand_range(R, -0.1f, 0.3f);
+        lead.sortie_max = 3 + int(xorshift32(R) % 3u);
+        lead.id = ++spacejet_next_id_;
+        lead.prev_pos = lead.pos; lead.prev_fwd = lead.fwd; lead.prev_up = lead.up;
+        spacejet_flights_.push_back(lead);
+        const glm::vec3 slots[2] = { {-20.0f, -2.0f, -16.0f}, {20.0f, -3.0f, -16.0f} };
+        for (int i = 1; i < wave; ++i) {
+            SpacejetFlight w = lead;
+            w.trail.clear();
+            w.id = ++spacejet_next_id_;
+            w.leader_id = lead.id;
+            w.slot = slots[i - 1];
+            glm::vec3 right = glm::normalize(glm::cross(lead.fwd, lead.up));
+            w.pos = lead.pos + right * w.slot.x + lead.up * w.slot.y + lead.fwd * w.slot.z;
+            w.prev_pos = w.pos;
+            w.scale = 1.0f + frand_range(R, -0.1f, 0.3f);
+            spacejet_flights_.push_back(w);
+        }
+        log::infof("[jets] wave of %d inbound from %.0f deg, alt %.0f m",
+                   wave, glm::degrees(bearing), lead.cruise_alt);
+    }
+
+    auto find_by_id = [&](uint32_t id) -> SpacejetFlight* {
+        if (id == 0) return nullptr;
+        for (auto& o : spacejet_flights_)
+            if (o.id == id && !o.dead && !o.destroying) return &o;
+        return nullptr;
+    };
+
+    for (auto& f : spacejet_flights_) {
+        f.prev_pos = f.pos; f.prev_fwd = f.fwd; f.prev_up = f.up;
+        f.t += dt;
+        f.mode_t += dt;
+        if (f.hit_flash_t > 0.0f) f.hit_flash_t -= dt;
+
+        // Trail sampling + ageing (also for dead jets until it fades).
+        const float kTrailLife = 6.0f;
+        while (!f.trail.empty() && f.t - f.trail.front().t > kTrailLife)
+            f.trail.erase(f.trail.begin());
+        if (f.dead) continue;
+
+        const float half_len = 3.0f * f.scale;   // asset normalised to 6 m
+        if (f.destroying) {
+            // Shot down: nose drops, spins, accelerates into the ground.
+            f.mode = JetMode::Crash;
+            f.destroy_t += dt;
+            glm::vec3 right = glm::normalize(glm::cross(f.fwd, f.up));
+            f.fwd = glm::normalize(rotate_axis(f.fwd, right, -0.55f * dt));
+            f.up  = glm::normalize(rotate_axis(f.up, f.fwd, 2.4f * dt));
+            f.up  = glm::normalize(f.up - f.fwd * glm::dot(f.up, f.fwd));
+            f.speed = std::min(f.speed + kG * 1.2f * dt, 190.0f);
+            f.pos += f.fwd * f.speed * dt + glm::vec3(0.0f, -kG * f.destroy_t * dt, 0.0f);
+            float gh = ground_h(f.pos.x, f.pos.z);
+            if (f.pos.y <= gh + 1.0f || f.destroy_t > 25.0f) {
+                f.pos.y = std::max(f.pos.y, gh);
+                spawn_explosion(f.pos, 1.3f, true);
+                f.dead = true;
+            }
+        } else {
+            SpacejetFlight* lead = find_by_id(f.leader_id);
+            if (f.leader_id != 0 && !lead) {
+                f.leader_id = 0;                 // promoted to leader
+                f.mode = JetMode::Ingress;
+                f.target = glm::vec3(0.0f);
+                f.mode_t = 0.0f;
+            }
+            glm::vec3 desired = f.fwd;
+            bool hold_alt = true;
+            float max_g = 6.0f;
+            float speed_cmd = 115.0f;
+            if (lead) {
+                // ---- Wingman: fly the slot, lead it slightly ----
+                glm::vec3 lr = glm::normalize(glm::cross(lead->fwd, lead->up));
+                glm::vec3 slot_w = lead->pos + lr * f.slot.x + lead->up * f.slot.y +
+                                   lead->fwd * f.slot.z;
+                glm::vec3 aim = slot_w + lead->fwd * 45.0f - f.pos;
+                desired = glm::normalize(aim);
+                float along = glm::dot(slot_w - f.pos, lead->fwd);
+                speed_cmd = lead->speed + glm::clamp(along * 0.8f, -25.0f, 25.0f);
+                max_g = 8.0f;
+                hold_alt = false;
+                if (lead->mode == JetMode::Loop) {
+                    if (f.mode != JetMode::Loop) { f.mode = JetMode::Loop; f.loop_rate = lead->loop_rate; }
+                }
+                else if (f.mode == JetMode::Loop) f.mode = JetMode::Ingress;
+                // Copy the leader's bomb release.
+                if (lead->bomb_dropped && !f.bomb_dropped && lead->mode == JetMode::Turn) {
+                    f.bomb_dropped = true;
+                    Bomb b{};
+                    b.pos = f.pos - f.up * 1.5f;
+                    b.vel = f.fwd * f.speed;
+                    b.prev_pos = b.pos;
+                    bombs_.push_back(b);
+                }
+                if (!lead->bomb_dropped) f.bomb_dropped = false;
+            } else {
+                // ---- Leader maneuvers ----
+                switch (f.mode) {
+                case JetMode::Ingress: {
+                    glm::vec3 to = f.target - f.pos; to.y = 0.0f;
+                    desired = glm::normalize(to + glm::vec3(1e-3f, 0, 0));
+                    if (glm::length(to) < 450.0f) choose_next(f);
+                    break;
+                }
+                case JetMode::Orbit: {
+                    glm::vec3 rad(f.pos.x, 0.0f, f.pos.z);
+                    float d = glm::length(rad);
+                    glm::vec3 ru = d > 1.0f ? rad / d : glm::vec3(1, 0, 0);
+                    glm::vec3 tang = glm::cross(glm::vec3(0, 1, 0), ru) * f.orbit_dir;
+                    desired = glm::normalize(tang - ru * glm::clamp((d - f.orbit_r) / f.orbit_r * 2.0f, -1.0f, 1.0f));
+                    if (f.mode_t > f.target.x) choose_next(f);
+                    break;
+                }
+                case JetMode::BombRun: {
+                    glm::vec3 to = f.target - f.pos; to.y = 0.0f;
+                    float hd = glm::length(to);
+                    desired = to / std::max(hd, 1e-3f);
+                    // Fly the run lower: ~100 m above the aim point.
+                    f.cruise_alt = 100.0f;
+                    float h = std::max(f.pos.y - f.target.y, 1.0f);
+                    // Ballistic impact prediction for a release NOW: the bomb
+                    // keeps the jet's velocity (incl. dive), falls h metres.
+                    // Light drag (fx.cpp) shortens range ~4 %.
+                    glm::vec3 v0 = f.fwd * f.speed;
+                    float vy = v0.y;
+                    float t_fall = (vy + std::sqrt(vy * vy + 2.0f * kG * h)) / kG;
+                    glm::vec3 impact = f.pos + glm::vec3(v0.x, 0.0f, v0.z) * (t_fall * 0.96f);
+                    glm::vec3 hf = glm::normalize(glm::vec3(f.fwd.x, 0, f.fwd.z) + glm::vec3(1e-4f));
+                    glm::vec3 miss = f.target - impact; miss.y = 0.0f;
+                    float along = glm::dot(miss, hf);                 // >0: impact short
+                    float cross_err = glm::length(miss - hf * along);
+                    if (!f.bomb_dropped && along <= 0.0f && along > -60.0f &&
+                        cross_err < 35.0f && h < 190.0f) {
+                        f.bomb_dropped = true;
+                        Bomb b{};
+                        b.pos = f.pos - f.up * 1.5f;
+                        b.vel = f.fwd * f.speed;
+                        b.prev_pos = b.pos;
+                        bombs_.push_back(b);
+                        log::infof("[jets] bomb away -> (%.0f, %.0f)", f.target.x, f.target.z);
+                        // Pull up and reverse.
+                        f.mode = JetMode::Turn;
+                        f.mode_t = 0.0f;
+                        glm::vec3 back(-f.fwd.x, 0.0f, -f.fwd.z);
+                        f.target = glm::normalize(back + glm::vec3(1e-3f, 0, 0));
+                        f.cruise_alt = frand_range(R, 120.0f, 170.0f);
+                        f.orbit_dir = (xorshift32(R) & 1u) ? 1.0f : -1.0f;
+                    } else if (f.mode_t > 45.0f) {
+                        choose_next(f);
+                    }
+                    break;
+                }
+                case JetMode::Loop:
+                    hold_alt = false;
+                    break;
+                case JetMode::Turn: {
+                    // First 2.5 s: climb out straight, then a hard
+                    // banked climbing reversal toward `target` heading.
+                    if (f.mode_t < 2.5f) {
+                        // Fixed ~19 deg climb relative to the HORIZON (was
+                        // relative to the nose -> compounding pull-up).
+                        glm::vec3 fh = glm::normalize(glm::vec3(f.fwd.x, 0, f.fwd.z) + glm::vec3(1e-4f));
+                        desired = glm::normalize(fh + glm::vec3(0, 0.35f, 0));
+                        hold_alt = false;
+                    } else {
+                        // Level banked reversal to the chosen side (the
+                        // shortest-arc 180 went up and over - an Immelmann
+                        // that left jets 500+ m up).
+                        glm::vec3 fh = glm::normalize(glm::vec3(f.fwd.x, 0, f.fwd.z) + glm::vec3(1e-4f));
+                        glm::vec3 lat = glm::cross(glm::vec3(0, 1, 0), fh) * f.orbit_dir;
+                        desired = glm::normalize(fh * 0.15f + lat);
+                        max_g = 6.5f;
+                        if (glm::dot(glm::normalize(glm::vec3(f.fwd.x, 0, f.fwd.z) + glm::vec3(1e-4f)),
+                                     f.target) > 0.96f) {
+                            f.mode = JetMode::Ingress;    // back over the castle
+                            f.mode_t = 0.0f;
+                            f.target = glm::vec3(frand_range(R, -120.0f, 120.0f), 0.0f,
+                                                 frand_range(R, -120.0f, 120.0f));
+                        }
+                    }
+                    if (f.mode_t > 30.0f) choose_next(f);
+                    break;
+                }
+                case JetMode::Egress: {
+                    glm::vec3 to = f.target - f.pos; to.y = 0.0f;
+                    desired = glm::normalize(to + glm::vec3(1e-3f, 0, 0));
+                    glm::vec2 hp(f.pos.x, f.pos.z);
+                    if (glm::length(hp) > 1700.0f) { f.dead = true; f.trail.clear(); }
+                    break;
+                }
+                default: break;
+                }
+            }
+
+            const float gh_here  = ground_h(f.pos.x, f.pos.z);
+            if (f.mode == JetMode::Loop) {
+                // Pitch program: constant-rate pull through 360 deg about
+                // the wing axis (lift toward the loop centre).
+                glm::vec3 right = glm::normalize(glm::cross(f.fwd, f.up));
+                float da = f.loop_rate * dt;
+                glm::vec3 nf = glm::normalize(rotate_axis(f.fwd, right, da));
+                f.up  = glm::normalize(rotate_axis(f.up, right, da));
+                f.turn_g = f.loop_rate * f.speed / kG;
+                f.fwd = nf;
+                f.loop_done += da;
+                if (!lead && (f.loop_done >= 6.2831853f || f.pos.y < gh_here + 45.0f)) {
+                    // level out (re-erect up) and carry on
+                    f.up = glm::vec3(0, 1, 0);
+                    choose_next(f);
+                }
+            } else {
+                // ---- Altitude hold + terrain avoidance ----
+                if (hold_alt) {
+                    float want = gh_here + f.cruise_alt;
+                    desired.y += glm::clamp((want - f.pos.y) / 160.0f, -0.35f, 0.35f);
+                }
+                glm::vec3 ahead = f.pos + f.fwd * f.speed * 3.0f;
+                float gh_ahead = std::max(ground_h(ahead.x, ahead.z),
+                                          ground_h((f.pos.x + ahead.x) * 0.5f,
+                                                   (f.pos.z + ahead.z) * 0.5f));
+                float clear = std::min(f.pos.y - gh_here, ahead.y - gh_ahead);
+                if (clear < 70.0f)
+                    desired.y += glm::clamp((70.0f - clear) / 35.0f, 0.0f, 1.5f);
+                desired.y = glm::clamp(desired.y, -0.55f, 0.85f);
+                desired = glm::normalize(desired);
+
+                // ---- Flight core: g-limited turn + coordinated bank ----
+                float max_rate = max_g * kG / std::max(f.speed, 30.0f);
+                glm::vec3 nf = rotate_toward(f.fwd, desired, max_rate * dt);
+                glm::vec3 acc = (nf - f.fwd) / dt * f.speed;          // lateral accel
+                f.turn_g = glm::length(acc) / kG;
+                glm::vec3 up_t = acc + glm::vec3(0.0f, kG, 0.0f);     // lift vector
+                f.fwd = nf;
+                up_t -= f.fwd * glm::dot(up_t, f.fwd);
+                if (glm::length(up_t) > 1e-3f) up_t = glm::normalize(up_t);
+                else up_t = f.up;
+                float k = 1.0f - std::exp(-dt * 3.5f);                // roll response
+                f.up = glm::normalize(glm::mix(f.up, up_t, k));
+                f.up = glm::normalize(f.up - f.fwd * glm::dot(f.up, f.fwd));
+            }
+            // Energy: climbing bleeds speed, diving gains; throttle
+            // pulls back toward the commanded speed.
+            f.speed += (-kG * f.fwd.y * 0.55f + (speed_cmd - f.speed) * 0.35f) * dt;
+            f.speed = glm::clamp(f.speed, 70.0f, 185.0f);
+            f.pos += f.fwd * f.speed * dt;
+            if (f.pos.y < gh_here + 25.0f) f.pos.y = gh_here + 25.0f;   // hard floor
+            if (f.t > 300.0f) { f.dead = true; }
+        }
+
+        // Exhaust trail sample.
+        f.trail_acc += dt;
+        if (!f.dead && f.trail_acc >= 0.04f) {
+            f.trail_acc = 0.0f;
+            f.trail.push_back({ f.pos - f.fwd * (half_len * 0.9f), f.t, f.turn_g });
+        }
+        (void)half_len;
+    }
+
+    // Periodic AI trace (every 10 s) - cheap, helps tune behaviour.
+    static float ai_log_t = 0.0f;
+    ai_log_t += dt;
+    if (ai_log_t > 10.0f) {
+        ai_log_t = 0.0f;
+        static const char* kModeName[] = { "ingress", "orbit", "bombrun", "loop", "turn", "egress", "crash" };
+        for (const auto& f : spacejet_flights_) {
+            if (f.dead) continue;
+            log::infof("[jets] id %u %s%s pos (%.0f, %.0f, %.0f) agl %.0f spd %.0f g %.1f",
+                       f.id, f.leader_id ? "wing " : "lead ", kModeName[int(f.mode)],
+                       f.pos.x, f.pos.y, f.pos.z,
+                       f.pos.y - std::max(sample_terrain_height(f.pos.x, f.pos.z), rt_.water_level),
+                       f.speed, f.turn_g);
         }
     }
     spacejet_flights_.erase(
         std::remove_if(spacejet_flights_.begin(), spacejet_flights_.end(),
-                       [kDestroyFade, kPostCastleMax](const SpacejetFlight& f){
-                           return f.t >= f.ttl ||
-                                  (f.destroying && f.destroy_t >= kDestroyFade) ||
-                                  (f.post_castle_t >= kPostCastleMax);
-                       }),
+                       [](const SpacejetFlight& f) { return f.dead && f.trail.empty(); }),
         spacejet_flights_.end());
-
-    // Spawn cadence -- the sky is busy now. Was 4-12 s between waves
-    // with 55% solo flights; now 1.5-4 s and the distribution is
-    // biased toward multi-jet formations.
-    spacejet_spawn_timer_ -= dt;
-    if (spacejet_spawn_timer_ > 0.0f) return;
-    spacejet_spawn_timer_ = frand_range(spacejet_rng_state_, 1.5f, 4.0f);
-
-    // Wave size: pairs / trios dominate, 5-jet formations frequent.
-    uint32_t r = xorshift32(spacejet_rng_state_) % 100u;
-    int wave = (r < 15) ? 1 :          //  15% solo
-               (r < 45) ? 2 :          //  30% pair
-               (r < 75) ? 3 :          //  30% trio
-               (r < 90) ? 4 : 5;       //  15% quad, 10% five
-
-    // Pick a flight heading. 0..2РџР‚, 0 = +Z. Spawn point is 1.4 km
-    // behind the castle (i.e. opposite the heading direction) so the
-    // jet flies inbound, over, and out the other side.
-    float heading = frand(spacejet_rng_state_) * 6.28318530718f;
-    glm::vec3 fwd{ std::sin(heading), 0.0f, std::cos(heading) };
-    glm::vec3 right{ fwd.z, 0.0f, -fwd.x };
-
-    constexpr float kTrackLen = 2800.0f;
-    // Lateral jitter dropped 80 m в†’ 25 m so every wave actually
-    // crosses (or grazes) the castle silhouette at midflight. 80 m
-    // could put flights at the edge of view; 25 m guarantees the
-    // jets pass within the castle footprint plus a small jitter
-    // for visual variety.
-    constexpr float kSideJit  = 25.0f;
-    float lateral  = frand_range(spacejet_rng_state_, -kSideJit, kSideJit);
-    // Altitude lowered (was 150-190 m). Still clear of FBM peaks at
-    // 120 m by a comfortable margin, but close enough that the jets
-    // read as a real combat threat instead of a distant flyover.
-    float altitude = frand_range(spacejet_rng_state_, 95.0f, 130.0f);
-    float speed    = frand_range(spacejet_rng_state_,  70.0f, 130.0f);
-
-    // Random gentle turn rate. Most waves go straight; some bank
-    // through a wide arc for variety. Cap at ~6 deg/s (0.1 rad/s)
-    // so the curve is visible but not aerobatic. ~30% chance of any
-    // turn at all.
-    float turn_rate = 0.0f;
-    if ((xorshift32(spacejet_rng_state_) & 0xFFu) < 80u) {
-        turn_rate = frand_range(spacejet_rng_state_, -0.10f, 0.10f);
-    }
-
-    glm::vec3 wave_origin = -fwd * (kTrackLen * 0.5f) +
-                            right * lateral +
-                            glm::vec3(0.0f, altitude, 0.0f);
-
-    for (int i = 0; i < wave; ++i) {
-        float side  = (wave == 1) ? 0.0f
-                                  : (float(i) - float(wave - 1) * 0.5f) * 12.0f;
-        float along = (wave == 1) ? 0.0f
-                                  : float(i) * 6.0f;
-        SpacejetFlight f{};
-        f.pos          = wave_origin + right * side - fwd * along;
-        f.heading      = heading;
-        f.prev_heading = heading;
-        f.turn_rate    = turn_rate;
-        f.speed        = speed + frand_range(spacejet_rng_state_, -8.0f, 8.0f);
-        f.scale        = 1.0f + frand_range(spacejet_rng_state_, -0.2f, 0.4f);
-        f.t            = 0.0f;
-        f.ttl          = kTrackLen / std::max(40.0f, f.speed) + 2.0f;
-        f.prev_pos     = f.pos;
-        spacejet_flights_.push_back(f);
-    }
-    log::infof("[spacejet] wave of %d launched (heading=%.1f deg, alt=%.0f, "
-               "spd=%.0f, turn=%.2f rad/s)",
-               wave, glm::degrees(heading), altitude, speed, turn_rate);
 }
 
 void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,

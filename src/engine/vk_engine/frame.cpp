@@ -83,7 +83,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     // Only now (both slots' GPU work finished) is it safe to overwrite;
     // writing it earlier in the main loop changed camera/sun data under
     // the previous frame while it was still being shaded.
-    update_scene_ubo();
+    // (update_scene_ubo() runs right after compute_frame_view below.)
 
     // ---------- Compute queue: per-frame TLAS rebuild ----------
     // Recorded onto a separate compute command buffer and submitted on the
@@ -154,6 +154,9 @@ void VulkanEngine::draw(uint32_t img_index) {
     // identical aspect/lerp/view/proj/Halton-jitter rebuilds per frame.
     prof_begin_frame(frame.command_buffer, gpu_query_slot);
     current_frame_view_ = compute_frame_view();
+    // Scene UBO: written only after the prev-frame fence (both slots idle)
+    // and after this frame's camera so camera_pos / jitter are current.
+    update_scene_ubo();
 
     // Quadtree CLOD terrain: select nodes + fill this frame's instance
     // ranges (camera list + light list). Must run after
@@ -585,6 +588,10 @@ void VulkanEngine::draw(uint32_t img_index) {
     // rt_.svgf_enabled is false (per-frame branch -- pipelines stand
     // up unconditionally so the toggle is allocation-free).
     prof_mark(frame.command_buffer, "deferred_blit");
+    // FX: explosions (volumetric), contrails, laser beams - blended into
+    // the lit HDR scene before SVGF/TAA/bloom.
+    render_fx(frame.command_buffer);
+    prof_mark(frame.command_buffer, "fx");
     render_svgf(frame.command_buffer, static_cast<uint32_t>(frame_number_));
     prof_mark(frame.command_buffer, "svgf");
     // Both history slots end the previous frame in SHADER_READ_ONLY (write slot

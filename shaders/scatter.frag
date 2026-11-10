@@ -12,6 +12,17 @@ layout(location = 3) in float vSunShadow;
 layout(location = 4) in float vCullKill;
 layout(location = 5) in float vDistToCam;
 layout(location = 6) in vec4 vPrevClip;
+layout(location = 7) in vec2 vUv;
+
+layout(push_constant) uniform PC {
+    mat4 mvp;
+    mat4 model;
+    mat4 prev_mvp;
+    vec4 color;
+    vec4 emissive;
+    vec4 tex_params;
+    vec4 grass_params;   // .y = 1 for plants
+} pc;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
@@ -56,6 +67,12 @@ void main() {
     if (vCullKill > 0.5) discard;
 
     vec3 N = normalize(vNormal);
+    bool plant = pc.grass_params.y > 0.5;
+    if (plant) {
+        // Two-sided cards / fronds: face the normal toward the viewer.
+        vec3 V = normalize(scene.camera_pos.xyz - vWorldPos);
+        if (dot(N, V) < 0.0) N = -N;
+    }
 
     // Rock albedo: 2-axis "biplanar" sample of the terrain rock layer
     // (slot 7) — full triplanar is overkill for fist-sized clutter.
@@ -67,6 +84,15 @@ void main() {
     vec3 tex = (texture(u_albedo[7], uvA).rgb * wA +
                 texture(u_albedo[7], uvB).rgb * wB) / max(wA + wB, 1e-3);
     vec3 albedo = tex * vColor;
+    if (plant) {
+        // Part colours: stems / leaves green (ferns carry their own
+        // tint), petals = instance colour, flower centre golden.
+        int part = int(vUv.x + 0.5);
+        bool fern = vColor.g > vColor.r * 1.5 && vColor.g > vColor.b * 1.5 && vColor.g < 0.35;
+        vec3 leaf = fern ? vColor : vec3(0.11, 0.22, 0.05);
+        leaf *= 0.8 + 0.4 * vUv.y;                // tips catch more light
+        albedo = (part == 0) ? leaf : (part == 1 ? vColor : vec3(0.75, 0.55, 0.04));
+    }
 
     vec3  L = normalize(scene.sun_direction.xyz);
     // Half-Lambert wrap (same reason as grass.frag): hard Lambert on
@@ -82,7 +108,10 @@ void main() {
                           + amb);
 
     outColor = vec4(lit, 1.0);
-    outGBuffer0 = vec4(clamp(lit, vec3(0.0), vec3(1.0)), 5.0 / 255.0);
+    // Material 1: the deferred pass re-shades with RT sun shadows, AO and
+    // GI like the rest of the world (was pre-lit material 5 with only
+    // the coarse shadow map).
+    outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)), 1.0 / 255.0);
     outGBuffer1 = vec4(_octa_encode(N), 0.6, 0.0);
     {
         vec2 current_uv = (gl_FragCoord.xy + 0.5) * scene.viewport.zw;

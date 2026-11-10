@@ -536,7 +536,15 @@ void main() {
     if (depth >= 0.99999) {
         vec2 uv = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
         vec3 dir = view_ray(uv);
-        hdr = sample_sky(dir);
+        // FX (smoke / fireballs / contrails) were blended over the sky
+        // pixels on top of the scene clear colour, leaving the remaining
+        // sky transmittance in alpha: swap that clear colour for the real
+        // sky. T = 1 (no FX) reproduces the plain sky exactly.
+        // Same (bilinear) filter for colour and alpha here - EASU sharpening
+        // on the colour alone drew a dark rim around smoke silhouettes.
+        vec4  hs = texture(history_color, sample_uv);
+        const vec3 kClear = vec3(0.55, 0.72, 0.95);   // frame.cpp clear_color
+        hdr = hs.rgb + (sample_sky(dir) - kClear) * hs.a;
     }
 
     // FSR1 RCAS — robust contrast-adaptive sharpening on the EASU-

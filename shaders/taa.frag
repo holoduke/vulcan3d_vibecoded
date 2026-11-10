@@ -118,6 +118,9 @@ void main() {
 
     vec3 mn, mx;
     vec3 cur_raw = variance_clip(ip, mn, mx);
+    // Alpha = sky transmittance left by the FX pass (1 = untouched sky);
+    // passed through unfiltered so compose can blend the sky under smoke.
+    float cur_a = texelFetch(current_color, ip, 0).a;
 
     // Read motion early so spatial strength can be modulated by it.
     vec2 motion = texelFetch(motion_color, ip, 0).rg;
@@ -149,13 +152,13 @@ void main() {
         : cur_raw;
 
     if (taa.params.z < 0.5) {
-        outColor = vec4(cur, 1.0);
+        outColor = vec4(cur, cur_a);
         return;
     }
     vec2 prev_uv = uv - motion;
     if (prev_uv.x < 0.0 || prev_uv.x > 1.0 ||
         prev_uv.y < 0.0 || prev_uv.y > 1.0) {
-        outColor = vec4(cur, 1.0);
+        outColor = vec4(cur, cur_a);
         return;
     }
 
@@ -222,5 +225,8 @@ void main() {
 
     vec3 blended = mix(cur, hist_clamped, alpha);
 
-    outColor = vec4(blended, 1.0);
+    // Sky transmittance follows the same temporal blend as the colour so
+    // compose's sky reconstruction stays consistent at smoke edges.
+    float hist_a = texture(history_color, prev_uv).a;
+    outColor = vec4(blended, mix(cur_a, hist_a, alpha));
 }

@@ -253,6 +253,8 @@ void VulkanEngine::init() {
     init_grass_raymarch_pipeline();
     init_viewmodel();
     init_spacejet();
+    init_fx();
+    init_flags();
     init_imgui();
     update_scene_ubo();
     present_loader_frame("Ready",                 1.00f);
@@ -489,6 +491,17 @@ void VulkanEngine::run(const RunOptions& opts) {
             static const bool test_hold = std::getenv("QLIKE_TEST_HOLD") != nullptr;
             static bool hold_init = false;
             static glm::vec3 hold_pos{0.0f};
+            // QLIKE_TEST_BOOM=<metres>: ground explosion that far ahead of
+            // the camera at frame 40 (headless explosion captures).
+            static const char* test_boom = std::getenv("QLIKE_TEST_BOOM");
+            static int boom_frame = 0;
+            if (test_boom && ++boom_frame == 40) {
+                glm::vec3 f = player_.forward(); f.y = 0.0f;
+                f = glm::normalize(f + glm::vec3(1e-4f));
+                glm::vec3 p = player_.eye_position() + f * static_cast<float>(std::atof(test_boom));
+                p.y = std::max(sample_terrain_height(p.x, p.z), rt_.water_level);
+                spawn_explosion(p, 1.0f, true);
+            }
             if (test_hold) {
                 if (!hold_init) { hold_pos = player_.position; hold_init = true; }
                 player_.position = hold_pos;
@@ -936,6 +949,7 @@ void VulkanEngine::run(const RunOptions& opts) {
         }
         // Spacejet flyovers: advance active flights, spawn next wave.
         tick_spacejet(frame_dt);
+        tick_fx(frame_dt);
         maybe_autosave_settings(frame_dt);
 
         // ImGui frame begins regardless; we just don't fill it when playing.
@@ -1083,6 +1097,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_loader_bg", [&]{ destroy_loader_bg_(); });
     guarded("destroy_viewmodel", [&]{ destroy_viewmodel(); });
     guarded("destroy_spacejet",  [&]{ destroy_spacejet(); });
+    guarded("destroy_fx",        [&]{ destroy_fx(); });
     // Reverse of init order: compose first (samples bloom + TAA history),
     // then bloom (samples scene), then TAA (owns linear_sampler_ + history).
     guarded("destroy_compose", [&]{ destroy_compose(); });
