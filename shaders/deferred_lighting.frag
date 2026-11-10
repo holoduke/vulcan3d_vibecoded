@@ -94,7 +94,7 @@ layout(set = 0, binding = 11) uniform sampler2D u_motion;
 layout(set = 0, binding = 12, r16f) uniform image2D u_gi_fast0;
 layout(set = 0, binding = 13, r16f) uniform image2D u_gi_fast1;
 // Small-object sun shadow map (flowers / ferns / clutter rocks only).
-layout(set = 0, binding = 14) uniform sampler2D u_clutter_shadow;
+layout(set = 0, binding = 14) uniform sampler2DArray u_clutter_shadow;   // layer 0 = 64 m, 1 = 16 m near
 // Terrain aux bake: .g = horizon sky visibility (same texture cube.frag
 // binding 26 reads) - valley floors see less sky dome.
 layout(set = 0, binding = 15) uniform sampler2D u_terrain_aux;
@@ -653,18 +653,33 @@ void main() {
             vec2 luv = lc.xy * 0.5 + 0.5;
             if (all(greaterThan(luv, vec2(0.002))) && all(lessThan(luv, vec2(0.998))) &&
                 lc.z > 0.0 && lc.z < 1.0) {
-                vec2 ts = 1.0 / vec2(textureSize(u_clutter_shadow, 0));
+                vec2 ts = 1.0 / vec2(textureSize(u_clutter_shadow, 0).xy);
                 float occ = 0.0;
                 for (int y = -1; y <= 1; ++y)
                     for (int x = -1; x <= 1; ++x) {
-                        float zc = textureLod(u_clutter_shadow, luv + vec2(x, y) * ts, 0.0).r;
+                        float zc = textureLod(u_clutter_shadow, vec3(luv + vec2(x, y) * ts, 0.0), 0.0).r;
                         occ += (zc < lc.z - 0.0004) ? 1.0 : 0.0;
                     }
                 occ /= 9.0;
+                // Near cascade (layer 1): same centre / depth, 4x finer
+                // (0.8 cm texels over 16 m) so thin stems and petals cast
+                // crisp shadows close by; blends to the far map at its edge.
+                vec2 nndc = lc.xy * 4.0;
+                float nr = max(abs(nndc.x), abs(nndc.y));
+                if (nr < 0.97) {
+                    vec2 nuv = nndc * 0.5 + 0.5;
+                    float occ_n = 0.0;
+                    for (int y = -1; y <= 1; ++y)
+                        for (int x = -1; x <= 1; ++x) {
+                            float zc = textureLod(u_clutter_shadow, vec3(nuv + vec2(x, y) * ts, 1.0), 0.0).r;
+                            occ_n += (zc < lc.z - 0.00025) ? 1.0 : 0.0;
+                        }
+                    occ = mix(occ_n / 9.0, occ, smoothstep(0.80, 0.97, nr));
+                }
                 // Fade out toward the map edge.
                 float edge = min(min(luv.x, luv.y), min(1.0 - luv.x, 1.0 - luv.y));
                 occ *= smoothstep(0.0, 0.08, edge) * clamp(scene.rt_params.w, 0.0, 1.0);
-                shadow = max(shadow, occ * 0.85);
+                shadow = max(shadow, occ * 0.9);
             }
         }
     }

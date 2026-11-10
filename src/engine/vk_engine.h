@@ -1361,7 +1361,9 @@ private:
     uint32_t tlas_refits_ = 0;
     VkImage        clutter_shadow_image_ = VK_NULL_HANDLE;
     VmaAllocation  clutter_shadow_alloc_ = nullptr;
-    VkImageView    clutter_shadow_view_ = VK_NULL_HANDLE;
+    VkImageView    clutter_shadow_view_ = VK_NULL_HANDLE;         // layer 0 (64 m), 2D
+    VkImageView    clutter_shadow_near_view_ = VK_NULL_HANDLE;    // layer 1 (16 m, 4x finer), 2D
+    VkImageView    clutter_shadow_array_view_ = VK_NULL_HANDLE;   // both layers (deferred)
     VkSampler      clutter_shadow_sampler_ = VK_NULL_HANDLE;   // NEAREST: depth compares must not average
     VkPipelineLayout clutter_shadow_layout_ = VK_NULL_HANDLE;
     VkPipeline     clutter_shadow_pipeline_ = VK_NULL_HANDLE;

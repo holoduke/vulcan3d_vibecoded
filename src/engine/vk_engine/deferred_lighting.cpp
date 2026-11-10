@@ -323,7 +323,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[12].pImageInfo = &gif0_ii;
         w[13].pImageInfo = &gif1_ii;
         VkDescriptorImageInfo cs_ii{ clutter_shadow_sampler_ ? clutter_shadow_sampler_ : linear_sampler_,
-                                     clutter_shadow_view_ ? clutter_shadow_view_ : sun_shadow_view_,
+                                     clutter_shadow_array_view_ ? clutter_shadow_array_view_ : sun_shadow_view_,
                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         w[14].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[14].dstSet = deferred_lighting_desc_set_; w[14].dstBinding = 14;
@@ -331,7 +331,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[14].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[14].pImageInfo = &cs_ii;
         VkDescriptorImageInfo aux_ii{ terrain_aux_sampler_ ? terrain_aux_sampler_ : linear_sampler_,
-                                      terrain_aux_view_ ? terrain_aux_view_ : cs_ii.imageView,
+                                      terrain_aux_view_ ? terrain_aux_view_ : clutter_shadow_view_,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         w[15] = w[14];
         w[15].dstBinding = 15;

@@ -25,8 +25,14 @@ namespace qlike {
 
 namespace {
 constexpr uint32_t kClutterDim  = 2048;
-constexpr float    kClutterHalf = 32.0f;   // metres
+constexpr float    kClutterHalf = 32.0f;   // metres (layer 0: 3.1 cm texels)
 constexpr float    kClutterDepth = 60.0f;  // +- along the sun axis
+// Layer 1: near cascade, same centre and depth range, 4x finer (0.78 cm
+// texels over 16 m) - thin stems and petals survive the 3x3 PCF. The
+// ratio is an exact power of two so the far map's texel snap (3.125 cm)
+// is exactly 4 near texels: no extra snap, no shimmer, and the shader
+// derives the near coordinates as far NDC * kClutterNearScale.
+constexpr float    kClutterNearScale = 4.0f;
 }
 
 void VulkanEngine::init_clutter_shadow() {
@@ -35,7 +41,7 @@ void VulkanEngine::init_clutter_shadow() {
     ici.imageType = VK_IMAGE_TYPE_2D;
     ici.format = VK_FORMAT_D32_SFLOAT;
     ici.extent = { kClutterDim, kClutterDim, 1 };
-    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.mipLevels = 1; ici.arrayLayers = 2;   // 0 = 64 m, 1 = 16 m near cascade
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -50,6 +56,11 @@ void VulkanEngine::init_clutter_shadow() {
     vci.format = VK_FORMAT_D32_SFLOAT;
     vci.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
     vk_check(vkCreateImageView(device_, &vci, nullptr, &clutter_shadow_view_), "clutter shadow view");
+    vci.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 1, 1 };
+    vk_check(vkCreateImageView(device_, &vci, nullptr, &clutter_shadow_near_view_), "clutter near view");
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 2 };
+    vk_check(vkCreateImageView(device_, &vci, nullptr, &clutter_shadow_array_view_), "clutter array view");
     {
         VkSamplerCreateInfo si{};
         si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -101,7 +112,7 @@ void VulkanEngine::init_clutter_shadow() {
         vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
     }
     clutter_shadow_vp_ = glm::mat4(0.0f);
-    log::info("[clutter shadow] 2048^2 map, 64 m around the camera");
+    log::info("[clutter shadow] 2x 2048^2 cascades: 64 m (3.1 cm) + 16 m near (0.8 cm)");
 }
 
 void VulkanEngine::destroy_clutter_shadow() {
@@ -109,6 +120,9 @@ void VulkanEngine::destroy_clutter_shadow() {
     if (clutter_shadow_layout_) vkDestroyPipelineLayout(device_, clutter_shadow_layout_, nullptr);
     if (clutter_shadow_vert_) vkDestroyShaderModule(device_, clutter_shadow_vert_, nullptr);
     if (clutter_shadow_view_) vkDestroyImageView(device_, clutter_shadow_view_, nullptr);
+    if (clutter_shadow_near_view_) vkDestroyImageView(device_, clutter_shadow_near_view_, nullptr);
+    if (clutter_shadow_array_view_) vkDestroyImageView(device_, clutter_shadow_array_view_, nullptr);
+    clutter_shadow_near_view_ = clutter_shadow_array_view_ = VK_NULL_HANDLE;
     if (clutter_shadow_sampler_) vkDestroySampler(device_, clutter_shadow_sampler_, nullptr);
     clutter_shadow_sampler_ = VK_NULL_HANDLE;
     if (clutter_shadow_image_) vmaDestroyImage(allocator_, clutter_shadow_image_, clutter_shadow_alloc_);
@@ -149,56 +163,64 @@ void VulkanEngine::render_clutter_shadow(VkCommandBuffer cmd) {
 
     vkinit::transition_image_aspect(cmd, clutter_shadow_image_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
-    VkRenderingAttachmentInfo da{};
-    da.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    da.imageView = clutter_shadow_view_;
-    da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    da.clearValue.depthStencil = { 1.0f, 0 };
-    VkRenderingInfo ri{};
-    ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    ri.renderArea = { { 0, 0 }, { kClutterDim, kClutterDim } };
-    ri.layerCount = 1;
-    ri.pDepthAttachment = &da;
-    vkCmdBeginRendering(cmd, &ri);
-    VkViewport vp{ 0.0f, 0.0f, float(kClutterDim), float(kClutterDim), 0.0f, 1.0f };
-    VkRect2D sc{ { 0, 0 }, { kClutterDim, kClutterDim } };
-    vkCmdSetViewport(cmd, 0, 1, &vp);
-    vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, clutter_shadow_pipeline_);
-    // p: .x wind time, .y plant (sway) flag, .z colour-pass draw distance -
-    // the same fade / sway as scatter.vert so shadows match what is drawn.
-    struct { glm::mat4 vp; glm::vec4 cam; glm::vec4 p; } pc{ clutter_shadow_vp_, glm::vec4(cam, kClutterHalf * 1.42f),
-        glm::vec4(static_cast<float>(frame_number_) * 0.016f, 0.0f,
-                  std::max(60.0f, rt_.grass_distance * 1.6f), 0.0f) };
-    vkCmdPushConstants(cmd, clutter_shadow_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
-    VkDeviceSize offs[2] = { 0, 0 };
-    // Only cells overlapping the shadow box around the camera (XZ).
-    const float box_r = kClutterHalf * 1.42f;
-    auto in_box = [&](const ScatterCell& c) {
-        float qx = std::clamp(cam.x, c.mn.x, c.mx.x), qz = std::clamp(cam.z, c.mn.z, c.mx.z);
-        return (qx - cam.x) * (qx - cam.x) + (qz - cam.z) * (qz - cam.z) < box_r * box_r;
-    };
-    {
-        VkBuffer b[2] = { scatter_.rock_mesh.vertex_buffer, scatter_.instance_buffer };
-        vkCmdBindVertexBuffers(cmd, 0, 2, b, offs);
-        vkCmdBindIndexBuffer(cmd, scatter_.rock_mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
-        scatter_draw_cells(cmd, scatter_.rock_mesh.index_count, scatter_.rock_cells, in_box);
-    }
-    if (scatter_.plant_buffer) {
-        pc.p.y = 1.0f;
-        pc.p.z = std::max(45.0f, rt_.grass_distance * 0.9f);
+    // Two cascades into the two array layers: 64 m (layer 0) and the 4x
+    // finer 16 m near cascade (layer 1, same centre: VP scaled in x/y).
+    glm::mat4 near_scale(1.0f);
+    near_scale[0][0] = near_scale[1][1] = kClutterNearScale;
+    for (int layer = 0; layer < 2; ++layer) {
+        const float half = layer == 0 ? kClutterHalf : kClutterHalf / kClutterNearScale;
+        const glm::mat4 cvp = layer == 0 ? clutter_shadow_vp_ : near_scale * clutter_shadow_vp_;
+        VkRenderingAttachmentInfo da{};
+        da.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        da.imageView = layer == 0 ? clutter_shadow_view_ : clutter_shadow_near_view_;
+        da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        da.clearValue.depthStencil = { 1.0f, 0 };
+        VkRenderingInfo ri{};
+        ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        ri.renderArea = { { 0, 0 }, { kClutterDim, kClutterDim } };
+        ri.layerCount = 1;
+        ri.pDepthAttachment = &da;
+        vkCmdBeginRendering(cmd, &ri);
+        VkViewport vp{ 0.0f, 0.0f, float(kClutterDim), float(kClutterDim), 0.0f, 1.0f };
+        VkRect2D sc{ { 0, 0 }, { kClutterDim, kClutterDim } };
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, clutter_shadow_pipeline_);
+        // p: .x wind time, .y plant (sway) flag, .z colour-pass draw distance -
+        // the same fade / sway as scatter.vert so shadows match what is drawn.
+        struct { glm::mat4 vp; glm::vec4 cam; glm::vec4 p; } pc{ cvp, glm::vec4(cam, half * 1.42f),
+            glm::vec4(static_cast<float>(frame_number_) * 0.016f, 0.0f,
+                      std::max(60.0f, rt_.grass_distance * 1.6f), 0.0f) };
         vkCmdPushConstants(cmd, clutter_shadow_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
-        for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {
-            if (!scatter_.plant_count[sp]) continue;
-            VkBuffer b[2] = { scatter_.plant_mesh[sp].vertex_buffer, scatter_.plant_buffer };
+        VkDeviceSize offs[2] = { 0, 0 };
+        // Only cells overlapping this cascade's box around the camera (XZ).
+        const float box_r = half * 1.42f;
+        auto in_box = [&](const ScatterCell& c) {
+            float qx = std::clamp(cam.x, c.mn.x, c.mx.x), qz = std::clamp(cam.z, c.mn.z, c.mx.z);
+            return (qx - cam.x) * (qx - cam.x) + (qz - cam.z) * (qz - cam.z) < box_r * box_r;
+        };
+        {
+            VkBuffer b[2] = { scatter_.rock_mesh.vertex_buffer, scatter_.instance_buffer };
             vkCmdBindVertexBuffers(cmd, 0, 2, b, offs);
-            vkCmdBindIndexBuffer(cmd, scatter_.plant_mesh[sp].index_buffer, 0, VK_INDEX_TYPE_UINT32);
-            scatter_draw_cells(cmd, scatter_.plant_mesh[sp].index_count, scatter_.plant_cells[sp], in_box);
+            vkCmdBindIndexBuffer(cmd, scatter_.rock_mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+            scatter_draw_cells(cmd, scatter_.rock_mesh.index_count, scatter_.rock_cells, in_box);
         }
+        if (scatter_.plant_buffer) {
+            pc.p.y = 1.0f;
+            pc.p.z = std::max(45.0f, rt_.grass_distance * 0.9f);
+            vkCmdPushConstants(cmd, clutter_shadow_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+            for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {
+                if (!scatter_.plant_count[sp]) continue;
+                VkBuffer b[2] = { scatter_.plant_mesh[sp].vertex_buffer, scatter_.plant_buffer };
+                vkCmdBindVertexBuffers(cmd, 0, 2, b, offs);
+                vkCmdBindIndexBuffer(cmd, scatter_.plant_mesh[sp].index_buffer, 0, VK_INDEX_TYPE_UINT32);
+                scatter_draw_cells(cmd, scatter_.plant_mesh[sp].index_count, scatter_.plant_cells[sp], in_box);
+            }
+        }
+        vkCmdEndRendering(cmd);
     }
-    vkCmdEndRendering(cmd);
     vkinit::transition_image_aspect(cmd, clutter_shadow_image_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
 }
