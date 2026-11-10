@@ -173,6 +173,49 @@ void add_cone(LevelMesh& m, glm::vec3 c, float r, float h, int segs, float seed,
     (void)base;
 }
 
+// Close-range pine tier: two rings (drooping outer rim + raised inner
+// ring) so a tier reads as a layer of sagging branches instead of a flat
+// cone; every outer point gets its own needle-tip jitter.
+void add_cone_layered(LevelMesh& m, glm::vec3 c, float r, float h, int segs, float seed,
+                      float w_rim, float w_apex, float phase) {
+    glm::vec3 apex = c + glm::vec3(0, h, 0);
+    std::vector<glm::vec3> rim(segs), mid(segs);
+    for (int i = 0; i < segs; ++i) {
+        float t = 2.0f * kPi * float(i) / float(segs) + seed;
+        float j = h3(glm::vec3(seed, float(i), 3.0f));
+        float rr = r * ((i & 1) ? 0.80f : 1.0f) * (0.86f + 0.28f * j);
+        float droop = -h * (0.16f + 0.10f * j) * ((i & 1) ? 0.5f : 1.0f);
+        rim[i] = c + glm::vec3(std::cos(t) * rr, droop, std::sin(t) * rr);
+        float tm = t + kPi / float(segs);
+        float rm = r * 0.52f * (0.9f + 0.2f * h3(glm::vec3(seed, float(i), 7.0f)));
+        mid[i] = c + glm::vec3(std::cos(tm) * rm, h * 0.36f, std::sin(tm) * rm);
+    }
+    auto tri = [&](glm::vec3 a, glm::vec3 b, glm::vec3 d, float wa, float wb, float wd) {
+        glm::vec3 n = glm::normalize(glm::cross(d - a, b - a));
+        if (n.y < -0.2f) n = -n;
+        uint32_t k = uint32_t(m.verts.size());
+        push_v(m, { a, n, wa, phase });
+        push_v(m, { b, n, wb, phase });
+        push_v(m, { d, n, wd, phase });
+        m.idx.insert(m.idx.end(), { k, k + 2, k + 1 });
+    };
+    const float w_mid = 0.5f * (w_rim + w_apex);
+    for (int i = 0; i < segs; ++i) {
+        int i1 = (i + 1) % segs;
+        // rim band (rim i, rim i+1, mid i) + (mid i, rim i+1, mid i+1)
+        tri(rim[i], rim[i1], mid[i], w_rim, w_rim, w_mid);
+        tri(mid[i], rim[i1], mid[i1], w_mid, w_rim, w_mid);
+        // upper band to the apex
+        tri(mid[i], mid[i1], apex, w_mid, w_mid, w_apex);
+    }
+    glm::vec3 under = c + glm::vec3(0, h * 0.05f, 0);
+    uint32_t ku = uint32_t(m.verts.size());
+    push_v(m, { under, glm::vec3(0, -1, 0), w_rim, phase });
+    for (int i = 0; i < segs; ++i) push_v(m, { rim[i], glm::vec3(0, -1, 0), w_rim, phase });
+    for (int i = 0; i < segs; ++i)
+        m.idx.insert(m.idx.end(), { ku, ku + 1 + uint32_t(i), ku + 1 + uint32_t((i + 1) % segs) });
+}
+
 }  // namespace
 
 WorldPropStats build_world_props(const Heightmap& hm, const Road* road,
@@ -314,17 +357,25 @@ WorldPropStats build_world_props(const Heightmap& hm, const Road* road,
 namespace {
 
 struct PineParams { float H; int tiers; float r0; float seed; float lean; };
-struct OakParams  { float H; int branches; float seed; float spread; glm::vec3 top_off; };
-struct BushParams { int blobs; float seed; };
+struct OakParams  { float H; int branches; float seed; float spread; glm::vec3 top_off;
+                    glm::vec2 crown = glm::vec2(1.0f);   // crown scale (xz, y): wide oak / tall narrow / round
+                    int clumps = 0; };                  // extra small crown clumps (LOD0 lumpiness)
+struct BushParams { int blobs; float seed; float sx = 1.0f, sy = 1.0f; };
 
 // LOD tables: LOD0 full detail .. LOD3 ~10-30 tris (far silhouette).
 void build_pine(LevelMesh& m, const PineParams& p, int lod, const Ico& lo, const Ico& hi) {
     (void)lo; (void)hi;
-    const int   trunk_segs[4] = { 7, 5, 4, 3 };
-    const int   cone_segs[4]  = { 11, 8, 6, 5 };
-    const int   tiers         = std::max(1, (lod == 0) ? p.tiers : (lod == 1) ? (p.tiers + 1) / 2 + 1
+    const int   trunk_segs[4] = { 12, 6, 4, 3 };
+    const int   cone_segs[4]  = { 18, 10, 6, 5 };
+    // LOD0: ~1.5x more, thinner tiers (layered branches); far LODs unchanged.
+    const int   tiers         = std::max(1, (lod == 0) ? p.tiers + p.tiers / 2
+                                                     : (lod == 1) ? (p.tiers + 1) / 2 + 1
                                                      : (lod == 2) ? 2 : 1);
     glm::vec3 b(0.0f);
+    if (lod == 0) {   // root flare: short wide base under the trunk
+        add_limb(m, b - glm::vec3(0, 0.3f, 0), b + glm::vec3(p.lean * 0.05f, 0.7f, 0), 0.55f, 0.33f,
+                 trunk_segs[lod], 0.0f, 0.0f, 0.0f);
+    }
     add_limb(m, b - glm::vec3(0, 0.3f, 0), b + glm::vec3(p.lean, p.H * 0.9f, 0), 0.32f, 0.06f,
              trunk_segs[lod], 0.0f, 0.35f, 0.0f);
     const float y0 = p.H * 0.22f;
@@ -333,55 +384,87 @@ void build_pine(LevelMesh& m, const PineParams& p, int lod, const Ico& lo, const
         float r = (tiers == 1) ? p.r0 * 0.95f : (p.r0 - (p.r0 - 0.6f) * f01);
         float th = (tiers == 1) ? (p.H - y0 + 0.5f) : (p.H - y0) / float(tiers) * 1.9f;
         float cy = (tiers == 1) ? y0 : y0 + (p.H - y0 - th * 0.6f) * f01;
-        add_cone(m, glm::vec3(p.lean * cy / p.H, cy, 0.0f), r, th, cone_segs[lod],
-                 p.seed + float(t) * 1.7f, 0.15f + 0.6f * f01, 0.3f + 0.7f * f01, 1.0f);
+        if (lod == 0)
+            add_cone_layered(m, glm::vec3(p.lean * cy / p.H, cy, 0.0f), r, th * 0.8f, cone_segs[lod],
+                             p.seed + float(t) * 1.7f, 0.15f + 0.6f * f01, 0.3f + 0.7f * f01, 1.0f);
+        else
+            add_cone(m, glm::vec3(p.lean * cy / p.H, cy, 0.0f), r, th, cone_segs[lod],
+                     p.seed + float(t) * 1.7f, 0.15f + 0.6f * f01, 0.3f + 0.7f * f01, 1.0f);
     }
 }
 
-void build_oak(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, const Ico& hi, const Ico& tiny) {
+void build_oak(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, const Ico& hi, const Ico& tiny,
+               const Ico& ultra) {
     glm::vec3 b(0.0f);
     glm::vec3 top = b + p.top_off + glm::vec3(0, p.H * 0.62f, 0);
-    const int limb_segs[4] = { 8, 5, 4, 3 };
+    const int limb_segs[4] = { 12, 6, 4, 3 };
+    const glm::vec3 cs(p.crown.x, p.crown.y, p.crown.x);   // crown shape scale
+    if (lod == 0)   // root flare
+        add_limb(m, b - glm::vec3(0, 0.3f, 0), b + glm::vec3(0, 0.8f, 0), 0.70f, 0.44f, limb_segs[lod],
+                 0.0f, 0.0f, 0.0f);
     add_limb(m, b - glm::vec3(0, 0.3f, 0), top, 0.42f, 0.24f, limb_segs[lod], 0.0f, 0.25f, 0.0f);
     std::vector<glm::vec3> tips;
     std::mt19937 r(uint32_t(p.seed * 1000.0f));
     std::uniform_real_distribution<float> U(0.0f, 1.0f);
     for (int k = 0; k < p.branches; ++k) {
         float ang = p.seed + float(k) * 2.0f * kPi / float(p.branches) + U(r) * 0.5f;
-        glm::vec3 tip = top + glm::vec3(std::cos(ang) * p.spread, 1.2f + U(r) * 1.4f, std::sin(ang) * p.spread);
+        glm::vec3 tip = top + glm::vec3(std::cos(ang) * p.spread * cs.x, (1.2f + U(r) * 1.4f) * cs.y,
+                                        std::sin(ang) * p.spread * cs.x);
         if (lod <= 1) add_limb(m, top, tip, 0.2f, 0.07f, limb_segs[lod] - 1, 0.25f, 0.55f, 0.0f);
+        if (lod == 0) {   // second-order twigs off each branch
+            for (int t = 0; t < 2; ++t) {
+                glm::vec3 a = glm::mix(top, tip, 0.45f + 0.25f * float(t));
+                float ta = ang + (t == 0 ? 0.9f : -0.9f) + (U(r) - 0.5f) * 0.4f;
+                glm::vec3 e = a + glm::vec3(std::cos(ta) * 1.1f * cs.x, 0.8f + U(r) * 0.6f, std::sin(ta) * 1.1f * cs.x);
+                add_limb(m, a, e, 0.08f, 0.03f, 5, 0.4f, 0.7f, 0.0f);
+                tips.push_back(e);
+            }
+        }
         tips.push_back(tip);
     }
-    const Ico& crown_ico = (lod == 0) ? hi : (lod == 1) ? lo : tiny;
-    glm::vec3 crown = top + glm::vec3(0, 2.4f, 0);
+    const Ico& crown_ico = (lod == 0) ? ultra : (lod == 1) ? hi : tiny;
+    glm::vec3 crown = top + glm::vec3(0, 2.4f * cs.y, 0);
     if (lod >= 2) {
         // Far: one merged canopy volume (covers the tips' extent).
         add_blob(m, crown_ico, crown + glm::vec3(0, 0.3f, 0),
-                 glm::vec3(3.0f + p.spread * 0.6f, 2.8f, 3.0f + p.spread * 0.6f), 0.0f,
+                 glm::vec3(3.0f + p.spread * 0.6f, 2.8f, 3.0f + p.spread * 0.6f) * cs, 0.0f,
                  p.seed * 7.0f, 0.18f, 2.0f, 0.0f, -1e9f, glm::vec2(0.5f, 2.0f), 0.95f);
         return;
     }
-    add_blob(m, crown_ico, crown, glm::vec3(3.0f, 2.3f, 3.0f), 0.0f, p.seed * 7.0f, 0.22f, 2.2f,
+    add_blob(m, crown_ico, crown, glm::vec3(3.0f, 2.3f, 3.0f) * cs, 0.0f, p.seed * 7.0f, 0.22f, 2.2f,
              0.0f, -1e9f, glm::vec2(0.5f, 2.0f), 0.95f);
     int ti = 0;
     for (const auto& tp : tips) {
-        float s = 1.6f + 0.7f * h3(glm::vec3(p.seed, float(ti), 1.0f));
-        add_blob(m, crown_ico, tp + glm::vec3(0, 0.4f, 0), glm::vec3(s, s * 0.8f, s), 0.0f,
+        float s = (1.6f + 0.7f * h3(glm::vec3(p.seed, float(ti), 1.0f))) * (lod == 0 && ti % 3 != 2 ? 0.85f : 1.0f);
+        const bool twig = lod == 0 && ti % 3 != 2;   // twig clumps: coarser sphere
+        add_blob(m, twig ? hi : crown_ico, tp + glm::vec3(0, 0.4f, 0), glm::vec3(s, s * 0.8f, s), 0.0f,
                  p.seed * 3.0f + float(ti), 0.25f, 2.4f, 0.0f, -1e9f, glm::vec2(0.55f, 2.0f), 1.0f);
         ++ti;
     }
+    if (lod == 0) {   // lumpy outer clumps around the crown
+        for (int k = 0; k < p.clumps; ++k) {
+            float a = p.seed * 1.3f + float(k) * 2.39996f;
+            float el = (U(r) - 0.3f) * 1.1f;
+            glm::vec3 d(std::cos(a) * std::cos(el), std::sin(el), std::sin(a) * std::cos(el));
+            glm::vec3 c = crown + d * glm::vec3(3.0f, 2.3f, 3.0f) * cs * 0.85f;
+            float s = 0.9f + 0.6f * U(r);
+            add_blob(m, hi, c, glm::vec3(s, s * 0.8f, s), 0.0f, p.seed * 11.0f + float(k), 0.28f, 2.6f,
+                     0.0f, -1e9f, glm::vec2(0.6f, 2.0f), 1.0f);
+        }
+    }
 }
 
-void build_bush(LevelMesh& m, const BushParams& p, int lod, const Ico& lo, const Ico& tiny) {
+void build_bush(LevelMesh& m, const BushParams& p, int lod, const Ico& lo, const Ico& tiny,
+                const Ico& hi) {
     const int n = (lod == 0) ? p.blobs : (lod == 1) ? 2 : 1;
-    const Ico& ico = (lod == 0) ? lo : tiny;
+    const Ico& ico = (lod == 0) ? hi : (lod == 1) ? lo : tiny;
     for (int k = 0; k < n; ++k) {
-        float ang = p.seed + float(k) * 2.3f;
-        float d = (n == 1) ? 0.0f : 0.35f;
-        float r = (n == 1) ? 1.0f : 0.75f;
-        glm::vec3 c(std::cos(ang) * d, 0.35f, std::sin(ang) * d);
-        add_blob(m, ico, c, glm::vec3(r, r * 0.75f, r), 0.0f, p.seed * 5.0f + float(k), 0.3f, 2.6f,
-                 0.0f, -0.15f, glm::vec2(0.05f, 3.0f), 0.35f);
+        float ang = p.seed + float(k) * 2.39996f;
+        float d = (n == 1) ? 0.0f : (k == 0 ? 0.0f : 0.42f + 0.12f * float(k % 2));
+        float r = (n == 1) ? 1.0f : (k == 0 ? 0.8f : 0.6f + 0.1f * float((k * 7) % 3));
+        glm::vec3 c(std::cos(ang) * d * p.sx, 0.35f + (k == 0 ? 0.1f : 0.0f), std::sin(ang) * d * p.sx);
+        add_blob(m, ico, c, glm::vec3(r * p.sx, r * 0.75f * p.sy, r * p.sx), 0.0f, p.seed * 5.0f + float(k),
+                 0.3f, 2.6f, 0.0f, -0.15f, glm::vec2(0.05f, 3.0f), 0.35f);
     }
 }
 
@@ -391,7 +474,7 @@ std::vector<VegArchetype> build_veg_archetypes(int seed) {
     std::vector<VegArchetype> out;
     std::mt19937 rng{ uint32_t(seed) };
     std::uniform_real_distribution<float> U(0.0f, 1.0f);
-    const Ico tiny = make_ico(0), lo = make_ico(1), hi = make_ico(2);
+    const Ico tiny = make_ico(0), lo = make_ico(1), hi = make_ico(2), ultra = make_ico(3);
     auto finish = [](VegArchetype& a) {
         float rmax = 0.0f, ymax = 0.0f;
         for (const auto& v : a.lods[0].verts) {
@@ -401,24 +484,41 @@ std::vector<VegArchetype> build_veg_archetypes(int seed) {
         a.height = ymax;
         a.radius = std::sqrt(rmax * rmax + ymax * ymax * 0.25f);
     };
-    for (int v = 0; v < 4; ++v) {                      // pines
+    // Pines: 7 variants - young / mature / tall-narrow spruce / broad old
+    // pine (height, tier count, base radius).
+    for (int v = 0; v < 7; ++v) {
         VegArchetype a; a.species = 0;
-        PineParams p{ 10.0f + 4.0f * U(rng), 6 + int(U(rng) * 3.0f), 2.4f + 0.6f * U(rng),
-                      U(rng) * 6.28f, (U(rng) - 0.5f) * 0.6f };
+        const float kind = float(v % 4);
+        float H  = (kind == 0 ? 8.0f : kind == 1 ? 11.0f : kind == 2 ? 15.0f : 12.0f) + 3.0f * U(rng);
+        int   tiers = 6 + int(U(rng) * 3.0f) + (kind == 2 ? 2 : 0);
+        float r0 = (kind == 2 ? 1.9f : kind == 3 ? 3.1f : 2.4f) + 0.6f * U(rng);
+        PineParams p{ H, tiers, r0, U(rng) * 6.28f, (U(rng) - 0.5f) * 0.6f };
         for (int l = 0; l < kVegLods; ++l) build_pine(a.lods[l], p, l, lo, hi);
         finish(a); out.push_back(std::move(a));
     }
-    for (int v = 0; v < 4; ++v) {                      // broadleaf
+    // Broadleaf: 7 variants - wide oak, tall narrow (birch / poplar-like),
+    // round ash, young tree; crown shape + branch count + outer clumps.
+    for (int v = 0; v < 7; ++v) {
         VegArchetype a; a.species = 1;
-        OakParams p{ 7.0f + 3.0f * U(rng), 3 + int(U(rng) * 2.5f), U(rng) * 6.28f, 1.8f + 0.9f * U(rng),
-                     glm::vec3((U(rng) - 0.5f) * 0.8f, 0.0f, (U(rng) - 0.5f) * 0.8f) };
-        for (int l = 0; l < kVegLods; ++l) build_oak(a.lods[l], p, l, lo, hi, tiny);
+        const int kind = v % 4;
+        const glm::vec2 crown = kind == 0 ? glm::vec2(1.25f, 0.95f)    // wide oak
+                              : kind == 1 ? glm::vec2(0.70f, 1.45f)    // tall narrow
+                              : kind == 2 ? glm::vec2(1.00f, 1.05f)    // round
+                                          : glm::vec2(0.80f, 0.85f);   // young
+        OakParams p{ (kind == 1 ? 9.5f : kind == 3 ? 5.5f : 7.0f) + 3.0f * U(rng),
+                     4 + int(U(rng) * 3.5f), U(rng) * 6.28f, (1.8f + 0.9f * U(rng)) * crown.x,
+                     glm::vec3((U(rng) - 0.5f) * 0.8f, 0.0f, (U(rng) - 0.5f) * 0.8f),
+                     crown, 4 + int(U(rng) * 4.0f) };
+        for (int l = 0; l < kVegLods; ++l) build_oak(a.lods[l], p, l, lo, hi, tiny, ultra);
         finish(a); out.push_back(std::move(a));
     }
-    for (int v = 0; v < 3; ++v) {                      // bushes
+    // Bushes: 5 variants (low wide / tall / round clusters).
+    for (int v = 0; v < 5; ++v) {
         VegArchetype a; a.species = 2;
-        BushParams p{ 2 + int(U(rng) * 2.0f), U(rng) * 6.28f };
-        for (int l = 0; l < kVegLods; ++l) build_bush(a.lods[l], p, l, lo, tiny);
+        BushParams p{ 3 + int(U(rng) * 3.0f), U(rng) * 6.28f,
+                      v % 3 == 0 ? 1.35f : v % 3 == 1 ? 0.85f : 1.0f,
+                      v % 3 == 0 ? 0.75f : v % 3 == 1 ? 1.45f : 1.0f };
+        for (int l = 0; l < kVegLods; ++l) build_bush(a.lods[l], p, l, lo, tiny, hi);
         finish(a); out.push_back(std::move(a));
     }
     for (int v = 0; v < 8; ++v) {                      // rocks (species 3)
