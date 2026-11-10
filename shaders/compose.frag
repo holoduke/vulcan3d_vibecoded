@@ -437,19 +437,20 @@ vec3 fsr1_easu(sampler2D tex, vec2 uv, vec2 src_size) {
 //
 // `sharpness` is in [0, 1]. 0 = no sharpening, 1 = max strength.
 vec3 fsr1_rcas(vec3 c, vec3 n, vec3 s, vec3 e, vec3 w, float sharpness) {
-    // Per-channel min/max box.
-    vec3 mn = min(min(n, s), min(min(e, w), c));
-    vec3 mx = max(max(n, s), max(max(e, w), c));
-    // Per-channel lobe: (mn / mx - 1) on the dim end, clamped.
-    vec3 mx_safe = max(mx, vec3(0.001));
-    vec3 lobe_rgb = max(-vec3(0.18745f), (mn - 1.0) / mx_safe);
-    // Use the green channel as the dominant for a single weight (the
-    // standard RCAS uses luma-ish greyscale; green is a reasonable
-    // proxy that avoids per-channel halos).
-    float lobe = lobe_rgb.g * sharpness;
-    // Final weighted sum: (lobe * (n+s+e+w) + c) / (1 + 4*lobe).
-    vec3 blur = (n + s + e + w);
-    return (lobe * blur + c) / (1.0 + 4.0 * lobe);
+    // AMD FsrRcasF on values compressed to [0,1) (x = c / (1 + c); the
+    // input is still HDR here) - the previous version's (mn-1)/mx lobe
+    // was almost always pinned at -0.1875, i.e. not contrast adaptive.
+    vec3 C = c / (1.0 + c), N = n / (1.0 + n), S = s / (1.0 + s),
+         E = e / (1.0 + e), W = w / (1.0 + w);
+    vec3 mn4 = min(min(N, S), min(E, W));
+    vec3 mx4 = max(max(N, S), max(E, W));
+    vec3 hit_min = mn4 / max(4.0 * mx4, vec3(1e-4));
+    vec3 hit_max = (1.0 - mx4) / min(4.0 * mn4 - 4.0, vec3(-1e-4));
+    vec3 lobe_rgb = max(-hit_min, hit_max);
+    float lobe = max(-0.1875, min(max(lobe_rgb.r, max(lobe_rgb.g, lobe_rgb.b)), 0.0)) * sharpness;
+    vec3 R = (lobe * (N + S + E + W) + C) / (4.0 * lobe + 1.0);
+    R = clamp(R, vec3(0.0), vec3(0.999));
+    return R / (1.0 - R);
 }
 
 // 9-tap Catmull-Rom bicubic upscale (Jorge Jimenez / Filmic AA — the
@@ -580,17 +581,25 @@ void main() {
     // range with a 0.5 mid-point so the existing UI defaults still
     // make sense.
     if (depth < 0.99999 && pc.sharpen_params.x > 0.0) {
-        // 4 cardinals at one HR pixel offset (post-upscale image is
-        // at HR; we sample neighbouring HR pixels via the upscale
-        // function so the sharpener sees full-res signal).
         vec2 hr_step = pc.viewport.zw;
-        vec3 sN = fsr1_easu(history_color, sample_uv + vec2(0.0,  hr_step.y), src_size);
-        vec3 sS = fsr1_easu(history_color, sample_uv + vec2(0.0, -hr_step.y), src_size);
-        vec3 sE = fsr1_easu(history_color, sample_uv + vec2( hr_step.x, 0.0), src_size);
-        vec3 sW = fsr1_easu(history_color, sample_uv + vec2(-hr_step.x, 0.0), src_size);
-        float sharpness = clamp(pc.sharpen_params.x * 0.5, 0.0, 1.0);
-        hdr = fsr1_rcas(hdr, sN, sS, sE, sW, sharpness);
-        hdr = max(hdr, vec3(0.0));   // RCAS guard against negative
+        vec2 uN = sample_uv + vec2(0.0,  hr_step.y), uS = sample_uv - vec2(0.0, hr_step.y);
+        vec2 uE = sample_uv + vec2(hr_step.x, 0.0),  uW = sample_uv - vec2(hr_step.x, 0.0);
+        // Never sharpen against the sky: the history holds the CLEAR
+        // colour there (the real sky is reconstructed above, per pixel),
+        // so the negative lobe pulled every silhouette pixel toward black
+        // - the dark contour against the sky, worst while moving.
+        vec4 g4 = max(max(textureGather(history_depth, uN, 0), textureGather(history_depth, uS, 0)),
+                      max(textureGather(history_depth, uE, 0), textureGather(history_depth, uW, 0)));
+        g4 = max(g4, textureGather(history_depth, sample_uv, 0));
+        float dmax = max(max(g4.x, g4.y), max(g4.z, g4.w));
+        if (dmax < 0.99999) {
+            vec3 sN = texture(history_color, uN).rgb;
+            vec3 sS = texture(history_color, uS).rgb;
+            vec3 sE = texture(history_color, uE).rgb;
+            vec3 sW = texture(history_color, uW).rgb;
+            float sharpness = clamp(pc.sharpen_params.x * 0.5, 0.0, 1.0);
+            hdr = fsr1_rcas(hdr, sN, sS, sE, sW, sharpness);
+        }
     }
 
     // Screen-space sun shafts (crepuscular rays). 24 fixed taps along
