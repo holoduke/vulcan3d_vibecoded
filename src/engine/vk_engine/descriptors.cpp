@@ -611,7 +611,7 @@ void VulkanEngine::update_scene_ubo() {
         float sn = std::max(rt_.grass_slope_n_min, 1e-2f);
         float slope_max = std::sqrt(std::max(1e-4f, 1.0f / (sn * sn) - 1.0f));
         data.grass_rm_params = glm::vec4(rt_.grass_height_scale, rt_.grass_wind,
-                                         static_cast<float>(frame_number_) * 0.016f,
+                                         anim_time_,
                                          glm::clamp(rt_.grass_density, 0.0f, 1.0f));
         data.grass_rm_params2 = glm::vec4(
             slope_max,
@@ -631,7 +631,7 @@ void VulkanEngine::update_scene_ubo() {
     // Ocean / water plane params. Time is derived from frame number
     // at a nominal 60 Hz — exact wall-clock isn't needed for waves
     // and avoids threading a real timer here.
-    float water_t = static_cast<float>(frame_number_) * (1.0f / 60.0f);
+    float water_t = anim_time_;
     data.water_params = glm::vec4(rt_.water_enabled ? 1.0f : 0.0f,
                                    rt_.water_level,
                                    rt_.water_wave_strength,

@@ -34,6 +34,7 @@ static_assert(sizeof(DeferredLightingPC) == 256,
 
 
 void VulkanEngine::init_deferred_lighting() {
+    deferred_desc_sig_ = 0;   // handles may be recreated (even at the same address)
     init_radiance_cache();   // bindings 16-18
     // Descriptor set layout: scene UBO + TLAS + gbuffer0 + gbuffer1 +
     // depth + sun_shadow. Six bindings, all fragment-stage. Reuses the
@@ -346,7 +347,20 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
             w[16 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             w[16 + i].pBufferInfo = &rc_bi[i];
         }
-        vkUpdateDescriptorSets(device_, 19, w, 0, nullptr);
+        // Only when a bound handle changed (resize, TLAS rebuild, aux re-bake):
+        // 19 descriptor writes every frame were pure CPU overhead.
+        uint64_t sig = 1469598103934665603ull;
+        for (int i = 0; i < 19; ++i) {
+            uint64_t h = w[i].pImageInfo ? uint64_t(reinterpret_cast<uintptr_t>(w[i].pImageInfo->imageView)) ^
+                                           (uint64_t(reinterpret_cast<uintptr_t>(w[i].pImageInfo->sampler)) << 1)
+                       : w[i].pBufferInfo ? uint64_t(reinterpret_cast<uintptr_t>(w[i].pBufferInfo->buffer))
+                       : uint64_t(reinterpret_cast<uintptr_t>(tlas_));
+            sig = (sig ^ h) * 1099511628211ull;
+        }
+        if (sig != deferred_desc_sig_) {
+            vkUpdateDescriptorSets(device_, 19, w, 0, nullptr);
+            deferred_desc_sig_ = sig;
+        }
     }
 
     // Transition staging_color into COLOR_ATTACHMENT layout.

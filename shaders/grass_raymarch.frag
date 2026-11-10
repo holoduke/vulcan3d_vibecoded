@@ -228,7 +228,20 @@ float terrainH(vec2 wp) {
 // so grass blades sit on the same surface the terrain raymarch draws
 // even at distance. Params come from pc.emissive.{y,z,w} (mirrors the
 // terrain shader's push-constant layout).
+// Absolute heightmap (1 m cells, centred on the origin) - the surface the
+// MESH terrain is built from, including sculpts, the road and craters.
+layout(set = 0, binding = 17) uniform sampler2D u_heightmap_full;
+float terrainH_mesh(vec2 wp) {
+    float W = float(textureSize(u_heightmap_full, 0).x);
+    vec2 uv = (wp + 0.5 * (W - 1.0) + 0.5) / W;
+    return textureLod(u_heightmap_full, uv, 0.0).r;
+}
+
 float terrainH_lod(vec2 wp, float ray_t) {
+    // Mesh-terrain mode: one bilinear fetch instead of 8 octaves of FBM
+    // per march step (the main cost of this pass), and the blades stand on
+    // the surface actually drawn.
+    if (pc.emissive.x > 0.5) return terrainH_mesh(wp);
     vec2 p = wp * TERRAIN_SCALE;
     const int oct_full = 8;
     int   oct_min = max(2, min(oct_full, int(pc.emissive.w)));
@@ -254,7 +267,7 @@ float terrainH_lod(vec2 wp, float ray_t) {
 }
 
 // Backwards-compat: rest of the shader still calls sampleHeight.
-float sampleHeight(vec2 wp_xz) { return terrainH(wp_xz); }
+float sampleHeight(vec2 wp_xz) { return pc.emissive.x > 0.5 ? terrainH_mesh(wp_xz) : terrainH(wp_xz); }
 float sampleHeight_lod(vec2 wp_xz, float ray_t) {
     return terrainH_lod(wp_xz, ray_t);
 }

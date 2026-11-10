@@ -255,7 +255,10 @@ void VulkanEngine::init() {
     // SSDM Phase 1: dedicated displacement-vector pass. Must run after
     // init_taa() so render_extent_ is finalised (the disp image sizes to it)
     // and before init_compose() in case future phases hook into compose.
-    init_ssdm();
+    // init_ssdm(): disabled - its passes are commented out (frame.cpp /
+    // world_render.cpp) but it still allocated 3 screen-size images +
+    // pipelines and rebuilt them on every resize. Code kept for reference.
+    if (std::getenv("QLIKE_SSDM_LEGACY")) init_ssdm();
     init_bloom();
     init_compose();
     // SVGF moments + 3-pass a-trous pipelines (4a-deep). Must run
@@ -963,6 +966,8 @@ void VulkanEngine::run(const RunOptions& opts) {
         // FSR3 toggle: only meaningful when fsr2_enabled is on AND the
         // backend is 1 (FSR3). Same wait-idle-only-on-actual-switch semantics.
         rewrite_compose_for_fsr3();
+        // DLSS: output (re)creation + compose rebind, never mid-recording.
+        ensure_dlss_bindings();
 
         // Heightmap-shadow texture is sampled by cube.frag's mesh-terrain
         // branch and grass.vert (raster grass). When raymarch terrain is on
@@ -1082,6 +1087,7 @@ void VulkanEngine::run(const RunOptions& opts) {
             for (int k = 0; k < 6; ++k) hitch_prev_[k] = hz_ms[k];
 
             ++frame_number_;
+            anim_time_ = static_cast<float>(std::fmod(glfwGetTime(), 3600.0));
             {
                 static bool first_logged = false;
                 if (!first_logged) {

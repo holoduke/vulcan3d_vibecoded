@@ -193,15 +193,31 @@ void VulkanEngine::sl_shutdown() {
 #endif
 }
 
-void VulkanEngine::dispatch_dlss(VkCommandBuffer cmd) {
+// Called BEFORE command recording (vk_engine.cpp, next to the other compose
+// rebinds): (re)creates the DLSS output on first use / resize and points
+// compose at it. Doing this inside dispatch_dlss / draw() rewrote descriptor
+// sets the frame had already bound (invalid command buffer).
+void VulkanEngine::ensure_dlss_bindings() {
 #ifdef QLIKE_HAVE_STREAMLINE
-    if (!dlss_supported_) return;
-    if (!dlss_output_view_ || dlss_output_extent_.width != swapchain_extent_.width ||
-        dlss_output_extent_.height != swapchain_extent_.height) {
+    if (dlss_supported_ && rt_.fsr2_enabled && rt_.fsr_backend == 2 &&
+        (!dlss_output_view_ || dlss_output_extent_.width != swapchain_extent_.width ||
+         dlss_output_extent_.height != swapchain_extent_.height)) {
         vkDeviceWaitIdle(device_);
         init_dlss();
         rewrite_compose_image_bindings();
     }
+#endif
+    if (dlss_active() != compose_uses_dlss_) {
+        vkDeviceWaitIdle(device_);
+        rewrite_compose_image_bindings();
+        dlss_reset_ = true;
+        log::infof("compose source switched to %s", compose_uses_dlss_ ? "DLSS" : "TAA/FSR");
+    }
+}
+
+void VulkanEngine::dispatch_dlss(VkCommandBuffer cmd) {
+#ifdef QLIKE_HAVE_STREAMLINE
+    if (!dlss_supported_ || !dlss_output_view_) return;   // set up by ensure_dlss_bindings()
     sl::FrameToken* token = nullptr;
     const uint32_t frame_idx = static_cast<uint32_t>(frame_number_);
     if (slGetNewFrameToken(token, &frame_idx) != sl::Result::eOk || !token) return;

@@ -541,6 +541,7 @@ void VulkanEngine::refresh_terrain_blas() {
 }
 
 void VulkanEngine::destroy_terrain_shadow_texture() {
+    deferred_desc_sig_ = 0;   // handles may be recreated (even at the same address)
     if (terrain_shadow_view_) {
         vkDestroyImageView(device_, terrain_shadow_view_, nullptr);
         terrain_shadow_view_ = VK_NULL_HANDLE;
@@ -1676,6 +1677,7 @@ void VulkanEngine::init_terrain_aux_texture() {
 }
 
 void VulkanEngine::destroy_terrain_aux_texture() {
+    deferred_desc_sig_ = 0;   // handles may be recreated (even at the same address)
     if (terrain_aux_view_)    vkDestroyImageView(device_, terrain_aux_view_, nullptr);
     if (terrain_aux_image_)   vmaDestroyImage(allocator_, terrain_aux_image_, terrain_aux_alloc_);
     if (terrain_aux_sampler_) vkDestroySampler(device_, terrain_aux_sampler_, nullptr);

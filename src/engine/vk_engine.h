@@ -270,6 +270,8 @@ private:
     void dispatch_dlss(VkCommandBuffer cmd);
     void sl_shutdown();
     bool dlss_active() const;
+    void ensure_dlss_bindings();
+    uint64_t deferred_desc_sig_ = 0;   // deferred-lighting descriptor handles last written
     void run_bloom_chain(VkCommandBuffer cmd);
     void init_skybox();
     void destroy_skybox_resources();
@@ -375,6 +377,10 @@ private:
 
     std::array<FrameData, kFrameOverlap> frames_{};
     uint64_t frame_number_ = 0;
+    // Seconds-based animation clock (wind, water, grass sway): advanced once
+    // per frame from real time so animation speed is frame-rate independent
+    // (was frame_number_ * 0.016 - 2.4x too fast at 144 fps). Wrapped hourly.
+    float anim_time_ = 0.0f;
 
     VkBuffer readback_buffer_ = VK_NULL_HANDLE;
     VmaAllocation readback_alloc_ = nullptr;

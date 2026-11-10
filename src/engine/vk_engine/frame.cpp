@@ -858,13 +858,7 @@ void VulkanEngine::draw(uint32_t img_index) {
         }
     }
 
-    // DLSS toggled on / off at runtime: point compose at the right image.
-    if (dlss_active() != compose_uses_dlss_) {
-        vkDeviceWaitIdle(device_);
-        rewrite_compose_image_bindings();
-        dlss_reset_ = true;
-        log::infof("compose source switched to %s", compose_uses_dlss_ ? "DLSS" : "TAA/FSR");
-    }
+    // (DLSS on/off + output (re)creation: ensure_dlss_bindings(), before recording.)
 
     // ---------- Pass 2.25: TAAU temporal upsample (optional) ----------
     // Reads LR history (just written) + LR motion + LR depth + previous-

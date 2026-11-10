@@ -210,12 +210,12 @@ void VulkanEngine::render_grass_raymarch(VkCommandBuffer cmd) {
     pc.prev_mvp = prev_view_proj_valid_ ? prev_view_proj_ : fv.vp;
     pc.color   = glm::vec4(rt_.grass_raymarch_distance,
                             rt_.grass_wind,
-                            static_cast<float>(frame_number_) * 0.016f,
+                            anim_time_,
                             rt_.grass_cutoff_soft_dist);
     // emissive.{y,z,w} = LOD ramp params (shared with terrain raymarch).
     // .x stays 0 вЂ” the grass shader doesn't read a step factor.
     pc.emissive = glm::vec4(
-        0.0f,
+        rt_.terrain_raymarch_enabled ? 0.0f : 1.0f,   // .x 1 = mesh terrain: read the height texture
         std::max(1.0f, rt_.terrain_raymarch_lod_near_m),
         std::max(rt_.terrain_raymarch_lod_near_m + 1.0f,
                  rt_.terrain_raymarch_lod_far_m),
@@ -226,7 +226,7 @@ void VulkanEngine::render_grass_raymarch(VkCommandBuffer cmd) {
     // default slider (в‰€1.0) gives ~0.25-0.37 m blades вЂ” matching the
     // instanced raster grass instead of the old 1.1-1.7 m dark spears.
     pc.grass_params = glm::vec4(rt_.grass_distance, rt_.grass_wind,
-                                 static_cast<float>(frame_number_) * 0.016f,
+                                 anim_time_,
                                  rt_.grass_height_scale);
     vkCmdPushConstants(cmd, pipeline_layout_,
                        kPushConstantStages,
@@ -814,7 +814,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         gpc.color = glm::vec4(1.0f);
         gpc.emissive = glm::vec4(0.0f);
         gpc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
-        float t = static_cast<float>(frame_number_) * 0.016f;
+        float t = anim_time_;
         gpc.grass_params = glm::vec4(rt_.grass_distance, rt_.grass_wind, t, 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_,
                            kPushConstantStages,
@@ -891,7 +891,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scatter_plant_pipeline_);
             PushConstants ppc = spc;
             ppc.grass_params = glm::vec4(std::max(45.0f, rt_.grass_distance * 0.9f), 1.0f,
-                                         static_cast<float>(frame_number_) * 0.016f, 0.0f);
+                                         anim_time_, 0.0f);
             vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
                                0, sizeof(PushConstants), &ppc);
             for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {

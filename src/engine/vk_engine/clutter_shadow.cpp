@@ -116,6 +116,7 @@ void VulkanEngine::init_clutter_shadow() {
 }
 
 void VulkanEngine::destroy_clutter_shadow() {
+    deferred_desc_sig_ = 0;   // handles may be recreated (even at the same address)
     if (clutter_shadow_pipeline_) vkDestroyPipeline(device_, clutter_shadow_pipeline_, nullptr);
     if (clutter_shadow_layout_) vkDestroyPipelineLayout(device_, clutter_shadow_layout_, nullptr);
     if (clutter_shadow_vert_) vkDestroyShaderModule(device_, clutter_shadow_vert_, nullptr);
@@ -191,7 +192,7 @@ void VulkanEngine::render_clutter_shadow(VkCommandBuffer cmd) {
         // p: .x wind time, .y plant (sway) flag, .z colour-pass draw distance -
         // the same fade / sway as scatter.vert so shadows match what is drawn.
         struct { glm::mat4 vp; glm::vec4 cam; glm::vec4 p; } pc{ cvp, glm::vec4(cam, half * 1.42f),
-            glm::vec4(static_cast<float>(frame_number_) * 0.016f, 0.0f,
+            glm::vec4(anim_time_, 0.0f,
                       std::max(60.0f, rt_.grass_distance * 1.6f), 0.0f) };
         vkCmdPushConstants(cmd, clutter_shadow_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
         VkDeviceSize offs[2] = { 0, 0 };

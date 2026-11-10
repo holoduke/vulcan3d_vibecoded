@@ -499,6 +499,7 @@ void VulkanEngine::write_depth_copy_binding() {
 }
 
 void VulkanEngine::recreate_swapchain() {
+    deferred_desc_sig_ = 0;   // handles may be recreated (even at the same address)
     uint32_t w = 0, h = 0;
     window_->framebuffer_size(w, h);
     while (w == 0 || h == 0) {

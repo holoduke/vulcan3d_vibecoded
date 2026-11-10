@@ -861,6 +861,7 @@ void VulkanEngine::recreate_shadow_lr() {
 // color pass and leaves it there (storage images can both write and
 // sample-read in GENERAL).
 void VulkanEngine::init_svgf_targets() {
+    deferred_desc_sig_ = 0;   // handles may be recreated (even at the same address)
     uint32_t w = std::max<uint32_t>(1u, render_extent_.width);
     uint32_t h = std::max<uint32_t>(1u, render_extent_.height);
     VkImageCreateInfo ici{
