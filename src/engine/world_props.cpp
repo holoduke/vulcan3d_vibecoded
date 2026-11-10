@@ -301,103 +301,278 @@ WorldPropStats build_world_props(const Heightmap& hm, const Road* road,
         ++st.boulders;
     }
 
-    // ---------------- Trees ----------------
+    // Trees + bushes are GPU-instanced now (place_vegetation).
+    for (auto& kv : chunks) out.push_back(std::move(kv.second));
+    return st;
+}
+
+
+// =====================================================================
+// GPU-instanced vegetation: archetypes with a 4-level LOD chain + placement
+// =====================================================================
+namespace {
+
+struct PineParams { float H; int tiers; float r0; float seed; float lean; };
+struct OakParams  { float H; int branches; float seed; float spread; glm::vec3 top_off; };
+struct BushParams { int blobs; float seed; };
+
+// LOD tables: LOD0 full detail .. LOD3 ~10-30 tris (far silhouette).
+void build_pine(LevelMesh& m, const PineParams& p, int lod, const Ico& lo, const Ico& hi) {
+    (void)lo; (void)hi;
+    const int   trunk_segs[4] = { 7, 5, 4, 3 };
+    const int   cone_segs[4]  = { 11, 8, 6, 5 };
+    const int   tiers         = std::max(1, (lod == 0) ? p.tiers : (lod == 1) ? (p.tiers + 1) / 2 + 1
+                                                     : (lod == 2) ? 2 : 1);
+    glm::vec3 b(0.0f);
+    add_limb(m, b - glm::vec3(0, 0.3f, 0), b + glm::vec3(p.lean, p.H * 0.9f, 0), 0.32f, 0.06f,
+             trunk_segs[lod], 0.0f, 0.35f, 0.0f);
+    const float y0 = p.H * 0.22f;
+    for (int t = 0; t < tiers; ++t) {
+        float f01 = tiers > 1 ? float(t) / float(tiers - 1) : 0.0f;
+        float r = (tiers == 1) ? p.r0 * 0.95f : (p.r0 - (p.r0 - 0.6f) * f01);
+        float th = (tiers == 1) ? (p.H - y0 + 0.5f) : (p.H - y0) / float(tiers) * 1.9f;
+        float cy = (tiers == 1) ? y0 : y0 + (p.H - y0 - th * 0.6f) * f01;
+        add_cone(m, glm::vec3(p.lean * cy / p.H, cy, 0.0f), r, th, cone_segs[lod],
+                 p.seed + float(t) * 1.7f, 0.15f + 0.6f * f01, 0.3f + 0.7f * f01, 1.0f);
+    }
+}
+
+void build_oak(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, const Ico& hi, const Ico& tiny) {
+    glm::vec3 b(0.0f);
+    glm::vec3 top = b + p.top_off + glm::vec3(0, p.H * 0.62f, 0);
+    const int limb_segs[4] = { 8, 5, 4, 3 };
+    add_limb(m, b - glm::vec3(0, 0.3f, 0), top, 0.42f, 0.24f, limb_segs[lod], 0.0f, 0.25f, 0.0f);
+    std::vector<glm::vec3> tips;
+    std::mt19937 r(uint32_t(p.seed * 1000.0f));
+    std::uniform_real_distribution<float> U(0.0f, 1.0f);
+    for (int k = 0; k < p.branches; ++k) {
+        float ang = p.seed + float(k) * 2.0f * kPi / float(p.branches) + U(r) * 0.5f;
+        glm::vec3 tip = top + glm::vec3(std::cos(ang) * p.spread, 1.2f + U(r) * 1.4f, std::sin(ang) * p.spread);
+        if (lod <= 1) add_limb(m, top, tip, 0.2f, 0.07f, limb_segs[lod] - 1, 0.25f, 0.55f, 0.0f);
+        tips.push_back(tip);
+    }
+    const Ico& crown_ico = (lod == 0) ? hi : (lod == 1) ? lo : tiny;
+    glm::vec3 crown = top + glm::vec3(0, 2.4f, 0);
+    if (lod >= 2) {
+        // Far: one merged canopy volume (covers the tips' extent).
+        add_blob(m, crown_ico, crown + glm::vec3(0, 0.3f, 0),
+                 glm::vec3(3.0f + p.spread * 0.6f, 2.8f, 3.0f + p.spread * 0.6f), 0.0f,
+                 p.seed * 7.0f, 0.18f, 2.0f, 0.0f, -1e9f, glm::vec2(0.5f, 2.0f), 0.95f);
+        return;
+    }
+    add_blob(m, crown_ico, crown, glm::vec3(3.0f, 2.3f, 3.0f), 0.0f, p.seed * 7.0f, 0.22f, 2.2f,
+             0.0f, -1e9f, glm::vec2(0.5f, 2.0f), 0.95f);
+    int ti = 0;
+    for (const auto& tp : tips) {
+        float s = 1.6f + 0.7f * h3(glm::vec3(p.seed, float(ti), 1.0f));
+        add_blob(m, crown_ico, tp + glm::vec3(0, 0.4f, 0), glm::vec3(s, s * 0.8f, s), 0.0f,
+                 p.seed * 3.0f + float(ti), 0.25f, 2.4f, 0.0f, -1e9f, glm::vec2(0.55f, 2.0f), 1.0f);
+        ++ti;
+    }
+}
+
+void build_bush(LevelMesh& m, const BushParams& p, int lod, const Ico& lo, const Ico& tiny) {
+    const int n = (lod == 0) ? p.blobs : (lod == 1) ? 2 : 1;
+    const Ico& ico = (lod == 0) ? lo : tiny;
+    for (int k = 0; k < n; ++k) {
+        float ang = p.seed + float(k) * 2.3f;
+        float d = (n == 1) ? 0.0f : 0.35f;
+        float r = (n == 1) ? 1.0f : 0.75f;
+        glm::vec3 c(std::cos(ang) * d, 0.35f, std::sin(ang) * d);
+        add_blob(m, ico, c, glm::vec3(r, r * 0.75f, r), 0.0f, p.seed * 5.0f + float(k), 0.3f, 2.6f,
+                 0.0f, -0.15f, glm::vec2(0.05f, 3.0f), 0.35f);
+    }
+}
+
+}  // namespace
+
+std::vector<VegArchetype> build_veg_archetypes(int seed) {
+    std::vector<VegArchetype> out;
+    std::mt19937 rng{ uint32_t(seed) };
+    std::uniform_real_distribution<float> U(0.0f, 1.0f);
+    const Ico tiny = make_ico(0), lo = make_ico(1), hi = make_ico(2);
+    auto finish = [](VegArchetype& a) {
+        float rmax = 0.0f, ymax = 0.0f;
+        for (const auto& v : a.lods[0].verts) {
+            rmax = std::max(rmax, glm::length(glm::vec2(v.p.x, v.p.z)));
+            ymax = std::max(ymax, v.p.y);
+        }
+        a.height = ymax;
+        a.radius = std::sqrt(rmax * rmax + ymax * ymax * 0.25f);
+    };
+    for (int v = 0; v < 4; ++v) {                      // pines
+        VegArchetype a; a.species = 0;
+        PineParams p{ 10.0f + 4.0f * U(rng), 6 + int(U(rng) * 3.0f), 2.4f + 0.6f * U(rng),
+                      U(rng) * 6.28f, (U(rng) - 0.5f) * 0.6f };
+        for (int l = 0; l < kVegLods; ++l) build_pine(a.lods[l], p, l, lo, hi);
+        finish(a); out.push_back(std::move(a));
+    }
+    for (int v = 0; v < 4; ++v) {                      // broadleaf
+        VegArchetype a; a.species = 1;
+        OakParams p{ 7.0f + 3.0f * U(rng), 3 + int(U(rng) * 2.5f), U(rng) * 6.28f, 1.8f + 0.9f * U(rng),
+                     glm::vec3((U(rng) - 0.5f) * 0.8f, 0.0f, (U(rng) - 0.5f) * 0.8f) };
+        for (int l = 0; l < kVegLods; ++l) build_oak(a.lods[l], p, l, lo, hi, tiny);
+        finish(a); out.push_back(std::move(a));
+    }
+    for (int v = 0; v < 3; ++v) {                      // bushes
+        VegArchetype a; a.species = 2;
+        BushParams p{ 2 + int(U(rng) * 2.0f), U(rng) * 6.28f };
+        for (int l = 0; l < kVegLods; ++l) build_bush(a.lods[l], p, l, lo, tiny);
+        finish(a); out.push_back(std::move(a));
+    }
+    for (int v = 0; v < 8; ++v) {                      // rocks (species 3)
+        VegArchetype a; a.species = 3;
+        float sd = U(rng) * 50.0f;
+        float strata = (v % 2 == 0) ? 0.55f : 0.0f;
+        float amp = 0.26f + 0.1f * U(rng);
+        const Ico* ic[kVegLods] = { &hi, &lo, &tiny, &tiny };
+        for (int l = 0; l < kVegLods; ++l)
+            add_blob(a.lods[l], *ic[l], glm::vec3(0.0f, 0.35f, 0.0f), glm::vec3(1.0f), 0.0f, sd,
+                     l >= 2 ? amp * 0.6f : amp, 1.6f, strata, -0.2f, glm::vec2(0.0f, 4.0f), 0.0f);
+        finish(a); out.push_back(std::move(a));
+    }
+    return out;
+}
+
+std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
+                                          const WorldPropParams& P,
+                                          const std::vector<VegArchetype>& arch,
+                                          std::vector<collision::AABB>& cols,
+                                          WorldPropStats& st) {
+    std::vector<VegInstance> out;
+    if (hm.heights.empty() || arch.empty()) return out;
+    std::vector<int> by_species[4];
+    for (size_t i = 0; i < arch.size(); ++i) by_species[arch[i].species].push_back(int(i));
+    std::mt19937 rng(uint32_t(P.seed) ^ 0x9E3779B9u);
+    std::uniform_real_distribution<float> U(0.0f, 1.0f);
+    auto u = [&]() { return U(rng); };
+    auto h_at = [&](float x, float z) { return hm.sample_world(x, z); };
+    auto ny_at = [&](float x, float z) {
+        float e = 1.5f;
+        float dx = h_at(x + e, z) - h_at(x - e, z), dz = h_at(x, z + e) - h_at(x, z - e);
+        return 2.0f * e / std::sqrt(dx * dx + dz * dz + 4.0f * e * e);
+    };
+    auto road_d = [&](float x, float z) {
+        if (!road || road->empty()) return 1e9f;
+        if (x < road->bb_min.x || x > road->bb_max.x || z < road->bb_min.y || z > road->bb_max.y) return 1e9f;
+        return road->distance(x, z);
+    };
+    const float road_clear = road ? road->half_width + road->shoulder : 0.0f;
     auto forest = [&](float x, float z) {
         return fbm(glm::vec3(x * 0.0065f, 11.0f, z * 0.0065f), 3) * 0.75f +
                fbm(glm::vec3(x * 0.021f, 4.0f, z * 0.021f), 2) * 0.45f;
     };
-    for (int a = 0; a < 40000 && st.pines + st.broadleaf < 900; ++a) {
-        float x = (u() * 2.0f - 1.0f) * P.half_extent, z = (u() * 2.0f - 1.0f) * P.half_extent;
-        if (!site_ok(x, z, 4.5f)) continue;
+    // 2.5 m occupancy grid keeps trunks apart.
+    std::unordered_set<int64_t> occ;
+    auto key2 = [](int x, int z) { return (int64_t(x) << 32) ^ int64_t(uint32_t(z)); };
+    auto try_mark = [&](float x, float z, float r) {
+        int r2 = int(std::ceil(r / 2.5f));
+        int cx = int(std::floor(x / 2.5f)), cz = int(std::floor(z / 2.5f));
+        for (int dz = -r2; dz <= r2; ++dz)
+            for (int dx = -r2; dx <= r2; ++dx)
+                if (occ.count(key2(cx + dx, cz + dz))) return false;
+        occ.insert(key2(cx, cz));
+        return true;
+    };
+    const float ext = P.veg_half_extent;
+    // Rocks: formations (clusters of 3-7 boulders on slopes / rock band)
+    // and lone erratics. Instances of the rock archetypes with a per-
+    // instance vertical squash (rot_arch_phase.w).
+    auto add_rock = [&](float x, float z, float s, float ysq) {
+        const auto& pool = by_species[3];
+        int ai = pool[size_t(u() * float(pool.size())) % pool.size()];
+        float gy = h_at(x, z);
+        VegInstance vi{};
+        vi.pos_scale = glm::vec4(x, gy - s * ysq * 0.12f, z, s);
+        vi.rot_arch_phase = glm::vec4(u() * 6.2831853f, float(ai), 0.0f, ysq);
+        out.push_back(vi);
+        float he = s * 0.72f;
+        cols.push_back({ glm::vec3(x - he, gy - 1.0f, z - he),
+                         glm::vec3(x + he, gy + s * ysq * 1.1f, z + he) });
+    };
+    for (int a = 0; a < 60000 && st.formations < P.max_formations; ++a) {
+        float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
+        if (std::sqrt(x * x + z * z) < P.castle_clear) continue;
+        if (road_d(x, z) < road_clear + 6.0f) continue;
+        float h = h_at(x, z);
+        if (h < P.water_level + 1.0f) continue;
+        float slope = 1.0f - ny_at(x, z);
+        float want = std::clamp(slope * 2.2f, 0.0f, 1.0f);
+        want = std::max(want, std::clamp((h - P.rock_band_lo + 15.0f) / 30.0f, 0.0f, 1.0f));
+        want *= 0.35f + 0.65f * std::clamp(fbm(glm::vec3(x * 0.01f, 3.0f, z * 0.01f), 2) * 2.0f - 0.4f, 0.0f, 1.0f);
+        if (u() > want * 0.5f) continue;
+        float size = 2.5f + 4.5f * u() * u();
+        if (!try_mark(x, z, size * 1.6f)) continue;
+        int n = 3 + int(u() * 4.0f);
+        float rot0 = u() * 6.2831853f;
+        for (int k = 0; k < n; ++k) {
+            float ang = rot0 + float(k) * 2.4f + u() * 0.6f;
+            float d = (k == 0) ? 0.0f : size * (0.6f + 0.6f * u());
+            float s = size * ((k == 0) ? 1.0f : 0.45f + 0.45f * u());
+            add_rock(x + std::cos(ang) * d, z + std::sin(ang) * d, s, 0.6f + 0.5f * u());
+        }
+        ++st.formations;
+    }
+    for (int a = 0; a < 40000 && st.boulders < P.max_boulders; ++a) {
+        float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
+        if (std::sqrt(x * x + z * z) < P.castle_clear) continue;
+        if (road_d(x, z) < road_clear + 3.0f) continue;
+        float h = h_at(x, z);
+        if (h < P.water_level + 0.8f || h > P.tree_line + 30.0f) continue;
+        if (ny_at(x, z) < 0.8f) continue;
+        float s = 0.9f + 2.0f * u() * u();
+        if (!try_mark(x, z, s * 1.2f)) continue;
+        add_rock(x, z, s, 0.6f + 0.3f * u());
+        ++st.boulders;
+    }
+    // Trees.
+    for (int a = 0; a < P.tree_attempts && int(out.size()) < P.max_trees; ++a) {
+        float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
+        if (std::sqrt(x * x + z * z) < P.castle_clear) continue;
+        if (road_d(x, z) < road_clear + 4.5f) continue;
         float h = h_at(x, z);
         if (h < std::max(P.grass_band_lo, P.water_level + 1.5f) || h > P.tree_line) continue;
-        float ny = ny_at(x, z);
-        if (ny < 0.72f) continue;
+        if (ny_at(x, z) < 0.72f) continue;
         float f = forest(x, z);
-        float dens = std::clamp((f - 0.50f) * 4.0f, 0.0f, 1.0f) + 0.015f;   // + lone trees
+        float dens = std::clamp((f - 0.47f) * 4.0f, 0.0f, 1.0f) + 0.01f;
         if (u() > dens) continue;
-        // Pines dominate higher up, broadleaf in the low valleys.
-        float pine_p = std::clamp((h - 28.0f) / 30.0f, 0.15f, 0.95f);
-        bool pine = u() < pine_p;
+        bool pine = u() < std::clamp((h - 28.0f) / 30.0f, 0.15f, 0.95f);
         float scale = 0.75f + 0.55f * u();
-        float rad = pine ? 2.4f * scale : 3.2f * scale;
-        if (!free_at(x, z, rad)) continue;
-        mark(x, z, rad * 0.8f);
-        float phase = u() * 6.28f;
-        float gy = h - 0.3f;
-        if (pine) {
-            float H = (9.0f + 6.0f * u()) * scale;
-            glm::vec3 b(x, gy, z);
-            add_limb(chunk(kBark, b), b, b + glm::vec3(0, H * 0.9f, 0), 0.32f * scale, 0.06f, 7,
-                     0.0f, 0.35f, phase);
-            int tiers = 5 + int(u() * 3.0f);
-            float y0 = H * 0.22f;
-            for (int t = 0; t < tiers; ++t) {
-                float f01 = float(t) / float(tiers - 1);
-                float r = (2.6f - 2.0f * f01) * scale * (0.9f + 0.2f * u());
-                float th = (H - y0) / float(tiers) * 1.9f;
-                float cy = gy + y0 + (H - y0 - th * 0.6f) * f01;
-                add_cone(chunk(kNeedle, b), glm::vec3(x, cy, z), r, th, 11, u() * 6.28f,
-                         0.15f + 0.6f * f01, 0.3f + 0.7f * f01, phase);
-            }
-            cols.push_back({ glm::vec3(x - 0.35f, gy, z - 0.35f), glm::vec3(x + 0.35f, gy + H, z + 0.35f) });
-            ++st.pines;
-        } else {
-            float H = (6.5f + 3.5f * u()) * scale;
-            glm::vec3 b(x, gy, z);
-            glm::vec3 top = b + glm::vec3((u() - 0.5f) * 0.8f, H * 0.62f, (u() - 0.5f) * 0.8f);
-            add_limb(chunk(kBark, b), b, top, 0.42f * scale, 0.24f * scale, 8, 0.0f, 0.25f, phase);
-            int nb = 3 + int(u() * 2.0f);
-            std::vector<glm::vec3> tips;
-            for (int k = 0; k < nb; ++k) {
-                float ang = phase + float(k) * 2.0f * kPi / float(nb) + u() * 0.5f;
-                glm::vec3 tip = top + glm::vec3(std::cos(ang) * 2.2f * scale, (1.2f + u() * 1.4f) * scale,
-                                                std::sin(ang) * 2.2f * scale);
-                add_limb(chunk(kBark, b), top, tip, 0.2f * scale, 0.07f * scale, 6, 0.25f, 0.55f, phase);
-                tips.push_back(tip);
-            }
-            // Canopy: one crown blob + a lump at each branch tip.
-            glm::vec3 crown = top + glm::vec3(0, 2.4f * scale, 0);
-            add_blob(chunk(kLeaf, b), sphere_lo, crown, glm::vec3(3.0f, 2.3f, 3.0f) * scale, u() * 6.28f,
-                     u() * 50.0f, 0.22f, 2.2f, 0.0f, -1e9f, glm::vec2(0.5f, phase), 0.95f);
-            for (const auto& tp : tips) {
-                float s = (1.6f + 0.7f * u()) * scale;
-                add_blob(chunk(kLeaf, b), sphere_lo, tp + glm::vec3(0, 0.4f * scale, 0),
-                         glm::vec3(s, s * 0.8f, s), u() * 6.28f, u() * 50.0f, 0.25f, 2.4f, 0.0f,
-                         -1e9f, glm::vec2(0.55f, phase), 1.0f);
-            }
-            cols.push_back({ glm::vec3(x - 0.45f, gy, z - 0.45f), glm::vec3(x + 0.45f, gy + H * 0.6f, z + 0.45f) });
-            ++st.broadleaf;
-        }
+        if (!try_mark(x, z, (pine ? 1.6f : 2.4f) * scale)) continue;
+        const auto& pool = by_species[pine ? 0 : 1];
+        int ai = pool[size_t(u() * float(pool.size())) % pool.size()];
+        VegInstance vi{};
+        vi.pos_scale = glm::vec4(x, h - 0.05f, z, scale);
+        vi.rot_arch_phase = glm::vec4(u() * 6.2831853f, float(ai), u() * 6.2831853f, 0.0f);
+        out.push_back(vi);
+        float tr = 0.38f * scale;
+        cols.push_back({ glm::vec3(x - tr, h - 0.5f, z - tr),
+                         glm::vec3(x + tr, h + arch[size_t(ai)].height * scale * 0.6f, z + tr) });
+        if (pine) ++st.pines; else ++st.broadleaf;
     }
-
-    // ---------------- Bushes ----------------
-    for (int a = 0; a < 20000 && st.bushes < 700; ++a) {
-        float x = (u() * 2.0f - 1.0f) * P.half_extent, z = (u() * 2.0f - 1.0f) * P.half_extent;
-        if (!site_ok(x, z, 1.5f)) continue;
+    // Bushes (no collision).
+    int bushes = 0;
+    for (int a = 0; a < P.bush_attempts && bushes < P.max_bushes; ++a) {
+        float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
+        if (std::sqrt(x * x + z * z) < P.castle_clear - 6.0f) continue;
+        if (road_d(x, z) < road_clear + 1.5f) continue;
         float h = h_at(x, z);
         if (h < P.water_level + 1.0f || h > P.tree_line + 8.0f) continue;
         if (ny_at(x, z) < 0.75f) continue;
         float f = forest(x, z);
-        float dens = std::clamp(1.0f - std::abs(f - 0.50f) * 6.0f, 0.0f, 1.0f) * 0.6f + 0.03f;  // forest edges
+        float dens = std::clamp(1.0f - std::abs(f - 0.47f) * 6.0f, 0.0f, 1.0f) * 0.6f + 0.02f;
         if (u() > dens) continue;
-        float s = 0.6f + 0.8f * u();
-        if (!free_at(x, z, s)) continue;
-        mark(x, z, s * 0.6f);
-        float phase = u() * 6.28f;
-        int n = 2 + int(u() * 2.0f);
-        for (int k = 0; k < n; ++k) {
-            float ang = u() * 6.28f, d = s * 0.5f * u();
-            glm::vec3 c(x + std::cos(ang) * d, h + s * 0.35f, z + std::sin(ang) * d);
-            float r = s * (0.6f + 0.4f * u());
-            add_blob(chunk(kBush, c), sphere_lo, c, glm::vec3(r, r * 0.75f, r), u() * 6.28f, u() * 50.0f,
-                     0.3f, 2.6f, 0.0f, h - 0.15f, glm::vec2(0.05f, phase), 0.35f);
-        }
-        ++st.bushes;
+        float scale = 0.6f + 0.9f * u();
+        const auto& pool = by_species[2];
+        int ai = pool[size_t(u() * float(pool.size())) % pool.size()];
+        VegInstance vi{};
+        vi.pos_scale = glm::vec4(x, h, z, scale);
+        vi.rot_arch_phase = glm::vec4(u() * 6.2831853f, float(ai), u() * 6.2831853f, 0.0f);
+        out.push_back(vi);
+        ++bushes;
     }
-
-    for (auto& kv : chunks) out.push_back(std::move(kv.second));
-    return st;
+    st.bushes = bushes;
+    return out;
 }
 
 } // namespace qlike

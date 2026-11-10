@@ -93,6 +93,8 @@ layout(location = 8) out vec4 vPrevClip;
 // constant per face under uniform extrusion. cube.frag uses it in the
 // SSDM shell-mapping path to decide brick-vs-sky inside the shell band.
 layout(location = 9) out vec3 vShellBase;
+// Vegetation LOD fade / impostor info (veg.vert only; 0 here).
+layout(location = 10) flat out vec4 vVegInfo;
 
 // Shell-mapping extrusion thickness in world metres (matches the
 // kHeightScaleBase in cube.frag's spom_uv). When the SPOM-strength UI
@@ -208,5 +210,6 @@ void main() {
     vTexParams = pc.tex_params;
     vObjectPos = inPos_ext;
     vObjectNormal = inNormal;
+    vVegInfo = vec4(0.0);
     vPrevClip = pc.prev_mvp * vec4(inPos_ext, 1.0);
 }

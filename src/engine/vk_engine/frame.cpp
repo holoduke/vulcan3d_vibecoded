@@ -157,6 +157,8 @@ void VulkanEngine::draw(uint32_t img_index) {
     // Scene UBO: written only after the prev-frame fence (both slots idle)
     // and after this frame's camera so camera_pos / jitter are current.
     update_scene_ubo();
+    // GPU vegetation: cull + LOD-select every instance, fill indirect draws.
+    cull_vegetation(frame.command_buffer);
 
     // Quadtree CLOD terrain: select nodes + fill this frame's instance
     // ranges (camera list + light list). Must run after

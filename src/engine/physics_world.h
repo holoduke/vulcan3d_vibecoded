@@ -33,6 +33,7 @@ public:
     // broadphase tree rebuild). Bodies stay disabled until prepare returns.
     struct StaticBox { glm::vec3 center; glm::vec3 half_extents; };
     void add_static_boxes(const StaticBox* boxes, size_t count);
+    void add_static_box_compounds(const StaticBox* boxes, size_t count, float cell = 128.0f);
 
     // Voxel-building collision: replace the single static body that
     // represents the destructible voxel shape with a fresh one built from

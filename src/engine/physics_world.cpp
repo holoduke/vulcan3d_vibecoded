@@ -11,6 +11,8 @@
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <map>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
@@ -332,6 +334,41 @@ void PhysicsWorld::add_static_boxes(const StaticBox* boxes, size_t count) {
         bi.AddBodiesPrepare(ids.data(), static_cast<int>(ids.size()));
     bi.AddBodiesFinalize(ids.data(), static_cast<int>(ids.size()),
                           state, JPH::EActivation::DontActivate);
+}
+
+// Many small static boxes (tree trunks, rocks) merged into one static
+// compound body per `cell` metres of XZ - keeps the body count far below
+// Jolt's max_bodies (16k individual boxes exhausted it and the terrain
+// heightfield then failed to create).
+void PhysicsWorld::add_static_box_compounds(const StaticBox* boxes, size_t count, float cell) {
+    if (count == 0) return;
+    JPH::BodyInterface& bi = impl_->system.GetBodyInterface();
+    std::map<std::pair<int, int>, std::vector<size_t>> cells;
+    for (size_t i = 0; i < count; ++i)
+        cells[{ int(std::floor(boxes[i].center.x / cell)), int(std::floor(boxes[i].center.z / cell)) }].push_back(i);
+    std::vector<JPH::BodyID> ids;
+    for (const auto& kv : cells) {
+        glm::vec3 org(0.0f);
+        for (size_t i : kv.second) org += boxes[i].center;
+        org /= float(kv.second.size());
+        JPH::StaticCompoundShapeSettings cs;
+        for (size_t i : kv.second) {
+            glm::vec3 he = boxes[i].half_extents;
+            float cr = calc_box_convex_radius(std::min({ he.x, he.y, he.z }));
+            glm::vec3 p = boxes[i].center - org;
+            cs.AddShape(JPH::Vec3(p.x, p.y, p.z), JPH::Quat::sIdentity(),
+                        new JPH::BoxShapeSettings(JPH::Vec3(he.x, he.y, he.z), cr));
+        }
+        JPH::ShapeSettings::ShapeResult sr = cs.Create();
+        if (sr.HasError()) { log::errorf("[jolt] compound: %s", sr.GetError().c_str()); continue; }
+        JPH::BodyCreationSettings bcs(sr.Get(), JPH::RVec3(org.x, org.y, org.z), JPH::Quat::sIdentity(),
+                                      JPH::EMotionType::Static, Layers::NON_MOVING);
+        if (JPH::Body* body = bi.CreateBody(bcs)) ids.push_back(body->GetID());
+    }
+    if (ids.empty()) return;
+    JPH::BodyInterface::AddState st = bi.AddBodiesPrepare(ids.data(), int(ids.size()));
+    bi.AddBodiesFinalize(ids.data(), int(ids.size()), st, JPH::EActivation::DontActivate);
+    log::infof("[jolt] %zu static boxes merged into %zu compound bodies", count, ids.size());
 }
 
 void PhysicsWorld::set_voxel_collision(const StaticBox* boxes, size_t count) {

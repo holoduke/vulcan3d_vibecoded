@@ -74,6 +74,8 @@ layout(location = 5) flat out vec4 vTexParams;
 layout(location = 6) out vec3 vObjectPos;
 layout(location = 7) out vec3 vObjectNormal;
 layout(location = 8) out vec4 vPrevClip;
+layout(location = 9) out vec3 vShellBase;      // cube.frag interface (unused for terrain)
+layout(location = 10) flat out vec4 vVegInfo;  // cube.frag interface (0 = not vegetation)
 
 const float kGridCells = 64.0;   // must match kClodGridCells
 
@@ -165,5 +167,7 @@ void main() {
     vTexParams = pc.tex_params;
     vObjectPos = pos;
     vObjectNormal = N;
+    vShellBase = pos;
+    vVegInfo = vec4(0.0);
     vPrevClip = pc.prev_mvp * vec4(pos, 1.0);
 }

@@ -252,6 +252,7 @@ void main() {
     int  material_id = int(g0.a * 255.0 + 0.5);
     vec3 N = octa_decode(g1.xy);
     float roughness = g1.b;
+    bool  foliage   = g1.a > 0.5;
 
     // Pre-shaded materials (5..8 = brush / voxel / water / raymarched
     // terrain) write LIT colour directly into scene_color in the
@@ -339,7 +340,10 @@ void main() {
         } else {
             bias = 0.005 + 0.02 * (1.0 - ndl_raw);
         }
-        vec3 origin = wp_safe + N * bias;
+        // Foliage: start the shadow ray well outside the swaying canopy,
+        // toward the sun, so it can't hit its own (static) RT copy.
+        vec3 origin = foliage ? wp_safe + L * (0.75 + cam_dist * 0.006) + N * 0.15
+                              : wp_safe + N * bias;
         float base_softness = scene.rt_params.x;
         float kBlockerCone = base_softness * 4.0;
         float kBlockerTMax = clamp(cam_dist * 4.0, 30.0, 200.0);
@@ -526,7 +530,7 @@ void main() {
         // Terrain: lift the origin over the BLAS-vs-raster height gap.
         float lift = (material_id == 3) ? mix(0.02, 0.25, clamp(cam_dist / 45.0, 0.0, 1.0))
                                         : 0.01;
-        vec3 origin = wp_safe + N * lift;
+        vec3 origin = wp_safe + N * (foliage ? 0.35 : lift);
         // Azimuths stratified around the circle with ONE random rotation
         // per pixel (was independent random phi per tap: 4 taps could all
         // land on one side, the main source of salt-and-pepper AO).
@@ -611,7 +615,7 @@ void main() {
         vec3 N_up  = abs(N.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0);
         vec3 N_tan = normalize(cross(N_up, N));
         vec3 N_bit = cross(N, N_tan);
-        vec3 ro    = wp_safe + N * 0.01;
+        vec3 ro    = wp_safe + N * (foliage ? 0.4 : 0.01);
         float gi_radius = max(8.0, scene.rt_params2.y);
         int sky_hits = 0;
         // Frame-cycled seed offset: the temporal accumulator below needs

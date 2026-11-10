@@ -24,6 +24,7 @@
 #include "engine/grass.h"
 #include "engine/scatter.h"
 #include "engine/road.h"
+#include "engine/world_props.h"
 #include "engine/texture.h"   // for BackgroundDecodeHandle
 #include "engine/vk_engine/settings_types.h"  // RtSettings / GameSettings
 #include "game/level.h"
@@ -1248,6 +1249,64 @@ private:
         VkDeviceAddress blas_addr = 0;
     };
     std::vector<CastleMeshGpu> castle_meshes_;
+    // GPU-driven vegetation + rocks (vk_engine/vegetation.cpp).
+    std::vector<VegArchetype> veg_arch_;
+    std::vector<VegInstance>  veg_inst_cpu_;
+    struct VegLodRange { uint32_t first_vertex, vertex_count, first_index, index_count; };
+    std::vector<VegLodRange>  veg_lod_ranges_;
+    std::vector<VkDrawIndexedIndirectCommand> veg_cmd_template_;
+    Mesh          veg_mesh_{};
+    uint32_t      veg_count_ = 0, veg_vis_capacity_ = 0;
+    VkBuffer      veg_inst_buf_ = VK_NULL_HANDLE, veg_vis_buf_ = VK_NULL_HANDLE,
+                  veg_ind_buf_ = VK_NULL_HANDLE, veg_arch_buf_ = VK_NULL_HANDLE;
+    VmaAllocation veg_inst_alloc_ = nullptr, veg_vis_alloc_ = nullptr,
+                  veg_ind_alloc_ = nullptr, veg_arch_alloc_ = nullptr;
+    VkDescriptorSetLayout veg_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool      veg_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet       veg_set_ = VK_NULL_HANDLE;
+    VkPipelineLayout veg_layout_ = VK_NULL_HANDLE, veg_cull_layout_ = VK_NULL_HANDLE;
+    VkPipeline veg_cull_pipeline_ = VK_NULL_HANDLE, veg_color_pipeline_ = VK_NULL_HANDLE,
+               veg_gbuf_pipeline_ = VK_NULL_HANDLE, veg_depth_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule veg_vert_module_ = VK_NULL_HANDLE, veg_cull_module_ = VK_NULL_HANDLE;
+    struct VegBlas { VkAccelerationStructureKHR as = VK_NULL_HANDLE; VkBuffer buf = VK_NULL_HANDLE;
+                     VmaAllocation alloc = nullptr; VkDeviceAddress addr = 0; };
+    std::vector<VegBlas> veg_blas_;
+    std::vector<uint32_t> veg_rt_list_;
+    int  veg_rt_cell_x_ = 0, veg_rt_cell_z_ = 0;
+    bool veg_rt_valid_ = false;
+    size_t veg_col_begin_ = SIZE_MAX;   // world_.aabbs index where veg colliders start
+    static constexpr int kVegDrawLods = 5;   // 4 mesh LODs + impostor card
+    static constexpr int kVegHizMaxMips = 14;
+    std::vector<uint8_t> veg_has_imp_;
+    VkBuffer      veg_fade_buf_ = VK_NULL_HANDLE;
+    VmaAllocation veg_fade_alloc_ = nullptr;
+    VkShaderModule veg_depth_frag_module_ = VK_NULL_HANDLE, veg_hiz_module_ = VK_NULL_HANDLE;
+    glm::mat4     veg_prev_vp_{1.0f};
+    VkImage       veg_hiz_image_ = VK_NULL_HANDLE;
+    VmaAllocation veg_hiz_alloc_ = nullptr;
+    VkImageView   veg_hiz_view_ = VK_NULL_HANDLE;
+    VkImageView   veg_hiz_mip_views_[kVegHizMaxMips]{};
+    VkImageView   veg_hiz_src_view_ = VK_NULL_HANDLE;
+    VkSampler     veg_hiz_sampler_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout veg_hiz_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool veg_hiz_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet  veg_hiz_sets_[kVegHizMaxMips]{};
+    VkPipelineLayout veg_hiz_layout_ = VK_NULL_HANDLE;
+    VkPipeline       veg_hiz_pipeline_ = VK_NULL_HANDLE;
+    uint32_t veg_hiz_w_ = 0, veg_hiz_h_ = 0, veg_hiz_mips_ = 0;
+    bool     veg_hiz_ready_ = false, veg_hiz_have_prev_ = false;
+    void create_veg_hiz();
+    void destroy_veg_hiz();
+    void destroy_veg_hiz_pipeline();
+    void write_veg_hiz_binding();
+    void build_veg_hiz(VkCommandBuffer cmd);
+    void init_vegetation_data(const Heightmap& hm);
+    void init_vegetation_pipelines();
+    void build_veg_blas();
+    void cull_vegetation(VkCommandBuffer cmd);
+    void draw_vegetation(VkCommandBuffer cmd, bool depth_only);
+    void destroy_vegetation();
+    void collect_veg_rt_instances(glm::vec3 eye, uint32_t cap, std::vector<uint32_t>& out) const;
     void init_castle_meshes();       // GPU upload (init_world)
     void build_castle_mesh_blas();   // BLAS per part (init_rt)
     void destroy_castle_meshes();

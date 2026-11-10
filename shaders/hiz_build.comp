@@ -1,0 +1,27 @@
+#version 460
+// Hi-Z pyramid build for vegetation occlusion culling. Each dispatch
+// writes one mip: texel = MAX depth (farthest) of the 2x2 (or 3x3 at odd
+// edges) footprint in the source level. Level 0 reads the prepass depth
+// copy (sampler) directly; higher levels read the previous mip (image).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D u_src_depth;     // level 0 source
+layout(set = 0, binding = 1, r32f) uniform readonly image2D u_src;  // mip N-1
+layout(set = 0, binding = 2, r32f) uniform writeonly image2D u_dst; // mip N
+layout(push_constant) uniform PC { ivec4 info; } pc;  // .x first (1 = from depth), .yz src size
+
+void main() {
+    ivec2 d = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dsz = imageSize(u_dst);
+    if (d.x >= dsz.x || d.y >= dsz.y) return;
+    ivec2 ssz = pc.info.yz;
+    ivec2 s0 = d * 2;
+    float m = 0.0;
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 3; ++x) {
+            if ((x == 2 && (ssz.x & 1) == 0) || (y == 2 && (ssz.y & 1) == 0)) continue;
+            ivec2 s = min(s0 + ivec2(x, y), ssz - 1);
+            float v = pc.info.x == 1 ? texelFetch(u_src_depth, s, 0).r : imageLoad(u_src, s).r;
+            m = max(m, v);
+        }
+    imageStore(u_dst, d, vec4(m));
+}

@@ -1,0 +1,109 @@
+#version 460
+// GPU-driven vegetation culling + LOD selection (vegetation.cpp).
+// One thread per instance:
+//   1. bounding-sphere frustum test;
+//   2. Hi-Z occlusion test against the previous frame's depth pyramid
+//      (sphere reprojected with last frame's view-proj); skipped near the
+//      camera / screen edges so fast turns can't pop trees;
+//   3. projected-size LOD: 0..3 meshes, 4 = impostor card (trees only);
+//   4. LOD cross-fade: inside a band around each threshold the instance is
+//      emitted to BOTH neighbouring LODs; veg.vert passes a fade factor and
+//      cube.frag dithers (screen-door) between them;
+//   5. compaction into per-(archetype, LOD) indirect buckets.
+// Visible-list entries pack (instance id | fade-bit<<31 | complement<<30).
+
+layout(local_size_x = 128) in;
+
+struct VegInstance { vec4 pos_scale; vec4 rot_arch_phase; };
+layout(std430, set = 1, binding = 0) readonly buffer Instances { VegInstance inst[]; };
+layout(std430, set = 1, binding = 1) writeonly buffer Visible  { uint visible[]; };
+layout(std430, set = 1, binding = 2) buffer Indirect { uint cmd[]; };
+// Per archetype: .x bounding radius, .y half height, .z has impostor (0/1).
+layout(std430, set = 1, binding = 3) readonly buffer ArchInfo { vec4 arch[]; };
+layout(set = 1, binding = 4) uniform sampler2D u_hiz;    // max-depth pyramid
+layout(std430, set = 1, binding = 5) buffer Fade { float fade[]; };  // per visible slot
+
+layout(push_constant) uniform PC {
+    vec4 planes[6];
+    vec4 cam;        // .xyz eye, .w pixels-per-radian
+    vec4 params;     // .x count, .y max dist, .z LOD bias, .w hiz on (0/1)
+    mat4 prev_vp;    // previous frame view-proj (Hi-Z reprojection)
+    vec4 hiz;        // .xy hiz level-0 size, .z mip count
+} pc;
+
+const int kLods = 5;
+
+void emit(uint a, uint lod, uint id, float f) {
+    uint b = a * uint(kLods) + lod;
+    uint slot = atomicAdd(cmd[b * 5u + 1u], 1u);
+    uint at = cmd[b * 5u + 4u] + slot;
+    visible[at] = id;
+    fade[at] = f;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(pc.params.x)) return;
+    VegInstance I = inst[i];
+    uint a = uint(I.rot_arch_phase.y + 0.5);
+    float s = I.pos_scale.w;
+    float ysq = I.rot_arch_phase.w > 0.0 ? I.rot_arch_phase.w : 1.0;
+    vec4 ai = arch[a];
+    vec3 c = I.pos_scale.xyz + vec3(0.0, ai.y * s * ysq, 0.0);
+    float r = ai.x * s * max(ysq, 1.0) + 0.6;
+
+    for (int p = 0; p < 6; ++p)
+        if (dot(pc.planes[p].xyz, c) + pc.planes[p].w < -r) return;
+    float d = distance(c, pc.cam.xyz);
+    if (d > pc.params.y + r) return;
+    float px = r / max(d, 0.1) * pc.cam.w * pc.params.z;
+    if (px < 0.9) return;
+
+    // ---- Hi-Z occlusion (conservative) ----
+    if (pc.params.w > 0.5 && d > r + 30.0) {
+        vec4 cc = pc.prev_vp * vec4(c, 1.0);
+        if (cc.w > r) {
+            vec3 ndc = cc.xyz / cc.w;
+            vec2 uv  = ndc.xy * 0.5 + 0.5;
+            float r_uv = r / max(d, 0.1) * pc.cam.w / pc.hiz.y;      // radius in uv
+            vec2 lo = uv - vec2(r_uv * pc.hiz.y / pc.hiz.x, r_uv);
+            vec2 hi = uv + vec2(r_uv * pc.hiz.y / pc.hiz.x, r_uv);
+            if (lo.x > 0.02 && lo.y > 0.02 && hi.x < 0.98 && hi.y < 0.98) {
+                // Nearest depth of the sphere (front point toward the old eye).
+                vec4 fc = pc.prev_vp * vec4(c + normalize(pc.cam.xyz - c) * r, 1.0);
+                float zmin = fc.z / fc.w;
+                vec2 ext = (hi - lo) * pc.hiz.xy;
+                float mip = ceil(log2(max(max(ext.x, ext.y), 1.0)));
+                mip = clamp(mip, 0.0, pc.hiz.z - 1.0);
+                float z = 0.0;
+                z = max(z, textureLod(u_hiz, vec2(lo.x, lo.y), mip).r);
+                z = max(z, textureLod(u_hiz, vec2(hi.x, lo.y), mip).r);
+                z = max(z, textureLod(u_hiz, vec2(lo.x, hi.y), mip).r);
+                z = max(z, textureLod(u_hiz, vec2(hi.x, hi.y), mip).r);
+                if (zmin > z + 1e-5) return;          // fully behind the depth
+            }
+        }
+    }
+
+    // ---- LOD selection with cross-fade ----
+    bool has_imp = ai.z > 0.5;
+    float dither = fract(I.rot_arch_phase.z * 2.7182818) * 0.25 + 0.88;
+    px *= dither;
+    // Thresholds between LOD k and k+1 (pixels of bounding radius).
+    const float th[4] = float[4](150.0, 55.0, 16.0, 7.0);
+    int nl = has_imp ? 5 : 4;
+    int lod = nl - 1;
+    for (int k = 0; k < nl - 1; ++k) if (px > th[k]) { lod = k; break; }
+    // Fade band: within +-15% of the threshold above this LOD, blend with
+    // the finer LOD k-1. f = 0 -> pure `lod`, 1 -> pure `lod-1`.
+    if (lod > 0) {
+        float t = th[lod - 1];
+        float f = clamp((px - t * 0.85) / (t * 0.30), 0.0, 1.0);   // 0 below, 1 at threshold
+        if (f > 0.0) {
+            emit(a, uint(lod), i, f);                 // draws where noise >= f
+            emit(a, uint(lod - 1), i | 0x80000000u, f); // draws where noise <  f
+            return;
+        }
+    }
+    emit(a, uint(lod), i, 0.0);
+}

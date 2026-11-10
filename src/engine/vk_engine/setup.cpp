@@ -89,6 +89,10 @@ void VulkanEngine::init_vulkan() {
     // G-buffer stay opaque) — mixed blend states need independentBlend
     // (validation VUID-...-pAttachments-00605 without it).
     base_feats.independentBlend = VK_TRUE;
+    // GPU-driven vegetation: one vkCmdDrawIndexedIndirect over many LOD
+    // buckets, each with its own firstInstance (visible-list offset).
+    base_feats.multiDrawIndirect = VK_TRUE;
+    base_feats.drawIndirectFirstInstance = VK_TRUE;
 
     vkb::PhysicalDeviceSelector selector{ vkb_inst };
     auto phys_ret = selector.set_minimum_version(1, 3)

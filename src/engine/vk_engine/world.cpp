@@ -241,18 +241,9 @@ void VulkanEngine::init_world() {
             m.bmin.y += hp.plateau_height;
             m.bmax.y += hp.plateau_height;
         }
-        // Procedural rock formations, trees and bushes (world space, already
-        // on the carved heightmap) - same static-mesh path as the castle.
-        {
-            WorldPropParams wp{};
-            wp.water_level  = rt_.water_level;
-            wp.rock_band_lo = rt_.terrain_h_dirt_rock_start;
-            std::vector<collision::AABB> pcols;
-            WorldPropStats ws = build_world_props(hm, &castle_road_, wp, world_.meshes, pcols);
-            for (const auto& a : pcols) world_.aabbs.push_back(a);
-            log::infof("[props] %d rock formations, %d boulders, %d pines, %d broadleaf, %d bushes",
-                       ws.formations, ws.boulders, ws.pines, ws.broadleaf, ws.bushes);
-        }
+        // Procedural trees, bushes, rock formations: GPU-instanced with LOD
+        // over the whole map (vegetation.cpp). Adds trunk / rock colliders.
+        init_vegetation_data(hm);
         init_castle_meshes();
         // Lift player's default spawn point above the new ground.
         player_.position.y += hp.plateau_height;
@@ -338,11 +329,22 @@ void VulkanEngine::init_world() {
         sboxes.push_back({b.center, b.size * 0.5f});
     }
     // Castle mesh colliders (round towers) sit after the brush AABBs.
-    for (size_t i = world_.brushes.size(); i < world_.aabbs.size(); ++i) {
+    const size_t veg_begin = std::min(veg_col_begin_, world_.aabbs.size());
+    for (size_t i = world_.brushes.size(); i < veg_begin; ++i) {
         const auto& a = world_.aabbs[i];
         sboxes.push_back({(a.min + a.max) * 0.5f, (a.max - a.min) * 0.5f});
     }
     physics_->add_static_boxes(sboxes.data(), sboxes.size());
+    // Vegetation trunks + rocks: merged per-cell compound bodies.
+    {
+        std::vector<PhysicsWorld::StaticBox> vb;
+        vb.reserve(world_.aabbs.size() - veg_begin);
+        for (size_t i = veg_begin; i < world_.aabbs.size(); ++i) {
+            const auto& a = world_.aabbs[i];
+            vb.push_back({(a.min + a.max) * 0.5f, (a.max - a.min) * 0.5f});
+        }
+        physics_->add_static_box_compounds(vb.data(), vb.size());
+    }
     // Heightfield collision for terrain. Player + crates collide cleanly
     // against the bumpy ground. Jolt requires the sample-count side to be
     // divisible by some block_size in [2, 8]; with dim=2048 (sample_count

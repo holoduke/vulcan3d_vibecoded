@@ -136,6 +136,8 @@ struct RtSettings {
         // Density: fraction of placed blades to actually draw (0..1).
         // Drives instance count in vkCmdDrawIndexed — cheap perf knob.
         float grass_density        = 0.7f;
+        // Vegetation LOD bias: >1 keeps higher LODs further out.
+        float veg_lod_bias         = 1.0f;
         // Per-blade Y multiplier (0.3..2.0). 1.0 = built-in 0.55 m blades.
         float grass_height_scale   = 1.0f;
         // Far-distance opacity drop for the raymarched grass.

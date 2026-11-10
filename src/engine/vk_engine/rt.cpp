@@ -155,11 +155,12 @@ void VulkanEngine::init_rt() {
     // when many dyn props + projectiles + particles share the TLAS.
     bake_merged_static_blas();
     build_castle_mesh_blas();
+    build_veg_blas();
 
     // --- Allocate TLAS storage + scratch + instance buffer (rebuilt each frame) ---
     // Sized for the FIFO box cap (200) + ~32 static brushes/lanterns +
     // ~80 in-flight projectiles + ~256 hit particles + headroom.
-    tlas_max_instances_ = 768;
+    tlas_max_instances_ = 8192;   // + up to 7000 trees / rocks (RT shadows to 650 m)
 
     {
         VkDeviceSize ibuf_size = sizeof(VkAccelerationStructureInstanceKHR) *
@@ -813,6 +814,17 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         sig = mix64(sig, hash_f(w[3].y));
         sig = mix64(sig, hash_f(w[3].z));
     }
+    // Nearby vegetation / rocks enter the TLAS: re-pick when the camera
+    // moves to another 12 m cell (the set changes, the rest is static).
+    {
+        glm::vec3 eye = player_.eye_position();
+        int cx = int(std::floor(eye.x / 12.0f)), cz = int(std::floor(eye.z / 12.0f));
+        if (cx != veg_rt_cell_x_ || cz != veg_rt_cell_z_ || !veg_rt_valid_) {
+            veg_rt_cell_x_ = cx; veg_rt_cell_z_ = cz; veg_rt_valid_ = true;
+            collect_veg_rt_instances(eye, 7000, veg_rt_list_);
+        }
+        sig = mix64(sig, uint64_t(uint32_t(cx)) * 73856093ull ^ uint64_t(uint32_t(cz)) * 19349663ull);
+    }
     if (tlas_first_build_done_ && sig == prev_dyn_signature_) {
         return;   // tlas_ contents still valid — skip build + signal
     }
@@ -996,6 +1008,25 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
             : kNoTex;
         write_instance(model, model, door_color, glm::vec3(0.0f),
                        false, blas_device_address_, door_tex);
+    }
+
+    // Vegetation / rocks near the camera (per-archetype LOD1 BLAS).
+    for (uint32_t ve : veg_rt_list_) {
+        const uint32_t vi = ve & 0x3FFFFFFFu, lvl = ve >> 30;
+        const VegInstance& I = veg_inst_cpu_[vi];
+        int a = int(I.rot_arch_phase.y + 0.5f);
+        const size_t bq = size_t(a) * kVegRtLevels + lvl;
+        if (a < 0 || bq >= veg_blas_.size() || !veg_blas_[bq].addr) continue;
+        float s = I.pos_scale.w, ysq = I.rot_arch_phase.w > 0.0f ? I.rot_arch_phase.w : 1.0f;
+        glm::mat4 m = glm::translate(glm::mat4(1.0f), glm::vec3(I.pos_scale)) *
+                      glm::rotate(glm::mat4(1.0f), -I.rot_arch_phase.x, glm::vec3(0, 1, 0)) *
+                      glm::scale(glm::mat4(1.0f), glm::vec3(s, s * ysq, s));
+        int sp = veg_arch_[size_t(a)].species;
+        glm::vec4 col = sp == 3 ? glm::vec4(0.40f, 0.38f, 0.35f, 1.0f)
+                      : sp == 0 ? glm::vec4(0.08f, 0.17f, 0.08f, 1.0f)
+                                : glm::vec4(0.15f, 0.27f, 0.07f, 1.0f);
+        glm::vec4 tex = (tex_on && sp == 3) ? glm::vec4(7.0f, 7.0f, 0.22f, 0.0f) : kNoTex;
+        write_instance(m, m, col, glm::vec3(0.0f), false, veg_blas_[bq].addr, tex);
     }
 
     // Castle mesh parts (round towers, roofs, gate arch): static, world-

@@ -47,6 +47,7 @@ layout(location = 8) in vec4 vPrevClip;  // prev_view_proj Г— prev_model Г�
 // vShellBase == vWorldPos, the dot product is 0, and the shell test is
 // a no-op.
 layout(location = 9) in vec3 vShellBase;
+layout(location = 10) flat in vec4 vVegInfo;
 layout(location = 0) out vec4 outColor;
 // Per-pixel screen-space motion vector — current_uv minus prev_uv. Dynamic
 // surfaces get correct reprojection because cube.vert applied prev_model
@@ -1300,7 +1301,40 @@ void main() {
         }
     }
 
+    // ---- Vegetation: LOD cross-fade dither + procedural impostors ----
+    // vVegInfo.x = fade f, .y = 1 for the finer LOD of a fading pair,
+    // .z = impostor kind (1 pine, 2 broadleaf). Screen-door dither with a
+    // stable per-pixel noise: the coarse LOD keeps pixels n >= f, the fine
+    // one n < f, so together they cover every pixel exactly once.
+    if (vVegInfo.x > 0.0) {
+        float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        if (vVegInfo.y > 0.5 ? (n >= vVegInfo.x) : (n < vVegInfo.x)) discard;
+    }
+    bool veg_imp = vVegInfo.z > 0.5;
+    if (veg_imp) {
+        // Billboard silhouette from uv (u -1..1 across, v 0..1 up).
+        float u = vUv.x, v = vUv.y;
+        float jag = (fract(sin(dot(floor(vec2(u * 9.0, v * 14.0)), vec2(12.9, 78.2))) * 43758.5) - 0.5);
+        bool inside;
+        if (vVegInfo.z < 1.5) {          // pine: tiered cone + trunk
+            float tier = fract(v * 6.0);
+            float w = (1.0 - v) * (0.75 + 0.25 * tier) + jag * 0.06;
+            inside = (v > 0.12 && abs(u) < w) || (v <= 0.14 && abs(u) < 0.06);
+        } else {                          // broadleaf: lumpy crown + trunk
+            vec2 q = vec2(u, (v - 0.62) * 1.5);
+            float rr = 0.78 + 0.12 * sin(atan(q.y, q.x) * 5.0 + vVegInfo.w) + jag * 0.08;
+            inside = length(q) < rr || (v < 0.4 && abs(u) < 0.07);
+        }
+        if (!inside) discard;
+    }
     vec3 N = normalize(vNormal);
+    if (veg_imp) {
+        // Fake a rounded canopy: bend the camera-facing normal outward by
+        // the billboard uv so impostors shade like the 3D crowns.
+        vec3 Vc = normalize(scene.camera_pos.xyz - vWorldPos);
+        vec3 Rt = normalize(cross(vec3(0.0, 1.0, 0.0), Vc));
+        N = normalize(Vc * 0.6 + Rt * vUv.x * 0.7 + vec3(0.0, 1.0, 0.0) * (vUv.y - 0.35) * 0.9);
+    }
 
     if (vEmissive.a > 0.5) {
         vec3 e = vColor + vEmissive.rgb;
@@ -1339,6 +1373,12 @@ void main() {
     // Static castle mesh (round towers, roofs, arch): pc.grass_params.w = -1.
     // Vertex-UV texturing; skips every axis-aligned-box-only path.
     bool is_mesh_draw = !is_terrain_pre && pc.grass_params.w < -0.5;
+    // Untextured world-prop mesh = foliage (canopies, needles, bushes):
+    // flagged in gbuffer1.a so deferred lighting offsets its shadow / AO /
+    // GI ray origins (the RT copy of a tree is static + lower detail while
+    // the raster one sways - rays self-hit the canopy -> crawling patches).
+    bool is_foliage_px = is_mesh_draw && pc.grass_params.z > 0.5 &&
+                         (vTexParams.x < 0.0 || pc.grass_params.x > 0.5);   // .x = GPU veg draw
 
     // ---- Terrain debug visualisation (set in pause-menu Graphics) ----
     // Bypasses everything except a basic Lambert / normal preview so we
@@ -2774,6 +2814,13 @@ void main() {
         }
     }
 
+    // GPU-veg rocks: snow caps on up-facing surfaces in the rock/snow band.
+    if (is_mesh_draw && pc.grass_params.x > 0.5 && use_albedo) {
+        float sn = smoothstep(scene.terrain_h_high.x + 10.0, scene.terrain_h_high.z, vWorldPos.y) *
+                   smoothstep(0.35, 0.75, N.y);
+        sn *= 0.75 + 0.25 * tnoise(vWorldPos.xz * 1.7);
+        albedo = mix(albedo, vec3(0.88, 0.9, 0.95), clamp(sn, 0.0, 1.0));
+    }
     // Untextured world props (foliage): procedural leaf-cluster variation
     // - large-scale hue drift between plants + fine clumpy light/dark
     // breakup, and a darker interior (approximated by the normal facing
@@ -2939,7 +2986,7 @@ void main() {
         outColor    = vec4(albedo, 1.0);
         outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)),
                            float(fast_mat) / 255.0);
-        outGBuffer1 = vec4(octa_encode(N), is_terrain_pre ? terrain_pom_vis : 0.5, 0.0);
+        outGBuffer1 = vec4(octa_encode(N), is_terrain_pre ? terrain_pom_vis : 0.5, is_foliage_px ? 1.0 : 0.0);
         return;
     }
 
@@ -4087,6 +4134,6 @@ void main() {
     if (vEmissive.a > 0.5) mat_id = 5;     // emissive — handled above too
     outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)),
                        float(mat_id) / 255.0);
-    outGBuffer1 = vec4(octa_encode(N), is_terrain_pre ? terrain_pom_vis : 0.5, 0.0);
+    outGBuffer1 = vec4(octa_encode(N), is_terrain_pre ? terrain_pom_vis : 0.5, is_foliage_px ? 1.0 : 0.0);
 }
 
