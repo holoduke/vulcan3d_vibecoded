@@ -19,7 +19,7 @@ void VulkanEngine::init_compose() {
     init_atmosphere();  // LUTs + aerial volume; compose bindings 5-7 sample them
     {
         VkDescriptorPoolSize sizes[] = {
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kHistorySlots * 7 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kHistorySlots * 8 },
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         kHistorySlots },
         };
         VkDescriptorPoolCreateInfo pci{
@@ -31,8 +31,8 @@ void VulkanEngine::init_compose() {
                  "compose desc pool");
     }
     {
-        VkDescriptorSetLayoutBinding b[8]{};
-        for (int i = 0; i < 8; ++i) {
+        VkDescriptorSetLayoutBinding b[9]{};
+        for (int i = 0; i < 9; ++i) {
             b[i].binding = i;
             b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             b[i].descriptorCount = 1;
@@ -42,7 +42,7 @@ void VulkanEngine::init_compose() {
         VkDescriptorSetLayoutCreateInfo lci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
-            .bindingCount = 8, .pBindings = b,
+            .bindingCount = 9, .pBindings = b,
         };
         vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                              &compose_desc_set_layout_),
@@ -150,18 +150,19 @@ void VulkanEngine::rewrite_compose_image_bindings() {
         if (exposure_buf_) vkUpdateDescriptorSets(device_, 1, &wb, 0, nullptr);
         // Atmosphere LUTs (GENERAL layout, see atmosphere.cpp).
         if (atmo_sampler_) {
-            VkDescriptorImageInfo ai[3] = {
+            VkDescriptorImageInfo ai[4] = {
                 { atmo_sampler_, atmo_trans_.view, VK_IMAGE_LAYOUT_GENERAL },
                 { atmo_sampler_, atmo_sky_.view,   VK_IMAGE_LAYOUT_GENERAL },
                 { atmo_sampler_, atmo_ap_.view,    VK_IMAGE_LAYOUT_GENERAL },
+                { atmo_sampler_, cloud_img_.view ? cloud_img_.view : atmo_sky_.view, VK_IMAGE_LAYOUT_GENERAL },
             };
-            VkWriteDescriptorSet wa[3]{};
-            for (int k = 0; k < 3; ++k) {
+            VkWriteDescriptorSet wa[4]{};
+            for (int k = 0; k < 4; ++k) {
                 wa[k] = w[0];
                 wa[k].dstBinding = uint32_t(5 + k);
                 wa[k].pImageInfo = &ai[k];
             }
-            vkUpdateDescriptorSets(device_, 3, wa, 0, nullptr);
+            vkUpdateDescriptorSets(device_, 4, wa, 0, nullptr);
         }
         // Exposure compute reads the same image compose shows.
         if (exposure_sets_[s]) {

@@ -1,0 +1,188 @@
+#version 460
+// Volumetric clouds - "Nubis-lite" (Schneider, Horizon Zero Dawn 2015 /
+// Nubis 2017): a cloud layer between kCloudBottom..kCloudTop metres,
+// coverage from a drifting 2D weather field, shape from a tileable
+// Perlin-Worley 3D texture eroded by a Worley detail texture, lit with
+// Beer-Powder + dual-lobe Henyey-Greenstein, sun light through the
+// physical atmosphere (transmittance LUT) and ambient from the sky-view LUT.
+//
+// pc.mode: 0 = generate shape noise (128^3), 1 = detail noise (32^3),
+//          2 = render the cloud layer for sky pixels (960x540).
+#include "atmosphere.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D u_trans;
+layout(set = 0, binding = 1) uniform sampler2D u_skyview;
+layout(set = 0, binding = 2) uniform sampler2D u_depth;
+layout(set = 0, binding = 3) uniform sampler3D u_shape;
+layout(set = 0, binding = 4) uniform sampler3D u_detail;
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D o_clouds;
+layout(set = 0, binding = 6, r16f) uniform writeonly image3D o_shape;
+layout(set = 0, binding = 7, r16f) uniform writeonly image3D o_detail;
+
+layout(push_constant) uniform PC {
+    mat4 inv_vp;
+    vec4 eye;       // xyz world camera (m), w = time (s)
+    vec4 sun;       // xyz toward sun, w = mode
+    vec4 params;    // x coverage, y density, z wind speed (m/s), w sun intensity (engine units * pi)
+    vec4 params2;   // x frame index, y camera planet radius (km)
+} pc;
+
+const float kCloudBottom = 1500.0;
+const float kCloudTop    = 4000.0;
+
+// ---------------- tileable noise (generation) ----------------
+vec3 hash33(vec3 p) {
+    uvec3 q = uvec3(ivec3(p)) * uvec3(1597334673u, 3812015801u, 2798796415u);
+    q = (q.x ^ q.y ^ q.z) * uvec3(1597334673u, 3812015801u, 2798796415u);
+    return vec3(q) * (1.0 / 4294967295.0);
+}
+// Tileable Worley (period = cells), returns 1 - F1 distance.
+float worley(vec3 p, float cells) {
+    vec3 pc0 = p * cells;
+    vec3 id = floor(pc0), f = fract(pc0);
+    float md = 1.0;
+    for (int z = -1; z <= 1; ++z)
+        for (int y = -1; y <= 1; ++y)
+            for (int x = -1; x <= 1; ++x) {
+                vec3 o = vec3(x, y, z);
+                vec3 c = mod(id + o, cells);
+                vec3 r = o + hash33(c) - f;
+                md = min(md, dot(r, r));
+            }
+    return 1.0 - sqrt(md);
+}
+// Tileable gradient (Perlin-like) noise with period `per`.
+float gnoise(vec3 p, float per) {
+    vec3 i = floor(p), f = fract(p);
+    vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float r = 0.0;
+    float v[8];
+    for (int k = 0; k < 8; ++k) {
+        vec3 o = vec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        vec3 g = hash33(mod(i + o, per)) * 2.0 - 1.0;
+        v[k] = dot(normalize(g + 1e-4), f - o);
+    }
+    return mix(mix(mix(v[0], v[1], u.x), mix(v[2], v[3], u.x), u.y),
+               mix(mix(v[4], v[5], u.x), mix(v[6], v[7], u.x), u.y), u.z) * 0.5 + 0.5;
+}
+float remap(float v, float a, float b, float c, float d) {
+    return c + (v - a) / max(b - a, 1e-5) * (d - c);
+}
+
+void gen_shape(ivec3 c) {
+    vec3 p = (vec3(c) + 0.5) / 128.0;
+    float perlin = gnoise(p * 4.0, 4.0) * 0.625 + gnoise(p * 8.0, 8.0) * 0.25 + gnoise(p * 16.0, 16.0) * 0.125;
+    float w = worley(p, 4.0) * 0.625 + worley(p, 8.0) * 0.25 + worley(p, 16.0) * 0.125;
+    float pw = remap(perlin, w - 1.0, 1.0, 0.0, 1.0);   // Perlin-Worley
+    imageStore(o_shape, c, vec4(clamp(pw, 0.0, 1.0)));
+}
+void gen_detail(ivec3 c) {
+    vec3 p = (vec3(c) + 0.5) / 32.0;
+    float w = worley(p, 2.0) * 0.625 + worley(p, 4.0) * 0.25 + worley(p, 8.0) * 0.125;
+    imageStore(o_detail, c, vec4(w));
+}
+
+// ---------------- cloud rendering ----------------
+float hvalue(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash33(vec3(i, 7.0)).x, b = hash33(vec3(i + vec2(1, 0), 7.0)).x;
+    float c = hash33(vec3(i + vec2(0, 1), 7.0)).x, d = hash33(vec3(i + vec2(1, 1), 7.0)).x;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+// 2D weather: coverage (0..1) at world xz (m).
+float weather(vec2 xz) {
+    vec2 p = xz / 9000.0;
+    float n = hvalue(p) * 0.55 + hvalue(p * 2.3 + 11.0) * 0.3 + hvalue(p * 5.1 + 3.0) * 0.15;
+    return clamp(remap(n, 1.0 - pc.params.x, 1.0, 0.0, 1.0), 0.0, 1.0);
+}
+float height_frac(float y) { return clamp((y - kCloudBottom) / (kCloudTop - kCloudBottom), 0.0, 1.0); }
+// Cumulus density-height gradient: round bottoms, tapering tops.
+float height_gradient(float h) {
+    return smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(0.45, 1.0, h));
+}
+float cloud_density(vec3 p, bool detail) {
+    float h = height_frac(p.y);
+    vec3 wind = vec3(1.0, 0.0, 0.35) * pc.params.z * pc.eye.w;
+    vec3 q = p + wind + vec3(0.0, 0.0, 0.0);
+    float cov = weather(q.xz);
+    if (cov <= 0.001) return 0.0;
+    float base = textureLod(u_shape, q / 2600.0, 0.0).r;
+    float shape = remap(base * height_gradient(h), 1.0 - cov, 1.0, 0.0, 1.0);
+    if (shape <= 0.0) return 0.0;
+    if (detail) {
+        float d = textureLod(u_detail, (q + wind * 0.5) / 520.0, 0.0).r;
+        // erode more at the bottom (wispy), less at the top
+        float de = mix(d, 1.0 - d, clamp(h * 4.0, 0.0, 1.0));
+        shape = remap(shape, de * 0.42, 1.0, 0.0, 1.0);
+    }
+    return clamp(shape, 0.0, 1.0) * pc.params.y;
+}
+float hg(float c, float g) { float g2 = g * g; return (1.0 - g2) / (4.0 * kAtmoPI * pow(max(1.0 + g2 - 2.0 * g * c, 1e-4), 1.5)); }
+
+void render(ivec2 px) {
+    ivec2 sz = imageSize(o_clouds);
+    if (any(greaterThanEqual(px, sz))) return;
+    vec2 uv = (vec2(px) + 0.5) / vec2(sz);
+    // Only sky pixels: clouds sit 1.5 km+ up, behind all terrain.
+    vec4 dg = textureGather(u_depth, uv, 0);
+    if (max(max(dg.x, dg.y), max(dg.z, dg.w)) < 0.99999) { imageStore(o_clouds, px, vec4(0.0)); return; }
+    vec4 wf = pc.inv_vp * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+    vec3 rd = normalize(wf.xyz / wf.w - pc.eye.xyz);
+    if (rd.y <= 0.01) { imageStore(o_clouds, px, vec4(0.0)); return; }
+    // Flat layer (the 2 km world is tiny vs the planet): slab intersection.
+    float t0 = (kCloudBottom - pc.eye.y) / rd.y;
+    float t1 = (kCloudTop - pc.eye.y) / rd.y;
+    t1 = min(t1, t0 + 30000.0);
+    const int N = 56;
+    float dt = (t1 - t0) / float(N);
+    // Per-pixel jitter (interleaved gradient noise, frame-varying).
+    float jit = fract(52.9829189 * fract(dot(vec2(px) + pc.params2.x * 5.588, vec2(0.06711056, 0.00583715))));
+    vec3 sun = normalize(pc.sun.xyz);
+    float cth = dot(rd, sun);
+    float phase = mix(hg(cth, 0.75), hg(cth, -0.25), 0.3);
+    vec3 sun_t = textureLod(u_trans, trans_uv(pc.params2.y + 2.5, max(sun.y, 0.0)), 0.0).rgb;
+    vec3 sun_l = sun_t * pc.params.w;
+    // Ambient: sky radiance toward the zenith (unit-sun LUT * intensity).
+    vec3 amb = textureLod(u_skyview, skyview_uv(1.2, 0.0), 0.0).rgb * pc.params.w * 1.6;
+    vec3 L = vec3(0.0);
+    float T = 1.0;
+    for (int i = 0; i < N; ++i) {
+        float t = t0 + (float(i) + jit) * dt;
+        vec3 p = pc.eye.xyz + rd * t;
+        float dens = cloud_density(p, true);
+        if (dens > 0.003) {
+            // Light march toward the sun (6 taps, growing steps).
+            float od = 0.0;
+            float ls = 90.0;
+            vec3 lp = p;
+            for (int k = 0; k < 6; ++k) {
+                lp += sun * ls;
+                od += cloud_density(lp, k < 3) * ls;
+                ls *= 1.6;
+            }
+            const float kSigma = 0.008;   // extinction per metre at density 1
+            float beer   = exp(-od * kSigma);
+            float powder = 1.0 - exp(-od * kSigma * 2.0);
+            float light  = beer * mix(1.0, powder, 0.5) * 2.0;
+            float h = height_frac(p.y);
+            vec3 S = (sun_l * light * phase + amb * mix(0.35, 1.0, h)) * dens * kSigma;
+            float st = exp(-dens * kSigma * dt);
+            L += T * S * (1.0 - st) / max(dens * kSigma, 1e-6);
+            T *= st;
+            if (T < 0.01) break;
+        }
+    }
+    // Fade toward the horizon (layer thins into the haze).
+    float hz = smoothstep(0.01, 0.12, rd.y);
+    imageStore(o_clouds, px, vec4(L * hz, (1.0 - T) * hz));
+}
+
+void main() {
+    int mode = int(pc.sun.w + 0.5);
+    if (mode == 0) { gen_shape(ivec3(gl_GlobalInvocationID)); return; }
+    if (mode == 1) { gen_detail(ivec3(gl_GlobalInvocationID)); return; }
+    render(ivec2(gl_GlobalInvocationID.xy));
+}

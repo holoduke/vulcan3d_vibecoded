@@ -252,6 +252,9 @@ private:
     void init_atmosphere();    // called from init_compose()
     void destroy_atmosphere();
     void dispatch_atmosphere(VkCommandBuffer cmd);   // per frame, before compose
+    void init_clouds();
+    void destroy_clouds();
+    void dispatch_clouds(VkCommandBuffer cmd);
     void run_bloom_chain(VkCommandBuffer cmd);
     void init_skybox();
     void destroy_skybox_resources();
@@ -2050,6 +2053,15 @@ private:
     VkPipelineLayout       atmo_pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline             atmo_pipeline_ = VK_NULL_HANDLE;
     bool                   atmo_luts_ready_ = false;
+    // Volumetric clouds (clouds.comp): 960x540 cloud layer + tileable noise.
+    AtmoImage              cloud_img_, cloud_shape_, cloud_detail_;
+    VkDescriptorSetLayout  cloud_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool       cloud_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet        cloud_set_ = VK_NULL_HANDLE;
+    VkPipelineLayout       cloud_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline             cloud_pipeline_ = VK_NULL_HANDLE;
+    bool                   cloud_noise_ready_ = false;
+    VkSampler              cloud_sampler_ = VK_NULL_HANDLE;   // linear + REPEAT (tileable noise)
     VkShaderModule         compose_frag_module_ = VK_NULL_HANDLE;
 
     // --- Bloom mip chain (Karis-style downsample + tent upsample) ---

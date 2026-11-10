@@ -62,6 +62,8 @@ layout(push_constant) uniform ComposePC {
 layout(set = 0, binding = 5) uniform sampler2D u_atmo_trans;
 layout(set = 0, binding = 6) uniform sampler2D u_atmo_sky;
 layout(set = 0, binding = 7) uniform sampler3D u_atmo_ap;
+// Volumetric cloud layer (clouds.comp, premultiplied: rgb in-scatter, a = coverage).
+layout(set = 0, binding = 8) uniform sampler2D u_clouds;
 
 vec3 atmo_sun_illum() {
     // x pi: the engine folds 1/pi into its sun intensity (diffuse =
@@ -620,6 +622,10 @@ void main() {
             // colour exactly (EASU weights left light / dark edge dots).
             vec3 base = texture(history_color, sample_uv).rgb;
             vec3 sky_rad = (pc.atmo.x > 0.5) ? atmo_sky(dir) : sample_sky(dir);
+            if (pc.atmo.x > 0.5) {   // clouds over the physical sky
+                vec4 cl = textureLod(u_clouds, sample_uv, 0.0);
+                sky_rad = sky_rad * (1.0 - cl.a) + cl.rgb;
+            }
             hdr = base + (sky_rad - kClear) * T;
         }
     }

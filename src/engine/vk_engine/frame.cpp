@@ -858,6 +858,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     // (compose binding 4) before the compose pass reads it.
     // Physical sky LUTs + aerial perspective for compose (sky_mode 1).
     if (rt_.sky_mode == 1) dispatch_atmosphere(frame.command_buffer);
+    prof_mark(frame.command_buffer, "sky_clouds");
     dispatch_exposure(frame.command_buffer);
     vkinit::transition_image_src_stage(
         frame.command_buffer, swapchain_images_[img_index],

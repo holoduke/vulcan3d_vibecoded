@@ -87,6 +87,11 @@ struct RtSettings {
         float atmosphere_intensity = 5.0f;   // calibrated vs the old HDRI sky brightness
         float aerial_scale = 6.0f;
         float aerial_max_km = 8.0f;
+        // Volumetric clouds (physical sky only).
+        int   clouds_enabled = 1;
+        float cloud_coverage = 0.45f;
+        float cloud_density  = 1.0f;
+        float cloud_speed    = 8.0f;   // wind, m/s
         // Static-castle BLAS merging: true = one BLAS for all 151 brushes
         // (the merged path baked at level load), false = per-brush TLAS
         // instance pointing at the shared cube BLAS (the original path).
