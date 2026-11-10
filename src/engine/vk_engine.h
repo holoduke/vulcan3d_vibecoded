@@ -1086,6 +1086,7 @@ private:
     void destroy_spacejet();
     void tick_spacejet(float dt);                 // move + spawn + despawn
     void tick_jet_audio(float dt);                // predictive flyby sounds
+    void play_explosion_audio(glm::vec3 pos, float size);   // distance-modelled boom
 
     // 60 dynamic crates: 100 still let the autodemo TDR (~2.4s on a 4080
     // even with the merged-static BLAS), so we drop further. The bottleneck

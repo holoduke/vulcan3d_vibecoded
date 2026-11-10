@@ -304,15 +304,8 @@ void VulkanEngine::update_projectiles(float dt) {
                             float dist = glm::length(f.pos - player_.eye_position());
                             float close = glm::clamp(1.0f - dist / 500.0f, 0.15f, 1.0f);
                             kill_flash_t_ = kKillFlashDuration * close;
-                            if (audio_) {
-                                // Big boom: 2× volume, deep pitch, wide
-                                // jitter; gain headroom by playing the
-                                // Impact clip twice with offset pitches.
-                                audio_->play_at(ClipID::Impact, f.pos,
-                                                 2.0f, -0.30f, 0.15f);
-                                audio_->play_at(ClipID::Impact, f.pos,
-                                                 1.4f,  0.05f, 0.10f);
-                            }
+                            // Boom: spawn_explosion above plays the
+                            // distance-modelled explosion sound.
                         }
                         break;     // bullet is dead, no other planes
                     }

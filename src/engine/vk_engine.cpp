@@ -108,6 +108,11 @@ void VulkanEngine::init() {
     audio_->load_clip(ClipID::JetFlyby1, "assets/sounds/jet_flyby_1.mp3");
     audio_->load_clip(ClipID::JetFlyby2, "assets/sounds/jet_flyby_2.mp3");
     audio_->load_clip(ClipID::JetFlyby3, "assets/sounds/jet_flyby_3.mp3");
+    // Explosions (play_explosion_audio picks close / far by distance).
+    for (int i = 0; i < 5; ++i) {
+        audio_->load_clip(ClipID(int(ClipID::ExplClose1) + i), "assets/sounds/expl_close_" + std::to_string(i + 1) + ".mp3");
+        audio_->load_clip(ClipID(int(ClipID::ExplFar1) + i),   "assets/sounds/expl_far_" + std::to_string(i + 1) + ".mp3");
+    }
     init_vulkan();
     init_pipeline_cache();
     init_swapchain();

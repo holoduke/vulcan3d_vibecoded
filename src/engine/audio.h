@@ -20,6 +20,8 @@ enum class ClipID : uint8_t {
     JetFlyby1,  // jet flybys (15 s recordings, one pass each)
     JetFlyby2,
     JetFlyby3,
+    ExplClose1, ExplClose2, ExplClose3, ExplClose4, ExplClose5,   // war explosions, close-up
+    ExplFar1, ExplFar2, ExplFar3, ExplFar4, ExplFar5,              // distant rumbling explosions
     Count
 };
 
@@ -74,6 +76,12 @@ public:
     // Returns a handle (0 = failed).
     uint32_t play_tracked(ClipID id, glm::vec3 pos, float volume,
                           float rate, float start_s);
+    // Fire-and-forget spatial effect: panned, no distance attenuation
+    // (caller sets volume), starts after `delay_s` (speed of sound) and
+    // runs through its own low-pass at `lpf_hz` (air absorption; <= 0 or
+    // >= 18 kHz = no filter).
+    void     play_effect(ClipID id, glm::vec3 pos, float volume, float pitch,
+                         float delay_s, float lpf_hz);
     void     set_voice(uint32_t h, glm::vec3 pos, float volume);
     void     set_voice_rate(uint32_t h, float rate);
     float    voice_time(uint32_t h) const;   // playback position in the clip (s)

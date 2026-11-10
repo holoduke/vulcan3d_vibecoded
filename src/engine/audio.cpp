@@ -53,6 +53,15 @@ struct AudioEngine::Impl {
     // at each set_listener call.
     std::list<ma_sound> oneshots;
 
+    // Effect voices (explosions): sound -> optional low-pass node ->
+    // endpoint. std::list keeps addresses stable for the mixer thread.
+    struct Effect {
+        ma_sound    sound;
+        ma_lpf_node lpf;
+        bool        has_lpf = false;
+    };
+    std::list<Effect> effects;
+
     // Tracked voices (jet flybys): heap-allocated so the ma_sound never
     // moves while miniaudio's mixer thread references it.
     std::unordered_map<uint32_t, ma_sound*> tracked;
@@ -78,6 +87,10 @@ AudioEngine::~AudioEngine() {
     if (!impl_->ok) return;
     for (auto& s : impl_->oneshots) ma_sound_uninit(&s);
     for (auto& kv : impl_->tracked) { ma_sound_uninit(kv.second); delete kv.second; }
+    for (auto& e : impl_->effects) {
+        ma_sound_uninit(&e.sound);
+        if (e.has_lpf) ma_lpf_node_uninit(&e.lpf, nullptr);
+    }
     ma_engine_uninit(&impl_->engine);
 }
 
@@ -88,6 +101,17 @@ void AudioEngine::set_listener(glm::vec3 pos, glm::vec3 forward) {
     ma_engine_listener_set_position(&impl_->engine, 0, pos.x, pos.y, pos.z);
     ma_engine_listener_set_direction(&impl_->engine, 0,
                                        forward.x, forward.y, forward.z);
+    // Reap finished effects (scheduled-but-not-started ones report
+    // playing, so delayed explosions survive until they have sounded).
+    for (auto it = impl_->effects.begin(); it != impl_->effects.end();) {
+        if (ma_sound_is_playing(&it->sound) == MA_FALSE && ma_sound_at_end(&it->sound)) {
+            ma_sound_uninit(&it->sound);
+            if (it->has_lpf) ma_lpf_node_uninit(&it->lpf, nullptr);
+            it = impl_->effects.erase(it);
+        } else {
+            ++it;
+        }
+    }
     // Reap finished tracked voices (handle then reads as not playing).
     for (auto it = impl_->tracked.begin(); it != impl_->tracked.end();) {
         if (ma_sound_is_playing(it->second) == MA_FALSE) {
@@ -216,6 +240,42 @@ void AudioEngine::set_voice(uint32_t h, glm::vec3 pos, float volume) {
     if (it == impl_->tracked.end()) return;
     ma_sound_set_position(it->second, pos.x, pos.y, pos.z);
     ma_sound_set_volume(it->second, volume);
+}
+
+void AudioEngine::play_effect(ClipID id, glm::vec3 pos, float volume, float pitch,
+                              float delay_s, float lpf_hz) {
+    if (!impl_->ok) return;
+    auto idx = static_cast<size_t>(id);
+    if (idx >= static_cast<size_t>(ClipID::Count)) return;
+    const std::string& path = impl_->clip_paths[idx];
+    if (path.empty()) return;
+    if (impl_->effects.size() > 24) return;        // runaway guard (bomb carpets)
+    impl_->effects.emplace_back();
+    Impl::Effect& e = impl_->effects.back();
+    if (ma_sound_init_from_file(&impl_->engine, path.c_str(), MA_SOUND_FLAG_DECODE,
+                                nullptr, nullptr, &e.sound) != MA_SUCCESS) {
+        impl_->effects.pop_back();
+        return;
+    }
+    if (lpf_hz > 0.0f && lpf_hz < 18000.0f) {
+        ma_lpf_node_config lc = ma_lpf_node_config_init(
+            ma_engine_get_channels(&impl_->engine), ma_engine_get_sample_rate(&impl_->engine),
+            lpf_hz, 2);
+        if (ma_lpf_node_init(ma_engine_get_node_graph(&impl_->engine), &lc, nullptr, &e.lpf) == MA_SUCCESS) {
+            e.has_lpf = true;
+            ma_node_attach_output_bus(&e.lpf, 0, ma_engine_get_endpoint(&impl_->engine), 0);
+            ma_node_attach_output_bus(&e.sound, 0, &e.lpf, 0);
+        }
+    }
+    ma_sound_set_attenuation_model(&e.sound, ma_attenuation_model_none);
+    ma_sound_set_doppler_factor(&e.sound, 0.0f);
+    ma_sound_set_position(&e.sound, pos.x, pos.y, pos.z);
+    ma_sound_set_volume(&e.sound, volume);
+    ma_sound_set_pitch(&e.sound, pitch);
+    if (delay_s > 0.0f)
+        ma_sound_set_start_time_in_milliseconds(
+            &e.sound, ma_engine_get_time_in_milliseconds(&impl_->engine) + ma_uint64(delay_s * 1000.0f));
+    ma_sound_start(&e.sound);
 }
 
 void AudioEngine::set_voice_rate(uint32_t h, float rate) {

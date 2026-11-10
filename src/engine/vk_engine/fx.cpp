@@ -45,6 +45,47 @@ constexpr float kFxG = 9.81f;
 // ---------------------------------------------------------------------
 // Simulation
 // ---------------------------------------------------------------------
+// Explosion sound with a simple outdoor propagation model:
+//   * close-up war explosions near, distant rumbling recordings far, and a
+//     crossfade of both in between (80..320 m);
+//   * arrival delayed by the speed of sound (d / 343 m/s) - flash first,
+//     boom later;
+//   * air absorption: low-pass cutoff falls with distance
+//     (18 kHz -> ~1.5 kHz at 1 km), so far blasts are dull rumbles;
+//   * level ~ 1/distance (ref 60 m) scaled by blast size, floored so a
+//     bomb run across the valley is still heard; bigger blasts pitch down.
+// Panned to the blast position; distance attenuation is ours, not
+// miniaudio's.
+void VulkanEngine::play_explosion_audio(glm::vec3 pos, float size) {
+    if (!audio_) return;
+    struct Gain { float near_g[5], far_g[5]; };   // ("far" is a Windows macro)
+    // Per-clip level match (recorded peaks -7.8 .. -11.7 dBFS).
+    static const Gain kG = { { 0.85f, 1.10f, 0.95f, 0.95f, 0.90f },
+                             { 1.25f, 0.95f, 1.00f, 1.20f, 1.00f } };
+    const float d = glm::distance(pos, player_.eye_position());
+    const float s = std::max(size, 0.2f);
+    const float delay = d / 343.0f;
+    const float lpf = glm::clamp(18000.0f * std::exp(-d / 420.0f), 350.0f, 18000.0f);
+    const float level = std::min(glm::clamp(60.0f / std::max(d, 25.0f), 0.025f, 2.4f) *
+                                 std::sqrt(s) * 1.4f, 1.6f);   // cap point-blank blasts
+    const float pitch = glm::clamp(1.0f / std::pow(s, 0.12f), 0.85f, 1.1f) *
+                        frand_range(spacejet_rng_state_, 0.93f, 1.06f);
+    const float w_close = 1.0f - glm::smoothstep(120.0f, 320.0f, d);
+    const float w_far   = glm::smoothstep(80.0f, 260.0f, d);
+    if (w_close > 0.01f) {
+        int k = int(frand(spacejet_rng_state_) * 5.0f) % 5;
+        audio_->play_effect(ClipID(int(ClipID::ExplClose1) + k), pos,
+                            level * w_close * kG.near_g[k], pitch, delay, lpf);
+    }
+    if (w_far > 0.01f) {
+        int k = int(frand(spacejet_rng_state_) * 5.0f) % 5;
+        // Distant recordings are already dull - only the extra absorption.
+        audio_->play_effect(ClipID(int(ClipID::ExplFar1) + k), pos,
+                            level * w_far * kG.far_g[k] * 1.3f, pitch, delay,
+                            std::max(lpf * 1.6f, 900.0f));
+    }
+}
+
 void VulkanEngine::spawn_explosion(glm::vec3 pos, float size, bool ground) {
     Explosion e{};
     e.pos = pos;
@@ -71,12 +112,7 @@ void VulkanEngine::spawn_explosion(glm::vec3 pos, float size, bool ground) {
         kill_flash_t_ = std::max(kill_flash_t_, kKillFlashDuration *
                                  glm::clamp(1.0f - dist / 400.0f, 0.1f, 0.8f));
     }
-    if (audio_) {
-        float vol = 2.2f * size;
-        audio_->play_at(ClipID::Impact, pos, vol, -0.45f, 0.10f);
-        audio_->play_at(ClipID::Impact, pos, vol * 0.8f, -0.30f, 0.10f);
-        audio_->play_at(ClipID::Impact, pos, vol * 0.6f, 0.05f, 0.10f);
-    }
+    play_explosion_audio(pos, size);
     log::infof("[fx] explosion at (%.0f, %.0f, %.0f) size %.2f%s",
                pos.x, pos.y, pos.z, size, ground ? " ground" : " air");
 }
