@@ -69,7 +69,7 @@ void VulkanEngine::init_compose() {
     // 10 vec4 (viewport, bloom, sun_dir, sun_color, sky, flare, flare2,
     //          sun_screen, sharpen_params, brush_indicator) +
     //          mat4 inv_view_proj.
-    compose_pc.size = sizeof(glm::vec4) * 11 + sizeof(glm::mat4);   // + atmo params
+    compose_pc.size = sizeof(glm::vec4) * 12 + sizeof(glm::mat4);   // + atmo + tone (= 256 B)
 
     VkPipelineLayoutCreateInfo cplci{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,

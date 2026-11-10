@@ -55,6 +55,7 @@ layout(push_constant) uniform ComposePC {
     vec4 brush_indicator;
     mat4 inv_view_proj;  // for view-ray reconstruction
     vec4 atmo;           // x sky_mode (1 = physical), y intensity, z camera radius (km), w AP max km
+    vec4 tone;           // x tonemap mode: 0 ACES fitted, 1 AgX, 2 Khronos PBR Neutral
 } pc;
 
 #include "atmosphere.glsl"
@@ -100,6 +101,42 @@ vec4 atmo_aerial(vec2 uv, float d_km) {
         return vec4(a0.rgb * f, mix(1.0, a0.a, f));
     }
     return textureLod(u_atmo_ap, vec3(uv, (w + 0.5) / 32.0), 0.0);
+}
+
+// AgX (Troy Sobotka, Blender 4) - minimal version with the 6th-order
+// sigmoid fit (Benjamin Wrensch). Smooth highlight desaturation toward
+// white instead of ACES' hue skews; outputs display-referred sRGB-linear.
+vec3 agx(vec3 c) {
+    const mat3 agx_in = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+                             0.0784335999999992, 0.878468636469772, 0.0784336,
+                             0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+    const mat3 agx_out = mat3(1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+                              -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+                              -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+    const float min_ev = -12.47393, max_ev = 4.026069;
+    c = agx_in * max(c, vec3(1e-10));
+    c = clamp(log2(c), min_ev, max_ev);
+    c = (c - min_ev) / (max_ev - min_ev);
+    vec3 x2 = c * c, x4 = x2 * x2;
+    c = 15.5 * x4 * x2 - 40.14 * x4 * c + 31.96 * x4 - 6.868 * x2 * c
+        + 0.4298 * x2 + 0.1191 * c - 0.00232;
+    c = agx_out * c;
+    return pow(max(c, vec3(0.0)), vec3(2.2));   // AgX base is ~gamma 2.2 encoded
+}
+// Khronos PBR Neutral (2024): hue-preserving, keeps base colours exact
+// below 0.8 and compresses only the highlights.
+vec3 pbr_neutral(vec3 color) {
+    const float start = 0.8 - 0.04, desat = 0.15;
+    float x = min(color.r, min(color.g, color.b));
+    float off = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= off;
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < start) return color;
+    float d = 1.0 - start;
+    float np = 1.0 - d * d / (peak + d - start);
+    color *= np / peak;
+    float g = 1.0 - 1.0 / (desat * (peak - np) + 1.0);
+    return mix(color, vec3(np), g);
 }
 
 vec3 aces_fitted(vec3 x) {
@@ -808,7 +845,8 @@ void main() {
     // values defensively.
     hdr = clamp(hdr, vec3(0.0), vec3(64.0));
 
-    vec3 mapped = aces_fitted(hdr);
+    int tm = int(pc.tone.x + 0.5);
+    vec3 mapped = (tm == 1) ? agx(hdr) : (tm == 2) ? pbr_neutral(hdr) : aces_fitted(hdr);
     // Tone controls applied post-tonemap, pre-sRGB. Order: brightness
     // (linear scale) -> contrast (pivot around 0.5) -> gamma curve.
     float brightness = max(pc.sharpen_params.w, 0.001);

@@ -248,6 +248,7 @@ void VulkanEngine::save_settings() const {
     f << "cloud_coverage = " << rt_.cloud_coverage << "\n";
     f << "cloud_density = " << rt_.cloud_density << "\n";
     f << "cloud_speed = " << rt_.cloud_speed << "\n";
+    f << "tonemap_mode = " << rt_.tonemap_mode << "\n";
     f << "use_merged_static_blas = " << (rt_.use_merged_static_blas ? 1 : 0) << "\n";
     f << "terrain_brush_radius = "   << terrain_brush_radius_   << "\n";
     f << "terrain_brush_strength = " << terrain_brush_strength_ << "\n";
@@ -687,6 +688,7 @@ void VulkanEngine::load_settings() {
             if (key == "cloud_coverage")       { rt_.cloud_coverage = std::stof(val); ++loaded; continue; }
             if (key == "cloud_density")        { rt_.cloud_density = std::stof(val); ++loaded; continue; }
             if (key == "cloud_speed")          { rt_.cloud_speed = std::stof(val); ++loaded; continue; }
+            if (key == "tonemap_mode")         { rt_.tonemap_mode = std::stoi(val); ++loaded; continue; }
             if      (key == "sun_pitch_deg")       rt_.sun_pitch_deg = std::stof(val);
             else if (key == "sun_yaw_deg")         rt_.sun_yaw_deg = std::stof(val);
             else if (key == "sun_intensity")       rt_.sun_intensity = std::stof(val);

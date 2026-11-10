@@ -85,6 +85,7 @@ struct RtSettings {
         // aerial_scale stretches haze distances (game scale vs real km).
         int   sky_mode = 1;
         float atmosphere_intensity = 5.0f;   // calibrated vs the old HDRI sky brightness
+        int   tonemap_mode = 0;   // 0 ACES fitted (tuned look), 1 AgX (Sobotka), 2 Khronos PBR Neutral
         float aerial_scale = 6.0f;
         float aerial_max_km = 8.0f;
         // Volumetric clouds (physical sky only).

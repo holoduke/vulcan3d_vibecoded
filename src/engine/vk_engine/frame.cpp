@@ -908,6 +908,7 @@ void VulkanEngine::draw(uint32_t img_index) {
             // Physical sky: x = sky_mode (1 = atmosphere), y = intensity,
             // z = camera radius in planet space (km), w = AP max distance (km).
             glm::vec4 atmo;
+            glm::vec4 tone;   // x = tonemap mode (0 ACES, 1 AgX, 2 PBR Neutral)
         } pc_data{};
         float w = static_cast<float>(swapchain_extent_.width);
         float h = static_cast<float>(swapchain_extent_.height);
@@ -983,6 +984,7 @@ void VulkanEngine::draw(uint32_t img_index) {
             pc_data.brush_indicator = glm::vec4(0.0f);
         }
         pc_data.inv_view_proj = last_inv_view_proj_;   // cached
+        pc_data.tone = glm::vec4(float(rt_.tonemap_mode), 0.0f, 0.0f, 0.0f);
         pc_data.atmo = glm::vec4((rt_.sky_mode == 1 && atmo_pipeline_) ? 1.0f : 0.0f,
                                  std::max(0.0f, rt_.atmosphere_intensity),
                                  6360.0f + std::max(current_frame_view_.eye_pos.y, 1.0f) * 0.001f,
