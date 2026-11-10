@@ -168,10 +168,58 @@ void VulkanEngine::init_spacejet() {
     }
     log::infof("spacejet: loaded %zu primitives, base_scale=%.3f РІР‚вЂќ flyover system armed",
                spacejet_meshes_.size(), spacejet_base_scale_);
+
+    // Break-up chunks: classify every triangle by its centroid in raw model
+    // space (nose points -Z): outer |x| = left / right wing, else nose /
+    // fuselage / tail along z. Each chunk gets its own index buffer per
+    // primitive (shared vertex data), so pieces keep their materials.
+    {
+        const glm::vec3 lo = gltf.aabb_min, hi = gltf.aabb_max, ext = hi - lo;
+        auto classify = [&](const glm::vec3& c) {
+            float x = (c.x - center.x) / ext.x, z = (c.z - center.z) / ext.z;
+            if (x < -0.17f) return 0;          // left wing
+            if (x >  0.17f) return 1;          // right wing
+            if (z < -0.20f) return 2;          // nose
+            if (z >  0.22f) return 3;          // tail
+            return 4;                          // fuselage
+        };
+        const float vts[5] = { 70.0f, 70.0f, 160.0f, 110.0f, 190.0f };   // flat wings flutter
+        spacejet_chunks_.assign(5, JetChunk{});
+        glm::dvec3 csum[5]{}; double ccnt[5]{};
+        for (const auto& prim : gltf.primitives) {
+            std::vector<uint32_t> idx[5];
+            for (size_t t = 0; t + 2 < prim.indices.size(); t += 3) {
+                const glm::vec3 a = prim.vertices[prim.indices[t]].position;
+                const glm::vec3 b = prim.vertices[prim.indices[t + 1]].position;
+                const glm::vec3 c = prim.vertices[prim.indices[t + 2]].position;
+                const glm::vec3 cc = (a + b + c) / 3.0f;
+                int k = classify(cc);
+                idx[k].insert(idx[k].end(), { prim.indices[t], prim.indices[t + 1], prim.indices[t + 2] });
+                csum[k] += glm::dvec3(cc); ccnt[k] += 1.0;
+            }
+            for (int k = 0; k < 5; ++k) {
+                if (idx[k].empty()) continue;
+                SpacejetMesh sm{};
+                sm.mesh = create_mesh_from_data(device_, allocator_, graphics_queue_, graphics_queue_family_,
+                                                prim.vertices.data(), static_cast<uint32_t>(prim.vertices.size()),
+                                                idx[k].data(), static_cast<uint32_t>(idx[k].size()));
+                sm.base_color = prim.base_color;
+                spacejet_chunks_[size_t(k)].parts.push_back(std::move(sm));
+            }
+        }
+        for (int k = 0; k < 5; ++k) {
+            spacejet_chunks_[size_t(k)].centroid_raw = ccnt[k] > 0.0 ? glm::vec3(csum[k] / ccnt[k]) : center;
+            spacejet_chunks_[size_t(k)].drag_vt = vts[k];
+        }
+        log::infof("spacejet: %d break-up chunks", int(spacejet_chunks_.size()));
+    }
 }
 
 void VulkanEngine::destroy_spacejet() {
     for (auto& sm : spacejet_meshes_) destroy_mesh(allocator_, sm.mesh);
+    for (auto& ch : spacejet_chunks_) for (auto& sm : ch.parts) destroy_mesh(allocator_, sm.mesh);
+    spacejet_chunks_.clear();
+    jet_debris_.clear();
     spacejet_meshes_.clear();
     spacejet_flights_.clear();
 }
@@ -342,16 +390,26 @@ void VulkanEngine::tick_spacejet(float dt) {
             f.destroying = true; f.destroy_t = 0.0f; spawn_explosion(f.pos, 0.55f, false);
         }
         if (f.destroying) {
-            // Shot down. Four crash styles, picked once:
-            //  0 spiral dive   - rolls hard, nose drops, accelerates in;
-            //  1 flat spin     - loses lift, yaws around, drops nearly flat;
-            //  2 break-up      - tumbles end over end, mid-air secondary
-            //                    explosion, falls ballistic;
-            //  3 burning glide - long shallow dive, belly-in at speed with
-            //                    a chain of explosions along the impact path.
+            // Shot down. Crash styles (picked once, weighted):
+            //  0 power dive    - nose pitches straight down, engine still
+            //                    pushing for a few seconds: accelerates
+            //                    toward ~300 m/s and goes in at full speed;
+            //  1 spiral        - one wing loses lift: hard roll, corkscrew
+            //                    that steepens and speeds up (~220 m/s);
+            //  2 break-up      - fuel tank goes: the airframe explodes in the
+            //                    air and splits into wings / nose / fuselage /
+            //                    tail + fragments, each falling ballistically
+            //                    with its own drag (spawn_jet_breakup);
+            //  3 burning glide - keeps some lift: shallow, fast, burning
+            //                    descent, belly-in with a chain of explosions.
+            // Flight model: gravity + quadratic drag (terminal velocity per
+            // style) + residual lift along the airframe's up axis + thrust;
+            // the flight path is pulled toward the nose (weathervaning) so
+            // the jet flies like a heavy aircraft, not a leaf.
             f.mode = JetMode::Crash;
             if (f.crash_kind < 0) {
-                f.crash_kind = int(xorshift32(R) % 4u);
+                const uint32_t roll = xorshift32(R) % 100u;
+                f.crash_kind = roll < 30u ? 0 : roll < 55u ? 1 : roll < 80u ? 2 : 3;
                 f.crash_vel = f.fwd * f.speed;
                 glm::vec3 a(frand_range(R, -1.0f, 1.0f), frand_range(R, -0.3f, 0.3f), frand_range(R, -1.0f, 1.0f));
                 f.tumble_axis = glm::normalize(a + glm::vec3(1e-3f));
@@ -359,57 +417,74 @@ void VulkanEngine::tick_spacejet(float dt) {
             }
             f.destroy_t += dt;
             glm::vec3 right = glm::normalize(glm::cross(f.fwd, f.up));
-            switch (f.crash_kind) {
-            case 0: {   // spiral dive
-                // Nose steers toward a steep dive while the heading corkscrews
-                // around world-up; airframe rolls hard about its own axis.
-                glm::vec3 hz(f.fwd.x, 0.0f, f.fwd.z);
+            float vt = 250.0f, lift = 0.0f, thrust = 0.0f, align = 1.2f;
+            // Nose steering referenced to WORLD down (not the airframe's own
+            // pitch axis, which spins with the roll and averaged out): aim at
+            // the current heading tilted down by atan(1 / k).
+            auto nose_toward = [&](glm::vec3 fw, float k, float rate) {
+                glm::vec3 hz(fw.x, 0.0f, fw.z);
                 hz = glm::length(hz) > 1e-3f ? glm::normalize(hz) : glm::vec3(1, 0, 0);
-                hz = rotate_axis(hz, glm::vec3(0, 1, 0), 0.9f * dt * (f.tumble_rate > 0.0f ? 1.0f : -1.0f));
-                glm::vec3 want = glm::normalize(hz * 0.55f + glm::vec3(0.0f, -1.0f, 0.0f));
-                f.fwd = glm::normalize(glm::mix(f.fwd, want, 1.0f - std::exp(-dt * 0.9f)));
+                glm::vec3 want = glm::normalize(hz * k + glm::vec3(0.0f, -1.0f, 0.0f));
+                return glm::normalize(glm::mix(fw, want, 1.0f - std::exp(-dt * rate)));
+            };
+            switch (f.crash_kind) {
+            case 0: {   // power dive: pitch the nose down to ~75-85 deg
+                f.fwd = nose_toward(f.fwd, 0.18f, 1.3f);   // ~80 deg down
+                f.up  = glm::normalize(rotate_axis(f.up, f.fwd, 0.6f * f.tumble_rate * 0.25f * dt));
+                vt = 300.0f; thrust = f.destroy_t < 3.5f ? 14.0f : 0.0f; align = 1.6f;
+                break;
+            }
+            case 1: {   // spiral: fast roll, nose drops and yaws round world-up
                 f.up  = glm::normalize(rotate_axis(f.up, f.fwd, f.tumble_rate * dt));
-                f.speed = std::min(f.speed + kG * 1.1f * dt, 200.0f);
-                f.crash_vel = glm::mix(f.crash_vel, f.fwd * f.speed, 1.0f - std::exp(-dt * 2.5f));
+                f.fwd = glm::normalize(rotate_axis(f.fwd, glm::vec3(0, 1, 0), 0.7f * dt * (f.tumble_rate > 0.0f ? 1.0f : -1.0f)));
+                f.fwd = nose_toward(f.fwd, 0.65f, 0.55f);  // steepens to ~57 deg
+                vt = 220.0f; lift = 0.25f; align = 0.9f;
                 break;
             }
-            case 1: {   // flat spin: velocity goes ballistic, airframe yaws
-                f.fwd = glm::normalize(rotate_axis(f.fwd, glm::vec3(0, 1, 0), f.tumble_rate * 0.9f * dt));
-                f.fwd.y = glm::mix(f.fwd.y, -0.18f, 1.0f - std::exp(-dt));
-                f.fwd = glm::normalize(f.fwd);
-                f.up = glm::normalize(glm::vec3(0, 1, 0) - f.fwd * f.fwd.y);
-                f.crash_vel *= std::exp(-dt * 0.45f);
-                f.crash_vel.y -= kG * dt;
-                f.crash_vel.y = std::max(f.crash_vel.y, -55.0f);   // flat-spin descent rate
-                break;
-            }
-            case 2: {   // break-up tumble
+            case 2: {   // break-up: brief tumble, then the airframe comes apart
                 f.fwd = glm::normalize(rotate_axis(f.fwd, f.tumble_axis, f.tumble_rate * dt));
                 f.up  = glm::normalize(rotate_axis(f.up, f.tumble_axis, f.tumble_rate * dt));
-                f.crash_vel *= std::exp(-dt * 0.25f);
-                f.crash_vel.y -= kG * dt;
-                if (!f.broke_up && f.destroy_t > 0.9f) {
+                vt = 140.0f; align = 0.0f;
+                if (!f.broke_up && f.destroy_t > 0.35f) {
                     f.broke_up = true;
-                    spawn_explosion(f.pos, 0.8f, false);
-                    f.tumble_rate *= 1.6f;
+                    spawn_explosion(f.pos, 1.1f, false);
+                    spawn_jet_breakup(f);
+                    f.dead = true;              // the pieces carry on as debris
                 }
                 break;
             }
-            default: {  // burning glide-in
+            default: {  // burning glide: shallow descent, wing rock
                 float wob = std::sin(f.destroy_t * 2.3f) * 0.35f;
-                f.fwd = glm::normalize(rotate_axis(f.fwd, right, -0.12f * dt));
+                f.fwd = nose_toward(f.fwd, 3.0f, 0.35f);   // ~18 deg glide slope
                 f.up  = glm::normalize(rotate_axis(glm::vec3(0, 1, 0), f.fwd, wob));
-                f.up  = glm::normalize(f.up - f.fwd * glm::dot(f.up, f.fwd));
-                f.speed = std::min(f.speed + kG * 0.4f * dt, 170.0f);
-                f.crash_vel = glm::mix(f.crash_vel, f.fwd * f.speed, 1.0f - std::exp(-dt * 1.5f));
+                vt = 200.0f; lift = 0.75f; thrust = 3.0f; align = 1.3f;
                 break;
             }
             }
             f.up = glm::normalize(f.up - f.fwd * glm::dot(f.up, f.fwd));
+            {
+                glm::vec3& v = f.crash_vel;
+                float s = std::max(glm::length(v), 1.0f);
+                const glm::vec3 vd = v / s;
+                glm::vec3 acc(0.0f, -kG, 0.0f);
+                acc -= vd * (kG * s * s / (vt * vt));                 // drag: balances g at vt
+                // Residual lift: perpendicular to the path, along the
+                // airframe's up axis; ~lift*g at 150 m/s.
+                glm::vec3 lup = f.up - vd * glm::dot(f.up, vd);
+                if (glm::length(lup) > 1e-3f) acc += glm::normalize(lup) * (lift * kG * (s * s) / (150.0f * 150.0f));
+                acc += f.fwd * thrust;
+                v += acc * dt;
+                // Weathervaning: the path turns toward the nose (keeps speed).
+                if (align > 0.0f) {
+                    s = glm::length(v);
+                    v = glm::normalize(glm::mix(v / s, f.fwd, 1.0f - std::exp(-dt * align))) * s;
+                }
+                f.speed = glm::length(v);
+            }
             f.pos += f.crash_vel * dt;
             f.turn_g = 0.0f;
             float gh = ground_h(f.pos.x, f.pos.z);
-            if (f.pos.y <= gh + 1.0f || f.destroy_t > 30.0f) {
+            if (!f.dead && (f.pos.y <= gh + 1.0f || f.destroy_t > 30.0f)) {
                 f.pos.y = std::max(f.pos.y, gh);
                 const bool water = gh <= rt_.water_level + 0.05f;
                 // Huge impact: main blast + secondary detonations (fuel,
@@ -427,7 +502,9 @@ void VulkanEngine::tick_spacejet(float dt) {
                     pending_booms_.push_back({ p, frand_range(R, 0.8f, 1.3f), true,
                                                0.25f * float(k) + frand_range(R, 0.0f, 0.35f) });
                 }
-                log::infof("[jets] id %u crashed (kind %d) after %.1f s", f.id, f.crash_kind, f.destroy_t);
+                log::infof("[jets] id %u crashed (kind %d) after %.1f s at %.0f m/s, %.0f deg down",
+                           f.id, f.crash_kind, f.destroy_t, glm::length(f.crash_vel),
+                           glm::degrees(std::asin(glm::clamp(-f.crash_vel.y / std::max(glm::length(f.crash_vel), 1.0f), -1.0f, 1.0f))));
                 f.dead = true;
             }
         } else {
@@ -647,6 +724,7 @@ void VulkanEngine::tick_spacejet(float dt) {
         }
     }
     tick_jet_audio(dt);
+    tick_jet_debris(dt);
     for (auto& f : spacejet_flights_)   // voices of removed jets stop with them
         if (f.dead && f.trail.empty() && f.snd_voice && audio_) audio_->stop_voice(f.snd_voice, 0.3f);
     spacejet_flights_.erase(
@@ -671,6 +749,88 @@ void VulkanEngine::tick_spacejet(float dt) {
 //   * position follows the jet every frame (panning), no attenuation.
 // Shot-down / crashing jets fade their pass out (the crash has its own
 // explosion sounds).
+// Mid-air break-up: every JetChunk becomes a falling piece that starts
+// exactly where it sat on the airframe (same rotation, its own centroid),
+// with the jet's velocity plus an outward blast kick and a random tumble;
+// plus a spray of small burning fragments.
+void VulkanEngine::spawn_jet_breakup(const SpacejetFlight& f) {
+    auto& R = spacejet_rng_state_;
+    const glm::vec3 z = -glm::normalize(f.fwd);
+    const glm::vec3 x = glm::normalize(glm::cross(f.up, z));
+    const glm::vec3 y = glm::cross(z, x);
+    const glm::mat3 rot(x, y, z);
+    const float S = spacejet_base_scale_ * f.scale;
+    static uint32_t next_id = 1;
+    for (size_t k = 0; k < spacejet_chunks_.size(); ++k) {
+        const JetChunk& ch = spacejet_chunks_[k];
+        if (ch.parts.empty()) continue;
+        JetDebris d{};
+        d.chunk = int(k);
+        d.pos = f.pos + rot * (S * (ch.centroid_raw + spacejet_centre_offset_));
+        d.prev_pos = d.pos;
+        glm::vec3 out = d.pos - f.pos;
+        out = glm::length(out) > 1e-3f ? glm::normalize(out) : glm::vec3(0, 1, 0);
+        d.vel = f.crash_vel + out * frand_range(R, 8.0f, 22.0f) + glm::vec3(0.0f, frand_range(R, 0.0f, 10.0f), 0.0f);
+        d.rot = d.prev_rot = rot;
+        glm::vec3 ax(frand_range(R, -1, 1), frand_range(R, -1, 1), frand_range(R, -1, 1));
+        d.spin_axis = glm::normalize(ax + glm::vec3(1e-3f));
+        d.spin_rate = frand_range(R, 1.5f, 6.0f) * (k < 2 ? 1.6f : 1.0f);   // wings flip faster
+        d.scale = f.scale;
+        d.vt = ch.drag_vt * frand_range(R, 0.85f, 1.15f);
+        d.burning = (k >= 2) || (xorshift32(R) & 1u);
+        d.id = next_id++;
+        jet_debris_.push_back(std::move(d));
+    }
+    const int nfrag = 10 + int(xorshift32(R) % 6u);
+    for (int i = 0; i < nfrag; ++i) {
+        JetDebris d{};
+        d.chunk = -1;
+        d.pos = d.prev_pos = f.pos;
+        glm::vec3 dir(frand_range(R, -1, 1), frand_range(R, -0.6f, 1), frand_range(R, -1, 1));
+        d.vel = f.crash_vel * 0.8f + glm::normalize(dir + glm::vec3(1e-3f)) * frand_range(R, 15.0f, 45.0f);
+        glm::vec3 ax(frand_range(R, -1, 1), frand_range(R, -1, 1), frand_range(R, -1, 1));
+        d.spin_axis = glm::normalize(ax + glm::vec3(1e-3f));
+        d.spin_rate = frand_range(R, 4.0f, 12.0f);
+        d.scale = frand_range(R, 0.25f, 0.7f) * f.scale;
+        d.vt = frand_range(R, 35.0f, 70.0f);
+        d.burning = (xorshift32(R) % 3u) == 0u;
+        d.id = next_id++;
+        jet_debris_.push_back(std::move(d));
+    }
+    if (jet_debris_.size() > 160) jet_debris_.erase(jet_debris_.begin(), jet_debris_.begin() + 40);
+    log::infof("[jets] id %u broke up in the air at %.0f m/s: %zu pieces falling", f.id, glm::length(f.crash_vel), jet_debris_.size());
+}
+
+void VulkanEngine::tick_jet_debris(float dt) {
+    if (jet_debris_.empty()) return;
+    auto& R = spacejet_rng_state_;
+    for (auto& d : jet_debris_) {
+        if (d.dead) continue;
+        d.t += dt;
+        d.prev_pos = d.pos;
+        d.prev_rot = d.rot;
+        float s = std::max(glm::length(d.vel), 1.0f);
+        glm::vec3 acc(0.0f, -kG, 0.0f);
+        acc -= (d.vel / s) * (kG * s * s / (d.vt * d.vt));
+        d.vel += acc * dt;
+        d.pos += d.vel * dt;
+        d.rot = glm::mat3(glm::rotate(glm::mat4(1.0f), d.spin_rate * dt, d.spin_axis)) * d.rot;
+        if (d.chunk >= 0 || d.burning) {
+            if (d.trail.empty() || d.t - d.trail.back().w > 0.06f) d.trail.push_back(glm::vec4(d.pos, d.t));
+            while (!d.trail.empty() && d.t - d.trail.front().w > 3.0f) d.trail.erase(d.trail.begin());
+        }
+        const float gh = std::max(sample_terrain_height(d.pos.x, d.pos.z), rt_.water_level);
+        if (d.pos.y <= gh + 0.3f || d.t > 25.0f) {
+            d.pos.y = std::max(d.pos.y, gh);
+            if (d.chunk >= 0) spawn_explosion(d.pos, d.chunk == 4 ? 1.2f : frand_range(R, 0.45f, 0.75f), true);
+            d.dead = true;
+        }
+    }
+    jet_debris_.erase(std::remove_if(jet_debris_.begin(), jet_debris_.end(),
+                                     [](const JetDebris& d) { return d.dead; }),
+                      jet_debris_.end());
+}
+
 void VulkanEngine::tick_jet_audio(float dt) {
     if (!audio_) return;
     struct ClipInfo { ClipID id; float peak_s, w_ref_s, len_s, gain; };

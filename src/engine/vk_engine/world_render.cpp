@@ -737,6 +737,49 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }
+    // Break-up wreckage: airframe chunks (rotated about their own centroid,
+    // scorched) and small dark fragments (cube mesh).
+    if (!jet_debris_.empty()) {
+        const float S0 = spacejet_base_scale_;
+        for (const auto& d : jet_debris_) {
+            auto chunk_model = [&](glm::vec3 pos, const glm::mat3& r) {
+                const JetChunk& ch = spacejet_chunks_[size_t(d.chunk)];
+                return glm::translate(glm::mat4(1.0f), pos) * glm::mat4(r) *
+                       glm::scale(glm::mat4(1.0f), glm::vec3(S0 * d.scale)) *
+                       glm::translate(glm::mat4(1.0f), -ch.centroid_raw);
+            };
+            auto frag_model = [&](glm::vec3 pos, const glm::mat3& r) {
+                return glm::translate(glm::mat4(1.0f), pos) * glm::mat4(r) *
+                       glm::scale(glm::mat4(1.0f), glm::vec3(d.scale, d.scale * 0.35f, d.scale * 0.8f));
+            };
+            const float burn = d.burning ? 0.8f + 0.2f * std::sin(d.t * 23.0f + float(d.id)) : 0.0f;
+            PushConstants pc{};
+            pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
+            pc.emissive = glm::vec4(1.4f * burn, 0.35f * burn, 0.05f * burn, 0.0f);
+            if (d.chunk >= 0 && size_t(d.chunk) < spacejet_chunks_.size()) {
+                const glm::mat4 m = chunk_model(d.pos, d.rot), pm = chunk_model(d.prev_pos, d.prev_rot);
+                for (const auto& sm : spacejet_chunks_[size_t(d.chunk)].parts) {
+                    VkDeviceSize off = 0;
+                    vkCmdBindVertexBuffers(cmd, 0, 1, &sm.mesh.vertex_buffer, &off);
+                    vkCmdBindIndexBuffer(cmd, sm.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+                    pc.mvp = vp * m; pc.model = m; pc.prev_mvp = prev_vp * pm;
+                    pc.color = sm.base_color * glm::vec4(0.45f, 0.42f, 0.40f, 1.0f);   // scorched
+                    vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages, 0, sizeof(PushConstants), &pc);
+                    vkCmdDrawIndexed(cmd, sm.mesh.index_count, 1, 0, 0, 0);
+                }
+            } else {
+                vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+                vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+                const glm::mat4 m = frag_model(d.pos, d.rot), pm = frag_model(d.prev_pos, d.prev_rot);
+                pc.mvp = vp * m; pc.model = m; pc.prev_mvp = prev_vp * pm;
+                pc.color = glm::vec4(0.12f, 0.11f, 0.10f, 1.0f);
+                vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages, 0, sizeof(PushConstants), &pc);
+                vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
+            }
+        }
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    }
 
     prof_mark(cmd, "w_jets");
     // Grass Р Р†Р вЂљРІР‚Сњ instanced billboard blades. Single draw call covers

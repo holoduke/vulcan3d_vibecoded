@@ -489,16 +489,52 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
             smoke.strip(p, w, a, glm::vec3(0.92f, 0.93f, 0.95f));
             smoke.strip(sp, sw, sa, glm::vec3(0.07f, 0.065f, 0.06f));
         }
-        if (!f.dead) {
+        if (!f.dead && !f.destroying) {   // afterburner (live engine only)
             glm::vec3 ex = f.pos - f.fwd * (3.0f * f.scale * 0.95f);
             float flick = 0.85f + 0.15f * std::sin(now * 53.0f + float(f.id));
             glow.segment(ex, ex - f.fwd * (5.5f * f.scale * flick),
                          min_w(ex, 0.55f * f.scale, 1.2f), 1.6f * flick,
                          glm::vec3(1.0f, 0.45f, 0.15f));
-            if (f.destroying) {   // burning wreck
-                glow.segment(f.pos, f.pos - f.fwd * 9.0f, min_w(f.pos, 2.0f, 2.0f), 2.5f,
-                             glm::vec3(1.0f, 0.35f, 0.05f));
+        }
+        if (!f.dead && f.destroying) {
+            // Burning wreck: flames stream back along the FLIGHT PATH (was a
+            // fixed 9 m streak along the nose axis, which stuck out sideways
+            // while the airframe tumbled), length grows with airspeed, and
+            // the fire flickers in two layers.
+            float sp = glm::length(f.crash_vel);
+            glm::vec3 back = sp > 1.0f ? -f.crash_vel / sp : -f.fwd;
+            float flick = 0.8f + 0.2f * std::sin(now * 41.0f + float(f.id) * 3.1f);
+            float len = (3.5f + sp * 0.035f) * f.scale * flick;
+            glow.segment(f.pos, f.pos + back * len, min_w(f.pos, 1.6f * f.scale, 1.6f), 2.2f * flick,
+                         glm::vec3(1.0f, 0.38f, 0.06f));
+            glow.segment(f.pos, f.pos + back * len * 0.45f, min_w(f.pos, 0.8f * f.scale, 1.2f), 3.0f,
+                         glm::vec3(1.0f, 0.75f, 0.35f));
+        }
+    }
+    // Break-up wreckage: dark smoke trail per piece (thickening, thinning
+    // with age) and flames streaming back along the fall for burning ones.
+    for (const auto& d : jet_debris_) {
+        if (d.trail.size() >= 2) {
+            std::vector<glm::vec3> p; std::vector<float> w, a;
+            p.reserve(d.trail.size() + 1);
+            const float base_w = d.chunk >= 0 ? 0.9f : 0.35f;
+            for (const auto& tp : d.trail) {
+                float age = d.t - tp.w;
+                p.push_back(glm::vec3(tp) + glm::vec3(0.0f, age * 1.0f, 0.0f) + wind_vel_ * (0.3f * age));
+                w.push_back(min_w(glm::vec3(tp), (base_w + age * 1.8f) * d.scale, 1.0f));
+                float life = glm::clamp(1.0f - age / 3.0f, 0.0f, 1.0f);
+                a.push_back(life * life * 0.75f);
             }
+            p.push_back(d.pos); w.push_back(min_w(d.pos, base_w * d.scale, 1.0f)); a.push_back(0.7f);
+            smoke.strip(p, w, a, glm::vec3(0.08f, 0.075f, 0.07f));
+        }
+        if (d.burning) {
+            float sp = glm::length(d.vel);
+            glm::vec3 back = sp > 1.0f ? -d.vel / sp : glm::vec3(0, 1, 0);
+            float flick = 0.75f + 0.25f * std::sin(now * 37.0f + float(d.id) * 1.7f);
+            float len = (d.chunk >= 0 ? 3.0f : 1.2f) * d.scale * flick;
+            glow.segment(d.pos, d.pos + back * len, min_w(d.pos, (d.chunk >= 0 ? 1.0f : 0.4f) * d.scale, 1.0f),
+                         2.4f * flick, glm::vec3(1.0f, 0.42f, 0.08f));
         }
     }
     // Falling bombs: short smoke wisp.

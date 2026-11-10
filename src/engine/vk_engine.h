@@ -1079,6 +1079,35 @@ private:
     static constexpr float kKillFlashDuration = 0.35f;
     glm::vec3 spacejet_centre_offset_{0.0f};      // gltf bbox-centre, applied per draw
     float     spacejet_base_scale_      = 1.0f;   // gltf-bbox-derived scale
+    // Break-up pieces: the jet's geometry split spatially at load into
+    // wings / nose / fuselage / tail (each keeps its per-material parts).
+    // centroid_raw is in raw glTF space (before centre offset / scale).
+    struct JetChunk {
+        std::vector<SpacejetMesh> parts;
+        glm::vec3 centroid_raw{0.0f};
+        float     drag_vt = 120.0f;    // terminal velocity of this piece (m/s)
+    };
+    std::vector<JetChunk> spacejet_chunks_;
+    // Falling wreckage from mid-air break-ups. chunk >= 0: a JetChunk;
+    // -1: small generic fragment (dark box). Ballistic with quadratic drag,
+    // tumbling, smoking; pops on ground impact.
+    struct JetDebris {
+        int       chunk = -1;
+        glm::vec3 pos{0.0f}, prev_pos{0.0f}, vel{0.0f};
+        glm::mat3 rot{1.0f}, prev_rot{1.0f};
+        glm::vec3 spin_axis{1.0f, 0.0f, 0.0f};
+        float     spin_rate = 0.0f;   // rad/s
+        float     scale = 1.0f;       // jet scale (chunks) / box size m (fragments)
+        float     vt = 100.0f;        // terminal velocity
+        float     t = 0.0f;
+        bool      burning = false;
+        uint32_t  id = 0;
+        std::vector<glm::vec4> trail;   // xyz + birth time (smoke)
+        bool      dead = false;
+    };
+    std::vector<JetDebris> jet_debris_;
+    void spawn_jet_breakup(const SpacejetFlight& f);
+    void tick_jet_debris(float dt);
     float     spacejet_spawn_timer_     = 1.0f;   // first wave after 2s
     uint32_t  spacejet_rng_state_       = 0xC0DEFEEDu;
     uint32_t  spacejet_next_id_         = 0;
