@@ -822,6 +822,10 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         if (cx != veg_rt_cell_x_ || cz != veg_rt_cell_z_ || !veg_rt_valid_) {
             veg_rt_cell_x_ = cx; veg_rt_cell_z_ = cz; veg_rt_valid_ = true;
             collect_veg_rt_instances(eye, 7000, veg_rt_list_);
+            // Different instance set at the same count: a refit (UPDATE) would
+            // stretch the old BVH over unrelated trees -> 50-170 ms ray
+            // traversal spikes in deferred lighting. Force a full build.
+            prev_tlas_n_ = UINT32_MAX;
         }
         sig = mix64(sig, uint64_t(uint32_t(cx)) * 73856093ull ^ uint64_t(uint32_t(cz)) * 19349663ull);
     }
@@ -1090,7 +1094,9 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
 
     // UPDATE mode if instance count is unchanged; BUILD mode otherwise.
-    const bool can_update = (n == prev_tlas_n_) && rt_initialized_;
+    // Refits degrade as dynamic instances (jets, crates) drift; rebuild
+    // from scratch every 30 updates to keep traversal fast.
+    const bool can_update = (n == prev_tlas_n_) && rt_initialized_ && (++tlas_refits_ % 30u) != 0u;
     VkAccelerationStructureBuildGeometryInfoKHR bgi{};
     bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;

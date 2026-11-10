@@ -389,6 +389,21 @@ void VulkanEngine::run(const RunOptions& opts) {
 
         auto now = std::chrono::steady_clock::now();
         float frame_dt = std::chrono::duration<float>(now - last).count();
+        // Hitch diagnostics: section timings, logged for any slow frame.
+        auto hz_mark = [](std::chrono::steady_clock::time_point& t) {
+            auto n = std::chrono::steady_clock::now();
+            float ms = std::chrono::duration<float, std::milli>(n - t).count();
+            t = n;
+            return ms;
+        };
+        auto hz_t = now;
+        float hz_ms[6] = {};
+        const float hz_frame_ms = frame_dt * 1000.0f;
+        if (hz_frame_ms > 28.0f && frame_number_ > 30)
+            log::warnf("[hitch] frame %.1f ms | prev: update %.1f, jets+fx %.1f, ui %.1f, fence %.1f, acquire %.1f, draw %.1f "
+                       "(draw: tlas-wait %.1f, cpu-build %.1f, record+submit %.1f)",
+                       hz_frame_ms, hitch_prev_[0], hitch_prev_[1], hitch_prev_[2], hitch_prev_[3],
+                       hitch_prev_[4], hitch_prev_[5], hitch_draw_[0], hitch_draw_[1], hitch_draw_[2]);
         last = now;
         if (frame_dt > 1.0f / 15.0f) frame_dt = 1.0f / 15.0f;
         if (frame_dt < 1e-6f)        frame_dt = 1.0f / 240.0f;
@@ -948,10 +963,12 @@ void VulkanEngine::run(const RunOptions& opts) {
         if (audio_) {
             audio_->set_listener(player_.eye_position(), player_.forward());
         }
+        hz_ms[0] = hz_mark(hz_t);
         // Spacejet flyovers: advance active flights, spawn next wave.
         tick_spacejet(frame_dt);
         tick_fx(frame_dt);
         maybe_autosave_settings(frame_dt);
+        hz_ms[1] = hz_mark(hz_t);
 
         // ImGui frame begins regardless; we just don't fill it when playing.
         if (imgui_initialized_) {
@@ -997,10 +1014,12 @@ void VulkanEngine::run(const RunOptions& opts) {
                     continue;   // re-enter loop with fresh swapchain
                 }
             }
+            hz_ms[2] = hz_mark(hz_t);
             auto& frame = current_frame();
             QLIKE_VK_CHECK(vkWaitForFences(device_, 1, &frame.render_fence,
                                            VK_TRUE, UINT64_MAX),
                            "vkWaitForFences");
+            hz_ms[3] = hz_mark(hz_t);
             // GPU watchdog: this slot's previous-iteration GPU work is
             // now finished (we just waited on its fence) so its
             // timestamps are safe to read non-blocking. Internally
@@ -1022,7 +1041,10 @@ void VulkanEngine::run(const RunOptions& opts) {
             QLIKE_VK_CHECK(vkResetCommandBuffer(frame.command_buffer, 0),
                            "vkResetCommandBuffer");
 
+            hz_ms[4] = hz_mark(hz_t);
             draw(img_index);
+            hz_ms[5] = hz_mark(hz_t);
+            for (int k = 0; k < 6; ++k) hitch_prev_[k] = hz_ms[k];
 
             ++frame_number_;
             if (opts_.max_frames >= 0 &&

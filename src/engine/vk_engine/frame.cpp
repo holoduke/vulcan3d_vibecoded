@@ -56,6 +56,13 @@ namespace qlike {
 
 void VulkanEngine::draw(uint32_t img_index) {
     auto& frame = current_frame();
+    auto dz_t = std::chrono::steady_clock::now();
+    auto dz_mark = [&]() {
+        auto n = std::chrono::steady_clock::now();
+        float ms = std::chrono::duration<float, std::milli>(n - dz_t).count();
+        dz_t = n;
+        return ms;
+    };
 
     // Snapshot every dynamic body's world matrix + AABB ONCE for this frame.
     // rebuild_tlas (below) and render_world (in the rendering pass) both read
@@ -76,9 +83,11 @@ void VulkanEngine::draw(uint32_t img_index) {
     {
         VkFence prev = frames_[(frame_number_ + kFrameOverlap - 1) %
                                kFrameOverlap].render_fence;
+        dz_mark();
         vk_check(vkWaitForFences(device_, 1, &prev, VK_TRUE, UINT64_MAX),
                  "prev-frame fence (TLAS hazard)");
     }
+    hitch_draw_[0] = dz_mark();
     // Scene UBO is a single host-visible buffer read by both frame slots.
     // Only now (both slots' GPU work finished) is it safe to overwrite;
     // writing it earlier in the main loop changed camera/sun data under
@@ -129,6 +138,7 @@ void VulkanEngine::draw(uint32_t img_index) {
                  "vkQueueSubmit2 compute (TLAS build)");
     }
 
+    hitch_draw_[1] = dz_mark();
     auto begin = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
     vk_check(vkBeginCommandBuffer(frame.command_buffer, &begin), "vkBeginCommandBuffer");
     // GPU watchdog: reset this slot's queries and write the BEGIN
@@ -1071,6 +1081,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     // Route through FSR3 SwapChain proxy fn when active — that path
     // internally paces real + generated frames into the present chain.
     VkResult pres = queue_present_image(img_index, render_semaphores_[img_index]);
+    hitch_draw_[2] = dz_mark();
     if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) {
         resize_requested_ = true;
     } else if (pres != VK_SUCCESS) {

@@ -1282,6 +1282,9 @@ private:
     VmaAllocation veg_fade_alloc_ = nullptr;
     VkShaderModule veg_depth_frag_module_ = VK_NULL_HANDLE, veg_hiz_module_ = VK_NULL_HANDLE;
     glm::mat4     veg_prev_vp_{1.0f};
+    uint32_t tlas_refits_ = 0;
+    float hitch_prev_[6] = {};   // main-loop section ms of the previous frame
+    float hitch_draw_[3] = {};   // draw(): tlas fence wait, cpu build, record+submit
     VkImage       veg_hiz_image_ = VK_NULL_HANDLE;
     VmaAllocation veg_hiz_alloc_ = nullptr;
     VkImageView   veg_hiz_view_ = VK_NULL_HANDLE;
