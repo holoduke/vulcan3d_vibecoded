@@ -262,6 +262,8 @@ void VulkanEngine::init_world() {
         }
         // Procedural trees, bushes, rock formations: GPU-instanced with LOD
         // over the whole map (vegetation.cpp). Adds trunk / rock colliders.
+        place_aa_vehicles(hm);           // before vegetation (keep-out)
+        init_aa_meshes();
         init_vegetation_data(hm);
         init_castle_meshes();
         // Lift player's default spawn point above the new ground.

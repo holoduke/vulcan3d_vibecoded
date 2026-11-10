@@ -68,7 +68,9 @@ void main() {
         float v = vUv.y;
         float core = exp(-v * v * 26.0);
         float halo = exp(-v * v * 3.0);
-        vec3  c = vTint * (halo * 1.4) + vec3(1.0, 0.95, 1.0) * core * 3.2;
+        // Strongly saturated tints (red AA tracers) keep a coloured core.
+        vec3  corec = (vTint.g < 0.1) ? vec3(1.0, 0.35, 0.25) : vec3(1.0, 0.95, 1.0);
+        vec3  c = vTint * (halo * 1.4) + corec * core * 3.2;
         outColor = vec4(c * vUv.x * inten, 0.0);
     } else if (kind == 3) {
         // Cloth flag: flat normal from screen derivatives, two-sided
@@ -106,7 +108,7 @@ void main() {
     } else {
         // Radial flash billboard (uv in [-1,1]^2), additive.
         float r2 = dot(vUv, vUv);
-        float f = exp(-r2 * 5.0) + 0.35 * exp(-r2 * 1.4);
+        float f = (exp(-r2 * 5.0) + 0.35 * exp(-r2 * 1.4)) * (1.0 - smoothstep(0.55, 1.0, sqrt(r2)));
         outColor = vec4(vTint * f * inten, 0.0);
     }
 }

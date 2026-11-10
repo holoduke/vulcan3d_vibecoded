@@ -330,6 +330,7 @@ void VulkanEngine::render_sun_shadow_pass(VkCommandBuffer cmd) {
     }
     if (!castle_meshes_.empty()) {
         draw_castle_meshes(cmd, vp, vp, light_frustum, true, sun_shadow_pipeline_layout_);
+        draw_aa(cmd, vp, vp, light_frustum, true, sun_shadow_pipeline_layout_);
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &cube_off);
         vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
     }

@@ -46,11 +46,13 @@ void VulkanEngine::init_castle_meshes() {
     log::infof("[castle] %zu static mesh parts, %zu tris", castle_meshes_.size(), total_tris);
 }
 
-void VulkanEngine::build_castle_mesh_blas() {
+void VulkanEngine::build_castle_mesh_blas() { build_mesh_part_blas(castle_meshes_); }
+
+void VulkanEngine::build_mesh_part_blas(std::vector<CastleMeshGpu>& parts) {
     const uint32_t shared_families[2] = { graphics_queue_family_, compute_queue_family_ };
     const VkSharingMode rt_sharing = compute_queue_distinct_
         ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
-    for (auto& g : castle_meshes_) {
+    for (auto& g : parts) {
         if (g.blas) continue;
         const uint32_t tri_count = g.mesh.index_count / 3;
         VkAccelerationStructureGeometryTrianglesDataKHR tri{};

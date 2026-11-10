@@ -36,6 +36,8 @@ struct WorldPropParams {
     int   tree_attempts   = 3000000;
     int   max_bushes      = 30000;
     int   max_formations  = 650;
+    // Circles (xz, radius) kept free of trees / rocks (AA vehicles etc.).
+    std::vector<glm::vec3> keep_out;
     int   max_boulders    = 1800;
     int   bush_attempts   = 500000;
 };

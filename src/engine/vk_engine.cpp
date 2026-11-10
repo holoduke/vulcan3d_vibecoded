@@ -968,6 +968,7 @@ void VulkanEngine::run(const RunOptions& opts) {
         // Spacejet flyovers: advance active flights, spawn next wave.
         tick_spacejet(frame_dt);
         tick_fx(frame_dt);
+        tick_aa(frame_dt);
         maybe_autosave_settings(frame_dt);
         hz_ms[1] = hz_mark(hz_t);
 
@@ -1144,6 +1145,7 @@ void VulkanEngine::shutdown() {
     // owns those bodies. Otherwise the renderer's deferred destruction could
     // deref freed Jolt body data.
     guarded("destroy_veg",    [&]{ destroy_vegetation(); });
+    guarded("destroy_aa",     [&]{ destroy_aa(); });
     guarded("destroy_clutter_shadow", [&]{ destroy_clutter_shadow(); });
     guarded("destroy_castle", [&]{ destroy_castle_meshes(); });
     guarded("destroy_rt",     [&]{ destroy_rt(); });

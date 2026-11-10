@@ -437,6 +437,21 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
                        { 0.0f, near_k(head) }, glm::vec3(1.0f, 0.25f, 0.75f));
         }
     }
+    // Anti-aircraft tracers: red glowing streaks (~15 m) + muzzle flashes.
+    for (const auto& r : aa_rounds_) {
+        glm::vec3 d = glm::normalize(r.vel);
+        float len = std::min(16.0f, glm::length(r.vel) * 0.022f);
+        glm::vec3 tail = r.pos - d * len;
+        glow.strip({ tail, r.pos }, { min_w(tail, 0.10f, 1.3f), min_w(r.pos, 0.16f, 1.8f) },
+                   { 0.15f, 1.4f }, glm::vec3(1.0f, 0.06f, 0.03f));
+    }
+    for (const auto& v : aa_) {
+        if (v.flash_t <= 0.0f) continue;
+        glm::mat4 m[4];
+        aa_part_models(v, false, m);
+        glm::vec3 mz = glm::vec3(m[2] * glm::vec4(aa_muzzle_[v.flash_barrel], 1.0f));
+        flash.billboard(mz, 1.1f, cam_right, cam_up, glm::vec3(1.0f, 0.55f, 0.25f) * 3.0f);
+    }
     for (const auto& t : tracer_segs_) {
         float fade = 1.0f - t.age / kTracerFade;
         if (fade <= 0.0f) continue;

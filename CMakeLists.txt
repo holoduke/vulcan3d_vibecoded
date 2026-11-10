@@ -286,6 +286,7 @@ add_library(qlike_engine STATIC
     src/engine/vk_engine/fx.cpp
     src/engine/vk_engine/vegetation.cpp
     src/engine/vk_engine/clutter_shadow.cpp
+    src/engine/vk_engine/aa.cpp
     src/engine/vk_engine/post.cpp
     src/engine/vk_engine/bloom.cpp
     src/engine/vk_engine/taa.cpp
@@ -323,6 +324,7 @@ add_library(qlike_engine STATIC
     src/engine/scatter.cpp
     src/engine/road.cpp
     src/engine/world_props.cpp
+    src/engine/aa_vehicle.cpp
 )
 target_include_directories(qlike_engine PUBLIC src)
 target_include_directories(qlike_engine PRIVATE

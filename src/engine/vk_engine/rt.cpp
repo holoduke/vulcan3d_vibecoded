@@ -156,6 +156,7 @@ void VulkanEngine::init_rt() {
     bake_merged_static_blas();
     build_castle_mesh_blas();
     build_veg_blas();
+    build_mesh_part_blas(aa_parts_);
 
     // --- Allocate TLAS storage + scratch + instance buffer (rebuilt each frame) ---
     // Sized for the FIFO box cap (200) + ~32 static brushes/lanterns +
@@ -829,6 +830,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         }
         sig = mix64(sig, uint64_t(uint32_t(cx)) * 73856093ull ^ uint64_t(uint32_t(cz)) * 19349663ull);
     }
+    for (const auto& v : aa_) { sig = mix64(sig, hash_f(v.turret_yaw)); sig = mix64(sig, hash_f(v.gun_pitch)); }
     if (tlas_first_build_done_ && sig == prev_dyn_signature_) {
         return;   // tlas_ contents still valid — skip build + signal
     }
@@ -1014,6 +1016,21 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
                        false, blas_device_address_, door_tex);
     }
 
+    // Anti-aircraft vehicles (hull, turret, guns; radar too small to matter).
+    for (const auto& v : aa_) {
+        glm::mat4 m[4], pm[4];
+        aa_part_models(v, false, m);
+        aa_part_models(v, true, pm);
+        for (size_t i = 0; i < aa_parts_.size(); ++i) {
+            const auto& g = aa_parts_[i];
+            const int p = aa_part_kind_[i];
+            if (!g.blas_addr || p == 3) continue;
+            glm::vec4 tex = (tex_on && g.tex_albedo >= 0)
+                ? glm::vec4(float(g.tex_albedo), float(g.tex_normal), 0.6f, 0.0f) : kNoTex;
+            write_instance(m[p], pm[p], glm::vec4(tex_on ? g.tint : g.fallback, 1.0f),
+                           glm::vec3(0.0f), false, g.blas_addr, tex);
+        }
+    }
     // Vegetation / rocks near the camera (per-archetype LOD1 BLAS).
     for (uint32_t ve : veg_rt_list_) {
         const uint32_t vi = ve & 0x3FFFFFFFu, lvl = ve >> 30;

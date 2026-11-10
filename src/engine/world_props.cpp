@@ -457,6 +457,11 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
         if (x < road->bb_min.x || x > road->bb_max.x || z < road->bb_min.y || z > road->bb_max.y) return 1e9f;
         return road->distance(x, z);
     };
+    auto excluded = [&](float x, float z) {
+        for (const auto& k : P.keep_out)
+            if ((x - k.x) * (x - k.x) + (z - k.y) * (z - k.y) < k.z * k.z) return true;
+        return false;
+    };
     const float road_clear = road ? road->half_width + road->shoulder : 0.0f;
     // Forest density 0..1 (1 = closed forest). Large-scale noise with high
     // contrast (thick woods / open meadows / thin edges) plus hand-placed
@@ -518,7 +523,7 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
     for (int a = 0; a < 60000 && st.formations < P.max_formations; ++a) {
         float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
         if (std::sqrt(x * x + z * z) < P.castle_clear) continue;
-        if (road_d(x, z) < road_clear + 6.0f) continue;
+        if (excluded(x, z) || road_d(x, z) < road_clear + 6.0f) continue;
         float h = h_at(x, z);
         if (h < P.water_level + 1.0f) continue;
         float slope = 1.0f - ny_at(x, z);
@@ -541,7 +546,7 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
     for (int a = 0; a < 40000 && st.boulders < P.max_boulders; ++a) {
         float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
         if (std::sqrt(x * x + z * z) < P.castle_clear) continue;
-        if (road_d(x, z) < road_clear + 3.0f) continue;
+        if (excluded(x, z) || road_d(x, z) < road_clear + 3.0f) continue;
         float h = h_at(x, z);
         if (h < P.water_level + 0.8f || h > P.tree_line + 30.0f) continue;
         if (ny_at(x, z) < 0.8f) continue;
@@ -554,7 +559,7 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
     for (int a = 0; a < P.tree_attempts && int(out.size()) < P.max_trees; ++a) {
         float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
         if (std::sqrt(x * x + z * z) < P.castle_clear) continue;
-        if (road_d(x, z) < road_clear + 4.5f) continue;
+        if (excluded(x, z) || road_d(x, z) < road_clear + 4.5f) continue;
         float h = h_at(x, z);
         if (h < std::max(P.grass_band_lo, P.water_level + 2.0f) || h > P.tree_line) continue;
         if (!dry(x, z, 2.0f)) continue;
@@ -581,7 +586,7 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
     for (int a = 0; a < P.bush_attempts && bushes < P.max_bushes; ++a) {
         float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
         if (std::sqrt(x * x + z * z) < P.castle_clear - 6.0f) continue;
-        if (road_d(x, z) < road_clear + 1.5f) continue;
+        if (excluded(x, z) || road_d(x, z) < road_clear + 1.5f) continue;
         float h = h_at(x, z);
         if (h < P.water_level + 1.0f || h > P.tree_line + 8.0f) continue;
         if (ny_at(x, z) < 0.75f) continue;

@@ -25,6 +25,7 @@
 #include "engine/scatter.h"
 #include "engine/road.h"
 #include "engine/world_props.h"
+#include "engine/aa_vehicle.h"
 #include "engine/texture.h"   // for BackgroundDecodeHandle
 #include "engine/vk_engine/settings_types.h"  // RtSettings / GameSettings
 #include "game/level.h"
@@ -959,6 +960,7 @@ private:
         bool      destroying   = false;
         float     destroy_t    = 0.0f;
         bool      dead         = false;     // remove next tick
+        int       aa_hits      = 0;         // anti-aircraft rounds taken
     };
     // Free-falling bomb dropped by a jet near the castle.
     struct Bomb {
@@ -1030,7 +1032,7 @@ private:
     static constexpr float kKillFlashDuration = 0.35f;
     glm::vec3 spacejet_centre_offset_{0.0f};      // gltf bbox-centre, applied per draw
     float     spacejet_base_scale_      = 1.0f;   // gltf-bbox-derived scale
-    float     spacejet_spawn_timer_     = 2.0f;   // first wave after 2s
+    float     spacejet_spawn_timer_     = 1.0f;   // first wave after 2s
     uint32_t  spacejet_rng_state_       = 0xC0DEFEEDu;
     uint32_t  spacejet_next_id_         = 0;
     void init_spacejet();
@@ -1249,6 +1251,29 @@ private:
         VkDeviceAddress blas_addr = 0;
     };
     std::vector<CastleMeshGpu> castle_meshes_;
+    // Anti-aircraft vehicles (vk_engine/aa.cpp, model in engine/aa_vehicle.cpp).
+    struct AaVehicle {
+        glm::vec3 pos{0.0f};
+        float body_yaw = 0.0f, turret_yaw = 0.0f, gun_pitch = 0.0f, radar_spin = 0.0f;
+        float prev_turret_yaw = 0.0f, prev_gun_pitch = 0.0f, prev_radar_spin = 0.0f;
+        float cooldown = 0.0f, burst = 0.0f, fire_acc = 0.0f, flash_t = 0.0f;
+        int   barrel = 0, flash_barrel = 0;
+    };
+    struct AaRound { glm::vec3 pos{0.0f}, prev{0.0f}, vel{0.0f}; float t = 0.0f; bool dead = false; };
+    std::vector<AaVehicle> aa_;
+    std::vector<AaRound>   aa_rounds_;
+    std::vector<CastleMeshGpu> aa_parts_;
+    std::vector<int>       aa_part_kind_;
+    glm::vec3 aa_model_pivots_[3]{};
+    glm::vec3 aa_muzzle_[2]{};
+    uint32_t  aa_rng_ = 0xF1A7u;
+    void place_aa_vehicles(const Heightmap& hm);
+    void init_aa_meshes();
+    void destroy_aa();
+    void tick_aa(float dt);
+    void aa_part_models(const AaVehicle& v, bool prev, glm::mat4 out[4]) const;
+    void draw_aa(VkCommandBuffer cmd, const glm::mat4& vp, const glm::mat4& prev_vp,
+                 const Frustum& fr, bool depth_only, VkPipelineLayout shadow_layout);
     // GPU-driven vegetation + rocks (vk_engine/vegetation.cpp).
     std::vector<VegArchetype> veg_arch_;
     std::vector<VegInstance>  veg_inst_cpu_;
@@ -1322,6 +1347,7 @@ private:
     void collect_veg_rt_instances(glm::vec3 eye, uint32_t cap, std::vector<uint32_t>& out) const;
     void init_castle_meshes();       // GPU upload (init_world)
     void build_castle_mesh_blas();   // BLAS per part (init_rt)
+    void build_mesh_part_blas(std::vector<CastleMeshGpu>& parts);
     void destroy_castle_meshes();
     // Draws every visible castle mesh with the bound pipeline. `depth_only`
     // pushes the depth-prepass constants; `shadow_layout` != null pushes

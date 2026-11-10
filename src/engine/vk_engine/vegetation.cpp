@@ -55,6 +55,7 @@ void VulkanEngine::init_vegetation_data(const Heightmap& hm) {
     WorldPropParams wp{};
     wp.water_level  = rt_.water_level;
     wp.rock_band_lo = rt_.terrain_h_dirt_rock_start;
+    for (const auto& a : aa_) wp.keep_out.push_back(glm::vec3(a.pos.x, a.pos.z, 9.0f));
     veg_arch_ = build_veg_archetypes(0xF0E57);
     std::vector<collision::AABB> cols;
     WorldPropStats st{};

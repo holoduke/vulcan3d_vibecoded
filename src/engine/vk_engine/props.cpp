@@ -278,9 +278,9 @@ void VulkanEngine::tick_spacejet(float dt) {
     int alive = 0;
     for (const auto& f : spacejet_flights_) if (!f.dead && !f.destroying) ++alive;
     spacejet_spawn_timer_ -= dt;
-    if (spacejet_spawn_timer_ <= 0.0f && alive < 5) {
-        spacejet_spawn_timer_ = frand_range(R, 9.0f, 18.0f);
-        int wave = 1 + int(xorshift32(R) % 3u);              // 1..3 jets
+    if (spacejet_spawn_timer_ <= 0.0f && alive < 14) {
+        spacejet_spawn_timer_ = frand_range(R, 3.5f, 8.0f);
+        int wave = 2 + int(xorshift32(R) % 3u);              // 2..4 jets
         float bearing = frand(R) * 6.2831853f;
         glm::vec3 from(std::cos(bearing), 0.0f, std::sin(bearing));
         SpacejetFlight lead{};
@@ -297,7 +297,7 @@ void VulkanEngine::tick_spacejet(float dt) {
         lead.id = ++spacejet_next_id_;
         lead.prev_pos = lead.pos; lead.prev_fwd = lead.fwd; lead.prev_up = lead.up;
         spacejet_flights_.push_back(lead);
-        const glm::vec3 slots[2] = { {-20.0f, -2.0f, -16.0f}, {20.0f, -3.0f, -16.0f} };
+        const glm::vec3 slots[3] = { {-20.0f, -2.0f, -16.0f}, {20.0f, -3.0f, -16.0f}, {0.0f, -5.0f, -34.0f} };
         for (int i = 1; i < wave; ++i) {
             SpacejetFlight w = lead;
             w.trail.clear();
