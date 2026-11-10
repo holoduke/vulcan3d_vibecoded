@@ -47,6 +47,7 @@ void main() {
     VegInstance I = inst[i];
     uint a = uint(I.rot_arch_phase.y + 0.5);
     float s = I.pos_scale.w;
+    if (s <= 0.0) return;   // destroyed by a blast
     float ysq = I.rot_arch_phase.w > 0.0 ? I.rot_arch_phase.w : 1.0;
     vec4 ai = arch[a];
     vec3 c = I.pos_scale.xyz + vec3(0.0, ai.y * s * ysq, 0.0);

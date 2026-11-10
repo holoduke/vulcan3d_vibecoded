@@ -750,7 +750,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             };
             auto frag_model = [&](glm::vec3 pos, const glm::mat3& r) {
                 return glm::translate(glm::mat4(1.0f), pos) * glm::mat4(r) *
-                       glm::scale(glm::mat4(1.0f), glm::vec3(d.scale, d.scale * 0.35f, d.scale * 0.8f));
+                       glm::scale(glm::mat4(1.0f), d.dims * d.scale);
             };
             const float burn = d.burning ? 0.8f + 0.2f * std::sin(d.t * 23.0f + float(d.id)) : 0.0f;
             PushConstants pc{};
@@ -772,7 +772,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                 vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
                 const glm::mat4 m = frag_model(d.pos, d.rot), pm = frag_model(d.prev_pos, d.prev_rot);
                 pc.mvp = vp * m; pc.model = m; pc.prev_mvp = prev_vp * pm;
-                pc.color = glm::vec4(0.12f, 0.11f, 0.10f, 1.0f);
+                pc.color = glm::vec4(d.color, 1.0f);
                 vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages, 0, sizeof(PushConstants), &pc);
                 vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
             }

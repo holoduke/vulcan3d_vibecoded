@@ -20,6 +20,7 @@
 #include "engine/log.h"
 #include "engine/vk_initializers.h"
 #include "engine/vk_pipelines.h"
+#include "engine/physics_world.h"
 
 #include <algorithm>
 #include <chrono>
@@ -67,6 +68,7 @@ void VulkanEngine::init_vegetation_data(const Heightmap& hm) {
                std::chrono::duration<double, std::milli>(tv1 - tv0).count(),
                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tv1).count());
     veg_col_begin_ = world_.aabbs.size();
+    veg_col_count_ = cols.size();
     for (const auto& a : cols) world_.aabbs.push_back(a);
 
     // Merge every archetype's LODs into one VB/IB; build the indirect
@@ -128,6 +130,7 @@ void VulkanEngine::init_vegetation_data(const Heightmap& hm) {
     veg_inst_buf_ = make_buffer(allocator_, sizeof(VegInstance) * std::max<size_t>(veg_count_, 1), ssbo,
                                 true, veg_inst_alloc_, &mp);
     if (mp && veg_count_) std::memcpy(mp, veg_inst_cpu_.data(), sizeof(VegInstance) * veg_count_);
+    veg_inst_mapped_ = mp;   // blast_vegetation() zeroes destroyed instances here
     vmaFlushAllocation(allocator_, veg_inst_alloc_, 0, VK_WHOLE_SIZE);
     veg_vis_buf_ = make_buffer(allocator_, sizeof(uint32_t) * veg_vis_capacity_, ssbo, false,
                                veg_vis_alloc_, nullptr);
@@ -425,6 +428,7 @@ void VulkanEngine::destroy_vegetation() {
     veg_pool_ = VK_NULL_HANDLE; veg_set_layout_ = VK_NULL_HANDLE;
     auto kill = [&](VkBuffer& b, VmaAllocation& a) { if (b) vmaDestroyBuffer(allocator_, b, a); b = VK_NULL_HANDLE; };
     kill(veg_inst_buf_, veg_inst_alloc_);
+    veg_inst_mapped_ = nullptr;
     kill(veg_vis_buf_, veg_vis_alloc_);
     kill(veg_ind_buf_, veg_ind_alloc_);
     kill(veg_arch_buf_, veg_arch_alloc_);
@@ -440,6 +444,7 @@ void VulkanEngine::collect_veg_rt_instances(glm::vec3 eye, uint32_t cap,
     std::vector<std::pair<float, uint32_t>> cand;
     for (uint32_t i = 0; i < veg_count_; ++i) {
         const auto& v = veg_inst_cpu_[i];
+        if (v.pos_scale.w <= 0.0f) continue;   // destroyed (blast_vegetation)
         float dx = v.pos_scale.x - eye.x, dz = v.pos_scale.z - eye.z;
         float d2 = dx * dx + dz * dz;
         if (d2 < R * R) cand.push_back({ d2, i });
@@ -641,6 +646,77 @@ void VulkanEngine::build_veg_hiz(VkCommandBuffer cmd) {
         sw = dw; sh = dh;
     }
     veg_hiz_ready_ = true;
+}
+
+// Blast damage to the forest. Every tree / bush whose base lies inside the
+// blast radius is destroyed: hidden (instance scale 0 in the CPU copy and
+// the host-mapped GPU buffer, so culling, impostors and the RT list drop
+// it), its trunk collider removed from the Jolt compound, and its trunk
+// thrown out as wood splinters - pushed away from the blast, harder the
+// closer the tree was, some burning / smoking. The foliage simply goes up
+// in the explosion (no green debris). Rocks are left alone.
+void VulkanEngine::blast_vegetation(glm::vec3 pos, float radius) {
+    if (veg_inst_cpu_.empty() || radius <= 0.5f) return;
+    auto& R = spacejet_rng_state_;
+    std::vector<glm::vec2> trunks;
+    int n_trees = 0;
+    static uint32_t next_id = 0x40000000u;
+    for (size_t i = 0; i < veg_inst_cpu_.size(); ++i) {
+        VegInstance& v = veg_inst_cpu_[i];
+        const float s = v.pos_scale.w;
+        if (s <= 0.0f) continue;
+        const glm::vec3 p(v.pos_scale);
+        const float dx = p.x - pos.x, dz = p.z - pos.z;
+        const float d2 = dx * dx + dz * dz;
+        const int a = int(v.rot_arch_phase.y + 0.5f);
+        if (a < 0 || size_t(a) >= veg_arch_.size()) continue;
+        const int sp = veg_arch_[size_t(a)].species;
+        if (sp == 3) continue;                                    // rocks survive
+        const float r_eff = radius * (sp == 2 ? 1.15f : 1.0f);   // bushes go a bit further out
+        if (d2 > r_eff * r_eff || std::abs(p.y - pos.y) > 25.0f) continue;
+
+        v.pos_scale.w = 0.0f;
+        if (veg_inst_mapped_)
+            static_cast<VegInstance*>(veg_inst_mapped_)[i].pos_scale.w = 0.0f;
+        trunks.push_back(glm::vec2(p.x, p.z));
+        ++n_trees;
+
+        // Splinters: the trunk breaks into pieces along its height.
+        const float d = std::sqrt(d2);
+        const float h = veg_arch_[size_t(a)].height * s * (v.rot_arch_phase.w > 0.0f ? v.rot_arch_phase.w : 1.0f);
+        const float closeness = 1.0f - glm::clamp(d / r_eff, 0.0f, 1.0f);
+        glm::vec3 away = glm::vec3(dx, 0.0f, dz);
+        away = glm::length(away) > 0.1f ? glm::normalize(away) : glm::vec3(1, 0, 0);
+        const int pieces = sp == 2 ? 2 : 4 + int(xorshift32(R) % 4u);
+        for (int k = 0; k < pieces; ++k) {
+            JetDebris w{};
+            w.chunk = -1;
+            w.pos = w.prev_pos = p + glm::vec3(0.0f, h * frand_range(R, 0.05f, 0.55f), 0.0f);
+            glm::vec3 dir = glm::normalize(away + glm::vec3(frand_range(R, -0.5f, 0.5f),
+                                                            frand_range(R, 0.4f, 1.1f),
+                                                            frand_range(R, -0.5f, 0.5f)));
+            w.vel = dir * frand_range(R, 12.0f, 38.0f) * (0.45f + closeness);
+            glm::vec3 ax(frand_range(R, -1, 1), frand_range(R, -1, 1), frand_range(R, -1, 1));
+            w.spin_axis = glm::normalize(ax + glm::vec3(1e-3f));
+            w.spin_rate = frand_range(R, 3.0f, 10.0f);
+            w.rot = w.prev_rot = glm::mat3(glm::rotate(glm::mat4(1.0f), frand_range(R, 0.0f, 6.28f), w.spin_axis));
+            const float girth = (sp == 2 ? 0.10f : 0.18f) * std::max(s, 0.5f);
+            w.scale = 1.0f;
+            w.dims = glm::vec3(girth * frand_range(R, 0.6f, 1.2f), girth * frand_range(R, 0.5f, 1.0f),
+                               (sp == 2 ? 0.5f : 1.0f) * frand_range(R, 0.7f, 2.6f));
+            w.color = glm::vec3(0.30f, 0.21f, 0.13f) * frand_range(R, 0.6f, 1.1f);   // raw / charred wood
+            w.vt = frand_range(R, 30.0f, 55.0f);
+            w.burning = (xorshift32(R) % 4u) == 0u;
+            w.id = next_id++;
+            jet_debris_.push_back(std::move(w));
+        }
+    }
+    if (n_trees == 0) return;
+    if (jet_debris_.size() > 400) jet_debris_.erase(jet_debris_.begin(), jet_debris_.begin() + (jet_debris_.size() - 400));
+    size_t cols = physics_ ? physics_->remove_compound_boxes_at(trunks.data(), trunks.size(), 0.8f) : 0;
+    veg_rt_valid_ = false;          // re-pick the RT tree set (destroyed ones drop out)
+    log::infof("[veg] blast at (%.0f, %.0f, %.0f) r %.0f m: %d trees/bushes destroyed, %zu colliders removed",
+               pos.x, pos.y, pos.z, radius, n_trees, cols);
 }
 
 } // namespace qlike

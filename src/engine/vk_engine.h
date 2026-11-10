@@ -1098,6 +1098,8 @@ private:
         glm::vec3 spin_axis{1.0f, 0.0f, 0.0f};
         float     spin_rate = 0.0f;   // rad/s
         float     scale = 1.0f;       // jet scale (chunks) / box size m (fragments)
+        glm::vec3 dims{1.0f, 0.35f, 0.8f};          // fragment box proportions (x scale)
+        glm::vec3 color{0.12f, 0.11f, 0.10f};      // fragment colour
         float     vt = 100.0f;        // terminal velocity
         float     t = 0.0f;
         bool      burning = false;
@@ -1108,6 +1110,12 @@ private:
     std::vector<JetDebris> jet_debris_;
     void spawn_jet_breakup(const SpacejetFlight& f);
     void tick_jet_debris(float dt);
+    // Trees / bushes inside a ground blast are destroyed: hidden (scale 0
+    // in the instance buffer), trunk collider disabled, RT list refreshed,
+    // and the trunk thrown out as burning / smoking wood splinters.
+    void blast_vegetation(glm::vec3 pos, float radius);
+    void* veg_inst_mapped_ = nullptr;
+    size_t veg_col_count_ = 0;
     float     spacejet_spawn_timer_     = 1.0f;   // first wave after 2s
     uint32_t  spacejet_rng_state_       = 0xC0DEFEEDu;
     uint32_t  spacejet_next_id_         = 0;

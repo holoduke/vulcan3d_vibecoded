@@ -206,6 +206,11 @@ struct PhysicsWorld::Impl {
 
     // Single static body for the destructible voxel shape (rebuilt on carve).
     JPH::BodyID voxel_body;   // invalid until set_voxel_collision runs
+    // Per-cell static box compounds (vegetation trunks + rocks), kept so a
+    // cell can be rebuilt when blasts destroy trees in it.
+    struct BoxCell { JPH::BodyID body; std::vector<PhysicsWorld::StaticBox> boxes; };
+    std::map<std::pair<int, int>, BoxCell> box_cells;
+    float box_cell = 128.0f;
     // Hash of the last voxel-collision geometry pushed. Lets us skip the
     // whole RemoveBody+DestroyBody+rebuild + AddShape×N storm when the
     // greedy decomposition produced the same boxes (e.g. carves outside
@@ -347,6 +352,11 @@ void PhysicsWorld::add_static_box_compounds(const StaticBox* boxes, size_t count
     for (size_t i = 0; i < count; ++i)
         cells[{ int(std::floor(boxes[i].center.x / cell)), int(std::floor(boxes[i].center.z / cell)) }].push_back(i);
     std::vector<JPH::BodyID> ids;
+    impl_->box_cell = cell;
+    for (const auto& kv : cells) {
+        auto& bc = impl_->box_cells[kv.first];
+        for (size_t i : kv.second) bc.boxes.push_back(boxes[i]);
+    }
     for (const auto& kv : cells) {
         glm::vec3 org(0.0f);
         for (size_t i : kv.second) org += boxes[i].center;
@@ -363,12 +373,56 @@ void PhysicsWorld::add_static_box_compounds(const StaticBox* boxes, size_t count
         if (sr.HasError()) { log::errorf("[jolt] compound: %s", sr.GetError().c_str()); continue; }
         JPH::BodyCreationSettings bcs(sr.Get(), JPH::RVec3(org.x, org.y, org.z), JPH::Quat::sIdentity(),
                                       JPH::EMotionType::Static, Layers::NON_MOVING);
-        if (JPH::Body* body = bi.CreateBody(bcs)) ids.push_back(body->GetID());
+        if (JPH::Body* body = bi.CreateBody(bcs)) {
+            ids.push_back(body->GetID());
+            impl_->box_cells[kv.first].body = body->GetID();
+        }
     }
     if (ids.empty()) return;
     JPH::BodyInterface::AddState st = bi.AddBodiesPrepare(ids.data(), int(ids.size()));
     bi.AddBodiesFinalize(ids.data(), int(ids.size()), st, JPH::EActivation::DontActivate);
     log::infof("[jolt] %zu static boxes merged into %zu compound bodies", count, ids.size());
+}
+
+size_t PhysicsWorld::remove_compound_boxes_at(const glm::vec2* xz, size_t n, float tol) {
+    if (n == 0 || impl_->box_cells.empty()) return 0;
+    JPH::BodyInterface& bi = impl_->system.GetBodyInterface();
+    const float cell = impl_->box_cell;
+    size_t removed = 0;
+    std::map<std::pair<int, int>, bool> dirty;
+    for (size_t k = 0; k < n; ++k) {
+        auto key = std::make_pair(int(std::floor(xz[k].x / cell)), int(std::floor(xz[k].y / cell)));
+        auto it = impl_->box_cells.find(key);
+        if (it == impl_->box_cells.end()) continue;
+        auto& v = it->second.boxes;
+        const size_t before = v.size();
+        v.erase(std::remove_if(v.begin(), v.end(), [&](const StaticBox& b) {
+                    float dx = b.center.x - xz[k].x, dz = b.center.z - xz[k].y;
+                    return dx * dx + dz * dz < tol * tol;
+                }), v.end());
+        if (v.size() != before) { removed += before - v.size(); dirty[key] = true; }
+    }
+    for (const auto& kv : dirty) {
+        auto& bc = impl_->box_cells[kv.first];
+        if (!bc.body.IsInvalid()) { bi.RemoveBody(bc.body); bi.DestroyBody(bc.body); bc.body = JPH::BodyID(); }
+        if (bc.boxes.empty()) continue;
+        glm::vec3 org(0.0f);
+        for (const auto& b : bc.boxes) org += b.center;
+        org /= float(bc.boxes.size());
+        JPH::StaticCompoundShapeSettings cs;
+        for (const auto& b : bc.boxes) {
+            float cr = calc_box_convex_radius(std::min({ b.half_extents.x, b.half_extents.y, b.half_extents.z }));
+            glm::vec3 p = b.center - org;
+            cs.AddShape(JPH::Vec3(p.x, p.y, p.z), JPH::Quat::sIdentity(),
+                        new JPH::BoxShapeSettings(JPH::Vec3(b.half_extents.x, b.half_extents.y, b.half_extents.z), cr));
+        }
+        JPH::ShapeSettings::ShapeResult sr = cs.Create();
+        if (sr.HasError()) continue;
+        JPH::BodyCreationSettings bcs(sr.Get(), JPH::RVec3(org.x, org.y, org.z), JPH::Quat::sIdentity(),
+                                      JPH::EMotionType::Static, Layers::NON_MOVING);
+        bc.body = bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+    }
+    return removed;
 }
 
 void PhysicsWorld::set_voxel_collision(const StaticBox* boxes, size_t count) {

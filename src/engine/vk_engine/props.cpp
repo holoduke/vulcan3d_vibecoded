@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <future>
@@ -270,6 +271,14 @@ glm::vec3 rotate_axis(const glm::vec3& v, const glm::vec3& axis, float a) {
 }  // namespace
 
 void VulkanEngine::tick_spacejet(float dt) {
+    // Test hook: QLIKE_TEST_BLAST=x,z,frame fires a crash-sized ground blast.
+    {
+        static float bx = 0.0f, bz = 0.0f; static int bf = -1;
+        static bool init = false;
+        if (!init) { init = true; if (const char* e = std::getenv("QLIKE_TEST_BLAST")) std::sscanf(e, "%f,%f,%d", &bx, &bz, &bf); }
+        if (bf >= 0 && int(frame_number_) == bf)
+            spawn_explosion(glm::vec3(bx, sample_terrain_height(bx, bz), bz), 2.3f, true);
+    }
     if (last_target_hud_ttl_ > 0.0f) last_target_hud_ttl_ -= dt;
     if (kill_flash_t_       > 0.0f) kill_flash_t_       -= dt;
     if (spacejet_meshes_.empty() || dt <= 0.0f) return;
