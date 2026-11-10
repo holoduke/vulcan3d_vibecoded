@@ -1,0 +1,98 @@
+#version 460
+// Froxel volumetric fog (Wronski 2014, Hillaire / Frostbite 2015).
+// 160x90x64 camera-aligned froxels, quadratic depth slices up to
+// params.w metres. pc.sun.w selects the pass:
+//   0 inject   - per froxel: height-fog density x drifting noise, sun
+//                visibility from an inline ray query against the scene
+//                TLAS (real shafts through trees / castle), HG phase,
+//                ambient sky term -> (in-scatter, extinction)
+//   1 integrate - front-to-back along each froxel column -> (L, T)
+// compose.frag applies the integrated volume to every pixel by distance.
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image3D o_inject;
+layout(set = 0, binding = 1) uniform sampler3D u_inject;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image3D o_integ;
+layout(set = 0, binding = 3) uniform sampler3D u_noise;      // tileable Worley (cloud detail)
+layout(set = 0, binding = 4) uniform accelerationStructureEXT topLevelAS;
+
+layout(push_constant) uniform PC {
+    mat4 inv_vp;
+    vec4 eye;       // xyz camera (m), w time (s)
+    vec4 sun;       // xyz toward sun, w pass
+    vec4 sun_col;   // rgb sun radiance scale (engine E * pi), w ground ref height (m)
+    vec4 amb;       // rgb ambient sky radiance, w frame jitter
+    vec4 params;    // x density (1/m), y height falloff (1/m), z anisotropy g, w max distance (m)
+} pc;
+
+const ivec3 kDim = ivec3(160, 90, 64);
+const float kPI = 3.14159265;
+
+float slice_dist(float k) {               // k in [0, 64]
+    float s = k / float(kDim.z);
+    return pc.params.w * s * s;
+}
+float hg(float c, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * kPI * pow(max(1.0 + g2 - 2.0 * g * c, 1e-4), 1.5));
+}
+
+void inject(ivec3 c) {
+    if (any(greaterThanEqual(c, kDim))) return;
+    vec2 uv = (vec2(c.xy) + 0.5) / vec2(kDim.xy);
+    vec4 wf = pc.inv_vp * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+    vec3 rd = normalize(wf.xyz / wf.w - pc.eye.xyz);
+    // Jitter inside the slice (frame-varying, decorrelated per froxel).
+    float j = fract(pc.amb.w * 0.618034 + fract(dot(vec3(c), vec3(0.06711056, 0.00583715, 0.1234))) * 52.98);
+    float d = slice_dist(float(c.z) + j);
+    vec3 p = pc.eye.xyz + rd * d;
+
+    // Height fog: dense near the valley floor / lake, thinning upward;
+    // wispy via drifting tileable Worley noise.
+    float h = p.y - pc.sun_col.w;
+    float dens = pc.params.x * exp(-max(h, -10.0) * pc.params.y);
+    vec3 wind = vec3(1.0, 0.1, 0.6) * pc.eye.w * 0.6;
+    float n = textureLod(u_noise, (p + wind) / 45.0, 0.0).r * 0.6 +
+              textureLod(u_noise, (p - wind * 0.7) / 13.0, 0.0).r * 0.4;
+    dens *= mix(0.25, 1.75, n);
+    dens = min(dens, 0.2);
+
+    // Sun visibility: one ray toward the sun (castle, trees, terrain).
+    float vis = 0.0;
+    vec3 sun = normalize(pc.sun.xyz);
+    if (sun.y > -0.05 && dens > 1e-6) {
+        rayQueryEXT rq;
+        rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                              0x01u, p, 0.05, sun, 600.0);
+        while (rayQueryProceedEXT(rq)) {}
+        vis = (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.0;
+    }
+    float ph = hg(dot(rd, sun), pc.params.z);
+    vec3 S = dens * (pc.sun_col.rgb * vis * ph + pc.amb.rgb * (1.0 / (4.0 * kPI)) * 4.0);
+    imageStore(o_inject, c, vec4(S, dens));
+}
+
+void integrate(ivec2 c) {
+    if (any(greaterThanEqual(c, kDim.xy))) return;
+    vec3 L = vec3(0.0);
+    float T = 1.0;
+    float prev = 0.0;
+    for (int k = 0; k < kDim.z; ++k) {
+        float z = slice_dist(float(k) + 1.0);
+        float dz = z - prev;
+        prev = z;
+        vec4 s = texelFetch(u_inject, ivec3(c, k), 0);
+        float ext = max(s.a, 1e-7);
+        float st = exp(-ext * dz);
+        L += T * s.rgb * (1.0 - st) / ext;
+        T *= st;
+        imageStore(o_integ, ivec3(c, k), vec4(L, T));
+    }
+}
+
+void main() {
+    if (pc.sun.w < 0.5) inject(ivec3(gl_GlobalInvocationID));
+    else integrate(ivec2(gl_GlobalInvocationID.xy));
+}

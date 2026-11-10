@@ -281,9 +281,11 @@ void VulkanEngine::init_clouds() {
     }
     cloud_noise_ready_ = false;
     log::info("[clouds] volumetric cloud layer ready (960x540, 128^3 + 32^3 noise)");
+    init_fog();
 }
 
 void VulkanEngine::destroy_clouds() {
+    destroy_fog();
     if (cloud_sampler_) vkDestroySampler(device_, cloud_sampler_, nullptr);
     cloud_sampler_ = VK_NULL_HANDLE;
     if (cloud_pipeline_) vkDestroyPipeline(device_, cloud_pipeline_, nullptr);
@@ -401,6 +403,190 @@ void VulkanEngine::dispatch_atmosphere(VkCommandBuffer cmd) {
     run(2.0f, (kSkyW + 7) / 8, (kSkyH + 7) / 8);
     run(3.0f, (kApN + 7) / 8, (kApN + 7) / 8);
     if (rt_.clouds_enabled) dispatch_clouds(cmd);
+}
+
+
+// ---------------------------------------------------------------------
+// Froxel volumetric fog (shaders/froxel_fog.comp)
+// ---------------------------------------------------------------------
+namespace {
+constexpr uint32_t kFogX = 160, kFogY = 90, kFogZ = 64;
+struct FogPC {
+    glm::mat4 inv_vp;
+    glm::vec4 eye;      // xyz camera (m), w time
+    glm::vec4 sun;      // xyz toward sun, w pass
+    glm::vec4 sun_col;  // rgb (engine E * pi), w ground reference height (m)
+    glm::vec4 amb;      // rgb ambient, w frame
+    glm::vec4 params;   // density, height falloff, anisotropy, max distance
+};
+}  // namespace
+
+void VulkanEngine::init_fog() {
+    for (AtmoImage* im : { &fog_inject_, &fog_integ_ }) {
+        VkImageCreateInfo ici{};
+        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.imageType = VK_IMAGE_TYPE_3D;
+        ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        ici.extent = { kFogX, kFogY, kFogZ };
+        ici.mipLevels = 1; ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        vk_check(vmaCreateImage(allocator_, &ici, &aci, &im->image, &im->alloc, nullptr), "fog volume");
+        VkImageViewCreateInfo vci{};
+        vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.image = im->image;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_3D;
+        vci.format = ici.format;
+        vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vk_check(vkCreateImageView(device_, &vci, nullptr, &im->view), "fog volume view");
+    }
+    vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_, [&](VkCommandBuffer cb) {
+        VkMemoryBarrier2 mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, nullptr,
+                             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                             VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT };
+        VkDependencyInfo di{}; di.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        di.memoryBarrierCount = 1; di.pMemoryBarriers = &mb;
+        for (AtmoImage* im : { &fog_inject_, &fog_integ_ })
+            vkinit::transition_image(cb, im->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        vkCmdPipelineBarrier2(cb, &di);
+        // Integrated volume = (L 0, T 1) until the first dispatch: no fog.
+        VkClearColorValue clr{ { 0.0f, 0.0f, 0.0f, 1.0f } };
+        VkImageSubresourceRange r{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdClearColorImage(cb, fog_integ_.image, VK_IMAGE_LAYOUT_GENERAL, &clr, 1, &r);
+        vkCmdPipelineBarrier2(cb, &di);
+    });
+    const VkDescriptorType types[5] = {
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR };
+    {
+        VkDescriptorSetLayoutBinding b[5]{};
+        for (int i = 0; i < 5; ++i) {
+            b[i].binding = uint32_t(i);
+            b[i].descriptorType = types[i];
+            b[i].descriptorCount = 1;
+            b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo lci{};
+        lci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        lci.bindingCount = 5; lci.pBindings = b;
+        vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr, &fog_set_layout_), "fog set layout");
+        VkDescriptorPoolSize sizes[] = {
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 },
+            { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
+        };
+        VkDescriptorPoolCreateInfo pci{};
+        pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pci.maxSets = 1; pci.poolSizeCount = 3; pci.pPoolSizes = sizes;
+        vk_check(vkCreateDescriptorPool(device_, &pci, nullptr, &fog_pool_), "fog pool");
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = fog_pool_; dai.descriptorSetCount = 1; dai.pSetLayouts = &fog_set_layout_;
+        vk_check(vkAllocateDescriptorSets(device_, &dai, &fog_set_), "fog set");
+        VkDescriptorImageInfo ii[4] = {
+            { VK_NULL_HANDLE, fog_inject_.view, VK_IMAGE_LAYOUT_GENERAL },
+            { atmo_sampler_, fog_inject_.view,  VK_IMAGE_LAYOUT_GENERAL },
+            { VK_NULL_HANDLE, fog_integ_.view,  VK_IMAGE_LAYOUT_GENERAL },
+            { cloud_sampler_, cloud_detail_.view, VK_IMAGE_LAYOUT_GENERAL },
+        };
+        VkWriteDescriptorSet w[4]{};
+        for (int i = 0; i < 4; ++i) {
+            w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[i].dstSet = fog_set_;
+            w[i].dstBinding = uint32_t(i);
+            w[i].descriptorCount = 1;
+            w[i].descriptorType = types[i];
+            w[i].pImageInfo = &ii[i];
+        }
+        vkUpdateDescriptorSets(device_, 4, w, 0, nullptr);
+    }
+    {
+        VkPushConstantRange pc{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(FogPC) };
+        VkPipelineLayoutCreateInfo plci{};
+        plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plci.setLayoutCount = 1; plci.pSetLayouts = &fog_set_layout_;
+        plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pc;
+        vk_check(vkCreatePipelineLayout(device_, &plci, nullptr, &fog_pipeline_layout_), "fog layout");
+        VkShaderModule m = vkpipe::load_shader_module(device_, std::string(QLIKE_SHADER_DIR) + "/froxel_fog.comp.spv");
+        VkComputePipelineCreateInfo cci{};
+        cci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cci.stage.module = m;
+        cci.stage.pName = "main";
+        cci.layout = fog_pipeline_layout_;
+        vk_check(vkCreateComputePipelines(device_, pipeline_cache_, 1, &cci, nullptr, &fog_pipeline_),
+                 "fog pipeline");
+        vkDestroyShaderModule(device_, m, nullptr);
+    }
+    fog_tlas_bound_ = VK_NULL_HANDLE;
+    log::info("[fog] froxel volumetric fog ready (160x90x64, RT sun visibility)");
+}
+
+void VulkanEngine::destroy_fog() {
+    if (fog_pipeline_) vkDestroyPipeline(device_, fog_pipeline_, nullptr);
+    if (fog_pipeline_layout_) vkDestroyPipelineLayout(device_, fog_pipeline_layout_, nullptr);
+    if (fog_pool_) vkDestroyDescriptorPool(device_, fog_pool_, nullptr);
+    if (fog_set_layout_) vkDestroyDescriptorSetLayout(device_, fog_set_layout_, nullptr);
+    for (AtmoImage* im : { &fog_inject_, &fog_integ_ }) {
+        if (im->view) vkDestroyImageView(device_, im->view, nullptr);
+        if (im->image) vmaDestroyImage(allocator_, im->image, im->alloc);
+        *im = {};
+    }
+    fog_pipeline_ = VK_NULL_HANDLE; fog_pipeline_layout_ = VK_NULL_HANDLE;
+    fog_pool_ = VK_NULL_HANDLE; fog_set_layout_ = VK_NULL_HANDLE; fog_set_ = VK_NULL_HANDLE;
+}
+
+void VulkanEngine::dispatch_fog(VkCommandBuffer cmd) {
+    if (!fog_pipeline_ || tlas_ == VK_NULL_HANDLE) return;
+    if (fog_tlas_bound_ != tlas_) {   // the TLAS handle changes when it is reallocated
+        VkWriteDescriptorSetAccelerationStructureKHR as{};
+        as.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+        as.accelerationStructureCount = 1;
+        as.pAccelerationStructures = &tlas_;
+        VkWriteDescriptorSet w{};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.pNext = &as;
+        w.dstSet = fog_set_; w.dstBinding = 4; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+        fog_tlas_bound_ = tlas_;
+    }
+    const FrameView& fv = current_frame_view_;
+    float p = glm::radians(rt_.sun_pitch_deg), y = glm::radians(rt_.sun_yaw_deg);
+    glm::vec3 sun(std::sin(y) * std::cos(p), std::sin(p), std::cos(y) * std::cos(p));
+    FogPC pc{};
+    pc.inv_vp = fv.inv_vp;
+    pc.eye = glm::vec4(fv.eye_pos, static_cast<float>(glfwGetTime()));
+    pc.sun_col = glm::vec4(last_sun_rgb_ * rt_.sun_intensity * 3.14159265f, rt_.water_level + 1.0f);
+    pc.amb = glm::vec4(last_sky_rgb_ * rt_.ambient_strength * 0.8f, float(frame_number_ % 64));
+    pc.params = glm::vec4(std::max(0.0f, rt_.fog_density), std::max(0.0f, rt_.fog_height_falloff),
+                          glm::clamp(rt_.fog_anisotropy, -0.9f, 0.95f), std::max(20.0f, rt_.fog_max_dist));
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fog_pipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fog_pipeline_layout_, 0, 1, &fog_set_, 0, nullptr);
+    auto barrier = [&]() {
+        VkMemoryBarrier2 mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, nullptr,
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                             VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT };
+        VkDependencyInfo di{}; di.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        di.memoryBarrierCount = 1; di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cmd, &di);
+    };
+    pc.sun = glm::vec4(sun, 0.0f);
+    vkCmdPushConstants(cmd, fog_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, (kFogX + 7) / 8, (kFogY + 7) / 8, kFogZ);
+    barrier();
+    pc.sun.w = 1.0f;
+    vkCmdPushConstants(cmd, fog_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, (kFogX + 7) / 8, (kFogY + 7) / 8, 1);
+    barrier();
 }
 
 } // namespace qlike

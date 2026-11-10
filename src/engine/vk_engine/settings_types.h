@@ -93,6 +93,12 @@ struct RtSettings {
         float cloud_coverage = 0.45f;
         float cloud_density  = 1.0f;
         float cloud_speed    = 8.0f;   // wind, m/s
+        // Froxel volumetric fog (RT-shadowed sun shafts).
+        int   fog_volumetric = 1;
+        float fog_density = 0.005f;        // 1/m at the reference height
+        float fog_height_falloff = 0.035f; // 1/m
+        float fog_anisotropy = 0.7f;       // HG g (forward scattering)
+        float fog_max_dist = 300.0f;       // m
         // Static-castle BLAS merging: true = one BLAS for all 151 brushes
         // (the merged path baked at level load), false = per-brush TLAS
         // instance pointing at the shared cube BLAS (the original path).

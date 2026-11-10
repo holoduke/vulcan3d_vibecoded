@@ -858,6 +858,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     // (compose binding 4) before the compose pass reads it.
     // Physical sky LUTs + aerial perspective for compose (sky_mode 1).
     if (rt_.sky_mode == 1) dispatch_atmosphere(frame.command_buffer);
+    if (rt_.fog_volumetric && fog_pipeline_) dispatch_fog(frame.command_buffer);
     prof_mark(frame.command_buffer, "sky_clouds");
     dispatch_exposure(frame.command_buffer);
     vkinit::transition_image_src_stage(
@@ -984,7 +985,9 @@ void VulkanEngine::draw(uint32_t img_index) {
             pc_data.brush_indicator = glm::vec4(0.0f);
         }
         pc_data.inv_view_proj = last_inv_view_proj_;   // cached
-        pc_data.tone = glm::vec4(float(rt_.tonemap_mode), 0.0f, 0.0f, 0.0f);
+        pc_data.tone = glm::vec4(float(rt_.tonemap_mode),
+                                 (rt_.fog_volumetric && fog_pipeline_) ? std::max(20.0f, rt_.fog_max_dist) : 0.0f,
+                                 0.0f, 0.0f);
         pc_data.atmo = glm::vec4((rt_.sky_mode == 1 && atmo_pipeline_) ? 1.0f : 0.0f,
                                  std::max(0.0f, rt_.atmosphere_intensity),
                                  6360.0f + std::max(current_frame_view_.eye_pos.y, 1.0f) * 0.001f,
@@ -1087,7 +1090,8 @@ void VulkanEngine::draw(uint32_t img_index) {
         vkinit::semaphore_submit_info(
             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, frame.swapchain_semaphore),
         vkinit::semaphore_submit_info(
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, frame.tlas_build_done),
+            // + COMPUTE: the froxel fog pass ray-queries the TLAS from compute.
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, frame.tlas_build_done),
     };
     auto signal = vkinit::semaphore_submit_info(
         VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, render_semaphores_[img_index]);

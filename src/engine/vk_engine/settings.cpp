@@ -249,6 +249,11 @@ void VulkanEngine::save_settings() const {
     f << "cloud_density = " << rt_.cloud_density << "\n";
     f << "cloud_speed = " << rt_.cloud_speed << "\n";
     f << "tonemap_mode = " << rt_.tonemap_mode << "\n";
+    f << "fog_volumetric = " << rt_.fog_volumetric << "\n";
+    f << "fog_density = " << rt_.fog_density << "\n";
+    f << "fog_height_falloff = " << rt_.fog_height_falloff << "\n";
+    f << "fog_anisotropy = " << rt_.fog_anisotropy << "\n";
+    f << "fog_max_dist = " << rt_.fog_max_dist << "\n";
     f << "use_merged_static_blas = " << (rt_.use_merged_static_blas ? 1 : 0) << "\n";
     f << "terrain_brush_radius = "   << terrain_brush_radius_   << "\n";
     f << "terrain_brush_strength = " << terrain_brush_strength_ << "\n";
@@ -689,6 +694,11 @@ void VulkanEngine::load_settings() {
             if (key == "cloud_density")        { rt_.cloud_density = std::stof(val); ++loaded; continue; }
             if (key == "cloud_speed")          { rt_.cloud_speed = std::stof(val); ++loaded; continue; }
             if (key == "tonemap_mode")         { rt_.tonemap_mode = std::stoi(val); ++loaded; continue; }
+            if (key == "fog_volumetric")       { rt_.fog_volumetric = std::stoi(val); ++loaded; continue; }
+            if (key == "fog_density")          { rt_.fog_density = std::stof(val); ++loaded; continue; }
+            if (key == "fog_height_falloff")   { rt_.fog_height_falloff = std::stof(val); ++loaded; continue; }
+            if (key == "fog_anisotropy")       { rt_.fog_anisotropy = std::stof(val); ++loaded; continue; }
+            if (key == "fog_max_dist")         { rt_.fog_max_dist = std::stof(val); ++loaded; continue; }
             if      (key == "sun_pitch_deg")       rt_.sun_pitch_deg = std::stof(val);
             else if (key == "sun_yaw_deg")         rt_.sun_yaw_deg = std::stof(val);
             else if (key == "sun_intensity")       rt_.sun_intensity = std::stof(val);

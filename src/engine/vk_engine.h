@@ -255,6 +255,9 @@ private:
     void init_clouds();
     void destroy_clouds();
     void dispatch_clouds(VkCommandBuffer cmd);
+    void init_fog();
+    void destroy_fog();
+    void dispatch_fog(VkCommandBuffer cmd);
     void run_bloom_chain(VkCommandBuffer cmd);
     void init_skybox();
     void destroy_skybox_resources();
@@ -2062,6 +2065,15 @@ private:
     VkPipeline             cloud_pipeline_ = VK_NULL_HANDLE;
     bool                   cloud_noise_ready_ = false;
     VkSampler              cloud_sampler_ = VK_NULL_HANDLE;   // linear + REPEAT (tileable noise)
+    // Froxel volumetric fog (froxel_fog.comp): inject + integrated volumes.
+    AtmoImage              fog_inject_, fog_integ_;
+    VkDescriptorSetLayout  fog_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool       fog_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet        fog_set_ = VK_NULL_HANDLE;
+    VkPipelineLayout       fog_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline             fog_pipeline_ = VK_NULL_HANDLE;
+    VkAccelerationStructureKHR fog_tlas_bound_ = VK_NULL_HANDLE;
+    glm::vec3              last_sun_rgb_{1.0f}, last_sky_rgb_{0.5f, 0.7f, 1.0f};
     VkShaderModule         compose_frag_module_ = VK_NULL_HANDLE;
 
     // --- Bloom mip chain (Karis-style downsample + tent upsample) ---

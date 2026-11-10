@@ -379,6 +379,8 @@ void VulkanEngine::update_scene_ubo() {
         sky_rgb = glm::mix(sky_rgb, sky_warm,       t * 0.85f);
     }
     data.sun_color     = glm::vec4(sun_rgb, rt_.sun_intensity);
+    last_sun_rgb_ = sun_rgb;   // volumetric fog uses the same (golden-hour) light
+    last_sky_rgb_ = sky_rgb;
     data.ambient       = glm::vec4(rt_.ground_ambient, rt_.terrain_ao_punch);
     data.sky_color     = glm::vec4(sky_rgb, 1.0f);
     data.rt_flags = glm::ivec4(rt_.shadow_enabled ? 1 : 0,

@@ -65,6 +65,8 @@ layout(set = 0, binding = 6) uniform sampler2D u_atmo_sky;
 layout(set = 0, binding = 7) uniform sampler3D u_atmo_ap;
 // Volumetric cloud layer (clouds.comp, premultiplied: rgb in-scatter, a = coverage).
 layout(set = 0, binding = 8) uniform sampler2D u_clouds;
+// Froxel volumetric fog, integrated (rgb in-scatter, a transmittance).
+layout(set = 0, binding = 9) uniform sampler3D u_fog;
 
 vec3 atmo_sun_illum() {
     // x pi: the engine folds 1/pi into its sun intensity (diffuse =
@@ -677,6 +679,24 @@ void main() {
         float dkm = distance(wp.xyz / wp.w, ep.xyz / ep.w) * 0.001;
         vec4 ap = atmo_aerial(uvp, dkm);
         hdr = hdr * ap.a + ap.rgb * atmo_sun_illum();
+    }
+
+    // Froxel volumetric fog (sun shafts / ground fog), applied to every
+    // pixel by distance after the aerial perspective (fog is the nearer
+    // medium). Slices are quadratic in distance up to tone.y metres.
+    if (pc.tone.y > 0.0) {
+        vec2 uvp = gl_FragCoord.xy * pc.viewport.zw;
+        float dm = pc.tone.y;
+        if (depth < 0.99999) {
+            vec4 wp = pc.inv_view_proj * vec4(uvp * 2.0 - 1.0, depth, 1.0);
+            vec4 ep = pc.inv_view_proj * vec4(uvp * 2.0 - 1.0, 0.0, 1.0);
+            dm = min(distance(wp.xyz / wp.w, ep.xyz / ep.w), pc.tone.y);
+        }
+        float s = sqrt(dm / pc.tone.y) * 64.0 - 1.0;   // slice k stores [0, d(k+1)]
+        vec4 fg = (s < 0.0)
+            ? mix(vec4(0.0, 0.0, 0.0, 1.0), textureLod(u_fog, vec3(uvp, 0.5 / 64.0), 0.0), clamp(s + 1.0, 0.0, 1.0))
+            : textureLod(u_fog, vec3(uvp, (s + 0.5) / 64.0), 0.0);
+        hdr = hdr * fg.a + fg.rgb;
     }
 
     // FSR1 RCAS — robust contrast-adaptive sharpening on the EASU-
