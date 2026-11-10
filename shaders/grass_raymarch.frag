@@ -767,7 +767,7 @@ void main() {
     if (clip.w > 0.0001 && prev_clip.w > 0.0001) {
         vec2 cur_uv  = clip.xy      / clip.w      * 0.5 + 0.5;
         vec2 prev_uv = prev_clip.xy / prev_clip.w * 0.5 + 0.5;
-        vec2 m = cur_uv - prev_uv;
+        vec2 m = cur_uv - prev_uv - scene.restir_params.zw;   // cube.frag convention (unjittered)
         // NaN/inf guard + clamp to a sane range. A blade hit very
         // close to the camera with a glancing prev-frame projection
         // can produce |motion| > 1.0 which poisons TAA history and

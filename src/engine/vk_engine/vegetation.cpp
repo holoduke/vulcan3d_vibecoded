@@ -280,6 +280,17 @@ void VulkanEngine::cull_vegetation(VkCommandBuffer cmd) {
     pc.cam = glm::vec4(fv.eye_pos, ppr);
     pc.params = glm::vec4(float(veg_count_), 1450.0f, std::max(0.25f, rt_.veg_lod_bias),
                           (veg_hiz_ready_ && !std::getenv("QLIKE_NO_HIZ")) ? 1.0f : 0.0f);
+    {
+        // Camera cut (teleport, respawn, big snap turn): last frame's Hi-Z
+        // no longer describes this view and would cull visible trees for a
+        // frame - skip the occlusion test once.
+        const glm::vec3 fwd = -glm::vec3(fv.inv_view[2]);
+        const bool cut = glm::distance(fv.eye_pos, veg_prev_eye_) > 8.0f ||
+                         glm::dot(fwd, veg_prev_fwd_) < 0.9f;
+        if (cut) pc.params.w = 0.0f;
+        veg_prev_eye_ = fv.eye_pos;
+        veg_prev_fwd_ = fwd;
+    }
     pc.prev_vp = veg_prev_vp_;
     pc.hiz = glm::vec4(float(veg_hiz_w_), float(veg_hiz_h_), float(veg_hiz_mips_), 0.0f);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, veg_cull_pipeline_);

@@ -46,6 +46,8 @@ layout(set = 0, binding = 0) uniform Scene {
 // Prepass depth copy (terrain + castle meshes): bounds the march so the
 // fireball is cut by the ground instead of showing through it.
 layout(set = 0, binding = 27) uniform sampler2D u_prepass_depth;
+// Full scene depth (gun, props, dynamic objects included) - see descriptors.cpp.
+layout(set = 0, binding = 29) uniform sampler2D u_scene_depth;
 
 float h3(vec3 p) {
     p = fract(p * 0.3183099 + 0.1);
@@ -141,9 +143,10 @@ void main() {
     float sq = sqrt(disc);
     float t0 = max((-b - sq) / a, 0.0);
     float t1 = (-b + sq) / a;
-    // Clip against the opaque scene (ground, castle).
+    // Clip against the full opaque scene (the prepass copy lacked the gun,
+    // props and dynamic objects: smoke painted over them from inside).
     vec2  suv = gl_FragCoord.xy * scene.viewport.zw;
-    float zs  = texelFetch(u_prepass_depth, ivec2(gl_FragCoord.xy), 0).r;
+    float zs  = texelFetch(u_scene_depth, ivec2(gl_FragCoord.xy), 0).r;
     if (zs < 0.99999) {
         vec4 wp = pc.inv_vp * vec4(suv * 2.0 - 1.0, zs, 1.0);
         float ts = distance(wp.xyz / wp.w, ro);

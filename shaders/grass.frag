@@ -185,7 +185,7 @@ void main() {
         if (vPrevClip.w > 0.0) {
             vec2 prev_ndc = vPrevClip.xy / vPrevClip.w;
             vec2 prev_uv  = prev_ndc * vec2(0.5, 0.5) + vec2(0.5);
-            outMotion = current_uv - prev_uv;
+            outMotion = current_uv - prev_uv - scene.restir_params.zw;   // cube.frag convention
         } else {
             outMotion = vec2(0.0);
         }

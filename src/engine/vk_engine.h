@@ -246,6 +246,9 @@ private:
     // resize destroys and recreates depth + history + bloom — without this,
     // compose samples freed image views.
     void rewrite_compose_image_bindings();
+    void init_exposure();      // called from init_compose()
+    void destroy_exposure();
+    void dispatch_exposure(VkCommandBuffer cmd);
     void run_bloom_chain(VkCommandBuffer cmd);
     void init_skybox();
     void destroy_skybox_resources();
@@ -1320,10 +1323,13 @@ private:
     VmaAllocation veg_fade_alloc_ = nullptr;
     VkShaderModule veg_depth_frag_module_ = VK_NULL_HANDLE, veg_hiz_module_ = VK_NULL_HANDLE;
     glm::mat4     veg_prev_vp_{1.0f};
+    glm::vec3     veg_prev_eye_{0.0f};
+    glm::vec3     veg_prev_fwd_{0.0f, 0.0f, -1.0f};
     uint32_t tlas_refits_ = 0;
     VkImage        clutter_shadow_image_ = VK_NULL_HANDLE;
     VmaAllocation  clutter_shadow_alloc_ = nullptr;
     VkImageView    clutter_shadow_view_ = VK_NULL_HANDLE;
+    VkSampler      clutter_shadow_sampler_ = VK_NULL_HANDLE;   // NEAREST: depth compares must not average
     VkPipelineLayout clutter_shadow_layout_ = VK_NULL_HANDLE;
     VkPipeline     clutter_shadow_pipeline_ = VK_NULL_HANDLE;
     VkShaderModule clutter_shadow_vert_ = VK_NULL_HANDLE;
@@ -2019,6 +2025,16 @@ private:
     VkDescriptorSet        compose_desc_sets_[kHistorySlots]{ VK_NULL_HANDLE, VK_NULL_HANDLE };
     VkPipelineLayout       compose_pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline             compose_pipeline_ = VK_NULL_HANDLE;
+    // Auto-exposure: luminance reduction compute (shaders/exposure.comp)
+    // writing an adapted log-luminance SSBO that compose binding 4 reads.
+    VkBuffer               exposure_buf_ = VK_NULL_HANDLE;
+    VmaAllocation          exposure_alloc_ = nullptr;
+    VkDescriptorSetLayout  exposure_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool       exposure_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet        exposure_sets_[kHistorySlots]{ VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkPipelineLayout       exposure_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline             exposure_pipeline_ = VK_NULL_HANDLE;
+    double                 exposure_last_t_ = 0.0;
     VkShaderModule         compose_frag_module_ = VK_NULL_HANDLE;
 
     // --- Bloom mip chain (Karis-style downsample + tent upsample) ---

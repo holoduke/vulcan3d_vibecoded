@@ -24,6 +24,9 @@ layout(set = 0, binding = 3) uniform TaaUBO {
     vec4 viewport;          // x: w, y: h, z: 1/w, w: 1/h
     vec4 params;            // x: history_blend, y: depth_reject_threshold,
                             // z: history_valid (0/1), w: spatial_strength
+    mat4 inv_vp;            // current frame
+    mat4 prev_vp;           // previous frame
+    vec4 eye;
 } taa;
 
 // Per-pixel screen-space motion vector written by cube.frag at location=1
@@ -124,6 +127,15 @@ void main() {
 
     // Read motion early so spatial strength can be modulated by it.
     vec2 motion = texelFetch(motion_color, ip, 0).rg;
+    // Sky has no fragment that writes motion (cleared to 0): reproject it
+    // as a direction at infinity so FX over the sky (smoke, contrails)
+    // doesn't smear while the camera turns.
+    if (texelFetch(current_depth, ip, 0).r >= 0.99999 && taa.params.z > 0.5) {
+        vec4 wf  = taa.inv_vp * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+        vec3 dir = wf.xyz / wf.w - taa.eye.xyz;
+        vec4 pc  = taa.prev_vp * vec4(dir, 0.0);
+        if (pc.w > 1e-6) motion = uv - (pc.xy / pc.w * 0.5 + 0.5);
+    }
     float motion_pix = length(motion * taa.viewport.xy);
 
     // Spatial à-trous adds a constant low-pass blur to the input. When

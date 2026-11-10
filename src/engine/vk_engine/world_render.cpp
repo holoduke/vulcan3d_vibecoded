@@ -832,8 +832,17 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                                      0.0f, 0.0f, 0.0f);
         vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
                            0, sizeof(PushConstants), &spc);
-        vkCmdDrawIndexed(cmd, scatter_.rock_mesh.index_count,
-                         scatter_.instance_count, 0, 0, 0);
+        // Per-cell frustum + distance culling (was: every instance in the
+        // world, every frame). Vertex shader still fades by distance.
+        const glm::vec3 eye_c = current_frame_view_.eye_pos;
+        auto cell_in = [&](const ScatterCell& c, float max_d) {
+            glm::vec3 q = glm::clamp(eye_c, c.mn, c.mx);
+            if (glm::dot(q - eye_c, q - eye_c) > max_d * max_d) return false;
+            return aabb_visible(frustum, c.mn, c.mx);
+        };
+        const float rock_d = spc.grass_params.x;
+        scatter_draw_cells(cmd, scatter_.rock_mesh.index_count, scatter_.rock_cells,
+                           [&](const ScatterCell& c) { return cell_in(c, rock_d); });
         // Flowers + ferns: per-species mesh, instance ranges in one buffer.
         if (scatter_.plant_buffer && scatter_plant_pipeline_) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scatter_plant_pipeline_);
@@ -849,8 +858,9 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                 vkCmdBindVertexBuffers(cmd, 0, 2, pb, po);
                 vkCmdBindIndexBuffer(cmd, scatter_.plant_mesh[sp].index_buffer, 0,
                                      VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(cmd, scatter_.plant_mesh[sp].index_count,
-                                 scatter_.plant_count[sp], 0, 0, scatter_.plant_first[sp]);
+                const float plant_d = ppc.grass_params.x;
+                scatter_draw_cells(cmd, scatter_.plant_mesh[sp].index_count, scatter_.plant_cells[sp],
+                                   [&](const ScatterCell& c) { return cell_in(c, plant_d); });
             }
         }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, world_pipeline());

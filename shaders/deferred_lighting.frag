@@ -95,6 +95,9 @@ layout(set = 0, binding = 12, r16f) uniform image2D u_gi_fast0;
 layout(set = 0, binding = 13, r16f) uniform image2D u_gi_fast1;
 // Small-object sun shadow map (flowers / ferns / clutter rocks only).
 layout(set = 0, binding = 14) uniform sampler2D u_clutter_shadow;
+// Terrain aux bake: .g = horizon sky visibility (same texture cube.frag
+// binding 26 reads) - valley floors see less sky dome.
+layout(set = 0, binding = 15) uniform sampler2D u_terrain_aux;
 
 layout(push_constant) uniform PC {
     mat4 inv_vp;
@@ -1052,6 +1055,10 @@ void main() {
     // terrain_ao_punch was 0, producing literal black on castle walls.
     vec3 ambient_ground = scene.ambient.rgb * ambient_strength;
     vec3 ambient_sky    = sky_tint * 0.45 * ambient_strength;
+    if (material_id == 3) {   // baked horizon AO, as cube.frag (was missing here)
+        vec2 aux_uv = clamp(world_pos.xz / 2048.0 + 0.5, vec2(0.0), vec2(1.0));
+        ambient_sky *= mix(0.45, 1.0, textureLod(u_terrain_aux, aux_uv, 0.0).g);
+    }
     // sky_factor: cube.frag uses smoothstep(0, 0.6, sky_vis) floored at
     // 0.10. Same here so deep cracks still pick up a tiny sky leakage.
     // 0.70 upper edge (was 0.60) + lower 0.06 floor: partially enclosed
@@ -1082,8 +1089,11 @@ void main() {
     vec3 sky_fill = vec3(0.0);
 
     // Sun term.
+    // No shadow rays below N.L 0.04: fade the (untested) sun to 0 there
+    // instead of letting up to 4 % leak into shadowed terminator areas.
+    float term_fade = (ndl_raw > 0.04) ? 1.0 : smoothstep(0.0, 0.04, ndl_raw);
     vec3 sun_term = albedo * scene.sun_color.rgb * scene.sun_color.a *
-                    ndl * (1.0 - shadow);
+                    ndl * term_fade * (1.0 - shadow);
 
     // ---------------------------------------------------------------
     //  Material-id tweaks

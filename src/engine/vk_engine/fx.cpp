@@ -134,7 +134,8 @@ void VulkanEngine::tick_flags(float dt) {
         const float rd = std::sqrt(rx * rx + ry * ry);
         auto idx = [nx](int i, int j) { return size_t(j) * nx + i; };
         glm::vec3 top = f.pole_base + glm::vec3(0.0f, f.pole_h - 0.05f, 0.0f);
-        std::vector<glm::vec3> force(f.p.size());
+        static std::vector<glm::vec3> force;
+        force.resize(f.p.size());
         while (f.acc >= h) {
             f.acc -= h;
             std::fill(force.begin(), force.end(), g);
@@ -339,7 +340,8 @@ struct RibbonBuilder {
                const std::vector<float>& a, const glm::vec3& tint) {
         const size_t n = p.size();
         if (n < 2) return;
-        std::vector<glm::vec3> side(n);
+        static thread_local std::vector<glm::vec3> side;   // reused scratch (no per-strip alloc)
+        side.resize(n);
         for (size_t i = 0; i < n; ++i) {
             glm::vec3 t = (i + 1 < n) ? p[i + 1] - p[i] : p[i] - p[i - 1];
             if (i > 0 && i + 1 < n) t = p[i + 1] - p[i - 1];
@@ -384,7 +386,9 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
     (void)cam_fwd;
 
     // ---- Build ribbons, grouped by kind ----
-    RibbonBuilder smoke, glow, flash;
+    // Builders persist across frames (capacity reused, no per-frame heap churn).
+    static RibbonBuilder smoke, glow, flash;
+    smoke.v.clear(); glow.v.clear(); flash.v.clear();
     smoke.eye = glow.eye = flash.eye = eye;
 
     // Contrails + afterburner glow.
@@ -518,7 +522,7 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
     }
     // Flags: cloth triangles (kind 3, lit two-sided in fx_ribbon.frag).
     // Normal slot carries the design index, uv = cloth uv.
-    RibbonBuilder cloth; cloth.eye = eye;
+    static RibbonBuilder cloth; cloth.v.clear(); cloth.eye = eye;
     for (const auto& f : flags_) {
         for (int j = 0; j + 1 < f.ny; ++j)
             for (int i = 0; i + 1 < f.nx; ++i) {
@@ -542,7 +546,8 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
 
     // ---- Volumes (fireball / smoke / dust), sorted far to near ----
     struct Vol { glm::vec3 c; float r, squash, age, kind, seed, dens, heat, fade, scroll, dist; };
-    std::vector<Vol> vols;
+    static std::vector<Vol> vols;
+    vols.clear();
     for (const auto& e : explosions_) {
         const float s = e.size, t = e.t;
         if (t < 3.4f) {   // fireball

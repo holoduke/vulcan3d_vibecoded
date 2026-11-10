@@ -1614,8 +1614,19 @@ void main() {
             #define HM(xz) textureLod(u_heightmap_full, (((xz) - pc.emissive.xy) * pc.emissive.z + 0.5) * pc.emissive.w, 0.0).r
             float hxp = HM(vWorldPos.xz + vec2(he, 0.0)), hxm = HM(vWorldPos.xz - vec2(he, 0.0));
             float hzp = HM(vWorldPos.xz + vec2(0.0, he)), hzm = HM(vWorldPos.xz - vec2(0.0, he));
-            #undef HM
             vec2 g = vec2(hxp - hxm, hzp - hzm) / (2.0 * he);
+            // Far pixels: the footprint-spaced point taps undersample the
+            // 1 m heightmap (normal sparkle / crawl on ridges). Average in
+            // a 45-degree rotated estimate - 8-tap rotated-grid filter.
+            if (fp > 1.5) {
+                const float r = 0.70710678;
+                float a0 = HM(vWorldPos.xz + vec2( he,  he) * r), a1 = HM(vWorldPos.xz - vec2( he,  he) * r);
+                float b0 = HM(vWorldPos.xz + vec2( he, -he) * r), b1 = HM(vWorldPos.xz - vec2( he, -he) * r);
+                vec2 gd = vec2(a0 - a1, b0 - b1) / (2.0 * he);        // along (1,1)/sqrt2 and (1,-1)/sqrt2
+                vec2 g2 = vec2(gd.x + gd.y, gd.x - gd.y) * r;         // back to x / z
+                g = mix(g, 0.5 * (g + g2), smoothstep(1.5, 3.0, fp));
+            }
+            #undef HM
             if (fp < 0.33) {
                 float eps = max(0.02, fp);
                 float h0 = terrain_fbm_detail(vWorldPos.xz, fp);

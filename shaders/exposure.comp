@@ -1,0 +1,80 @@
+#version 460
+// Auto-exposure (eye adaptation) — scene luminance reduction.
+//
+// One 16x16 workgroup samples the final HDR image (TAA / upscaler output)
+// on a 64x64 grid, takes a centre-weighted average of log2 luminance and
+// adapts the stored value toward it over time (faster when it gets
+// brighter, like the eye). compose.frag reads the adapted value.
+//
+// Replaces the old estimate (one texel of the threshold-filtered bloom
+// mip 4 at the screen centre), which followed the crosshair and pumped.
+//
+// Sky pixels hold the scene clear colour in the HDR target (compose
+// reconstructs the real sky later), so they are counted with a sky
+// luminance passed in from the CPU instead.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform sampler2D u_scene;
+layout(set = 0, binding = 1) uniform sampler2D u_depth;
+layout(std430, set = 0, binding = 2) buffer Exposure {
+    float log_avg;     // adapted log2 luminance
+    float valid;       // 0 until the first frame wrote it
+    float cur_log;     // this frame's measurement (debug)
+    float pad;
+} ex;
+
+layout(push_constant) uniform PC {
+    float dt;          // seconds since the previous frame
+    float speed_up;    // adaptation rate toward brighter (1/s)
+    float speed_down;  // adaptation rate toward darker (1/s)
+    float sky_lum;     // luminance used for sky pixels
+} pc;
+
+shared float s_sum[256];
+shared float s_w[256];
+
+void main() {
+    uint i = gl_LocalInvocationIndex;
+    vec2 cell = (vec2(gl_LocalInvocationID.xy) + 0.5) / 16.0;
+    float sum = 0.0, wsum = 0.0;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            vec2 uv = cell + (vec2(x, y) - 1.5) / 64.0;
+            float l;
+            if (textureLod(u_depth, uv, 0.0).r >= 0.99999) {
+                l = pc.sky_lum;
+            } else {
+                vec3 c = textureLod(u_scene, uv, 0.0).rgb;
+                l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+            }
+            if (!(l == l) || l > 1e4) l = 1.0;            // NaN / Inf guard
+            l = clamp(l, 1e-4, 1e4);
+            vec2 d = uv - 0.5;
+            float w = exp(-dot(d, d) * 3.0);              // mild centre weight
+            sum  += log2(l) * w;
+            wsum += w;
+        }
+    }
+    s_sum[i] = sum;
+    s_w[i]   = wsum;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (i < s) {
+            s_sum[i] += s_sum[i + s];
+            s_w[i]   += s_w[i + s];
+        }
+        barrier();
+    }
+    if (i == 0u) {
+        float cur = s_sum[0] / max(s_w[0], 1e-6);
+        ex.cur_log = cur;
+        if (ex.valid < 0.5 || !(ex.log_avg == ex.log_avg)) {
+            ex.log_avg = cur;
+            ex.valid = 1.0;
+        } else {
+            float rate = (cur > ex.log_avg) ? pc.speed_up : pc.speed_down;
+            ex.log_avg += (cur - ex.log_avg) * (1.0 - exp(-max(pc.dt, 0.0) * rate));
+        }
+    }
+}

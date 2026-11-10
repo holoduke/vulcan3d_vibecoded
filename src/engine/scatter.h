@@ -28,6 +28,15 @@ struct ScatterInstance {
 };
 static_assert(sizeof(ScatterInstance) == 32, "instance layout is GPU ABI");
 
+// Contiguous instance range of one 32 m ground cell (instances are sorted
+// by cell at build time) - lets the colour and shadow passes cull per cell
+// instead of drawing every instance in the world twice per frame.
+struct ScatterCell {
+    glm::vec3 mn, mx;      // world AABB of the cell's instances (+ margin)
+    uint32_t  first = 0;   // first instance (absolute index in its buffer)
+    uint32_t  count = 0;
+};
+
 struct ScatterSet {
     Mesh          rock_mesh{};                  // shared lumpy-rock mesh
     VkBuffer      instance_buffer = VK_NULL_HANDLE;
@@ -49,6 +58,8 @@ struct ScatterSet {
     void*              plant_mapped = nullptr;
     std::vector<float> inst_dy, plant_dy;
     bool               rm_surface = false;
+    std::vector<ScatterCell> rock_cells;
+    std::vector<ScatterCell> plant_cells[kPlantSpecies];
 };
 
 struct ScatterParams {
@@ -83,5 +94,23 @@ void destroy_scatter(VmaAllocator alloc, ScatterSet& s);
 // Move all instances onto the raymarched surface (on) or back onto the
 // CPU heightmap surface (off). Cheap: rewrites the mapped buffers.
 void scatter_set_raymarch_surface(ScatterSet& s, bool on);
+
+// Draw the visible cells of one mesh: consecutive visible ranges are merged
+// into one instanced draw (cells are contiguous in the instance buffer).
+template <class Visible>
+inline uint32_t scatter_draw_cells(VkCommandBuffer cmd, uint32_t index_count,
+                                   const std::vector<ScatterCell>& cells, Visible visible) {
+    uint32_t run_first = 0, run_count = 0, drawn = 0;
+    for (const ScatterCell& c : cells) {
+        if (!visible(c)) continue;
+        drawn += c.count;
+        if (run_count && run_first + run_count == c.first) { run_count += c.count; continue; }
+        if (run_count) vkCmdDrawIndexed(cmd, index_count, run_count, 0, 0, run_first);
+        run_first = c.first;
+        run_count = c.count;
+    }
+    if (run_count) vkCmdDrawIndexed(cmd, index_count, run_count, 0, 0, run_first);
+    return drawn;
+}
 
 } // namespace qlike

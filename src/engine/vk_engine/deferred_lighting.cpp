@@ -42,7 +42,7 @@ void VulkanEngine::init_deferred_lighting() {
         // SAD gap on indoor / shadow-side surfaces. Image is in GENERAL
         // layout when cube.frag writes via imageStore — sampler2D reads
         // are allowed from GENERAL.
-        VkDescriptorSetLayoutBinding b[15]{};
+        VkDescriptorSetLayoutBinding b[16]{};
         b[0].binding = 0;
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         b[0].descriptorCount = 1;
@@ -88,10 +88,15 @@ void VulkanEngine::init_deferred_lighting() {
         b[14].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         b[14].descriptorCount = 1;
         b[14].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        // 15: terrain aux bake (curvature, sky-vis) - horizon AO on terrain.
+        b[15].binding = 15;
+        b[15].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        b[15].descriptorCount = 1;
+        b[15].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         VkDescriptorSetLayoutCreateInfo dlci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
-            .bindingCount = 15, .pBindings = b,
+            .bindingCount = 16, .pBindings = b,
         };
         vk_check(vkCreateDescriptorSetLayout(device_, &dlci, nullptr,
                                               &deferred_lighting_desc_layout_),
@@ -124,7 +129,7 @@ void VulkanEngine::init_deferred_lighting() {
         VkDescriptorPoolSize sizes[] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1 },
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     9 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     16 },
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              4 },
         };
         VkDescriptorPoolCreateInfo pci{
@@ -260,7 +265,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         VkDescriptorImageInfo gif1_ii{ VK_NULL_HANDLE,
                                        deferred_gi_fast_view_[1],
                                        VK_IMAGE_LAYOUT_GENERAL };
-        VkWriteDescriptorSet w[15]{};
+        VkWriteDescriptorSet w[16]{};
         w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[0].dstSet = deferred_lighting_desc_set_; w[0].dstBinding = 0;
         w[0].descriptorCount = 1;
@@ -305,14 +310,21 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         }
         w[12].pImageInfo = &gif0_ii;
         w[13].pImageInfo = &gif1_ii;
-        VkDescriptorImageInfo cs_ii{ linear_sampler_, clutter_shadow_view_ ? clutter_shadow_view_ : sun_shadow_view_,
+        VkDescriptorImageInfo cs_ii{ clutter_shadow_sampler_ ? clutter_shadow_sampler_ : linear_sampler_,
+                                     clutter_shadow_view_ ? clutter_shadow_view_ : sun_shadow_view_,
                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         w[14].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[14].dstSet = deferred_lighting_desc_set_; w[14].dstBinding = 14;
         w[14].descriptorCount = 1;
         w[14].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[14].pImageInfo = &cs_ii;
-        vkUpdateDescriptorSets(device_, 15, w, 0, nullptr);
+        VkDescriptorImageInfo aux_ii{ terrain_aux_sampler_ ? terrain_aux_sampler_ : linear_sampler_,
+                                      terrain_aux_view_ ? terrain_aux_view_ : cs_ii.imageView,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        w[15] = w[14];
+        w[15].dstBinding = 15;
+        w[15].pImageInfo = &aux_ii;
+        vkUpdateDescriptorSets(device_, 16, w, 0, nullptr);
     }
 
     // Transition staging_color into COLOR_ATTACHMENT layout.

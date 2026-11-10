@@ -7,6 +7,8 @@
 
 #include "engine/vk_engine.h"
 #include "engine/vk_engine/internal.h"
+
+#include <algorithm>
 #include "engine/log.h"
 #include "engine/vk_initializers.h"
 #include "engine/vk_pipelines.h"
@@ -48,13 +50,22 @@ void VulkanEngine::init_clutter_shadow() {
     vci.format = VK_FORMAT_D32_SFLOAT;
     vci.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
     vk_check(vkCreateImageView(device_, &vci, nullptr, &clutter_shadow_view_), "clutter shadow view");
+    {
+        VkSamplerCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.maxLod = 0.0f;
+        vk_check(vkCreateSampler(device_, &si, nullptr, &clutter_shadow_sampler_), "clutter shadow sampler");
+    }
     vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_, [&](VkCommandBuffer cb) {
         vkinit::transition_image_aspect(cb, clutter_shadow_image_, VK_IMAGE_LAYOUT_UNDEFINED,
                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                         VK_IMAGE_ASPECT_DEPTH_BIT);
     });
 
-    VkPushConstantRange pc{ VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4) + sizeof(glm::vec4) };
+    VkPushConstantRange pc{ VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4) + 2 * sizeof(glm::vec4) };
     VkPipelineLayoutCreateInfo plci{};
     plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pc;
@@ -75,12 +86,13 @@ void VulkanEngine::init_clutter_shadow() {
     VkVertexInputBindingDescription b1{ 1, sizeof(ScatterInstance), VK_VERTEX_INPUT_RATE_INSTANCE };
     cfg.vbindings = { b0, b1 };
     VkVertexInputAttributeDescription a0{ 0, 0, VK_FORMAT_R32G32B32_SFLOAT, uint32_t(offsetof(Vertex, position)) };
+    VkVertexInputAttributeDescription a2{ 2, 0, VK_FORMAT_R32G32_SFLOAT, uint32_t(offsetof(Vertex, uv)) };
     VkVertexInputAttributeDescription a3{ 3, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0 };
     VkVertexInputAttributeDescription a4{ 4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 16 };
-    cfg.vattrs = { a0, a3, a4 };
+    cfg.vattrs = { a0, a2, a3, a4 };
     clutter_shadow_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
     {
-        VkDescriptorImageInfo ii{ linear_sampler_, clutter_shadow_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo ii{ clutter_shadow_sampler_, clutter_shadow_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkWriteDescriptorSet w{};
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w.dstSet = scene_desc_set_; w.dstBinding = 28; w.descriptorCount = 1;
@@ -97,6 +109,8 @@ void VulkanEngine::destroy_clutter_shadow() {
     if (clutter_shadow_layout_) vkDestroyPipelineLayout(device_, clutter_shadow_layout_, nullptr);
     if (clutter_shadow_vert_) vkDestroyShaderModule(device_, clutter_shadow_vert_, nullptr);
     if (clutter_shadow_view_) vkDestroyImageView(device_, clutter_shadow_view_, nullptr);
+    if (clutter_shadow_sampler_) vkDestroySampler(device_, clutter_shadow_sampler_, nullptr);
+    clutter_shadow_sampler_ = VK_NULL_HANDLE;
     if (clutter_shadow_image_) vmaDestroyImage(allocator_, clutter_shadow_image_, clutter_shadow_alloc_);
     clutter_shadow_pipeline_ = VK_NULL_HANDLE; clutter_shadow_layout_ = VK_NULL_HANDLE;
     clutter_shadow_vert_ = VK_NULL_HANDLE; clutter_shadow_view_ = VK_NULL_HANDLE;
@@ -153,23 +167,35 @@ void VulkanEngine::render_clutter_shadow(VkCommandBuffer cmd) {
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, clutter_shadow_pipeline_);
-    struct { glm::mat4 vp; glm::vec4 cam; } pc{ clutter_shadow_vp_, glm::vec4(cam, kClutterHalf * 1.42f) };
+    // p: .x wind time, .y plant (sway) flag, .z colour-pass draw distance -
+    // the same fade / sway as scatter.vert so shadows match what is drawn.
+    struct { glm::mat4 vp; glm::vec4 cam; glm::vec4 p; } pc{ clutter_shadow_vp_, glm::vec4(cam, kClutterHalf * 1.42f),
+        glm::vec4(static_cast<float>(frame_number_) * 0.016f, 0.0f,
+                  std::max(60.0f, rt_.grass_distance * 1.6f), 0.0f) };
     vkCmdPushConstants(cmd, clutter_shadow_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
     VkDeviceSize offs[2] = { 0, 0 };
+    // Only cells overlapping the shadow box around the camera (XZ).
+    const float box_r = kClutterHalf * 1.42f;
+    auto in_box = [&](const ScatterCell& c) {
+        float qx = std::clamp(cam.x, c.mn.x, c.mx.x), qz = std::clamp(cam.z, c.mn.z, c.mx.z);
+        return (qx - cam.x) * (qx - cam.x) + (qz - cam.z) * (qz - cam.z) < box_r * box_r;
+    };
     {
         VkBuffer b[2] = { scatter_.rock_mesh.vertex_buffer, scatter_.instance_buffer };
         vkCmdBindVertexBuffers(cmd, 0, 2, b, offs);
         vkCmdBindIndexBuffer(cmd, scatter_.rock_mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(cmd, scatter_.rock_mesh.index_count, scatter_.instance_count, 0, 0, 0);
+        scatter_draw_cells(cmd, scatter_.rock_mesh.index_count, scatter_.rock_cells, in_box);
     }
     if (scatter_.plant_buffer) {
+        pc.p.y = 1.0f;
+        pc.p.z = std::max(45.0f, rt_.grass_distance * 0.9f);
+        vkCmdPushConstants(cmd, clutter_shadow_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
         for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {
             if (!scatter_.plant_count[sp]) continue;
             VkBuffer b[2] = { scatter_.plant_mesh[sp].vertex_buffer, scatter_.plant_buffer };
             vkCmdBindVertexBuffers(cmd, 0, 2, b, offs);
             vkCmdBindIndexBuffer(cmd, scatter_.plant_mesh[sp].index_buffer, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(cmd, scatter_.plant_mesh[sp].index_count, scatter_.plant_count[sp], 0, 0,
-                             scatter_.plant_first[sp]);
+            scatter_draw_cells(cmd, scatter_.plant_mesh[sp].index_count, scatter_.plant_cells[sp], in_box);
         }
     }
     vkCmdEndRendering(cmd);

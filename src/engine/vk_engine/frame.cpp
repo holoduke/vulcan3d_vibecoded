@@ -640,7 +640,13 @@ void VulkanEngine::draw(uint32_t img_index) {
         struct TaaUBO {
             glm::vec4 viewport;
             glm::vec4 params;
+            glm::mat4 inv_vp;    // current frame
+            glm::mat4 prev_vp;   // previous frame (sky reprojection)
+            glm::vec4 eye;
         } u{};
+        u.inv_vp  = current_frame_view_.inv_vp;
+        u.prev_vp = prev_view_proj_valid_ ? prev_view_proj_ : current_frame_view_.vp;
+        u.eye     = glm::vec4(current_frame_view_.eye_pos, 1.0f);
         // TAA reads + writes at render_extent_, so the viewport vec it uses
         // for `gl_FragCoord → uv` conversion must reflect that.
         float w = static_cast<float>(render_extent_.width);
@@ -848,6 +854,9 @@ void VulkanEngine::draw(uint32_t img_index) {
     // the swapchain image isn't ordered before this write —
     // sync-validation flagged it as a WRITE_AFTER_READ hazard and it
     // is a real intermittent device-lost risk under load.
+    // Auto-exposure: reduce the final HDR image to an adapted log-luminance
+    // (compose binding 4) before the compose pass reads it.
+    dispatch_exposure(frame.command_buffer);
     vkinit::transition_image_src_stage(
         frame.command_buffer, swapchain_images_[img_index],
         VK_IMAGE_LAYOUT_UNDEFINED,

@@ -64,7 +64,7 @@ void VulkanEngine::init_descriptors() {
         // +1 (now 11) for the terrain aux bake (curvature + sky-vis)
         // at binding 26 — AAA terrain Phases 4/5.
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            kTextureCount * 2 + 14 + kSpomMaterialCount },
+            kTextureCount * 2 + 15 + kSpomMaterialCount },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -84,7 +84,7 @@ void VulkanEngine::init_descriptors() {
     //              terrain_raymarch_scale < 1.
     //          15=ReSTIR reservoir SSBO (read prev), 16=write cur.
     //              Owned by restir.cpp; cube.frag's GI loop reads/writes.
-    VkDescriptorSetLayoutBinding bindings[29]{};
+    VkDescriptorSetLayoutBinding bindings[30]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -304,11 +304,18 @@ void VulkanEngine::init_descriptors() {
     bindings[28].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[28].descriptorCount = 1;
     bindings[28].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Binding 29: the FULL scene depth (depth_view_), read by the FX volume
+    // pass while the same image is its DEPTH_READ_ONLY attachment - the
+    // prepass copy (27) lacks the gun, props and dynamic objects.
+    bindings[29].binding = 29;
+    bindings[29].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[29].descriptorCount = 1;
+    bindings[29].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 29, .pBindings = bindings,
+        .bindingCount = 30, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),
@@ -750,9 +757,19 @@ void VulkanEngine::update_scene_ubo() {
 
     // Castle road polyline (static after init_world; cached once).
     {
+        // Cached resample, rebuilt whenever the road itself changes (was
+        // built once and never refreshed).
         static std::vector<glm::vec4> road_gpu;
-        if (road_gpu.empty() && !castle_road_.empty())
-            road_gpu = road_gpu_points(castle_road_, 64);
+        static size_t road_sig = 0;
+        size_t sig = castle_road_.pts.size();
+        if (!castle_road_.pts.empty()) {
+            const glm::vec3 a = castle_road_.pts.front(), b = castle_road_.pts.back();
+            sig = sig * 1000003u ^ std::hash<float>{}(a.x + 7.0f * a.z) ^ (std::hash<float>{}(b.x - 3.0f * b.z) << 1);
+        }
+        if (sig != road_sig) {
+            road_gpu = castle_road_.empty() ? std::vector<glm::vec4>{} : road_gpu_points(castle_road_, 64);
+            road_sig = sig;
+        }
         const int n = static_cast<int>(std::min<size_t>(road_gpu.size(), 64));
         data.road_info = glm::vec4(static_cast<float>(n), castle_road_.half_width,
                                    castle_road_.shoulder, 0.0f);

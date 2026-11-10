@@ -408,6 +408,17 @@ void VulkanEngine::run(const RunOptions& opts) {
                        "(draw: tlas-wait %.1f, cpu-build %.1f, record+submit %.1f)",
                        hz_frame_ms, hitch_prev_[0], hitch_prev_[1], hitch_prev_[2], hitch_prev_[3],
                        hitch_prev_[4], hitch_prev_[5], hitch_draw_[0], hitch_draw_[1], hitch_draw_[2]);
+        {
+            // Rolling average of the draw() split (every ~5 s): how long the
+            // CPU waits on the GPU vs builds / records while the GPU idles.
+            static double acc[4] = {}; static int acc_n = 0;
+            acc[0] += hitch_draw_[0]; acc[1] += hitch_draw_[1]; acc[2] += hitch_draw_[2]; acc[3] += hz_frame_ms;
+            if (++acc_n >= 300) {
+                log::infof("[cpu] avg frame %.2f ms | prev-fence wait %.2f, cpu-build %.2f, record+submit %.2f",
+                           acc[3] / acc_n, acc[0] / acc_n, acc[1] / acc_n, acc[2] / acc_n);
+                acc[0] = acc[1] = acc[2] = acc[3] = 0.0; acc_n = 0;
+            }
+        }
         last = now;
         if (frame_dt > 1.0f / 15.0f) frame_dt = 1.0f / 15.0f;
         if (frame_dt < 1e-6f)        frame_dt = 1.0f / 240.0f;

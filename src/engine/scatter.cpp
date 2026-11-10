@@ -188,6 +188,38 @@ void build_flower(std::vector<Vertex>& v, std::vector<uint32_t>& ix,
     }
 }
 
+// Sort instances by 32 m ground cell and emit one contiguous range per
+// cell with a conservative AABB (instance size + raymarch-surface offset).
+void sort_into_cells(std::vector<ScatterInstance>& v, uint32_t base,
+                     std::vector<ScatterCell>& out) {
+    const float kCell = 32.0f;
+    auto key = [&](const ScatterInstance& s) {
+        int cx = int(std::floor(s.pos_scale.x / kCell)) + 512;
+        int cz = int(std::floor(s.pos_scale.z / kCell)) + 512;
+        return cz * 1024 + cx;
+    };
+    std::stable_sort(v.begin(), v.end(),
+                     [&](const ScatterInstance& a, const ScatterInstance& b) { return key(a) < key(b); });
+    out.clear();
+    for (size_t i = 0; i < v.size();) {
+        const int k = key(v[i]);
+        ScatterCell c{};
+        c.mn = glm::vec3(1e9f);
+        c.mx = glm::vec3(-1e9f);
+        size_t j = i;
+        for (; j < v.size() && key(v[j]) == k; ++j) {
+            glm::vec3 p(v[j].pos_scale);
+            float r = v[j].pos_scale.w * 1.5f + 0.5f;
+            c.mn = glm::min(c.mn, p - glm::vec3(r, 1.5f, r));
+            c.mx = glm::max(c.mx, p + glm::vec3(r, r * 2.0f + 1.5f, r));
+        }
+        c.first = base + uint32_t(i);
+        c.count = uint32_t(j - i);
+        out.push_back(c);
+        i = j;
+    }
+}
+
 } // namespace
 
 ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
@@ -324,6 +356,7 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
         std::vector<ScatterInstance> all;
         for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {
             s.plant_first[sp] = uint32_t(all.size());
+            sort_into_cells(per[sp], uint32_t(all.size()), s.plant_cells[sp]);
             s.plant_count[sp] = uint32_t(per[sp].size());
             all.insert(all.end(), per[sp].begin(), per[sp].end());
         }
@@ -353,6 +386,7 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
     }
 
     if (inst.empty()) return s;
+    sort_into_cells(inst, 0, s.rock_cells);
     const VkDeviceSize bytes = sizeof(ScatterInstance) *
                                VkDeviceSize(inst.size());
     VkBufferCreateInfo bci{};

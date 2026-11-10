@@ -22,6 +22,7 @@ struct Skybox {
     // the scene match the visible sun in the sky.
     glm::vec3     sun_direction{ 0.0f, 1.0f, 0.0f };
     bool          hdr = false;   // RGBA32F EXR panorama (compose picks the HDR path)
+    float         avg_lum = 0.0f;   // mean upper-hemisphere luminance (auto-exposure)
 };
 
 // Start decoding an .exr sky on a worker thread (no-op for other files /

@@ -52,6 +52,9 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4  grass_extra;
     vec4  grass_extra2;
     mat4  light_vp;
+    vec4  terrain_extra;
+    vec4  _scene_pad[24];
+    vec4  restir_params;   // .zw = jitter delta (motion vectors)
 } scene;
 
 vec2 _octa_encode(vec3 n) {
@@ -117,7 +120,8 @@ void main() {
         vec2 current_uv = gl_FragCoord.xy * scene.viewport.zw;
         if (vPrevClip.w > 0.0) {
             vec2 prev_ndc = vPrevClip.xy / vPrevClip.w;
-            outMotion = current_uv - (prev_ndc * 0.5 + 0.5);
+            // Unjittered motion, same convention as cube.frag.
+            outMotion = current_uv - (prev_ndc * 0.5 + 0.5) - scene.restir_params.zw;
         } else {
             outMotion = vec2(0.0);
         }

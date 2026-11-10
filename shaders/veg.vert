@@ -99,17 +99,25 @@ void main() {
         imp_uv = vec2(inNormal.x, inNormal.y);      // (u, v) packed in the normal
     }
 
-    // Wind: trunk base still, crown sways; per-instance phase.
+    // Wind: trunk base still, crown sways; per-instance phase. The previous
+    // frame's pose (time - 0.016, the CPU step) feeds the motion vector so
+    // swaying crowns reproject correctly in TAA.
     float w = inUv.x;
+    vec3 wp_prev = wp;
     if (w > 0.001) {
-        float t  = scene.grass_rm_params.z;
         float ws = 0.35 + clamp(scene.grass_rm_params.y, 0.0, 3.0);
         vec2  wd = normalize(vec2(0.8, 0.45));
         float ph = I.rot_arch_phase.z;
-        float sway = sin(t * 1.3 + ph) * 0.6 + sin(t * 2.9 + ph * 1.7) * 0.25 + 0.35;
-        float flutter = sin(t * 9.0 + dot(wp, vec3(1.7, 2.3, 1.9))) * 0.04;
-        wp.xz += wd * (sway * 0.22 * ws * w * w * s);
-        wp += vec3(flutter * ws * w * w);
+        vec3  rest = wp;
+        for (int k = 0; k < 2; ++k) {
+            float t = scene.grass_rm_params.z - (k == 1 ? 0.016 : 0.0);
+            float sway = sin(t * 1.3 + ph) * 0.6 + sin(t * 2.9 + ph * 1.7) * 0.25 + 0.35;
+            float flutter = sin(t * 9.0 + dot(rest, vec3(1.7, 2.3, 1.9))) * 0.04;
+            vec3 p = rest;
+            p.xz += wd * (sway * 0.22 * ws * w * w * s);
+            p += vec3(flutter * ws * w * w);
+            if (k == 0) wp = p; else wp_prev = p;
+        }
     }
 
     int mat = int(inUv.y + 0.5);
@@ -126,7 +134,7 @@ void main() {
     if (mat >= 1 && mat <= 3) col *= mix(vec3(0.85, 1.05, 0.8), vec3(1.15, 0.95, 1.1), hj);
 
     gl_Position = pc.mvp * vec4(wp, 1.0);
-    vPrevClip   = pc.prev_mvp * vec4(wp, 1.0);
+    vPrevClip   = pc.prev_mvp * vec4(wp_prev, 1.0);
     vWorldPos   = wp;
     vShellBase  = wp;
     vObjectPos  = wp;

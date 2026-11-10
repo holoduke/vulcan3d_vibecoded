@@ -206,6 +206,16 @@ Skybox load_skybox(VkDevice device, VmaAllocator alloc, VkQueue queue,
                                 ? g_prefetch.get() : load_exr(path);
         if (!hdr.ok) return sb;
         sb.hdr = true;
+        {
+            double s = 0.0; size_t n = 0;
+            for (int y = 0; y < hdr.h / 2; y += 4)          // upper half = sky dome
+                for (int x = 0; x < hdr.w; x += 4) {
+                    const float* p = hdr.rgba + (size_t(y) * hdr.w + x) * 4;
+                    float l = 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2];
+                    if (l == l && l < 50.0f) { s += l; ++n; }   // skip the sun disc
+                }
+            sb.avg_lum = n ? float(s / double(n)) : 0.0f;
+        }
         sb.width = static_cast<uint32_t>(hdr.w);
         sb.height = static_cast<uint32_t>(hdr.h);
         sb.sun_direction = extract_sun_direction_float(hdr.rgba, hdr.w, hdr.h);

@@ -457,6 +457,13 @@ void VulkanEngine::write_depth_copy_binding() {
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w.pImageInfo = &bi;
     vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+    if (depth_view_) {
+        VkDescriptorImageInfo fi{ depth_copy_sampler_, depth_view_,
+                                  VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL };
+        w.dstBinding = 29;
+        w.pImageInfo = &fi;
+        vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+    }
 }
 
 void VulkanEngine::recreate_swapchain() {

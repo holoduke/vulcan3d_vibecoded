@@ -6,36 +6,42 @@
 #include "engine/vk_engine/internal.h"
 #include "engine/vk_pipelines.h"
 
+#include <GLFW/glfw3.h>
+#include <algorithm>
+
 namespace qlike {
 
 void VulkanEngine::init_compose() {
     // Compose set's binding 3 samples bloom_mip_views_[0], so init_bloom()
     // must have run first. linear_sampler_ comes from init_taa(). Both are
     // sequenced from VulkanEngine::init() — this method just assumes them.
+    init_exposure();   // SSBO + compute; compose binding 4 reads the buffer
     {
         VkDescriptorPoolSize sizes[] = {
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kHistorySlots * 4 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         kHistorySlots },
         };
         VkDescriptorPoolCreateInfo pci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
-            .maxSets = kHistorySlots, .poolSizeCount = 1, .pPoolSizes = sizes,
+            .maxSets = kHistorySlots, .poolSizeCount = 2, .pPoolSizes = sizes,
         };
         vk_check(vkCreateDescriptorPool(device_, &pci, nullptr, &compose_desc_pool_),
                  "compose desc pool");
     }
     {
-        VkDescriptorSetLayoutBinding b[4]{};
-        for (int i = 0; i < 4; ++i) {
+        VkDescriptorSetLayoutBinding b[5]{};
+        for (int i = 0; i < 5; ++i) {
             b[i].binding = i;
             b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             b[i].descriptorCount = 1;
             b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         }
+        b[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;   // exposure SSBO
         VkDescriptorSetLayoutCreateInfo lci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
-            .bindingCount = 4, .pBindings = b,
+            .bindingCount = 5, .pBindings = b,
         };
         vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                              &compose_desc_set_layout_),
@@ -133,11 +139,27 @@ void VulkanEngine::rewrite_compose_image_bindings() {
         w[1] = w[0]; w[1].dstBinding = 1; w[1].pImageInfo = &i_depth;
         w[2] = w[0]; w[2].dstBinding = 2; w[2].pImageInfo = &i_sky;
         w[3] = w[0]; w[3].dstBinding = 3; w[3].pImageInfo = &i_bloom;
+        VkDescriptorBufferInfo bi{ exposure_buf_, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet wb = w[0];
+        wb.dstBinding = 4;
+        wb.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        wb.pImageInfo = nullptr;
+        wb.pBufferInfo = &bi;
         vkUpdateDescriptorSets(device_, 4, w, 0, nullptr);
+        if (exposure_buf_) vkUpdateDescriptorSets(device_, 1, &wb, 0, nullptr);
+        // Exposure compute reads the same image compose shows.
+        if (exposure_sets_[s]) {
+            VkWriteDescriptorSet we[3]{};
+            we[0] = w[0]; we[0].dstSet = exposure_sets_[s]; we[0].dstBinding = 0;
+            we[1] = w[1]; we[1].dstSet = exposure_sets_[s]; we[1].dstBinding = 1;
+            we[2] = wb;   we[2].dstSet = exposure_sets_[s]; we[2].dstBinding = 2;
+            vkUpdateDescriptorSets(device_, 3, we, 0, nullptr);
+        }
     }
 }
 
 void VulkanEngine::destroy_compose() {
+    destroy_exposure();
     if (compose_pipeline_)         vkDestroyPipeline(device_, compose_pipeline_, nullptr);
     if (compose_pipeline_layout_)  vkDestroyPipelineLayout(device_, compose_pipeline_layout_, nullptr);
     if (compose_frag_module_)      vkDestroyShaderModule(device_, compose_frag_module_, nullptr);
@@ -148,6 +170,114 @@ void VulkanEngine::destroy_compose() {
     compose_frag_module_      = VK_NULL_HANDLE;
     compose_desc_set_layout_  = VK_NULL_HANDLE;
     compose_desc_pool_        = VK_NULL_HANDLE;
+}
+
+
+// ---------------------------------------------------------------------
+// Auto-exposure (shaders/exposure.comp)
+// ---------------------------------------------------------------------
+void VulkanEngine::init_exposure() {
+    {
+        VkBufferCreateInfo bci{};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = 16;
+        bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        vk_check(vmaCreateBuffer(allocator_, &bci, &aci, &exposure_buf_, &exposure_alloc_, nullptr),
+                 "exposure buffer");
+        vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_, [&](VkCommandBuffer cb) {
+            vkCmdFillBuffer(cb, exposure_buf_, 0, 16, 0u);   // valid = 0 -> first frame snaps
+        });
+    }
+    {
+        VkDescriptorSetLayoutBinding b[3]{};
+        for (int i = 0; i < 3; ++i) {
+            b[i].binding = uint32_t(i);
+            b[i].descriptorType = (i == 2) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                                           : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            b[i].descriptorCount = 1;
+            b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo lci{};
+        lci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        lci.bindingCount = 3; lci.pBindings = b;
+        vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr, &exposure_set_layout_),
+                 "exposure set layout");
+        VkDescriptorPoolSize sizes[] = {
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kHistorySlots * 2 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         kHistorySlots },
+        };
+        VkDescriptorPoolCreateInfo pci{};
+        pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pci.maxSets = kHistorySlots; pci.poolSizeCount = 2; pci.pPoolSizes = sizes;
+        vk_check(vkCreateDescriptorPool(device_, &pci, nullptr, &exposure_pool_), "exposure pool");
+        VkDescriptorSetLayout layouts[kHistorySlots] = { exposure_set_layout_, exposure_set_layout_ };
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = exposure_pool_;
+        dai.descriptorSetCount = kHistorySlots; dai.pSetLayouts = layouts;
+        vk_check(vkAllocateDescriptorSets(device_, &dai, exposure_sets_), "exposure sets");
+    }
+    {
+        VkPushConstantRange pc{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(float) * 4 };
+        VkPipelineLayoutCreateInfo plci{};
+        plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plci.setLayoutCount = 1; plci.pSetLayouts = &exposure_set_layout_;
+        plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pc;
+        vk_check(vkCreatePipelineLayout(device_, &plci, nullptr, &exposure_pipeline_layout_),
+                 "exposure pipeline layout");
+        VkShaderModule m = vkpipe::load_shader_module(device_, std::string(QLIKE_SHADER_DIR) + "/exposure.comp.spv");
+        VkComputePipelineCreateInfo cci{};
+        cci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cci.stage.module = m;
+        cci.stage.pName = "main";
+        cci.layout = exposure_pipeline_layout_;
+        vk_check(vkCreateComputePipelines(device_, pipeline_cache_, 1, &cci, nullptr, &exposure_pipeline_),
+                 "exposure pipeline");
+        vkDestroyShaderModule(device_, m, nullptr);
+    }
+    log::info("[exposure] luminance-reduction auto-exposure ready");
+}
+
+void VulkanEngine::destroy_exposure() {
+    if (exposure_pipeline_) vkDestroyPipeline(device_, exposure_pipeline_, nullptr);
+    if (exposure_pipeline_layout_) vkDestroyPipelineLayout(device_, exposure_pipeline_layout_, nullptr);
+    if (exposure_pool_) vkDestroyDescriptorPool(device_, exposure_pool_, nullptr);
+    if (exposure_set_layout_) vkDestroyDescriptorSetLayout(device_, exposure_set_layout_, nullptr);
+    if (exposure_buf_) vmaDestroyBuffer(allocator_, exposure_buf_, exposure_alloc_);
+    exposure_pipeline_ = VK_NULL_HANDLE; exposure_pipeline_layout_ = VK_NULL_HANDLE;
+    exposure_pool_ = VK_NULL_HANDLE; exposure_set_layout_ = VK_NULL_HANDLE;
+    exposure_buf_ = VK_NULL_HANDLE; exposure_alloc_ = nullptr;
+    exposure_sets_[0] = exposure_sets_[1] = VK_NULL_HANDLE;
+}
+
+void VulkanEngine::dispatch_exposure(VkCommandBuffer cmd) {
+    if (!exposure_pipeline_ || rt_.auto_exposure_strength <= 0.0f) return;
+    const double now = glfwGetTime();
+    float dt = exposure_last_t_ > 0.0 ? float(now - exposure_last_t_) : 0.0f;
+    exposure_last_t_ = now;
+    dt = std::min(dt, 0.25f);
+    // Sky luminance estimate: the sky colour the compose pass paints.
+    const glm::vec3 sky = rt_.sky_color;
+    float sky_lum = 0.2126f * sky.r + 0.7152f * sky.g + 0.0722f * sky.b;
+    if (skybox_.hdr && skybox_.avg_lum > 0.0f) sky_lum = skybox_.avg_lum;   // what compose paints
+    sky_lum = std::max(0.05f, sky_lum);
+    struct { float dt, up, down, sky; } pc{ dt, 2.5f, 0.9f, sky_lum };
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, exposure_pipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, exposure_pipeline_layout_, 0, 1,
+                            &exposure_sets_[history_write_slot_], 0, nullptr);
+    vkCmdPushConstants(cmd, exposure_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, 1, 1, 1);
+    VkMemoryBarrier2 mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, nullptr,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT };
+    VkDependencyInfo di{}; di.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    di.memoryBarrierCount = 1; di.pMemoryBarriers = &mb;
+    vkCmdPipelineBarrier2(cmd, &di);
 }
 
 } // namespace qlike

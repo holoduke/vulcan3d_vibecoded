@@ -14,6 +14,10 @@ layout(set = 0, binding = 0) uniform sampler2D history_color;
 layout(set = 0, binding = 1) uniform sampler2D history_depth;
 // Equirectangular LDR sky panorama (sRGB sampler → linear in shader).
 layout(set = 0, binding = 2) uniform sampler2D u_skybox;
+// Adapted log2 scene luminance from shaders/exposure.comp.
+layout(std430, set = 0, binding = 4) readonly buffer Exposure {
+    float log_avg; float valid; float cur_log; float pad;
+} u_exposure;
 // Mip 0 of the bloom chain (Karis-prefiltered downsample → upsample). The
 // engine runs run_bloom_chain between TAA and compose; we sample it here at
 // the same resolution as history_color and add it back additively. Replaces
@@ -632,8 +636,10 @@ void main() {
         // shows. The hash offsets the starting position by ∈ [0, kStep),
         // turning the band pattern into per-pixel noise that TAA's
         // history blend integrates into smooth continuous rays.
-        float jitter = fract(sin(dot(gl_FragCoord.xy,
-                                      vec2(12.9898, 78.233))) * 43758.5453);
+        // (compose runs AFTER TAA, so nothing averages this: interleaved-
+        // gradient noise instead of a sin-hash - structured, far less
+        // visible as static grain.)
+        float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
         vec2 uv_t   = uv_here - d_step * jitter;
         float w = 1.0;
         float occ = 0.0;
@@ -652,6 +658,10 @@ void main() {
         float radial_fade  = exp(-r * 1.8);
         vec3 shaft_col     = pc.sun_color.rgb * pc.sun_color.a *
                              shaft * radial_fade * pc.sun_dir.w;
+        // Silhouette pixels (filtered depth < far but partly sky) only get
+        // their geometry fraction - no bright rim against the sun.
+        vec4 sg = textureGather(history_depth, sample_uv, 0);
+        shaft_col *= dot(vec4(lessThan(sg, vec4(0.99999))), vec4(0.25));
         hdr += shaft_col;
     }
 
@@ -711,8 +721,9 @@ void main() {
         // The previous 6.0 value was stale (from when kBloomMips = 7);
         // it relied on the sampler's max-LOD clamp, which works but
         // requires the all-mips view bound at this binding.
-        float scene_avg = max(0.005,
-            lum(textureLod(u_bloom, vec2(0.5), 4.0).rgb));
+        // Centre-weighted, temporally adapted average from exposure.comp
+        // (was one texel of bloom mip 4 at the crosshair -> pumping).
+        float scene_avg = (u_exposure.valid > 0.5) ? max(0.005, exp2(u_exposure.log_avg)) : 0.18;
         const float kTarget = 0.18;        // mid-grey target
         float ratio = kTarget / scene_avg;
         ratio = clamp(ratio, 0.4, 4.0);    // bound the auto-correction
@@ -752,12 +763,10 @@ void main() {
     // pixels (depth ≈ 1) so the ring doesn't draw on the sky.
     if (pc.brush_indicator.w > 0.5 && depth < 0.99999) {
         vec2 uv = gl_FragCoord.xy * pc.viewport.zw;
-        // NDC for this pixel. Vulkan: gl_FragCoord.y is top-down, so
-        // ndc.y = 1 - 2*uv.y. ndc.z uses depth directly (Vulkan z range
-        // is [0,1], not [-1,1] like GL).
-        vec4 ndc = vec4(uv.x * 2.0 - 1.0,
-                        1.0 - uv.y * 2.0,
-                        depth, 1.0);
+        // NDC for this pixel - same convention as view_ray(): the
+        // projection already carries the Vulkan Y flip, so ndc.y = 2uv-1
+        // (the old 1-2uv mirrored the ring). Vulkan z range is [0,1].
+        vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
         vec4 wp_h = pc.inv_view_proj * ndc;
         vec3 world = wp_h.xyz / wp_h.w;
         float d = length(world.xz - pc.brush_indicator.xy);
