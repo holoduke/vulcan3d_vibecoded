@@ -330,12 +330,11 @@ int height_idx_for_albedo(int a) {
                             // outer SPOM brush path (terrain bypasses that
                             // path via the is_terrain gate -- terrain uses
                             // its own splat-aware march, see below).
-    // Floor tile materials (5 / 6) intentionally omitted: floor brushes are
-    // 0.5 m thin slabs, so their side faces are axis 0/2 and bypass the
-    // axis==1 silhouette gate. SPOM raymarched past the slab thickness and
-    // produced visible parallax depth on the slab edges that didn't match
-    // anything in the world. Floors keep normal maps + triplanar shading;
-    // they just lose the parallax displacement effect.
+    // Floor tiles (courtyard): their slabs are 0.5 m thin, so parallax on
+    // the SIDE faces showed depth past the slab - the brush path only
+    // allows these on up-facing faces (see spom_path).
+    if (a == 5) return 2;   // Tiles130
+    if (a == 6) return 3;   // Tiles074
     return -1;
 }
 
@@ -793,6 +792,52 @@ vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
     vec3 wnz = vec3(nz.x, nz.y, N.z + nz.z * sign(N.z));
 
     return normalize(wnx * blend.x + wny * blend.y + wnz * blend.z);
+}
+
+// ---- Relief helpers shared by the brush SPOM, triplanar-mesh and UV-mesh
+// parallax paths. `Vt` / `Lt` = view / light in the face's tangent frame
+// (x along +u, y along +v, z = face normal); `hs` = relief depth in uv.
+vec2 pom_march(int hix, vec2 uv0, vec3 Vt, float hs, vec2 gdx, vec2 gdy) {
+    vec2  P   = Vt.xy / max(Vt.z, 0.12) * hs;
+    int   nL  = int(mix(28.0, 10.0, clamp(Vt.z, 0.0, 1.0)));
+    float lay = 1.0 / float(nL);
+    vec2  duv = P * lay;
+    vec2  uv  = uv0;
+    float cur = 0.0;
+    float hd  = 1.0 - textureGrad(u_height[hix], uv, gdx, gdy).r;
+    for (int i = 0; i < 28; ++i) {
+        if (i >= nL || cur >= hd) break;
+        uv  -= duv;
+        cur += lay;
+        hd   = 1.0 - textureGrad(u_height[hix], uv, gdx, gdy).r;
+    }
+    vec2  puv    = uv + duv;
+    float after  = hd - cur;
+    float before = (1.0 - textureGrad(u_height[hix], puv, gdx, gdy).r) - (cur - lay);
+    float wgt    = after / min(after - before, -1e-5);
+    return mix(uv, puv, clamp(wgt, 0.0, 1.0));
+}
+// Cavity darkening x parallax self-shadow toward the sun (Tatarchuk 2006).
+// Deferred lighting shades the FLAT surface, so these cues are what make
+// the relief read as depth; they go into albedo, recomputed every frame.
+float pom_shade(int hix, vec2 uv, vec3 Lt, float hs, vec2 gdx, vec2 gdy) {
+    float h0  = textureGrad(u_height[hix], uv, gdx, gdy).r;
+    float cav = mix(0.62, 1.0, smoothstep(0.0, 0.7, h0));
+    float vis = 1.0;
+    if (Lt.z > 0.05 && h0 < 0.98) {
+        vec2 sP = Lt.xy / max(Lt.z, 0.15) * hs * (1.0 - h0);
+        float occ = 0.0;
+        for (int k = 1; k <= 8; ++k) {
+            float t  = float(k) / 8.0;
+            float rh = h0 + (1.0 - h0) * t;
+            float sh = textureGrad(u_height[hix], uv + sP * t, gdx, gdy).r;
+            occ = max(occ, (sh - rh) * (1.0 - t));
+        }
+        vis = 1.0 - 0.55 * smoothstep(0.0, 0.12, occ);
+    } else if (Lt.z <= 0.05) {
+        vis = 0.8;   // face turned away from the sun: crevices stay dark
+    }
+    return cav * vis;
 }
 
 // Per-surface PBR parameters for the G-buffer (deferred GGX). No roughness
@@ -1592,6 +1637,35 @@ void main() {
     // pick world-space explicitly so the height read uses true world Y.
     vec3  sample_pos     = (obj_space ? vObjectPos : vWorldPos) * scale;
     vec3  proj_n         = obj_space ? normalize(vObjectNormal) : N;
+    float mesh_pom_shade = 1.0;   // cavity + self-shadow, applied to albedo below
+    // ---- Parallax occlusion for triplanar MESH surfaces ----
+    // The brush SPOM path below needs brush face data and excludes mesh
+    // draws. Steep-parallax march in the dominant triplanar plane; the
+    // shifted sample_pos then drives albedo AND normal sampling.
+    if (is_mesh_draw && pc.grass_params.z > 0.5 && albedo_idx_raw >= 0 &&
+        scene.spom_params.x > 0.01) {
+        int   hix   = height_idx_for_albedo(albedo_idx_raw);
+        float fadeP = 1.0 - smoothstep(12.0, 40.0, distance(vWorldPos, scene.camera_pos.xyz));
+        if (hix >= 0 && fadeP > 0.01) {
+            vec3 an = abs(N);
+            vec3 Tp, Bp, Fp;
+            if (an.x >= an.y && an.x >= an.z)  { Tp = vec3(0, 0, 1); Bp = vec3(0, 1, 0); Fp = vec3(sign(N.x), 0, 0); }
+            else if (an.y >= an.z)              { Tp = vec3(1, 0, 0); Bp = vec3(0, 0, 1); Fp = vec3(0, sign(N.y), 0); }
+            else                                { Tp = vec3(1, 0, 0); Bp = vec3(0, 1, 0); Fp = vec3(0, 0, sign(N.z)); }
+            vec3 Vw = normalize(scene.camera_pos.xyz - vWorldPos);
+            vec3 Vt = vec3(dot(Vw, Tp), dot(Vw, Bp), dot(Vw, Fp));
+            if (Vt.z > 0.12) {
+                // uv = (dot(p,T), dot(p,B)) == triplanar_sample's wp.zy / wp.xz / wp.xy
+                vec2  uv0 = vec2(dot(sample_pos, Tp), dot(sample_pos, Bp));
+                vec2  gdx = dFdx(uv0), gdy = dFdy(uv0);
+                float hs  = 0.11 * scene.spom_params.x * fadeP;
+                vec2  uv  = pom_march(hix, uv0, Vt, hs, gdx, gdy);
+                sample_pos += Tp * (uv.x - uv0.x) + Bp * (uv.y - uv0.y);
+                vec3 Lt = vec3(dot(L, Tp), dot(L, Bp), dot(L, Fp));
+                mesh_pom_shade = mix(1.0, pom_shade(hix, uv, Lt, hs, gdx, gdy), fadeP);
+            }
+        }
+    }
     bool  use_albedo     = albedo_idx_raw >= 0 && albedo_idx_raw < kTextureCount;
     bool  use_normal     = normal_idx_raw >= 0 && normal_idx_raw < kTextureCount &&
                            !obj_space && !is_terrain;
@@ -2423,7 +2497,8 @@ void main() {
         // its own raymarched normal path.
         int spom_h_idx = height_idx_for_albedo(albedo_idx_raw);
         bool spom_path = use_albedo && spom_h_idx >= 0 && !obj_space &&
-                         !is_terrain && !is_mesh_draw;
+                         !is_terrain && !is_mesh_draw &&
+                         ((albedo_idx_raw != 5 && albedo_idx_raw != 6) || N.y > 0.9);
         if (spom_path) {
             // pc.model is translate * scale (no rotation for static brushes,
             // and obj_space — which would rotate — already failed the gate
@@ -2879,10 +2954,24 @@ void main() {
             // when TAA history is unavailable (camera moving / falling).
             // Floors keep shading_pos = vWorldPos so AO/shadow rays
             // trace from the actual rasterised hit point.
+            // Depth cues for the deferred path (cavity + self-shadow), see
+            // pom_shade(). The old forward path got them from RT rays fired
+            // out of the displaced crevice; deferred shades the flat face.
+            {
+                float fadeB = 1.0 - smoothstep(12.0, 40.0, distance(vWorldPos, scene.camera_pos.xyz));
+                if (fadeB > 0.01 && scene.spom_params.x > 0.01) {
+                    int  hb = clamp(spom_h_idx, 0, 5);
+                    vec3 Lt = vec3(dot(L, spom_T), dot(L, spom_B), dot(L, spom_face_n));
+                    if (hb == 0 || hb == 2) Lt.x *= 0.5;   // 2:1 brick texture aspect (spom_uv)
+                    float hsB = 0.04 * scene.spom_params.x;
+                    mesh_pom_shade = mix(1.0, pom_shade(hb, spom_uv_off, Lt, hsB,
+                                                        dFdx(spom_uv0), dFdy(spom_uv0)), fadeB);
+                }
+            }
             if (axis != 1) shading_pos = spom_world;
             int  a_idx = clamp(albedo_idx_raw, 0, kTextureCount - 1);
             vec3 tex_albedo = texture(u_albedo[a_idx], spom_uv_off).rgb;
-            albedo = tex_albedo * vColor;
+            albedo = tex_albedo * vColor * mesh_pom_shade;
             if (use_normal) {
                 vec3 n_t = texture(u_normal[a_idx], spom_uv_off).rgb * 2.0 - 1.0;
                 N = normalize(spom_T  * n_t.x +
@@ -2894,23 +2983,42 @@ void main() {
             // (Schueler 2013). NormalGL green = image-up = -dP/dv.
             int  ai  = clamp(albedo_idx_raw, 0, kTextureCount - 1);
             vec2 muv = vUv * scale;
-            albedo = texture(u_albedo[ai], muv).rgb * vColor;
+            // Cotangent frame (Schueler 2013) - needed for the normal map AND
+            // the parallax march; derivatives taken before any uv shift.
+            vec3 dp1 = dFdx(vWorldPos), dp2 = dFdy(vWorldPos);
+            vec2 du1 = dFdx(muv),       du2 = dFdy(muv);
+            vec3 dp2p = cross(dp2, N), dp1p = cross(N, dp1);
+            vec3 Tm = dp2p * du1.x + dp1p * du2.x;
+            vec3 Bm = dp2p * du1.y + dp1p * du2.y;
+            float im = inversesqrt(max(max(dot(Tm, Tm), dot(Bm, Bm)), 1e-20));
+            // Parallax occlusion on UV-mapped meshes (castle towers / keep).
+            {
+                int   hix   = height_idx_for_albedo(albedo_idx_raw);
+                float fadeP = 1.0 - smoothstep(12.0, 40.0, distance(vWorldPos, scene.camera_pos.xyz));
+                if (hix >= 0 && fadeP > 0.01 && scene.spom_params.x > 0.01) {
+                    vec3 Tn = normalize(Tm), Bn = normalize(Bm);
+                    vec3 Vw = normalize(scene.camera_pos.xyz - vWorldPos);
+                    vec3 Vt = vec3(dot(Vw, Tn), dot(Vw, Bn), dot(Vw, N));
+                    if (Vt.z > 0.12) {
+                        float hs = 0.11 * scene.spom_params.x * fadeP;
+                        vec2 uvp = pom_march(hix, muv, Vt, hs, du1, du2);
+                        vec3 Lt = vec3(dot(L, Tn), dot(L, Bn), dot(L, N));
+                        mesh_pom_shade = mix(1.0, pom_shade(hix, uvp, Lt, hs, du1, du2), fadeP);
+                        muv = uvp;
+                    }
+                }
+            }
+            albedo = textureGrad(u_albedo[ai], muv, du1, du2).rgb * vColor * mesh_pom_shade;
             if (use_normal) {
                 int  ni = clamp(normal_idx_raw, 0, kTextureCount - 1);
-                vec3 nt = texture(u_normal[ni], muv).xyz * 2.0 - 1.0;
-                vec3 dp1 = dFdx(vWorldPos), dp2 = dFdy(vWorldPos);
-                vec2 du1 = dFdx(muv),       du2 = dFdy(muv);
-                vec3 dp2p = cross(dp2, N), dp1p = cross(N, dp1);
-                vec3 Tm = dp2p * du1.x + dp1p * du2.x;
-                vec3 Bm = dp2p * du1.y + dp1p * du2.y;
-                float im = inversesqrt(max(max(dot(Tm, Tm), dot(Bm, Bm)), 1e-20));
+                vec3 nt = textureGrad(u_normal[ni], muv, du1, du2).xyz * 2.0 - 1.0;
                 N = normalize(Tm * (im * nt.x) - Bm * (im * nt.y) + N * nt.z);
             }
         } else if (use_albedo) {
             int  albedo_idx = clamp(albedo_idx_raw, 0, kTextureCount - 1);
             vec3 tex_albedo = triplanar_sample(u_albedo[albedo_idx],
                                                sample_pos, proj_n);
-            albedo = tex_albedo * vColor;
+            albedo = tex_albedo * vColor * mesh_pom_shade;
             if (use_normal) {
                 int  normal_idx = clamp(normal_idx_raw, 0, kTextureCount - 1);
                 N = triplanar_normal(u_normal[normal_idx], sample_pos, N);

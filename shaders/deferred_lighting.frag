@@ -548,7 +548,8 @@ void main() {
         // march, packed into gbuffer1.b (1 = fully lit) for material 3.
         // (Was applied to EVERY material with its 0.5 placeholder -> all
         // non-terrain surfaces got only half the sunlight.)
-        shadow = 1.0 - (1.0 - shadow) * clamp(relief_vis, 0.0, 1.0);
+        // Floor at 0.3: a hard 0 left black single-pixel specks in the grass.
+        shadow = 1.0 - (1.0 - shadow) * mix(0.3, 1.0, clamp(relief_vis, 0.0, 1.0));
         // Small-object shadows (flowers, ferns, clutter rocks): dedicated
         // depth map of ONLY those casters around the camera (light-VP in
         // the spare light slots), so the terrain receiver can't self-acne.
