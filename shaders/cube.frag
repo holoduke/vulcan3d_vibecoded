@@ -3153,7 +3153,7 @@ void main() {
     // Phase 5: baked horizon AO — valley floors see less sky dome, so
     // their ambient drops. 0.45 floor keeps deep gorges readable.
     if (is_terrain) {
-        float sv = mix(0.45, 1.0, terrain_sky_vis);
+        float sv = mix(0.08, 1.0, terrain_sky_vis * terrain_sky_vis * (3.0 - 2.0 * terrain_sky_vis));   // matches deferred (was 0.45 floor: gullies far too bright)
         ambient_sky *= sv;
     }
 

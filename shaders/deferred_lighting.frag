@@ -748,14 +748,20 @@ void main() {
         // = every bit except 0 and 2 -> castle / brushes / props only.
         const uint kProbeMask = 0xFAu;
         vec3 probe_origin = world_pos + vec3(0.0, 0.10, 0.0);
+        // Hemisphere around the surface normal (was world-up: on slopes
+        // half the rays pointed into the hill).
+        vec3 pt_u = abs(N.y) < 0.999 ? normalize(cross(vec3(0.0, 1.0, 0.0), N)) : vec3(1.0, 0.0, 0.0);
+        vec3 pt_v = cross(N, pt_u);
         int probe_misses = 0;
         for (int i = 0; i < kProbeN; ++i) {
             float r1 = (float(i) + 0.5) / float(kProbeN);
             float r_h = sqrt(r1);
             float phi = 2.39996323 * float(i) + 0.7;
-            vec3 dir = vec3(r_h * cos(phi),
-                            sqrt(max(0.0, 1.0 - r1)),
-                            r_h * sin(phi));
+            vec3 dir = normalize(pt_u * (r_h * cos(phi)) + pt_v * (r_h * sin(phi)) +
+                                 N * sqrt(max(0.0, 1.0 - r1)));
+            // Castle / props / trees. Terrain self-occlusion comes from the
+            // baked horizon visibility (u_terrain_aux.g) below - RT rays
+            // against the terrain BLAS cost ~6 ms here.
             if (!any_hit_m(probe_origin, dir, 60.0, kProbeMask)) {
                 probe_misses += 1;
             }
@@ -1199,7 +1205,12 @@ void main() {
     vec3 ambient_sky    = sky_tint * 0.45 * ambient_strength;
     if (material_id == 3) {   // baked horizon AO, as cube.frag (was missing here)
         vec2 aux_uv = clamp(world_pos.xz / 2048.0 + 0.5, vec2(0.0), vec2(1.0));
-        ambient_sky *= mix(0.45, 1.0, textureLod(u_terrain_aux, aux_uv, 0.0).g);
+        // Baked terrain horizon visibility (hills / gullies / slopes
+        // occluding their own sky). Was floored at 0.45, so a deep gully
+        // lost at most 55 % of its sky light - narrow ground stayed far
+        // too bright. Near-full range now (0.08 floor).
+        float hv = textureLod(u_terrain_aux, aux_uv, 0.0).g;
+        ambient_sky *= mix(0.08, 1.0, hv * hv * (3.0 - 2.0 * hv));
     }
     // sky_factor: cube.frag uses smoothstep(0, 0.6, sky_vis) floored at
     // 0.10. Same here so deep cracks still pick up a tiny sky leakage.
