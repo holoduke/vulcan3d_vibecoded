@@ -57,6 +57,9 @@ struct ScatterSet {
     void*              inst_mapped  = nullptr;
     void*              plant_mapped = nullptr;
     std::vector<float> inst_dy, plant_dy;
+    // CPU copies of the instances (the mapped buffers are write-combined):
+    // craters edit these and write the changed ones through.
+    std::vector<ScatterInstance> inst_cpu, plant_cpu;
     bool               rm_surface = false;
     std::vector<ScatterCell> rock_cells;
     std::vector<ScatterCell> plant_cells[kPlantSpecies];

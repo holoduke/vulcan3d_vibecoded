@@ -37,6 +37,11 @@ public:
     // Remove the compound boxes whose centre lies within `tol` (XZ) of any
     // given point and rebuild the affected cells. Returns boxes removed.
     size_t remove_compound_boxes_at(const glm::vec2* xz, size_t n, float tol);
+    // Push edited heights (row-major, `stride` floats per row, same indexing
+    // as the heightfield samples) for the sample rectangle [x0..x1]x[z0..z1]
+    // into the live heightfield in place (craters). Block-aligned inside.
+    void update_heightfield_region(const float* heights, int stride,
+                                   int x0, int z0, int x1, int z1);
 
     // Voxel-building collision: replace the single static body that
     // represents the destructible voxel shape with a fresh one built from

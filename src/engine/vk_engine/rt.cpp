@@ -43,7 +43,7 @@ void VulkanEngine::init_rt() {
     auto build_mesh_blas = [&](const Mesh& mesh, const char* tag,
                                VkBuffer& out_buffer, VmaAllocation& out_alloc,
                                VkAccelerationStructureKHR& out_as,
-                               VkDeviceAddress& out_addr) {
+                               VkDeviceAddress& out_addr, bool allow_update = false) {
         const uint32_t tri_count = mesh.index_count / 3;
         VkDeviceAddress vbo_addr = buffer_device_address(device_, mesh.vertex_buffer);
         VkDeviceAddress ibo_addr = buffer_device_address(device_, mesh.index_buffer);
@@ -66,7 +66,8 @@ void VulkanEngine::init_rt() {
         VkAccelerationStructureBuildGeometryInfoKHR bgi{};
         bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
         bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                    (allow_update ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0u);
         bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
         bgi.geometryCount = 1;
         bgi.pGeometries = &geom;
@@ -147,7 +148,7 @@ void VulkanEngine::init_rt() {
     if (terrain_mesh_.index_count > 0) {
         build_mesh_blas(terrain_mesh_, "terrain",
                         terrain_blas_buffer_, terrain_blas_alloc_,
-                        terrain_blas_, terrain_blas_device_address_);
+                        terrain_blas_, terrain_blas_device_address_, true);   // refittable (craters)
     }
     // Single big BLAS over the entire static castle. Replaces ~190 small
     // per-brush TLAS instances with one вЂ” drops top-level traversal cost
@@ -357,6 +358,54 @@ void VulkanEngine::init_rt() {
     log::infof("RT initialized: max %u instances, TLAS buffer %llu B",
                tlas_max_instances_,
                static_cast<unsigned long long>(tlas_buffer_size_));
+}
+
+// Refit (UPDATE) the terrain BLAS in place after crater edits rewrote some
+// of its vertices. Records into cb; the caller destroys *scratch after the
+// submission completes. Built with ALLOW_UPDATE in init_rt.
+void VulkanEngine::record_terrain_blas_refit(VkCommandBuffer cb, VkBuffer* scratch,
+                                             VmaAllocation* scratch_alloc) {
+    *scratch = VK_NULL_HANDLE; *scratch_alloc = nullptr;
+    if (!terrain_blas_ || terrain_mesh_.index_count == 0) return;
+    VkAccelerationStructureGeometryTrianglesDataKHR tri{};
+    tri.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    tri.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    tri.vertexData.deviceAddress = buffer_device_address(device_, terrain_mesh_.vertex_buffer);
+    tri.vertexStride = sizeof(Vertex);
+    tri.maxVertex = terrain_mesh_.vertex_count - 1;
+    tri.indexType = VK_INDEX_TYPE_UINT32;
+    tri.indexData.deviceAddress = buffer_device_address(device_, terrain_mesh_.index_buffer);
+    VkAccelerationStructureGeometryKHR geom{};
+    geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geom.geometry.triangles = tri;
+    geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    VkAccelerationStructureBuildGeometryInfoKHR bgi{};
+    bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+    bgi.srcAccelerationStructure = terrain_blas_;
+    bgi.dstAccelerationStructure = terrain_blas_;
+    bgi.geometryCount = 1;
+    bgi.pGeometries = &geom;
+    uint32_t prim_count = terrain_mesh_.index_count / 3;
+    VkAccelerationStructureBuildSizesInfoKHR sizes{};
+    sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    g_rt.get_as_build_sizes(device_, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, &prim_count, &sizes);
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = std::max<VkDeviceSize>(sizes.updateScratchSize, 256);
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vk_check(vmaCreateBuffer(allocator_, &bci, &aci, scratch, scratch_alloc, nullptr), "terrain refit scratch");
+    bgi.scratchData.deviceAddress = buffer_device_address(device_, *scratch);
+    VkAccelerationStructureBuildRangeInfoKHR range{};
+    range.primitiveCount = prim_count;
+    const VkAccelerationStructureBuildRangeInfoKHR* p_range = &range;
+    g_rt.cmd_build_as(cb, 1, &bgi, &p_range);
 }
 
 void VulkanEngine::destroy_rt() {

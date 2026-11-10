@@ -11,6 +11,7 @@
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <cstring>
 #include <map>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
@@ -209,6 +210,9 @@ struct PhysicsWorld::Impl {
     // Per-cell static box compounds (vegetation trunks + rocks), kept so a
     // cell can be rebuilt when blasts destroy trees in it.
     struct BoxCell { JPH::BodyID body; std::vector<PhysicsWorld::StaticBox> boxes; };
+    // Terrain heightfield (region-updatable via SetHeights for craters).
+    JPH::BodyID hf_body;
+    int hf_samples = 0, hf_block = 8;
     std::map<std::pair<int, int>, BoxCell> box_cells;
     float box_cell = 128.0f;
     // Hash of the last voxel-collision geometry pushed. Lets us skip the
@@ -552,13 +556,48 @@ void PhysicsWorld::add_static_heightfield(const float* samples, int dim,
         JPH::EMotionType::Static,
         Layers::NON_MOVING);
     JPH::BodyInterface& bi = impl_->system.GetBodyInterface();
+    // Replace (not stack) a previous heightfield: sculpt-stroke refreshes
+    // used to add a new body each time, leaving the old surface colliding.
+    if (!impl_->hf_body.IsInvalid()) {
+        bi.RemoveBody(impl_->hf_body);
+        bi.DestroyBody(impl_->hf_body);
+        impl_->hf_body = JPH::BodyID();
+    }
     JPH::BodyID id = bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
     if (id.IsInvalid()) {
         log::error("[jolt] heightfield body create failed");
     } else {
+        impl_->hf_body = id;
+        impl_->hf_samples = sample_count;
+        impl_->hf_block = block_size;
         log::infof("[jolt] heightfield: %dx%d samples, block=%d, cell=%.1fm",
                    sample_count, sample_count, block_size, cell_size);
     }
+}
+
+void PhysicsWorld::update_heightfield_region(const float* heights, int stride,
+                                             int x0, int z0, int x1, int z1) {
+    if (impl_->hf_body.IsInvalid() || !heights) return;
+    const int bs = impl_->hf_block, n = impl_->hf_samples;
+    // SetHeights needs block-aligned start / size inside the sample grid.
+    int ax0 = std::max(0, (x0 / bs) * bs), az0 = std::max(0, (z0 / bs) * bs);
+    int ax1 = std::min(n, ((x1 + bs) / bs) * bs), az1 = std::min(n, ((z1 + bs) / bs) * bs);
+    if (ax1 <= ax0 || az1 <= az0) return;
+    const int w = ax1 - ax0, h = az1 - az0;
+    std::vector<float> region(size_t(w) * size_t(h));
+    for (int z = 0; z < h; ++z)
+        std::memcpy(region.data() + size_t(z) * size_t(w),
+                    heights + size_t(az0 + z) * size_t(stride) + size_t(ax0), size_t(w) * sizeof(float));
+    {
+        JPH::BodyLockWrite lock(impl_->system.GetBodyLockInterface(), impl_->hf_body);
+        if (!lock.Succeeded()) return;
+        JPH::Body& body = lock.GetBody();
+        auto* hf = static_cast<JPH::HeightFieldShape*>(const_cast<JPH::Shape*>(body.GetShape()));
+        hf->SetHeights(JPH::uint(ax0), JPH::uint(az0), JPH::uint(w), JPH::uint(h),
+                       region.data(), w, impl_->temp_alloc);
+    }
+    impl_->system.GetBodyInterface().NotifyShapeChanged(impl_->hf_body, JPH::Vec3::sZero(), false,
+                                                        JPH::EActivation::DontActivate);
 }
 
 uint32_t PhysicsWorld::add_dynamic_box(glm::vec3 c, glm::vec3 he,

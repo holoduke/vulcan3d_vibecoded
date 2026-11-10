@@ -379,6 +379,7 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             if (vmaCreateBuffer(alloc, &pb, &pa, &s.plant_buffer, &s.plant_alloc, &pai) == VK_SUCCESS) {
                 std::memcpy(pai.pMappedData, all.data(), sizeof(ScatterInstance) * all.size());
                 s.plant_mapped = pai.pMappedData;
+                s.plant_cpu = all;
             }
         }
         log::infof("[scatter] plants: %u ferns, %u daisies, %u poppies, %u bluebells",
@@ -406,6 +407,7 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
     }
     std::memcpy(ai.pMappedData, inst.data(), size_t(bytes));
     s.inst_mapped = ai.pMappedData;
+    s.inst_cpu = inst;
     if (params.rm_params) {
         s.inst_dy.resize(inst.size());
         for (size_t i = 0; i < inst.size(); ++i)

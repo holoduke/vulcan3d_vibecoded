@@ -107,6 +107,7 @@ void VulkanEngine::spawn_explosion(glm::vec3 pos, float size, bool ground) {
     if (ground) spawn_impact_decal(pos + glm::vec3(0.0f, 3.0f, 0.0f), glm::vec3(0, -1, 0));
     // Big ground blasts (bombs, crashes, falling wreckage) shred the forest.
     if (ground && size >= 0.7f) blast_vegetation(pos, 7.5f * size);
+    if (ground && size >= 0.9f) make_crater(pos, size);
 
     const float dist = glm::distance(pos, player_.eye_position());
     cam_shake_ = std::max(cam_shake_, size * glm::clamp(1.0f - dist / 700.0f, 0.0f, 1.0f) * 1.6f);

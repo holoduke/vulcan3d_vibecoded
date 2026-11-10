@@ -1114,6 +1114,11 @@ private:
     // in the instance buffer), trunk collider disabled, RT list refreshed,
     // and the trunk thrown out as burning / smoking wood splinters.
     void blast_vegetation(glm::vec3 pos, float radius);
+    // Dynamic crater (craters.cpp): bowl + rim pressed into the terrain
+    // heightmap, propagated by REGION to the height textures, terrain mesh
+    // vertices + BLAS refit, Jolt heightfield and scatter instances.
+    void make_crater(glm::vec3 pos, float size);
+    void record_terrain_blas_refit(VkCommandBuffer cb, VkBuffer* scratch, VmaAllocation* scratch_alloc);
     void* veg_inst_mapped_ = nullptr;
     size_t veg_col_count_ = 0;
     float     spacejet_spawn_timer_     = 1.0f;   // first wave after 2s
