@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -141,12 +142,50 @@ uint32_t mip_levels_for(int w, int h) {
 // produces a sampled device-local texture with a full GPU-blitted mip
 // chain. Used by both the file loader and the procedural-bake path so
 // the proven staging/barrier/mip sequence lives in exactly one place.
+// Batched uploads: while a batch is open, each texture is submitted
+// without vkQueueWaitIdle and its staging buffer + command pool are kept
+// until texture_upload_batch_flush(). The GPU then copies + builds mips
+// for the whole set back to back while the CPU prepares the next one,
+// instead of a full CPU<->GPU round trip per texture. Safe without
+// semaphores: every texture ends with a barrier into FRAGMENT_SHADER
+// reads, and later submissions on the same queue are ordered after it.
+namespace {
+struct PendingUpload { VkCommandPool pool; VkBuffer buf; VmaAllocation alloc; };
+bool g_upload_batch = false;
+std::vector<PendingUpload> g_pending_uploads;
+VkDeviceSize g_pending_bytes = 0;
+void flush_pending(VkDevice device, VmaAllocator alloc, VkQueue queue) {
+    if (g_pending_uploads.empty()) return;
+    vk_check(vkQueueWaitIdle(queue), "tex batch wait");
+    for (auto& p : g_pending_uploads) {
+        vkDestroyCommandPool(device, p.pool, nullptr);
+        vmaDestroyBuffer(alloc, p.buf, p.alloc);
+    }
+    g_pending_uploads.clear();
+    g_pending_bytes = 0;
+}
+} // namespace
+
+void texture_upload_batch_begin() { g_upload_batch = true; }
+void texture_upload_batch_sync(VkDevice device, VmaAllocator alloc, VkQueue queue) {
+    flush_pending(device, alloc, queue);   // batch stays open
+}
+void texture_upload_batch_flush(VkDevice device, VmaAllocator alloc, VkQueue queue) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const size_t n = g_pending_uploads.size();
+    flush_pending(device, alloc, queue);
+    g_upload_batch = false;
+    log::infof("[texture] batch flush: %zu uploads, %.1f ms GPU wait", n,
+               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+}
+
 static Texture2D upload_rgba8_core(VkDevice device, VmaAllocator alloc,
                                    VkQueue queue, uint32_t qf,
                                    const unsigned char* pixels,
                                    int w, int h, VkFormat format,
                                    const char* label) {
     Texture2D r{};
+    const auto t_start = std::chrono::steady_clock::now();
     const VkDeviceSize bytes = static_cast<VkDeviceSize>(w) * h * 4;
 
     VkBuffer stage_buf = VK_NULL_HANDLE;
@@ -326,11 +365,21 @@ static Texture2D upload_rgba8_core(VkDevice device, VmaAllocator alloc,
                      .commandBufferCount = 1, .pCommandBuffers = &cb,
                      .signalSemaphoreCount = 0, .pSignalSemaphores = nullptr };
     vk_check(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE), "tex submit");
-    vk_check(vkQueueWaitIdle(queue), "tex wait");
-    vkDestroyCommandPool(device, pool, nullptr);
-    vmaDestroyBuffer(alloc, stage_buf, stage_alloc);
+    const auto t_sub = std::chrono::steady_clock::now();
+    if (g_upload_batch) {
+        g_pending_uploads.push_back({ pool, stage_buf, stage_alloc });
+        g_pending_bytes += bytes;
+        if (g_pending_bytes > (VkDeviceSize(768) << 20)) flush_pending(device, alloc, queue);   // cap staging RAM
+    } else {
+        vk_check(vkQueueWaitIdle(queue), "tex wait");
+        vkDestroyCommandPool(device, pool, nullptr);
+        vmaDestroyBuffer(alloc, stage_buf, stage_alloc);
+    }
 
-    log::infof("[texture] uploaded %s: %dx%d", label, w, h);
+    const auto t_end = std::chrono::steady_clock::now();
+    log::infof("[texture] uploaded %s: %dx%d (%.1f ms cpu, %.1f ms gpu wait)", label, w, h,
+               std::chrono::duration<double, std::milli>(t_sub - t_start).count(),
+               std::chrono::duration<double, std::milli>(t_end - t_sub).count());
     r.ok = true;
     return r;
 }

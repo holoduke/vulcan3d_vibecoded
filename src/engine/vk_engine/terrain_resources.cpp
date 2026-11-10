@@ -627,7 +627,7 @@ void ensure_shadow_resources(VkDevice device, VmaAllocator alloc,
 }
 } // namespace
 
-void VulkanEngine::rebuild_terrain_shadow_texture() {
+void VulkanEngine::rebuild_terrain_shadow_texture(bool defer_bake) {
     if (terrain_data_.heights.empty()) return;
     // Reconstruct a Heightmap view over the cached data.
     Heightmap hm{};
@@ -657,7 +657,15 @@ void VulkanEngine::rebuild_terrain_shadow_texture() {
     // re-bakes properly at the user's SS in the background.
     const int ss = std::max(1, rt_.terrain_bake_supersample);
     terrain_shadow_active_ss_ = ss;
-    std::vector<uint8_t> base = bake_heightmap_shadow(hm, sun_dir);
+    std::vector<uint8_t> base;
+    if (defer_bake) {
+        // R = 0 (lit), G = 255 (no occluder) - the worker streams in the
+        // real bake right after startup, nearest tiles first.
+        base.resize(static_cast<size_t>(hm.width()) * static_cast<size_t>(hm.height()) * 2);
+        for (size_t i = 0; i < base.size(); i += 2) { base[i] = 0; base[i + 1] = 255; }
+    } else {
+        base = bake_heightmap_shadow(hm, sun_dir);
+    }
     const int W = hm.width()  * ss;
     const int H = hm.height() * ss;
     std::vector<uint8_t> shadow;
@@ -1297,6 +1305,9 @@ void VulkanEngine::start_terrain_shadow_worker() {
     terrain_shadow_baker_hm_.heights   = terrain_data_.heights;
     terrain_shadow_stop_.store(false);
     terrain_shadow_worker_ = std::thread([this]() { terrain_shadow_worker_loop(); });
+    const unsigned hc = (std::max)(2u, std::thread::hardware_concurrency());
+    for (unsigned i = 0; i + 2 < hc / 2; ++i)
+        terrain_shadow_helpers_.emplace_back([this]() { terrain_shadow_worker_loop(); });
 }
 
 void VulkanEngine::stop_terrain_shadow_worker() {
@@ -1308,6 +1319,8 @@ void VulkanEngine::stop_terrain_shadow_worker() {
     }
     terrain_shadow_cv_.notify_all();
     terrain_shadow_worker_.join();
+    for (auto& t : terrain_shadow_helpers_) if (t.joinable()) t.join();
+    terrain_shadow_helpers_.clear();
 }
 
 void VulkanEngine::terrain_shadow_worker_loop() {

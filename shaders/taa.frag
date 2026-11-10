@@ -223,10 +223,35 @@ void main() {
     float disoccl  = smoothstep(reject_t, 0.92, dgap);
     alpha *= (1.0 - disoccl);
 
-    vec3 blended = mix(cur, hist_clamped, alpha);
+    float a_mn = 1.0, a_mx = 0.0;
+    bool any_sky = false;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = clamp(ip + ivec2(dx, dy), ivec2(0), ivec2(taa.viewport.xy) - 1);
+            if (texelFetch(current_depth, q, 0).r < 0.99999) continue;
+            float a = texelFetch(current_color, q, 0).a;
+            a_mn = min(a_mn, a); a_mx = max(a_mx, a);
+            any_sky = true;
+        }
+    // Clean sky (no FX anywhere in the 3x3) is painted analytically by
+    // compose - it needs no history, and history there can only be a
+    // silhouette that just moved away (dark trailing rim).
+    const bool center_sky = texelFetch(current_depth, ip, 0).r >= 0.99999;
+    const bool clean_sky = center_sky && any_sky && a_mn > 0.999;
+    if (clean_sky) alpha = 0.0;
+
+    // (raw centre for clean sky: the spatial filter would pull the
+    // neighbouring silhouette colour into it)
+    vec3 blended = clean_sky ? cur_raw : mix(cur, hist_clamped, alpha);
 
     // Sky transmittance follows the same temporal blend as the colour so
     // compose's sky reconstruction stays consistent at smoke edges.
     float hist_a = texture(history_color, prev_uv).a;
+    // Clamp history alpha to the current SKY neighbourhood. Geometry
+    // pixels carry a different alpha, so a sky pixel just revealed behind
+    // a moving silhouette used to inherit the object's alpha from
+    // history -> compose added (almost) no sky there and a dark rim
+    // trailed every object edge against the sky while moving.
+    if (any_sky) hist_a = clamp(hist_a, a_mn, a_mx);
     outColor = vec4(blended, mix(cur_a, hist_a, alpha));
 }

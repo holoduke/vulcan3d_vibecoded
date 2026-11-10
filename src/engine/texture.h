@@ -65,6 +65,14 @@ TextureCpuPixels decode_texture_pixels(const std::string& path);
 // MUST be called from the thread that owns the graphics queue (Vulkan
 // queues are externally synchronised). Frees the input pixel buffer on
 // successful upload OR on failure — the caller need not free it.
+// Open / close an upload batch (see texture.cpp): uploads inside a batch
+// do not stall on the GPU one by one; flush waits once and frees staging.
+void texture_upload_batch_begin();
+void texture_upload_batch_flush(VkDevice device, VmaAllocator alloc, VkQueue queue);
+// Wait for pending batched uploads (batch stays open) - call before
+// destroying a texture that may still be in a pending upload.
+void texture_upload_batch_sync(VkDevice device, VmaAllocator alloc, VkQueue queue);
+
 Texture2D upload_decoded_pixels(VkDevice device, VmaAllocator alloc,
                                  VkQueue queue, uint32_t queue_family,
                                  TextureCpuPixels&& pixels, VkFormat format);

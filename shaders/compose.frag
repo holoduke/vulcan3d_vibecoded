@@ -532,19 +532,38 @@ void main() {
     // (red+blue) fringe on one side. Vignette below stays, it's clean.
     float depth = texture(history_depth, sample_uv).r;
 
-    // Background pixel (no geometry hit) — paint procedural sky.
-    if (depth >= 0.99999) {
-        vec2 uv = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
-        vec3 dir = view_ray(uv);
+    // Sky: per-texel classification of the 4 bilinear taps instead of a
+    // bilinearly-filtered depth test. Filtered depth at a silhouette is
+    // "not quite far", so edge pixels used to keep the plain clear colour
+    // (a dark rim around everything against the sky, worse at < 100 %
+    // render scale). Now each sky tap contributes (sky - clear) * T with
+    // its bilinear weight, so the clear colour mixed into the edge is
+    // replaced by real sky exactly in proportion.
         // FX (smoke / fireballs / contrails) were blended over the sky
         // pixels on top of the scene clear colour, leaving the remaining
         // sky transmittance in alpha: swap that clear colour for the real
         // sky. T = 1 (no FX) reproduces the plain sky exactly.
         // Same (bilinear) filter for colour and alpha here - EASU sharpening
         // on the colour alone drew a dark rim around smoke silhouettes.
-        vec4  hs = texture(history_color, sample_uv);
-        const vec3 kClear = vec3(0.55, 0.72, 0.95);   // frame.cpp clear_color
-        hdr = hs.rgb + (sample_sky(dir) - kClear) * hs.a;
+    {
+        vec2 dsz = vec2(textureSize(history_depth, 0));
+        vec2 pp  = sample_uv * dsz - 0.5;
+        vec2 f   = fract(pp);
+        vec4 dg  = textureGather(history_depth, sample_uv, 0);   // (i0,j1)(i1,j1)(i1,j0)(i0,j0)
+        vec4 ag  = textureGather(history_color, sample_uv, 3);
+        vec4 bw  = vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y));
+        vec4 sky_m = vec4(greaterThanEqual(dg, vec4(0.99999)));
+        float sky_w = dot(bw, sky_m);
+        if (sky_w > 0.0) {
+            vec2 uv = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
+            vec3 dir = view_ray(uv);
+            float T = dot(bw * sky_m, ag);
+            const vec3 kClear = vec3(0.55, 0.72, 0.95);   // frame.cpp clear_color
+            // Pure sky: bilinear colour (EASU sharpening on the colour
+            // alone drew a dark rim around smoke silhouettes).
+            vec3 base = (sky_w > 0.999) ? texture(history_color, sample_uv).rgb : hdr;
+            hdr = base + (sample_sky(dir) - kClear) * T;
+        }
     }
 
     // FSR1 RCAS — robust contrast-adaptive sharpening on the EASU-

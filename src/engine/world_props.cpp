@@ -10,6 +10,7 @@
 #include <cmath>
 #include <map>
 #include <random>
+#include <thread>
 #include <unordered_set>
 
 namespace qlike {
@@ -471,7 +472,7 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
         float dx = (x0 - cx) / r, dz = (z0 - cz) / r;
         return std::exp(-(dx * dx + dz * dz) * 2.0f);
     };
-    auto forest = [&](float x, float z) {
+    auto forest_exact = [&](float x, float z) {
         float n = fbm(glm::vec3(x * 0.0042f, 11.0f, z * 0.0042f), 3) * 0.8f +
                   fbm(glm::vec3(x * 0.017f, 4.0f, z * 0.017f), 2) * 0.35f;
         float d = std::clamp((n - 0.50f) * 6.0f, 0.0f, 1.0f);
@@ -481,6 +482,35 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
         clear = std::max(clear, blob(x, z, 170.0f, 140.0f, 110.0f) * 1.4f);           // SE meadow
         clear = std::max(clear, blob(x, z, 40.0f, 330.0f, 120.0f) * 1.4f);
         return std::clamp(d * (1.0f - std::min(clear, 1.0f)), 0.0f, 1.0f);
+    };
+    // Forest density is smooth (>= ~60 m features + 100 m+ blobs), so a
+    // 2 m grid baked on all cores and sampled bilinearly matches it while
+    // taking the 5-octave noise out of the 3.5 M-attempt placement loops
+    // (startup: ~0.9 s -> ~0.2 s).
+    const float fcell = 2.0f;
+    const float fext = P.veg_half_extent + 8.0f;
+    const int fn = int(std::ceil(2.0f * fext / fcell)) + 2;
+    std::vector<float> fgrid(size_t(fn) * size_t(fn));
+    {
+        const unsigned nt = (std::max)(1u, std::thread::hardware_concurrency());
+        std::vector<std::thread> th;
+        for (unsigned t = 0; t < nt; ++t)
+            th.emplace_back([&, t]() {
+                for (int j = int(t); j < fn; j += int(nt))
+                    for (int i = 0; i < fn; ++i)
+                        fgrid[size_t(j) * size_t(fn) + size_t(i)] =
+                            forest_exact(-fext + float(i) * fcell, -fext + float(j) * fcell);
+            });
+        for (auto& t : th) t.join();
+    }
+    auto forest = [&](float x, float z) {
+        float fx = std::clamp((x + fext) / fcell, 0.0f, float(fn - 1) - 0.001f);
+        float fz = std::clamp((z + fext) / fcell, 0.0f, float(fn - 1) - 0.001f);
+        int ix = int(fx), iz = int(fz);
+        float tx = fx - float(ix), tz = fz - float(iz);
+        const float* r0 = &fgrid[size_t(iz) * size_t(fn) + size_t(ix)];
+        const float* r1 = r0 + fn;
+        return (r0[0] * (1.0f - tx) + r0[1] * tx) * (1.0f - tz) + (r1[0] * (1.0f - tx) + r1[1] * tx) * tz;
     };
     // Dry ground: the trunk AND a 3.5 m ring above water + margin, so
     // shore slopes don't put trees (or their crowns) in the lake.

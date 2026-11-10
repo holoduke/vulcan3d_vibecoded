@@ -132,8 +132,10 @@ void VulkanEngine::init() {
     start_world_texture_decodes();
     init_world();
     present_loader_frame("Loading skybox",        0.30f);
+    texture_upload_batch_begin();
     init_skybox();
     init_textures();
+    texture_upload_batch_flush(device_, allocator_, graphics_queue_);
     present_loader_frame("Loading settings",      0.40f);
     load_settings();
     // load_settings reads rt_.render_scale from disk, but init_swapchain
@@ -218,11 +220,12 @@ void VulkanEngine::init() {
     // texture itself can be created; depends on terrain_data_ which
     // init_world fills. Done here so the descriptor write at the end
     // of rebuild_terrain_shadow_texture lands on the live scene set.
-    rebuild_terrain_shadow_texture();
+    rebuild_terrain_shadow_texture(/*defer_bake=*/true);
     // Async worker thread bakes the heightmap shadow off the main
     // thread. Started after the initial full bake so the texture is
     // valid before grass renders.
     start_terrain_shadow_worker();
+    enqueue_terrain_shadow_rebake(terrain_shadow_sun_dir_);   // stream the real bake
     // Sun shadow map (binding 7). Created after descriptors so the
     // one-shot binding-7 write at the end of init_sun_shadow_resources
     // lands on the live scene set.
@@ -523,6 +526,9 @@ void VulkanEngine::run(const RunOptions& opts) {
                 if (!hold_init) { hold_pos = player_.position; hold_init = true; }
                 player_.position = hold_pos;
                 player_.velocity = glm::vec3(0.0f);
+                // QLIKE_TEST_PAN=<rad/s>: steady yaw pan (motion artefact captures).
+                static const char* test_pan = std::getenv("QLIKE_TEST_PAN");
+                if (test_pan) player_.yaw += static_cast<float>(std::atof(test_pan)) * frame_dt;
             }
         }
         // --scene N teleport works WITHOUT --autodemo too. Pin the camera
@@ -1049,6 +1055,14 @@ void VulkanEngine::run(const RunOptions& opts) {
             for (int k = 0; k < 6; ++k) hitch_prev_[k] = hz_ms[k];
 
             ++frame_number_;
+            {
+                static bool first_logged = false;
+                if (!first_logged) {
+                    first_logged = true;
+                    log::infof("[init] first game frame submitted %.0f ms after launch",
+                               glfwGetTime() * 1000.0);
+                }
+            }
             if (opts_.max_frames >= 0 &&
                 static_cast<int>(frame_number_) >= opts_.max_frames) {
                 log::infof("max_frames reached (%d), exiting loop",

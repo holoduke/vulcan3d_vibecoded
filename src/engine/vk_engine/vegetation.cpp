@@ -22,6 +22,7 @@
 #include "engine/vk_pipelines.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -56,10 +57,15 @@ void VulkanEngine::init_vegetation_data(const Heightmap& hm) {
     wp.water_level  = rt_.water_level;
     wp.rock_band_lo = rt_.terrain_h_dirt_rock_start;
     for (const auto& a : aa_) wp.keep_out.push_back(glm::vec3(a.pos.x, a.pos.z, 9.0f));
+    const auto tv0 = std::chrono::steady_clock::now();
     veg_arch_ = build_veg_archetypes(0xF0E57);
+    const auto tv1 = std::chrono::steady_clock::now();
     std::vector<collision::AABB> cols;
     WorldPropStats st{};
     veg_inst_cpu_ = place_vegetation(hm, &castle_road_, wp, veg_arch_, cols, st);
+    log::infof("[init] veg archetypes %.0f ms, placement %.0f ms",
+               std::chrono::duration<double, std::milli>(tv1 - tv0).count(),
+               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tv1).count());
     veg_col_begin_ = world_.aabbs.size();
     for (const auto& a : cols) world_.aabbs.push_back(a);
 

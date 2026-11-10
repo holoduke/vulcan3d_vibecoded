@@ -1474,19 +1474,24 @@ private:
     int terrain_shadow_active_ss_ = 1;  // current texture's supersample factor
     glm::vec3 terrain_shadow_target_sun_dir_ = glm::vec3(0.0f);
     static constexpr int kShadowTileSize           = 64;
-    static constexpr int kShadowUploadsPerFrame    = 12;
+    static constexpr int kShadowUploadsPerFrame    = 48;   // 64x64 RG8 tiles: 8 KB each
     // Immutable heightmap snapshot the worker reads — taken once at
     // engine init (after init_world). Sculpt edits don't propagate
     // (acceptable; sculpt is rare and we can rebuild the snapshot
     // explicitly if/when that path matters).
     Heightmap                       terrain_shadow_baker_hm_;
     std::thread                     terrain_shadow_worker_;
+    // Extra threads draining the same job queue (startup streams the
+    // whole bake in ~1 s instead of ~10 s on one thread).
+    std::vector<std::thread>        terrain_shadow_helpers_;
     std::mutex                      terrain_shadow_mutex_;
     std::condition_variable         terrain_shadow_cv_;
     std::deque<ShadowBakeJob>       terrain_shadow_jobs_;     // main → worker
     std::deque<ShadowBakeResult>    terrain_shadow_results_;  // worker → main
     std::atomic<bool>               terrain_shadow_stop_{false};
-    void rebuild_terrain_shadow_texture();
+    // defer_bake: upload a neutral (fully lit) texture now and let the
+    // background worker bake it tile by tile, nearest first (startup).
+    void rebuild_terrain_shadow_texture(bool defer_bake = false);
     void enqueue_terrain_shadow_rebake(glm::vec3 target_sun);
     void tick_terrain_shadow_progressive();
     void destroy_terrain_shadow_texture();

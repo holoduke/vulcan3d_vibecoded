@@ -13,6 +13,7 @@
 #include "engine/texture.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -264,8 +265,16 @@ void VulkanEngine::init_world() {
         // over the whole map (vegetation.cpp). Adds trunk / rock colliders.
         place_aa_vehicles(hm);           // before vegetation (keep-out)
         init_aa_meshes();
-        init_vegetation_data(hm);
-        init_castle_meshes();
+        {
+            auto t0 = std::chrono::steady_clock::now();
+            init_vegetation_data(hm);
+            auto t1 = std::chrono::steady_clock::now();
+            init_castle_meshes();
+            auto t2 = std::chrono::steady_clock::now();
+            log::infof("[init] vegetation %.0f ms, castle meshes %.0f ms",
+                       std::chrono::duration<double, std::milli>(t1 - t0).count(),
+                       std::chrono::duration<double, std::milli>(t2 - t1).count());
+        }
         // Lift player's default spawn point above the new ground.
         player_.position.y += hp.plateau_height;
 

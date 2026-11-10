@@ -167,6 +167,8 @@ const char* kWorldSpomPaths[] = {
 }  // namespace
 
 void VulkanEngine::start_world_texture_decodes() {
+    // The 4K HDR sky decode (~0.4 s) overlaps world generation too.
+    skybox_prefetch("assets/sky/MorningSkyHDRI002B_4K_HDR.exr");
     // Resolve paths NOW on the main thread (filesystem access is fast)
     // so the worker threads only do JPG decode. paths[i] empty => skip.
     std::vector<std::string> paths;
@@ -494,6 +496,7 @@ void VulkanEngine::init_textures() {
     // avoid leaking before overwriting. If the disk asset failed to load
     // (probe miss) we keep the procedural fallback intact.
     auto kill_slot = [&](TextureSlot& s) {
+        if (s.image) texture_upload_batch_sync(device_, allocator_, graphics_queue_);   // may be mid-upload
         if (s.view)  vkDestroyImageView(device_, s.view, nullptr);
         if (s.image) vmaDestroyImage(allocator_, s.image, s.alloc);
         s = {};
@@ -611,6 +614,7 @@ void VulkanEngine::load_terrain_pbr_overrides() {
         return std::string();
     };
     auto kill_slot = [&](TextureSlot& s) {
+        if (s.image) texture_upload_batch_sync(device_, allocator_, graphics_queue_);   // may be mid-upload
         if (s.view)  vkDestroyImageView(device_, s.view, nullptr);
         if (s.image) vmaDestroyImage(allocator_, s.image, s.alloc);
         s = {};

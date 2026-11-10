@@ -184,7 +184,8 @@ static VkPipelineStageFlags2 stage_for_layout(VkImageLayout layout) {
         case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
             return VK_PIPELINE_STAGE_2_COPY_BIT |
                    VK_PIPELINE_STAGE_2_BLIT_BIT |
-                   VK_PIPELINE_STAGE_2_RESOLVE_BIT;
+                   VK_PIPELINE_STAGE_2_RESOLVE_BIT |
+                   VK_PIPELINE_STAGE_2_CLEAR_BIT;   // vkCmdClear*Image is a transfer op too
         case VK_IMAGE_LAYOUT_GENERAL:
         default:
             return VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;

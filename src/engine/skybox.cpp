@@ -20,6 +20,9 @@
 
 #include <cmath>
 #include <cstring>
+#include <fstream>
+#include <future>
+#include <string>
 
 namespace qlike {
 
@@ -175,6 +178,21 @@ static HdrLoadResult load_exr(const std::string& path) {
     return r;
 }
 
+// Background EXR decode (~0.4 s for the 4K sky): started early in init so
+// it overlaps world generation; load_skybox() picks it up if the path matches.
+static std::string g_prefetch_path;
+static std::future<HdrLoadResult> g_prefetch;
+
+void skybox_prefetch(const std::string& path) {
+    if (!path_ends_with(path, ".exr")) return;
+    {
+        std::ifstream f(path, std::ios::binary);
+        if (!f.good()) return;
+    }
+    g_prefetch_path = path;
+    g_prefetch = std::async(std::launch::async, load_exr, path);
+}
+
 Skybox load_skybox(VkDevice device, VmaAllocator alloc, VkQueue queue,
                    uint32_t queue_family, const std::string& path) {
     Skybox sb{};
@@ -184,7 +202,8 @@ Skybox load_skybox(VkDevice device, VmaAllocator alloc, VkQueue queue,
     // it into a glaring disc instead of needing a procedural overlay.
     const bool is_exr = path_ends_with(path, ".exr");
     if (is_exr) {
-        HdrLoadResult hdr = load_exr(path);
+        HdrLoadResult hdr = (g_prefetch.valid() && g_prefetch_path == path)
+                                ? g_prefetch.get() : load_exr(path);
         if (!hdr.ok) return sb;
         sb.width = static_cast<uint32_t>(hdr.w);
         sb.height = static_cast<uint32_t>(hdr.h);
