@@ -603,6 +603,40 @@ vec3 view_ray(vec2 uv) {
     return normalize(world_far - world_near);
 }
 
+// Eye distance (m) of NDC depth d at screen uv.
+float eye_dist(vec2 uv, float d) {
+    vec4 wp = pc.inv_view_proj * vec4(uv * 2.0 - 1.0, d, 1.0);
+    vec4 ep = pc.inv_view_proj * vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+    return distance(wp.xyz / wp.w, ep.xyz / ep.w);
+}
+
+// Froxel fog (in-scatter rgb, transmittance a) between the eye and dm
+// metres along the pixel ray. Depth-aware upsample of the 160x90 grid: a
+// froxel column whose centre ray hits geometry NEARER than dm carries fog
+// from inside / behind that object (sun rays from there are blocked ->
+// unlit fog); it is weighted out so it can't darken neighbours.
+vec4 fog_at(vec2 uvp, float dm) {
+    float s = sqrt(dm / pc.tone.y) * 64.0 - 1.0;   // slice k stores [0, d(k+1)]
+    float wz = (max(s, 0.0) + 0.5) / 64.0;
+    vec3 fdim = vec3(textureSize(u_fog, 0));
+    vec2 fp = uvp * fdim.xy - 0.5;
+    vec2 f0 = floor(fp), ff = fp - f0;
+    ivec2 dsz = textureSize(history_depth, 0);
+    vec4 acc = vec4(0.0); float wsum = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        vec2 o = vec2(k & 1, k >> 1);
+        vec2 cuv = clamp((f0 + o + 0.5) / fdim.xy, vec2(0.0), vec2(1.0));
+        float cd = texelFetch(history_depth, clamp(ivec2(cuv * vec2(dsz)), ivec2(0), dsz - 1), 0).r;
+        float cdist = (cd < 0.99999) ? eye_dist(cuv, cd) : 1e9;
+        float bw = (o.x > 0.5 ? ff.x : 1.0 - ff.x) * (o.y > 0.5 ? ff.y : 1.0 - ff.y);
+        float w = bw * ((cdist >= dm * 0.85 - 1.0) ? 1.0 : 0.001);
+        acc += textureLod(u_fog, vec3(cuv, wz), 0.0) * w;
+        wsum += w;
+    }
+    vec4 fs = (wsum > 1e-7) ? acc / wsum : textureLod(u_fog, vec3(uvp, wz), 0.0);
+    return (s < 0.0) ? mix(vec4(0.0, 0.0, 0.0, 1.0), fs, clamp(s + 1.0, 0.0, 1.0)) : fs;
+}
+
 void main() {
     ivec2 ip = ivec2(gl_FragCoord.xy);
     // texelFetch indexes by integer texel coords, not UVs. When the
@@ -642,6 +676,16 @@ void main() {
         // sky. T = 1 (no FX) reproduces the plain sky exactly.
         // Same (bilinear) filter for colour and alpha here - EASU sharpening
         // on the colour alone drew a dark rim around smoke silhouettes.
+    // Silhouette split: sky fraction of this pixel (bilinear weight of the
+    // sky taps), its sky radiance part, and the depth of the non-sky taps.
+    // Aerial perspective + fog act on the object part at the OBJECT depth
+    // and on the sky part as sky - applying them at the filtered "almost
+    // far" depth extinguished the sky share of every edge pixel twice
+    // (the sky radiance already contains the atmosphere): a dark rim
+    // around everything in front of the sky, worst looking into the sun.
+    float edge_w = (depth >= 0.99999) ? 1.0 : 0.0;
+    vec3  edge_sky = vec3(0.0);
+    float obj_depth = depth;
     {
         vec2 dsz = vec2(textureSize(history_depth, 0));
         vec2 pp  = sample_uv * dsz - 0.5;
@@ -666,44 +710,23 @@ void main() {
                 sky_rad = sky_rad * (1.0 - cl.a) + cl.rgb;
             }
             hdr = base + (sky_rad - kClear) * T;
+            if (sky_w < 0.999) {
+                edge_w = sky_w;
+                edge_sky = sky_rad * T;
+                float ow = dot(bw, 1.0 - sky_m);
+                obj_depth = dot(bw * (1.0 - sky_m), dg) / max(ow, 1e-6);
+            }
         }
     }
-
-    // Aerial perspective (physical sky): in-scatter + extinction between
-    // the camera and every geometry pixel, from the froxel volume - the
-    // distance haze that ties far mountains / forests into the sky colour.
-    if (pc.atmo.x > 0.5 && depth < 0.99999) {
-        vec2 uvp = gl_FragCoord.xy * pc.viewport.zw;
-        vec4 wp  = pc.inv_view_proj * vec4(uvp * 2.0 - 1.0, depth, 1.0);
-        vec4 ep  = pc.inv_view_proj * vec4(uvp * 2.0 - 1.0, 0.0, 1.0);   // near plane ~ eye
-        float dkm = distance(wp.xyz / wp.w, ep.xyz / ep.w) * 0.001;
-        vec4 ap = atmo_aerial(uvp, dkm);
-        hdr = hdr * ap.a + ap.rgb * atmo_sun_illum();
-    }
-
-    // Froxel volumetric fog (sun shafts / ground fog), applied to every
-    // pixel by distance after the aerial perspective (fog is the nearer
-    // medium). Slices are quadratic in distance up to tone.y metres.
-    if (pc.tone.y > 0.0) {
-        vec2 uvp = gl_FragCoord.xy * pc.viewport.zw;
-        float dm = pc.tone.y;
-        if (depth < 0.99999) {
-            vec4 wp = pc.inv_view_proj * vec4(uvp * 2.0 - 1.0, depth, 1.0);
-            vec4 ep = pc.inv_view_proj * vec4(uvp * 2.0 - 1.0, 0.0, 1.0);
-            dm = min(distance(wp.xyz / wp.w, ep.xyz / ep.w), pc.tone.y);
-        }
-        float s = sqrt(dm / pc.tone.y) * 64.0 - 1.0;   // slice k stores [0, d(k+1)]
-        vec4 fg = (s < 0.0)
-            ? mix(vec4(0.0, 0.0, 0.0, 1.0), textureLod(u_fog, vec3(uvp, 0.5 / 64.0), 0.0), clamp(s + 1.0, 0.0, 1.0))
-            : textureLod(u_fog, vec3(uvp, (s + 0.5) / 64.0), 0.0);
-        hdr = hdr * fg.a + fg.rgb;
-    }
-
     // FSR1 RCAS — robust contrast-adaptive sharpening on the EASU-
     // upscaled colour. Sharpens texture detail without ringing on
     // edges. Sharpness slider [0..2] is clamped to RCAS's [0..1]
     // range with a 0.5 mid-point so the existing UI defaults still
     // make sense.
+    // Runs on the RAW colour, before aerial perspective / fog: the 4
+    // neighbours are read raw from history, so sharpening a fogged centre
+    // against unfogged neighbours drew a dark outline along every edge
+    // in haze (worst looking into the sun).
     if (depth < 0.99999 && pc.sharpen_params.x > 0.0) {
         vec2 hr_step = pc.viewport.zw;
         vec2 uN = sample_uv + vec2(0.0,  hr_step.y), uS = sample_uv - vec2(0.0, hr_step.y);
@@ -725,6 +748,38 @@ void main() {
             hdr = fsr1_rcas(hdr, sN, sS, sE, sW, sharpness);
         }
     }
+
+    // Object / sky parts of this pixel (pure sky: all sky; pure object:
+    // all object).
+    vec3 hdr_sky = (edge_w >= 1.0) ? hdr : edge_sky;
+    vec3 hdr_obj = (edge_w >= 1.0) ? vec3(0.0) : hdr - edge_sky;
+    float obj_w  = 1.0 - edge_w;
+
+    // Aerial perspective (physical sky): in-scatter + extinction between
+    // the camera and every geometry pixel - the distance haze that ties
+    // far mountains / forests into the sky colour. Object part only, at
+    // the object's own depth (the sky radiance already contains it).
+    vec2 uvp = gl_FragCoord.xy * pc.viewport.zw;
+    float obj_dist = (obj_w > 0.0) ? eye_dist(uvp, obj_depth) : 0.0;
+    if (pc.atmo.x > 0.5 && obj_w > 0.0) {
+        vec4 ap = atmo_aerial(uvp, obj_dist * 0.001);
+        hdr_obj = hdr_obj * ap.a + ap.rgb * atmo_sun_illum() * obj_w;
+    }
+
+    // Froxel volumetric fog (sun shafts / ground fog), after the aerial
+    // perspective (fog is the nearer medium): object part to its depth,
+    // sky part over the full fog range.
+    if (pc.tone.y > 0.0) {
+        if (obj_w > 0.0) {
+            vec4 fo = fog_at(uvp, min(obj_dist, pc.tone.y));
+            hdr_obj = hdr_obj * fo.a + fo.rgb * obj_w;
+        }
+        if (edge_w > 0.0) {
+            vec4 fsk = fog_at(uvp, pc.tone.y);
+            hdr_sky = hdr_sky * fsk.a + fsk.rgb * edge_w;
+        }
+    }
+    hdr = hdr_obj + hdr_sky;
 
     // Screen-space sun shafts (crepuscular rays). 24 fixed taps along
     // the line from this pixel toward the sun's screen position; each
