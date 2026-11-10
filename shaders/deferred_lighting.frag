@@ -197,10 +197,19 @@ const vec2 kVogel[32] = vec2[32](
 float ign(vec2 p) {
     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
+// PCG3D hash (Jarzynski & Olano 2020). The previous IGN-of-shifted-pixel
+// "rand" made every sample at a pixel a near-copy of its neighbours' (seed
+// offsets only shifted the IGN lattice), so shadow / AO jitter was strongly
+// correlated and printed a fixed diagonal hatch into soft shadows.
+uvec3 pcg3d(uvec3 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
 float rand(uvec3 seed) {
-    float s = float(seed.x) + 5.588238 * float(seed.z);
-    float t = float(seed.y) + 1.388765 * float(seed.z);
-    return ign(vec2(s, t));
+    return float(pcg3d(seed).x) * (1.0 / 4294967296.0);
 }
 // Distance-LOD sample reducer РІР‚вЂќ same as cube.frag's lod_samples. Close
 // pixels get the full requested count; far pixels collapse toward 1.

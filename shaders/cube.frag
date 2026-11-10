@@ -906,10 +906,17 @@ vec3 terrain_detail_fbm(vec2 wp, float scale, int octaves) {
 // Per-sample IGN: shift the input position by the sample index along a known
 // magic vector so each sample's jitter is uncorrelated within a pixel but
 // stays smooth across neighbouring pixels.
+// PCG3D hash - decorrelated per sample (IGN-of-shifted-pixel printed a
+// fixed diagonal hatch into soft shadows; see deferred_lighting.frag).
+uvec3 pcg3d(uvec3 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
 float rand(uvec3 seed) {
-    float s = float(seed.x) + 5.588238  * float(seed.z);
-    float t = float(seed.y) + 1.388765  * float(seed.z);
-    return ign(vec2(s, t));
+    return float(pcg3d(seed).x) * (1.0 / 4294967296.0);
 }
 
 vec3 cos_hemi(float u1, float u2, vec3 n) {
