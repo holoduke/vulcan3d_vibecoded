@@ -214,6 +214,33 @@ uvec3 pcg3d(uvec3 v) {
 float rand(uvec3 seed) {
     return float(pcg3d(seed).x) * (1.0 / 4294967296.0);
 }
+// ---- Physically based specular (GGX / Smith / Schlick) ----
+const float kPI = 3.14159265;
+float d_ggx(float NoH, float a) {               // a = roughness^2
+    float a2 = a * a;
+    float d = NoH * NoH * (a2 - 1.0) + 1.0;
+    return a2 / (kPI * d * d + 1e-7);
+}
+float v_smith_ggx_correlated(float NoV, float NoL, float a) {   // Heitz 2014 (Hammon approx)
+    return 0.5 / max(NoL * (NoV * (1.0 - a) + a) + NoV * (NoL * (1.0 - a) + a), 1e-5);
+}
+vec3 f_schlick(vec3 f0, float VoH) {
+    float f = pow(1.0 - VoH, 5.0);
+    return f0 + (1.0 - f0) * f;
+}
+// Split-sum environment BRDF, analytic fit (Karis 2014 "mobile").
+vec2 env_brdf_approx(float NoV, float r) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 rr = r * c0 + c1;
+    float a004 = min(rr.x * rr.x, exp2(-9.28 * NoV)) * rr.x + rr.y;
+    return vec2(-1.04, 1.04) * a004 + rr.zw;
+}
+// Specular occlusion from diffuse AO (Lagarde & de Rousiers 2014).
+float spec_occlusion(float NoV, float ao, float r) {
+    return clamp(pow(NoV + ao, exp2(-16.0 * r - 1.0)) - 1.0 + ao, 0.0, 1.0);
+}
+
 // Distance-LOD sample reducer РІР‚вЂќ same as cube.frag's lod_samples. Close
 // pixels get the full requested count; far pixels collapse toward 1.
 int lod_samples(int requested, float dist) {
@@ -265,8 +292,15 @@ void main() {
     vec3 albedo = g0.rgb;
     int  material_id = int(g0.a * 255.0 + 0.5);
     vec3 N = octa_decode(g1.xy);
-    float roughness = g1.b;
-    bool  foliage   = g1.a > 0.5;
+    // gbuffer1.b: terrain = POM relief sun visibility, else roughness.
+    // gbuffer1.a (2 bits): 1 = foliage, 2/3 = metal, 0 = dielectric.
+    float relief_vis = (material_id == 3) ? g1.b : 1.0;
+    bool  foliage   = g1.a > 0.83;
+    float metallic  = (!foliage && g1.a > 0.5) ? 1.0 : 0.0;
+    float roughness = (material_id == 3)
+        // terrain: snow / wet-ish rock smoother than soil and grass
+        ? mix(0.92, 0.48, smoothstep(0.45, 0.75, dot(g0.rgb, vec3(0.333))))
+        : clamp(g1.b, 0.05, 1.0);
 
     // Pre-shaded materials (5..8 = brush / voxel / water / raymarched
     // terrain) write LIT colour directly into scene_color in the
@@ -512,7 +546,9 @@ void main() {
         }
         // Per-pixel relief self-shadow from cube.frag's terrain POM sun
         // march, packed into gbuffer1.b (1 = fully lit) for material 3.
-        shadow = 1.0 - (1.0 - shadow) * clamp(roughness, 0.0, 1.0);
+        // (Was applied to EVERY material with its 0.5 placeholder -> all
+        // non-terrain surfaces got only half the sunlight.)
+        shadow = 1.0 - (1.0 - shadow) * clamp(relief_vis, 0.0, 1.0);
         // Small-object shadows (flowers, ferns, clutter rocks): dedicated
         // depth map of ONLY those casters around the camera (light-VP in
         // the spare light slots), so the terrain receiver can't self-acne.
@@ -1046,6 +1082,17 @@ void main() {
     // block in cube.frag РІР‚вЂќ the raw saturated Rayleigh blue reads as
     // steel-blue on pure-shadow surfaces; bounce light off warm
     // geometry tonally lifts real shadows toward neutral.
+    // ---- PBR surface terms (shared by sun, ambient and point lights) ----
+    vec3  Vv  = normalize(view_vec);
+    float NoV = clamp(dot(N, Vv), 1e-4, 1.0);
+    vec3  F0  = mix(vec3(0.04), albedo, metallic);
+    vec3  diff_albedo = albedo * (1.0 - metallic);
+    float a_r = max(roughness * roughness, 0.002);
+    vec2  dfg = env_brdf_approx(NoV, roughness);
+    // Multi-scatter energy compensation (Fdez-Aguera 2019 / Kulla-Conty):
+    // single-scatter GGX loses energy on rough surfaces.
+    vec3  ms_comp = 1.0 + F0 * (1.0 / max(dfg.x + dfg.y, 1e-3) - 1.0);
+    vec3  F_env = F0 * dfg.x + dfg.y;
     vec3 sky_tint = mix(scene.sky_color.rgb, scene.sun_color.rgb, 0.12);
     float ambient_strength = clamp(scene.rt_params.z, 0.0, 1.0);
     // ambient.a is `terrain_ao_punch` on the C++ side (descriptors.cpp line
@@ -1083,7 +1130,18 @@ void main() {
     // the "dark where it should be dark" contact look. Floor lowered
     // 0.08 -> 0.05 (still above the scattered-black-pixel regime).
     float ao_floored = mix(0.05, 1.0, ao * ao);
-    vec3 ambient_term = albedo * ambient_combined * ao_floored;
+    // Diffuse ambient keeps the energy the specular lobe did not take.
+    vec3 ambient_term = diff_albedo * (1.0 - F_env) * ambient_combined * ao_floored;
+    // Specular ambient: sky / ground radiance in the reflection direction
+    // through the split-sum env BRDF, occluded by sky visibility + AO.
+    vec3 spec_ambient;
+    {
+        vec3  Rr   = reflect(-Vv, N);
+        float up_r = smoothstep(-0.15, 0.35, Rr.y);
+        vec3  env  = mix(ambient_ground * ground_atten, sky_tint * ambient_strength * sky_factor, up_r);
+        float so   = spec_occlusion(NoV, ao_floored * sky_factor, roughness);
+        spec_ambient = env * F_env * ms_comp * so;
+    }
     // sky_fill drops out as a separate term РІР‚вЂќ it's been folded into
     // ambient_sky above. Zero it so the addition below stays valid.
     vec3 sky_fill = vec3(0.0);
@@ -1092,8 +1150,18 @@ void main() {
     // No shadow rays below N.L 0.04: fade the (untested) sun to 0 there
     // instead of letting up to 4 % leak into shadowed terminator areas.
     float term_fade = (ndl_raw > 0.04) ? 1.0 : smoothstep(0.0, 0.04, ndl_raw);
-    vec3 sun_term = albedo * scene.sun_color.rgb * scene.sun_color.a *
-                    ndl * term_fade * (1.0 - shadow);
+    vec3 sun_rad = scene.sun_color.rgb * scene.sun_color.a * ndl * term_fade * (1.0 - shadow);
+    vec3 sun_term;
+    {
+        vec3  H   = normalize(L + Vv);
+        float NoH = clamp(dot(N, H), 0.0, 1.0);
+        float VoH = clamp(dot(Vv, H), 0.0, 1.0);
+        vec3  F   = f_schlick(F0, VoH);
+        // Engine convention: diffuse = albedo * E * N.L (the 1/pi folded
+        // into E), so the specular BRDF is scaled by pi to match.
+        vec3 spec = d_ggx(NoH, a_r) * v_smith_ggx_correlated(NoV, max(ndl, 1e-4), a_r) * F * ms_comp * kPI;
+        sun_term = (diff_albedo * (1.0 - F) + spec) * sun_rad;
+    }
 
     // ---------------------------------------------------------------
     //  Material-id tweaks
@@ -1134,12 +1202,16 @@ void main() {
         if (pndl <= 0.0) continue;
         float fall = 1.0 - clamp(sqrt(d2) / radius, 0.0, 1.0);
         fall = fall * fall;
-        point_term += albedo * pc.light_col[i].rgb *
+        vec3 Hp = normalize(ld + Vv);
+        vec3 Fp = f_schlick(F0, clamp(dot(Vv, Hp), 0.0, 1.0));
+        vec3 sp = d_ggx(clamp(dot(N, Hp), 0.0, 1.0), a_r) *
+                  v_smith_ggx_correlated(NoV, pndl, a_r) * Fp * ms_comp * kPI;
+        point_term += (diff_albedo * (1.0 - Fp) + sp) * pc.light_col[i].rgb *
                       pc.light_col[i].a * pndl * fall;
     }
 
-    vec3 lit = sun_term + ambient_term + sky_fill + point_term +
-               albedo * gi_indirect;
+    vec3 lit = sun_term + ambient_term + spec_ambient + sky_fill + point_term +
+               diff_albedo * gi_indirect;
 
     // Terrain sky-bounce wrap (cube.frag lines 3322-3331). Back-facing
     // terrain pixels (-NР’В·L > 0) pick up a sky-tinted lift to model
@@ -1177,9 +1249,15 @@ void main() {
             if (att * scene.muzzle_pos.w > 0.01) {
                 bool occl = any_hit_m(wp_safe + N * 0.06, Lp,
                                       max(d - 0.8, 0.05), 0x01u);
-                if (!occl)
-                    lit += albedo * scene.muzzle_color.rgb *
-                           (scene.muzzle_pos.w * att * ndl);
+                if (!occl) {
+                    vec3  Hm = normalize(Lp + Vv);
+                    float nl = max(dot(N, Lp), 1e-4);
+                    vec3  Fm = f_schlick(F0, clamp(dot(Vv, Hm), 0.0, 1.0));
+                    vec3  sm = d_ggx(clamp(dot(N, Hm), 0.0, 1.0), a_r) *
+                               v_smith_ggx_correlated(NoV, nl, a_r) * Fm * ms_comp * kPI * nl;
+                    lit += (diff_albedo * (1.0 - Fm) * ndl + sm) * scene.muzzle_color.rgb *
+                           (scene.muzzle_pos.w * att);
+                }
             }
         }
     }

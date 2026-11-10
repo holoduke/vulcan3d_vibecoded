@@ -795,6 +795,29 @@ vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
     return normalize(wnx * blend.x + wny * blend.y + wnz * blend.z);
 }
 
+// Per-surface PBR parameters for the G-buffer (deferred GGX). No roughness
+// / metal maps ship with the brush textures, so they come from the texture
+// slot (ambientCG set) - values from the sets' roughness-map means.
+// Returns (roughness, metallic).
+vec2 surface_rough_metal(int tex_idx, bool foliage, bool mesh_draw) {
+    if (foliage) return vec2(0.55, 0.0);
+    if (mesh_draw && tex_idx < 0) return vec2(0.62, 0.0);    // painted vehicles / jets
+    switch (tex_idx) {
+        case 0:  return vec2(0.88, 0.0);   // Ground054
+        case 1:  return vec2(0.80, 0.0);   // Bricks078 (castle walls)
+        case 2:  return vec2(0.62, 0.0);   // Wood048
+        case 3:  return vec2(0.38, 1.0);   // Metal042A
+        case 4:  return vec2(0.74, 0.0);   // PaintedBricks001
+        case 5:  return vec2(0.42, 0.0);   // Tiles130 (glazed)
+        case 6:  return vec2(0.50, 0.0);   // Tiles074
+        case 13: return vec2(0.58, 0.0);   // RoofingTiles012A
+        case 14: return vec2(0.82, 0.0);   // PavingStones131
+        default: return vec2(0.78, 0.0);   // rock / stone clutter etc.
+    }
+}
+// gbuffer1.a (2 bits): 1.0 = foliage, 2/3 = metal, 0 = dielectric.
+float gbuf_flags(bool foliage, float metal) { return foliage ? 1.0 : (metal > 0.5 ? 0.6667 : 0.0); }
+
 // Interleaved Gradient Noise (Jorge Jimenez, "Next Generation Post-Processing
 // in Call of Duty: Advanced Warfare", SIGGRAPH 2014).
 // Adjacent pixels see *smoothly varying* random values rather than hash-style
@@ -3070,7 +3093,8 @@ void main() {
         outColor    = vec4(albedo, 1.0);
         outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)),
                            float(fast_mat) / 255.0);
-        outGBuffer1 = vec4(octa_encode(N), is_terrain_pre ? terrain_pom_vis : 0.5, is_foliage_px ? 1.0 : 0.0);
+        vec2 rmf = surface_rough_metal(albedo_idx_raw, is_foliage_px, is_mesh_draw);
+        outGBuffer1 = vec4(octa_encode(N), is_terrain_pre ? terrain_pom_vis : rmf.x, gbuf_flags(is_foliage_px, rmf.y));
         return;
     }
 
@@ -4221,6 +4245,7 @@ void main() {
     if (vEmissive.a > 0.5) mat_id = 5;     // emissive — handled above too
     outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)),
                        float(mat_id) / 255.0);
-    outGBuffer1 = vec4(octa_encode(N), is_terrain_pre ? terrain_pom_vis : 0.5, is_foliage_px ? 1.0 : 0.0);
+    vec2 rmf = surface_rough_metal(albedo_idx_raw, is_foliage_px, is_mesh_draw);
+    outGBuffer1 = vec4(octa_encode(N), is_terrain_pre ? terrain_pom_vis : rmf.x, gbuf_flags(is_foliage_px, rmf.y));
 }
 
