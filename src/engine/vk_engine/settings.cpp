@@ -250,6 +250,7 @@ void VulkanEngine::save_settings() const {
     f << "cloud_speed = " << rt_.cloud_speed << "\n";
     f << "tonemap_mode = " << rt_.tonemap_mode << "\n";
     f << "hdr_output = " << rt_.hdr_output << "\n";
+    f << "radiance_cache = " << rt_.radiance_cache << "\n";
     f << "hdr_paper_nits = " << rt_.hdr_paper_nits << "\n";
     f << "hdr_peak_nits = " << rt_.hdr_peak_nits << "\n";
     f << "fog_volumetric = " << rt_.fog_volumetric << "\n";
@@ -698,6 +699,7 @@ void VulkanEngine::load_settings() {
             if (key == "cloud_speed")          { rt_.cloud_speed = std::stof(val); ++loaded; continue; }
             if (key == "tonemap_mode")         { rt_.tonemap_mode = std::stoi(val); ++loaded; continue; }
             if (key == "hdr_output")     { rt_.hdr_output = std::stoi(val); ++loaded; continue; }
+            if (key == "radiance_cache") { rt_.radiance_cache = std::stoi(val); ++loaded; continue; }
             if (key == "hdr_paper_nits") { rt_.hdr_paper_nits = std::stof(val); ++loaded; continue; }
             if (key == "hdr_peak_nits")  { rt_.hdr_peak_nits = std::stof(val); ++loaded; continue; }
             if (key == "fog_volumetric")       { rt_.fog_volumetric = std::stoi(val); ++loaded; continue; }

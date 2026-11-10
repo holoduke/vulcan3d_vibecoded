@@ -34,6 +34,7 @@ static_assert(sizeof(DeferredLightingPC) == 256,
 
 
 void VulkanEngine::init_deferred_lighting() {
+    init_radiance_cache();   // bindings 16-18
     // Descriptor set layout: scene UBO + TLAS + gbuffer0 + gbuffer1 +
     // depth + sun_shadow. Six bindings, all fragment-stage. Reuses the
     // same binding numbers the shader declares.
@@ -45,7 +46,7 @@ void VulkanEngine::init_deferred_lighting() {
         // SAD gap on indoor / shadow-side surfaces. Image is in GENERAL
         // layout when cube.frag writes via imageStore — sampler2D reads
         // are allowed from GENERAL.
-        VkDescriptorSetLayoutBinding b[16]{};
+        VkDescriptorSetLayoutBinding b[19]{};
         b[0].binding = 0;
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         b[0].descriptorCount = 1;
@@ -96,10 +97,16 @@ void VulkanEngine::init_deferred_lighting() {
         b[15].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         b[15].descriptorCount = 1;
         b[15].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        for (int i = 16; i < 19; ++i) {   // radiance cache keys / acc / res
+            b[i].binding = uint32_t(i);
+            b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            b[i].descriptorCount = 1;
+            b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
         VkDescriptorSetLayoutCreateInfo dlci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
-            .bindingCount = 16, .pBindings = b,
+            .bindingCount = 19, .pBindings = b,
         };
         vk_check(vkCreateDescriptorSetLayout(device_, &dlci, nullptr,
                                               &deferred_lighting_desc_layout_),
@@ -134,12 +141,13 @@ void VulkanEngine::init_deferred_lighting() {
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     16 },
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              4 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             3 },
         };
         VkDescriptorPoolCreateInfo pci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
             .maxSets = 1,
-            .poolSizeCount = 4, .pPoolSizes = sizes,
+            .poolSizeCount = 5, .pPoolSizes = sizes,
         };
         vk_check(vkCreateDescriptorPool(device_, &pci, nullptr,
                                          &deferred_lighting_desc_pool_),
@@ -183,6 +191,7 @@ void VulkanEngine::init_deferred_lighting() {
 }
 
 void VulkanEngine::destroy_deferred_lighting() {
+    destroy_radiance_cache();
     if (deferred_lighting_pipeline_) {
         vkDestroyPipeline(device_, deferred_lighting_pipeline_, nullptr);
         deferred_lighting_pipeline_ = VK_NULL_HANDLE;
@@ -268,7 +277,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         VkDescriptorImageInfo gif1_ii{ VK_NULL_HANDLE,
                                        deferred_gi_fast_view_[1],
                                        VK_IMAGE_LAYOUT_GENERAL };
-        VkWriteDescriptorSet w[16]{};
+        VkWriteDescriptorSet w[19]{};
         w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[0].dstSet = deferred_lighting_desc_set_; w[0].dstBinding = 0;
         w[0].descriptorCount = 1;
@@ -327,7 +336,17 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[15] = w[14];
         w[15].dstBinding = 15;
         w[15].pImageInfo = &aux_ii;
-        vkUpdateDescriptorSets(device_, 16, w, 0, nullptr);
+        VkDescriptorBufferInfo rc_bi[3];
+        for (int i = 0; i < 3; ++i) {
+            rc_bi[i] = { rc_buf_[i], 0, VK_WHOLE_SIZE };
+            w[16 + i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[16 + i].dstSet = deferred_lighting_desc_set_;
+            w[16 + i].dstBinding = uint32_t(16 + i);
+            w[16 + i].descriptorCount = 1;
+            w[16 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w[16 + i].pBufferInfo = &rc_bi[i];
+        }
+        vkUpdateDescriptorSets(device_, 19, w, 0, nullptr);
     }
 
     // Transition staging_color into COLOR_ATTACHMENT layout.

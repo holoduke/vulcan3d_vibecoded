@@ -289,6 +289,7 @@ add_library(qlike_engine STATIC
     src/engine/vk_engine/aa.cpp
     src/engine/vk_engine/post.cpp
     src/engine/vk_engine/atmosphere.cpp
+    src/engine/vk_engine/radiance_cache.cpp
     src/engine/vk_engine/dlss.cpp
     src/engine/vk_engine/bloom.cpp
     src/engine/vk_engine/taa.cpp

@@ -584,6 +584,8 @@ void VulkanEngine::draw(uint32_t img_index) {
     // colour writer).
     render_deferred_lighting(frame.command_buffer);
     prof_mark(frame.command_buffer, "deferred_lighting");
+    dispatch_radiance_cache(frame.command_buffer);
+    prof_mark(frame.command_buffer, "rcache");
     // When the toggle is on, blit the deferred output back into
     // scene_color so the downstream chain (SVGF, TAA, FSR3, compose)
     // sees the deferred result without descriptor surgery. scene_color

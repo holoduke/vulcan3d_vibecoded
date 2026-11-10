@@ -249,6 +249,9 @@ private:
     void init_exposure();      // called from init_compose()
     void destroy_exposure();
     void dispatch_exposure(VkCommandBuffer cmd);
+    void init_radiance_cache();
+    void destroy_radiance_cache();
+    void dispatch_radiance_cache(VkCommandBuffer cmd);
     void init_atmosphere();    // called from init_compose()
     void destroy_atmosphere();
     void dispatch_atmosphere(VkCommandBuffer cmd);   // per frame, before compose
@@ -2055,6 +2058,15 @@ private:
     VkPipelineLayout       exposure_pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline             exposure_pipeline_ = VK_NULL_HANDLE;
     double                 exposure_last_t_ = 0.0;
+    // World-space radiance cache (radiance_cache.cpp, rc_resolve.comp).
+    static constexpr uint32_t kRadianceCacheEntries = 1u << 20;
+    VkBuffer               rc_buf_[3]{};      // keys, acc, res
+    VmaAllocation          rc_alloc_[3]{};
+    VkDescriptorSetLayout  rc_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool       rc_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet        rc_set_ = VK_NULL_HANDLE;
+    VkPipelineLayout       rc_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline             rc_pipeline_ = VK_NULL_HANDLE;
     // Physical atmosphere (Hillaire 2020): transmittance, multi-scatter and
     // sky-view LUTs + aerial-perspective froxel volume (atmosphere.cpp).
     // All images live in GENERAL (storage in atmosphere.comp, sampled in compose).

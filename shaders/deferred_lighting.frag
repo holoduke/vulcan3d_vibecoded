@@ -169,6 +169,72 @@ bool closest_hit_m(vec3 origin, vec3 dir, float t_max, uint mask, out float out_
     }
     return false;
 }
+
+// ---------------------------------------------------------------
+//  World-space radiance cache (SHaRC-style hash grid, see
+//  radiance_cache.cpp). Cell size doubles every octave of camera
+//  distance from 0.5 m; 6 buckets per cell by dominant normal axis.
+// ---------------------------------------------------------------
+layout(std430, set = 0, binding = 16) buffer RcKeys { uint rc_keys[]; };
+layout(std430, set = 0, binding = 17) buffer RcAcc  { uvec4 rc_acc[]; };
+layout(std430, set = 0, binding = 18) buffer RcRes  { vec4 rc_res[]; };
+const uint kRcEntries = 1u << 20;
+const int  kRcProbe = 8;
+
+uint rc_pcg(uint v) {
+    uint s = v * 747796405u + 2891336453u;
+    uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+int rc_axis(vec3 n) {
+    vec3 a = abs(n);
+    if (a.x >= a.y && a.x >= a.z) return n.x > 0.0 ? 0 : 1;
+    if (a.y >= a.z) return n.y > 0.0 ? 2 : 3;
+    return n.z > 0.0 ? 4 : 5;
+}
+// Returns the (slot hash, check key) pair for a surface point.
+uvec2 rc_hash(vec3 p, vec3 n) {
+    int ax = rc_axis(n);
+    vec3 an = vec3(0.0);
+    an[ax >> 1] = (ax & 1) == 0 ? 1.0 : -1.0;
+    float d = distance(p, scene.camera_pos.xyz);
+    int lvl = clamp(int(floor(log2(max(d, 1.0) / 8.0))) + 1, 0, 9);
+    float cell = 0.5 * exp2(float(lvl));
+    ivec3 ip = ivec3(floor((p + an * 0.05) / cell));
+    uint h = rc_pcg(uint(ip.x) + rc_pcg(uint(ip.y) + rc_pcg(uint(ip.z) +
+             rc_pcg(uint(lvl * 8 + ax)))));
+    uint k = rc_pcg(h ^ 0x9E3779B9u) | 1u;
+    return uvec2(h, k);
+}
+void rc_store(vec3 p, vec3 n, vec3 radiance) {
+    uvec2 hk = rc_hash(p, n);
+    for (int i = 0; i < kRcProbe; ++i) {
+        uint s = (hk.x + uint(i)) & (kRcEntries - 1u);
+        uint prev = atomicCompSwap(rc_keys[s], 0u, hk.y);
+        if (prev == 0u || prev == hk.y) {
+            uvec3 q = uvec3(clamp(radiance, vec3(0.0), vec3(64.0)) * 256.0 + 0.5);
+            atomicAdd(rc_acc[s].x, q.x);
+            atomicAdd(rc_acc[s].y, q.y);
+            atomicAdd(rc_acc[s].z, q.z);
+            atomicAdd(rc_acc[s].w, 1u);
+            return;
+        }
+    }
+}
+bool rc_lookup(vec3 p, vec3 n, out vec3 radiance) {
+    uvec2 hk = rc_hash(p, n);
+    for (int i = 0; i < kRcProbe; ++i) {
+        uint s = (hk.x + uint(i)) & (kRcEntries - 1u);
+        if (rc_keys[s] == hk.y) {
+            vec4 r = rc_res[s];
+            // valid = resolved at least once and seen within ~4 s
+            if (r.w > 0.5 && r.w < 240.0) { radiance = r.rgb; return true; }
+            return false;
+        }
+    }
+    return false;
+}
+
 bool closest_hit(vec3 origin, vec3 dir, float t_max, out float out_t) {
     return closest_hit_m(origin, dir, t_max, 0x01u, out_t);
 }
@@ -720,7 +786,12 @@ void main() {
             if (closest_hit_m(ro, dir, gi_radius, 0x04u, t)) {
                 vec3 hit_pos = ro + dir * t;
                 vec3 hit_n   = -dir;
-                if (!skip_gi_inner) {
+                vec3 rc_rad;
+                if (!skip_gi_inner && rc_lookup(hit_pos, hit_n, rc_rad)) {
+                    // Radiance cache hit: real surface colour + all
+                    // bounces, no shadow / second-bounce rays needed.
+                    gi_indirect += rc_rad;
+                } else if (!skip_gi_inner) {
                     // Sun-shadow at the hit point: one any-hit ray; if
                     // clear, hit gets sun + ambient; otherwise just
                     // ambient.
@@ -1265,6 +1336,16 @@ void main() {
         float wrap_amt = clamp(scene.terrain_params.y, 0.0, 1.0);
         float back     = max(0.0, -dot(N, L));
         lit += albedo * scene.sky_color.rgb * back * 0.30 * wrap_amt;
+    }
+
+    // Radiance cache scatter: ~1 in 8 pixels (rotating per frame) writes
+    // its diffuse outgoing radiance into the world-space hash grid that
+    // GI rays read back (rc_lookup above).
+    {
+        uvec2 px = uvec2(gl_FragCoord.xy);
+        uint sel = rc_pcg(px.x * 1973u + px.y * 9277u + uint(scene.rt_flags.w) * 26699u);
+        if ((sel & 7u) == 0u && cam_dist < 400.0)
+            rc_store(world_pos, N, max(lit - spec_ambient, vec3(0.0)));
     }
 
     // ---------------------------------------------------------------

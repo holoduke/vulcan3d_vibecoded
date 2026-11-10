@@ -1,0 +1,34 @@
+#version 460
+// Radiance-cache resolve: average this frame's scattered samples into the
+// resolved radiance (EMA), clear the accumulators, age untouched entries
+// and evict the ones that went unseen for ~10 s. See radiance_cache.cpp.
+layout(local_size_x = 256) in;
+
+layout(std430, set = 0, binding = 0) buffer Keys { uint rc_keys[]; };
+layout(std430, set = 0, binding = 1) buffer Acc  { uvec4 rc_acc[]; };
+layout(std430, set = 0, binding = 2) buffer Res  { vec4 rc_res[]; };
+
+layout(push_constant) uniform PC { vec4 p; } pc;   // x = entries, y = EMA alpha
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(pc.p.x)) return;
+    if (rc_keys[i] == 0u) return;
+    uvec4 a = rc_acc[i];
+    vec4 r = rc_res[i];
+    if (a.w > 0u) {
+        vec3 avg = vec3(a.xyz) / (256.0 * float(a.w));
+        // New entry snaps; existing ones blend (more samples -> faster).
+        float alpha = r.w > 0.0 ? clamp(pc.p.y * (1.0 + float(a.w) * 0.05), 0.0, 0.5) : 1.0;
+        r.rgb = mix(r.rgb, avg, alpha);
+        r.w = 1.0;
+        rc_acc[i] = uvec4(0u);
+    } else {
+        r.w += 1.0;
+        if (r.w > 600.0) {           // unseen ~10 s: evict
+            rc_keys[i] = 0u;
+            r = vec4(0.0);
+        }
+    }
+    rc_res[i] = r;
+}
