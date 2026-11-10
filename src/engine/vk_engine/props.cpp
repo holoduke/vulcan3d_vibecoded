@@ -4,6 +4,7 @@
 // Split out of the old monolithic world.cpp (maintainability pass).
 
 #include "engine/vk_engine/internal.h"
+#include "engine/audio.h"
 #include "engine/gltf_loader.h"
 #include "engine/grass.h"
 #include "engine/skybox.h"
@@ -645,10 +646,119 @@ void VulkanEngine::tick_spacejet(float dt) {
                        f.speed, f.turn_g);
         }
     }
+    tick_jet_audio(dt);
+    for (auto& f : spacejet_flights_)   // voices of removed jets stop with them
+        if (f.dead && f.trail.empty() && f.snd_voice && audio_) audio_->stop_voice(f.snd_voice, 0.3f);
     spacejet_flights_.erase(
         std::remove_if(spacejet_flights_.begin(), spacejet_flights_.end(),
                        [](const SpacejetFlight& f) { return f.dead && f.trail.empty(); }),
         spacejet_flights_.end());
+}
+
+// Predictive flyby audio. Each clip is a recorded single pass whose
+// loudness peak marks the closest approach. For every jet we predict, from
+// its current position and velocity, WHEN it will pass closest to the
+// listener (t_ca) and HOW close (d_min), then:
+//   * rate: a pass sweeps by in ~2*sqrt(3)*d_min/speed seconds of
+//     "within 6 dB of peak" (inverse-square law); the clip's own 6 dB
+//     window is W_ref. Playback rate = W_ref / that, clamped, so fast /
+//     close passes play shorter (and a bit higher) and slow / distant ones
+//     longer (and lower).
+//   * timing: start when t_ca equals the clip's pre-peak length at that
+//     rate, so the recorded peak lands on the real closest approach; if
+//     the jet is already nearer than that, seek into the clip.
+//   * volume from d_min (the clip itself carries approach / recede).
+//   * position follows the jet every frame (panning), no attenuation.
+// Shot-down / crashing jets fade their pass out (the crash has its own
+// explosion sounds).
+void VulkanEngine::tick_jet_audio(float dt) {
+    if (!audio_) return;
+    struct ClipInfo { ClipID id; float peak_s, w_ref_s, len_s, gain; };
+    static const ClipInfo kClips[3] = {
+        { ClipID::JetFlyby1, 3.70f, 3.50f, 15.0f, 1.00f },
+        { ClipID::JetFlyby2, 6.60f, 3.30f, 15.0f, 1.00f },
+        { ClipID::JetFlyby3, 3.50f, 2.60f, 15.0f, 1.70f },   // recorded ~5 dB quieter
+    };
+    const glm::vec3 eye = player_.eye_position();
+    int active = 0;
+    for (const auto& f : spacejet_flights_) if (f.snd_voice && audio_->voice_playing(f.snd_voice)) ++active;
+
+    for (auto& f : spacejet_flights_) {
+        f.snd_cool = std::max(0.0f, f.snd_cool - dt);
+        if (f.snd_voice) {
+            if (!audio_->voice_playing(f.snd_voice)) {
+                f.snd_voice = 0;
+                f.snd_cool = 3.0f;
+            } else if (f.destroying || f.dead) {
+                audio_->stop_voice(f.snd_voice, 0.8f);
+                f.snd_voice = 0;
+                f.snd_cool = 1e9f;          // never again for this jet
+            } else {
+                audio_->set_voice(f.snd_voice, f.pos, f.snd_vol);
+                // Re-predict while approaching (jets turn, loop, orbit):
+                // steer the rate within +-15 % of the pass's base rate so
+                // the clip's peak keeps landing on the real closest
+                // approach; if the jet turns away before the peak, fade.
+                const ClipInfo& c = kClips[f.snd_clip];
+                const float pos_s = audio_->voice_time(f.snd_voice);
+                if (pos_s < c.peak_s - 0.3f) {
+                    const glm::vec3 r = f.pos - eye;
+                    const glm::vec3 v = f.fwd * std::max(f.speed, 1.0f);
+                    const float t_ca = -glm::dot(r, v) / glm::dot(v, v);
+                    const float d_min = glm::length(r + v * std::max(t_ca, 0.0f));
+                    if (t_ca < -0.5f || d_min > 900.0f) {
+                        audio_->stop_voice(f.snd_voice, 2.0f);   // no pass coming after all
+                        f.snd_voice = 0;
+                        f.snd_cool = 2.5f;
+                    } else if (t_ca > 0.2f) {
+                        float want = (c.peak_s - pos_s) / t_ca;
+                        want = glm::clamp(want, f.snd_rate * 0.85f, f.snd_rate * 1.15f);
+                        audio_->set_voice_rate(f.snd_voice, glm::clamp(want, 0.6f, 1.6f));
+                    }
+                } else {
+                    if (!f.snd_peaked && pos_s >= c.peak_s) {
+                        f.snd_peaked = true;
+                        const glm::vec3 r = f.pos - eye;
+                        const glm::vec3 v = f.fwd * std::max(f.speed, 1.0f);
+                        log::infof("[jet-audio] id %u clip peak: jet at %.0f m, closest approach in %.2f s",
+                                   f.id, glm::length(r), -glm::dot(r, v) / glm::dot(v, v));
+                    }
+                    audio_->set_voice_rate(f.snd_voice, f.snd_rate);   // recede at the base rate
+                }
+            }
+            continue;
+        }
+        if (f.dead || f.destroying || f.snd_cool > 0.0f || active >= 4) continue;
+
+        const glm::vec3 r = f.pos - eye;
+        const glm::vec3 v = f.fwd * std::max(f.speed, 1.0f);
+        const float v2 = glm::dot(v, v);
+        const float t_ca = -glm::dot(r, v) / v2;              // s until closest approach
+        const float d_min = glm::length(r + v * std::max(t_ca, 0.0f));
+        if (d_min > 700.0f || t_ca < -1.5f) continue;          // too far / long gone
+
+        const ClipInfo& c = kClips[f.id % 3];
+        const float sweep = 3.46f * std::max(d_min, 20.0f) / std::sqrt(v2);
+        const float rate = glm::clamp(c.w_ref_s / sweep, 0.75f, 1.4f);
+        const float lead = c.peak_s / rate;                    // real seconds before the peak
+        if (t_ca > lead) continue;                             // not yet: start later
+        // Seek so the clip peak coincides with t_ca (already-near jets).
+        const float start_s = std::max(0.0f, c.peak_s - t_ca * rate);
+        if (start_s > c.peak_s - 1.5f) continue;   // need an audible approach, never start at the peak
+        float vol = glm::clamp(160.0f / std::max(d_min, 25.0f), 0.10f, 1.0f) * c.gain;
+        if (f.leader_id != 0) vol *= 0.6f;                     // wingmen under the lead
+        f.snd_vol = vol;
+        f.snd_rate = rate;
+        f.snd_clip = int(f.id % 3);
+        f.snd_peaked = false;
+        f.snd_voice = audio_->play_tracked(c.id, f.pos, vol, rate, start_s);
+        if (f.snd_voice) {
+            ++active;
+            log::infof("[jet-audio] id %u pass in %.1f s at %.0f m (speed %.0f): clip %d rate %.2f start %.1f s vol %.2f",
+                       f.id, t_ca, d_min, std::sqrt(v2), int(f.id % 3) + 1, rate, start_s, vol);
+        }
+        else f.snd_cool = 5.0f;
+    }
 }
 
 void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,

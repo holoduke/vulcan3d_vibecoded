@@ -196,7 +196,7 @@ void VulkanEngine::tick_aa(float dt) {
                 v.flash_t = 0.05f;
                 v.flash_barrel = b;
                 if (audio_ && ++shots_this_tick <= 2 && glm::distance(eye, mz) < 400.0f)
-                    audio_->play_at(ClipID::Shot, mz, 0.55f, 0.25f, 0.10f);
+                    audio_->play_at(ClipID::AaShot, mz, 0.55f, 0.12f, 0.10f);
             }
             if (v.burst <= 0.0f) { v.cooldown = frand_range(R, 0.8f, 2.2f); v.fire_acc = 0.0f; }
         }

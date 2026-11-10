@@ -16,6 +16,10 @@ enum class ClipID : uint8_t {
     Impact,
     Jump,
     Laser,      // player laser gun (assets/sounds/laser_shot.wav)
+    AaShot,     // anti-aircraft gun round (assets/sounds/aa_shot.wav)
+    JetFlyby1,  // jet flybys (15 s recordings, one pass each)
+    JetFlyby2,
+    JetFlyby3,
     Count
 };
 
@@ -62,6 +66,19 @@ public:
                      float volume = 1.0f,
                      float pitch_jitter = 0.05f,
                      float volume_jitter = 0.05f);
+
+    // Tracked spatial voice: panned by position, NO distance attenuation
+    // (the caller drives volume - e.g. a flyby recording already carries
+    // its own approach / recede loudness) and no Doppler. `rate` scales
+    // playback speed (and pitch); `start_s` seeks into the clip.
+    // Returns a handle (0 = failed).
+    uint32_t play_tracked(ClipID id, glm::vec3 pos, float volume,
+                          float rate, float start_s);
+    void     set_voice(uint32_t h, glm::vec3 pos, float volume);
+    void     set_voice_rate(uint32_t h, float rate);
+    float    voice_time(uint32_t h) const;   // playback position in the clip (s)
+    void     stop_voice(uint32_t h, float fade_s);
+    bool     voice_playing(uint32_t h) const;
 
     // Master volume (0..1). Persisted via settings.cpp.
     void set_master_volume(float v);

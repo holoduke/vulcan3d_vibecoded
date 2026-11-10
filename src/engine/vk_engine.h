@@ -989,6 +989,14 @@ private:
         bool      destroying   = false;
         float     destroy_t    = 0.0f;
         bool      dead         = false;     // remove next tick
+        // Flyby sound (tick_jet_audio): tracked voice handle, cooldown
+        // before the next pass may trigger, clip gain for this pass.
+        uint32_t  snd_voice    = 0;
+        float     snd_cool     = 0.0f;
+        float     snd_vol      = 0.0f;
+        float     snd_rate     = 1.0f;      // base playback rate of this pass
+        int       snd_clip     = 0;
+        bool      snd_peaked   = false;     // clip peak reached (logged once)
         int       aa_hits      = 0;         // anti-aircraft rounds taken
         // Crash: 0 spiral dive, 1 flat spin, 2 tumbling break-up, 3 burning
         // glide-in (picked when shot down). Ballistic velocity + tumble.
@@ -1077,6 +1085,7 @@ private:
     void init_spacejet();
     void destroy_spacejet();
     void tick_spacejet(float dt);                 // move + spawn + despawn
+    void tick_jet_audio(float dt);                // predictive flyby sounds
 
     // 60 dynamic crates: 100 still let the autodemo TDR (~2.4s on a 4080
     // even with the merged-static BLAS), so we drop further. The bottleneck

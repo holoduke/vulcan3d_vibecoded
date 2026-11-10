@@ -101,6 +101,13 @@ void VulkanEngine::init() {
     // Single shot cut from laser_gun_#4 (0.045-0.225 s, 100 ms fade, -3.5 dB
     // to sit at the old shot level).
     audio_->load_clip(ClipID::Laser,  "assets/sounds/laser_shot.wav");
+    // One round cut from laser_gun_#3 (a rapid-fire burst, ~80 ms pulses).
+    audio_->load_clip(ClipID::AaShot, "assets/sounds/aa_shot.wav");
+    // Full jet flyby recordings; tick_jet_audio() times their peak to each
+    // jet's predicted closest approach.
+    audio_->load_clip(ClipID::JetFlyby1, "assets/sounds/jet_flyby_1.mp3");
+    audio_->load_clip(ClipID::JetFlyby2, "assets/sounds/jet_flyby_2.mp3");
+    audio_->load_clip(ClipID::JetFlyby3, "assets/sounds/jet_flyby_3.mp3");
     init_vulkan();
     init_pipeline_cache();
     init_swapchain();

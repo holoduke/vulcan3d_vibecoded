@@ -20,6 +20,7 @@
 #undef STB_VORBIS_HEADER_ONLY
 #include "extras/stb_vorbis.c"
 
+#include <algorithm>
 #include <list>
 #include <random>
 #include <string>
@@ -52,6 +53,11 @@ struct AudioEngine::Impl {
     // at each set_listener call.
     std::list<ma_sound> oneshots;
 
+    // Tracked voices (jet flybys): heap-allocated so the ma_sound never
+    // moves while miniaudio's mixer thread references it.
+    std::unordered_map<uint32_t, ma_sound*> tracked;
+    uint32_t next_handle = 1;
+
     // (loops removed — see comment in start_loop deletion below.)
 
     std::default_random_engine rng{ std::random_device{}() };
@@ -71,6 +77,7 @@ AudioEngine::AudioEngine() : impl_(std::make_unique<Impl>()) {
 AudioEngine::~AudioEngine() {
     if (!impl_->ok) return;
     for (auto& s : impl_->oneshots) ma_sound_uninit(&s);
+    for (auto& kv : impl_->tracked) { ma_sound_uninit(kv.second); delete kv.second; }
     ma_engine_uninit(&impl_->engine);
 }
 
@@ -81,6 +88,16 @@ void AudioEngine::set_listener(glm::vec3 pos, glm::vec3 forward) {
     ma_engine_listener_set_position(&impl_->engine, 0, pos.x, pos.y, pos.z);
     ma_engine_listener_set_direction(&impl_->engine, 0,
                                        forward.x, forward.y, forward.z);
+    // Reap finished tracked voices (handle then reads as not playing).
+    for (auto it = impl_->tracked.begin(); it != impl_->tracked.end();) {
+        if (ma_sound_is_playing(it->second) == MA_FALSE) {
+            ma_sound_uninit(it->second);
+            delete it->second;
+            it = impl_->tracked.erase(it);
+        } else {
+            ++it;
+        }
+    }
     // Reap drained one-shots.
     for (auto it = impl_->oneshots.begin(); it != impl_->oneshots.end();) {
         if (ma_sound_is_playing(&*it) == MA_FALSE) {
@@ -161,6 +178,76 @@ void AudioEngine::play_local(ClipID id,
 // If we ever need looping audio (ambience, footstep loop), add an
 // enum-keyed version that mirrors play_at / play_local rather than
 // resurrecting the string-keyed map.
+
+uint32_t AudioEngine::play_tracked(ClipID id, glm::vec3 pos, float volume,
+                                   float rate, float start_s) {
+    if (!impl_->ok) return 0;
+    auto idx = static_cast<size_t>(id);
+    if (idx >= static_cast<size_t>(ClipID::Count)) return 0;
+    const std::string& path = impl_->clip_paths[idx];
+    if (path.empty()) return 0;
+    ma_sound* s = new ma_sound;
+    if (ma_sound_init_from_file(&impl_->engine, path.c_str(), MA_SOUND_FLAG_DECODE,
+                                nullptr, nullptr, s) != MA_SUCCESS) {
+        delete s;
+        return 0;
+    }
+    ma_sound_set_attenuation_model(s, ma_attenuation_model_none);
+    ma_sound_set_doppler_factor(s, 0.0f);
+    ma_sound_set_position(s, pos.x, pos.y, pos.z);
+    ma_sound_set_volume(s, volume);
+    ma_sound_set_pitch(s, rate);
+    if (start_s > 0.0f) {
+        ma_uint32 sr = 0;
+        ma_sound_get_data_format(s, nullptr, nullptr, &sr, nullptr, 0);
+        if (sr) ma_sound_seek_to_pcm_frame(s, ma_uint64(double(start_s) * sr));
+        ma_sound_set_fade_in_milliseconds(s, 0.0f, 1.0f, 700);   // mid-clip start: no hard onset
+    }
+    ma_sound_start(s);
+    const uint32_t h = impl_->next_handle++;
+    if (impl_->next_handle == 0) impl_->next_handle = 1;
+    impl_->tracked[h] = s;
+    return h;
+}
+
+void AudioEngine::set_voice(uint32_t h, glm::vec3 pos, float volume) {
+    if (!impl_->ok) return;
+    auto it = impl_->tracked.find(h);
+    if (it == impl_->tracked.end()) return;
+    ma_sound_set_position(it->second, pos.x, pos.y, pos.z);
+    ma_sound_set_volume(it->second, volume);
+}
+
+void AudioEngine::set_voice_rate(uint32_t h, float rate) {
+    if (!impl_->ok) return;
+    auto it = impl_->tracked.find(h);
+    if (it != impl_->tracked.end()) ma_sound_set_pitch(it->second, rate);
+}
+
+float AudioEngine::voice_time(uint32_t h) const {
+    if (!impl_->ok) return 0.0f;
+    auto it = impl_->tracked.find(h);
+    if (it == impl_->tracked.end()) return 0.0f;
+    float t = 0.0f;
+    ma_sound_get_cursor_in_seconds(it->second, &t);
+    return t;
+}
+
+void AudioEngine::stop_voice(uint32_t h, float fade_s) {
+    if (!impl_->ok) return;
+    auto it = impl_->tracked.find(h);
+    if (it == impl_->tracked.end()) return;
+    ma_uint64 ms = ma_uint64((std::max)(0.0f, fade_s) * 1000.0f);
+    // Fade from the current volume, then stop (reaped in set_listener).
+    ma_sound_set_stop_time_with_fade_in_milliseconds(
+        it->second, ma_engine_get_time_in_milliseconds(&impl_->engine) + ms, ms);
+}
+
+bool AudioEngine::voice_playing(uint32_t h) const {
+    if (!impl_->ok) return false;
+    auto it = impl_->tracked.find(h);
+    return it != impl_->tracked.end() && ma_sound_is_playing(it->second) == MA_TRUE;
+}
 
 void AudioEngine::set_master_volume(float v) {
     if (!impl_->ok) return;
