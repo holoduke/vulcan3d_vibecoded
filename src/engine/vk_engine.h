@@ -258,6 +258,15 @@ private:
     void init_fog();
     void destroy_fog();
     void dispatch_fog(VkCommandBuffer cmd);
+    // NVIDIA DLSS via Streamline (dlss.cpp), manual hooking. Upscaler
+    // backend 2 under the fsr2_enabled master toggle.
+    void sl_init_early();          // before the Vulkan instance
+    void sl_set_vulkan_info();     // after the device
+    void init_dlss();
+    void destroy_dlss();
+    void dispatch_dlss(VkCommandBuffer cmd);
+    void sl_shutdown();
+    bool dlss_active() const;
     void run_bloom_chain(VkCommandBuffer cmd);
     void init_skybox();
     void destroy_skybox_resources();
@@ -2074,6 +2083,23 @@ private:
     VkPipeline             fog_pipeline_ = VK_NULL_HANDLE;
     VkAccelerationStructureKHR fog_tlas_bound_ = VK_NULL_HANDLE;
     glm::vec3              last_sun_rgb_{1.0f}, last_sky_rgb_{0.5f, 0.7f, 1.0f};
+    // Streamline / DLSS state.
+    bool                   sl_ok_ = false;
+    bool                   dlss_supported_ = false;
+    std::vector<std::string> sl_instance_exts_, sl_device_exts_;
+    VkImage                dlss_output_image_ = VK_NULL_HANDLE;
+    VmaAllocation          dlss_output_alloc_ = nullptr;
+    VkImageView            dlss_output_view_ = VK_NULL_HANDLE;
+    VkExtent2D             dlss_output_extent_{0, 0};
+    bool                   dlss_reset_ = true;
+    bool                   compose_uses_dlss_ = false;
+    // Streamline proxies (sl.interposer.dll): vk-bootstrap creates the
+    // instance / device / swapchain through sl_gipa_, acquire + present go
+    // through the proxies so SL's per-frame bookkeeping (presentCommon) runs.
+    PFN_vkGetInstanceProcAddr sl_gipa_ = nullptr;
+    PFN_vkGetDeviceProcAddr   sl_gdpa_ = nullptr;
+    PFN_vkAcquireNextImageKHR sl_acquire_fn_ = nullptr;
+    PFN_vkQueuePresentKHR     sl_present_fn_ = nullptr;
     VkShaderModule         compose_frag_module_ = VK_NULL_HANDLE;
 
     // --- Bloom mip chain (Karis-style downsample + tent upsample) ---

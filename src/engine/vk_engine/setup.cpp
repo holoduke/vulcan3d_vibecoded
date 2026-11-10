@@ -22,7 +22,12 @@
 namespace qlike {
 
 void VulkanEngine::init_vulkan() {
-    vkb::InstanceBuilder builder;
+    // Streamline must be initialised before the VkInstance (manual hooking).
+    sl_init_early();
+    // With Streamline, vk-bootstrap goes through SL's vkGetInstanceProcAddr
+    // proxy: SL adds its extensions / features / queues itself and sees the
+    // swapchain.
+    vkb::InstanceBuilder builder = sl_gipa_ ? vkb::InstanceBuilder(sl_gipa_) : vkb::InstanceBuilder();
     auto& b = builder.set_app_name("quake-like")
                   .request_validation_layers(vk_validation_enabled())
                   .require_api_version(1, 3, 0)
@@ -60,6 +65,7 @@ void VulkanEngine::init_vulkan() {
     f13.dynamicRendering = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
     f13.shaderDemoteToHelperInvocation = VK_TRUE;   // GLSL demote (alpha-tested shaders)
+    f13.privateData = VK_TRUE;   // Streamline (DLSS) private data slots
 
     VkPhysicalDeviceVulkan12Features f12{};
     f12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
@@ -257,6 +263,7 @@ void VulkanEngine::init_vulkan() {
     log::infof("vk compute queue family=%u (%s)", compute_queue_family_,
                compute_queue_distinct_ ? "ASYNC — separate from graphics"
                                        : "shared with graphics");
+    sl_set_vulkan_info();   // DLSS: hand the device to Streamline
 
     // Pull the extra graphics-family queues for the FSR3 SwapChain
     // proxy. Indices 1..3 are populated only when custom_queue_setup

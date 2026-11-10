@@ -64,3 +64,7 @@ d*.err
 
 # Texture decode cache (auto-generated, ~2.4 GB at 8K)
 *.qtc
+
+# NVIDIA Streamline SDK (fetched by scripts/fetch_streamline.ps1, ~280 MB)
+external/streamline/
+external/_dl/

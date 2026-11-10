@@ -106,17 +106,21 @@ void VulkanEngine::rewrite_compose_image_bindings() {
     //   TAA   — LR temporal AA history (default)
     // FSR3 only wins when fsr2_enabled is on AND fsr_backend == 1; the
     // FSR2/FSR3 selection is mutually exclusive (one upscale per frame).
+    const bool use_dlss = dlss_active();   // backend 2 (Streamline)
     const bool use_fsr3 = rt_.fsr2_enabled && rt_.fsr_backend == 1 &&
                           fsr3_output_view_ != VK_NULL_HANDLE;
     const bool use_fsr2 = !use_fsr3 && rt_.fsr2_enabled &&
+                          !use_dlss &&
                           fsr2_output_view_ != VK_NULL_HANDLE;
-    const bool use_taau = !use_fsr3 && !use_fsr2 && rt_.taau_enabled &&
+    const bool use_taau = !use_fsr3 && !use_fsr2 && !use_dlss && rt_.taau_enabled &&
                           taau_image_[0] != VK_NULL_HANDLE;
     compose_uses_fsr3_ = use_fsr3;
     compose_uses_fsr2_ = use_fsr2;
     compose_uses_taau_ = use_taau;
+    compose_uses_dlss_ = use_dlss;
     for (int s = 0; s < kHistorySlots; ++s) {
-        VkImageView hist_src = use_fsr3 ? fsr3_output_view_
+        VkImageView hist_src = use_dlss ? dlss_output_view_
+                              : use_fsr3 ? fsr3_output_view_
                               : use_fsr2 ? fsr2_output_view_
                               : use_taau ? taau_view_[s]
                               : history_view_[s];

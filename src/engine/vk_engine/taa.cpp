@@ -636,7 +636,7 @@ void VulkanEngine::rewrite_compose_for_taau() {
     // never becomes the compose source, so comparing against the raw
     // toggle used to trigger vkDeviceWaitIdle + a rebind EVERY frame.
     const bool fsr3 = rt_.fsr2_enabled && rt_.fsr_backend == 1 && fsr3_output_view_ != VK_NULL_HANDLE;
-    const bool fsr2 = !fsr3 && rt_.fsr2_enabled && fsr2_output_view_ != VK_NULL_HANDLE;
+    const bool fsr2 = !fsr3 && rt_.fsr2_enabled && (fsr2_output_view_ != VK_NULL_HANDLE || dlss_active());
     const bool want_taau = !fsr3 && !fsr2 && rt_.taau_enabled && taau_image_[0] != VK_NULL_HANDLE;
     if (want_taau == compose_uses_taau_) return;
     vkDeviceWaitIdle(device_);   // safest — compose desc may be in flight

@@ -260,7 +260,8 @@ void VulkanEngine::dispatch_fsr2(VkCommandBuffer cmd) {
 // the actual switch, not every frame.
 void VulkanEngine::rewrite_compose_for_fsr2() {
 #ifdef QLIKE_HAVE_FSR2
-    const bool want_fsr2 = rt_.fsr2_enabled && fsr2_output_view_ != VK_NULL_HANDLE;
+    const bool want_fsr2 = rt_.fsr2_enabled && rt_.fsr_backend != 2 && !dlss_active() &&
+                           fsr2_output_view_ != VK_NULL_HANDLE;   // backend 2 = DLSS
     if (want_fsr2 == compose_uses_fsr2_) return;
     if (device_) vkDeviceWaitIdle(device_);
     rewrite_compose_image_bindings();

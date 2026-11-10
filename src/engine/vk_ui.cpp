@@ -720,8 +720,8 @@ void VulkanEngine::build_menu_ui() {
         // uses the new ffx-api ABI through the prebuilt vendored DLL;
         // FSR2 uses the legacy static-lib path. Frame generation (FSR3
         // sessions 3-6) is NOT yet wired — this only swaps the upscaler.
-        const char* fsr_backends[] = { "FSR2 (legacy static)", "FSR3 (ffx-api DLL)" };
-        ImGui::Combo("FSR backend", &rt_.fsr_backend, fsr_backends,
+        const char* fsr_backends[] = { "FSR2 (legacy static)", "FSR3 (ffx-api DLL)", "DLSS (NVIDIA Streamline)" };
+        ImGui::Combo("Upscaler backend", &rt_.fsr_backend, fsr_backends,
                      IM_ARRAYSIZE(fsr_backends));
         if (fsr3_fatal_) {
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),

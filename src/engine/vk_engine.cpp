@@ -109,6 +109,7 @@ void VulkanEngine::init() {
     // created; the per-frame dispatch path (Phase 4) is still gated on
     // rt_.fsr2_enabled, so the toggle remains the sole runtime switch.
     init_fsr2();
+    init_dlss();   // Streamline DLSS output (no-op without SDK / unsupported GPU)
     // FSR3 init is lazy (only fires when the user picks fsr_backend=1
     // in the UI). The ffx-api SDK's session-2 status was crash-on-
     // create at startup; deferring keeps the engine launchable even
@@ -1137,6 +1138,7 @@ void VulkanEngine::shutdown() {
     // first so the device + descriptor pool tear-down below isn't
     // racing with the SDK's internal allocator.
     guarded("destroy_fsr2",   [&]{ destroy_fsr2(); });
+    guarded("destroy_dlss",   [&]{ destroy_dlss(); });   // while the allocator still exists
     // Destroy SwapChain proxy first — it holds Vulkan resources tied
     // to the FG context's pacing state.
     guarded("destroy_fsr3_sc",[&]{ destroy_fsr3_swapchain(); });
@@ -1233,6 +1235,7 @@ void VulkanEngine::shutdown() {
         allocator_ = nullptr;
     });
 
+    guarded("sl_shutdown", [&]{ sl_shutdown(); });   // Streamline: before the device
     guarded("destroy_surface_device_instance", [&]{
         if (surface_) vkDestroySurfaceKHR(instance_, surface_, nullptr);
         surface_ = VK_NULL_HANDLE;

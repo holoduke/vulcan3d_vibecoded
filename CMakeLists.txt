@@ -289,6 +289,7 @@ add_library(qlike_engine STATIC
     src/engine/vk_engine/aa.cpp
     src/engine/vk_engine/post.cpp
     src/engine/vk_engine/atmosphere.cpp
+    src/engine/vk_engine/dlss.cpp
     src/engine/vk_engine/bloom.cpp
     src/engine/vk_engine/taa.cpp
     src/engine/vk_engine/fsr2.cpp
@@ -372,6 +373,21 @@ if(TARGET ffx_sdk_vk)
     set_source_files_properties(src/engine/vk_engine/fsr3.cpp
         PROPERTIES COMPILE_FLAGS "/EHa")
 endif()
+# NVIDIA Streamline (DLSS SR / DLAA) - downloaded by scripts/fetch_streamline.ps1
+# into external/streamline (not committed: ~280 MB). Manual-hooking
+# integration: we link sl.interposer.lib only for the sl* API; it comes
+# AFTER vulkan-1.lib on the link line, so every vk* call still resolves
+# to the regular Vulkan loader.
+set(SL_ROOT "${CMAKE_SOURCE_DIR}/external/streamline")
+if(WIN32 AND EXISTS "${SL_ROOT}/lib/x64/sl.interposer.lib")
+    target_include_directories(qlike_engine PUBLIC "${SL_ROOT}/include")
+    target_compile_definitions(qlike_engine PUBLIC QLIKE_HAVE_STREAMLINE=1)
+    target_link_libraries(qlike_engine PUBLIC "${SL_ROOT}/lib/x64/sl.interposer.lib")
+    set(QLIKE_HAVE_SL ON)
+    message(STATUS "NVIDIA Streamline SDK found - DLSS available (fsr_backend = 2)")
+else()
+    message(STATUS "NVIDIA Streamline SDK not present (run scripts/fetch_streamline.ps1) - DLSS disabled")
+endif()
 if(WIN32)
     target_compile_definitions(qlike_engine PUBLIC VK_USE_PLATFORM_WIN32_KHR)
 elseif(APPLE)
@@ -392,6 +408,14 @@ if(TARGET ffx_sdk_vk)
             "${FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
             "$<TARGET_FILE_DIR:quake_like>/amd_fidelityfx_vk.dll"
         COMMENT "Staging amd_fidelityfx_vk.dll alongside quake_like.exe")
+endif()
+if(QLIKE_HAVE_SL)
+    foreach(dll sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll NvLowLatencyVk.dll)
+        add_custom_command(TARGET quake_like POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${SL_ROOT}/bin/x64/${dll}" "$<TARGET_FILE_DIR:quake_like>/${dll}"
+            COMMENT "Staging ${dll} (Streamline / DLSS)")
+    endforeach()
 endif()
 target_compile_definitions(qlike_engine PRIVATE
     QLIKE_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders"

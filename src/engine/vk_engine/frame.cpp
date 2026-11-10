@@ -716,6 +716,9 @@ void VulkanEngine::draw(uint32_t img_index) {
     // frame cost is negligible vs the world pass and avoids a one-frame
     // black flash on toggle.
     if (rt_.fsr2_enabled) {
+        if (rt_.fsr_backend == 2) {
+            dispatch_dlss(frame.command_buffer);   // NVIDIA DLSS (Streamline)
+        } else
         if (rt_.fsr_backend == 1 && !fsr3_fatal_) {
             // Lazy init on first frame the FSR3 backend is selected.
             // SEH-guarded: if init AVs in the SDK, fsr3_fatal_ flips
@@ -765,6 +768,14 @@ void VulkanEngine::draw(uint32_t img_index) {
         } else if (fsr2_context_valid_) {
             dispatch_fsr2(frame.command_buffer);
         }
+    }
+
+    // DLSS toggled on / off at runtime: point compose at the right image.
+    if (dlss_active() != compose_uses_dlss_) {
+        vkDeviceWaitIdle(device_);
+        rewrite_compose_image_bindings();
+        dlss_reset_ = true;
+        log::infof("compose source switched to %s", compose_uses_dlss_ ? "DLSS" : "TAA/FSR");
     }
 
     // ---------- Pass 2.25: TAAU temporal upsample (optional) ----------

@@ -727,6 +727,7 @@ VkResult VulkanEngine::acquire_next_image(uint64_t timeout, VkSemaphore sem,
         return fsr3_acquire_fn_(device_, swapchain_, timeout, sem, fence, out_idx);
     }
 #endif
+    if (sl_acquire_fn_) return sl_acquire_fn_(device_, swapchain_, timeout, sem, fence, out_idx);
     return vkAcquireNextImageKHR(device_, swapchain_, timeout, sem, fence, out_idx);
 }
 
@@ -746,6 +747,7 @@ VkResult VulkanEngine::queue_present_image(uint32_t image_index,
         return fsr3_present_fn_(graphics_queue_, &present);
     }
 #endif
+    if (sl_present_fn_) return sl_present_fn_(graphics_queue_, &present);   // Streamline presentCommon
     return vkQueuePresentKHR(graphics_queue_, &present);
 }
 
