@@ -1141,7 +1141,49 @@ void main() {
         float up_r = smoothstep(-0.15, 0.35, Rr.y);
         vec3  env  = mix(ambient_ground * ground_atten, sky_tint * ambient_strength * sky_factor, up_r);
         float so   = spec_occlusion(NoV, ao_floored * sky_factor, roughness);
-        spec_ambient = env * F_env * ms_comp * so;
+        // Ray-traced glossy reflections (roughness < 0.6, < 60 m): one
+        // GGX-sampled ray per pixel (frame-varying; TAA / DLSS integrate it).
+        // Hit = the GI's sun-visibility-lit surface estimate, miss = sky.
+        float rt_w = (1.0 - smoothstep(0.35, 0.6, roughness)) *
+                     (1.0 - smoothstep(40.0, 60.0, cam_dist));
+        if (rt_w > 0.01 && scene.rt_flags.x != 0 && !foliage) {
+            vec2 fs = vec2(float(scene.rt_flags.w & 63)) * vec2(0.618, 0.382);
+            float u1 = hash12(gl_FragCoord.xy + fs * 37.0);
+            float u2 = hash12(gl_FragCoord.xy * 1.37 + fs * 91.0 + 5.0);
+            // GGX half-vector sample around N (Walter 2007).
+            float a2s = a_r * a_r;
+            float cth = sqrt((1.0 - u1) / max(1.0 + (a2s - 1.0) * u1, 1e-5));
+            float sth = sqrt(max(0.0, 1.0 - cth * cth));
+            float ph  = 6.2831853 * u2;
+            vec3 tup = abs(N.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+            vec3 tx  = normalize(cross(tup, N)), ty = cross(N, tx);
+            vec3 Hs  = normalize(tx * (sth * cos(ph)) + ty * (sth * sin(ph)) + N * cth);
+            vec3 rd  = reflect(-Vv, Hs);
+            if (dot(rd, N) > 0.01) {
+                vec3 ro = wp_safe + N * 0.03;
+                float th;
+                vec3 refl;
+                if (closest_hit_m(ro, rd, 120.0, 0x01u, th)) {
+                    vec3 hp = ro + rd * th;
+                    vec3 hn = -rd;
+                    vec3 halb = (rd.y < -0.3 && hp.y < 23.5) ? vec3(0.33, 0.45, 0.27)
+                                                             : vec3(0.55, 0.50, 0.44);
+                    vec3 hl = scene.ambient.rgb * ambient_strength * 0.8;
+                    if (!any_hit_m(hp + hn * 0.02, L, 200.0, 0x01u))
+                        hl += scene.sun_color.rgb * scene.sun_color.a * 0.6;
+                    refl = halb * hl;
+                } else {
+                    refl = mix(ambient_ground, sky_tint * ambient_strength, smoothstep(-0.15, 0.35, rd.y));
+                }
+                float so_rt = spec_occlusion(NoV, ao_floored, roughness);
+                env = mix(env, refl, rt_w);
+                spec_ambient = env * F_env * ms_comp * mix(so, so_rt, rt_w);
+            } else {
+                spec_ambient = env * F_env * ms_comp * so;
+            }
+        } else {
+            spec_ambient = env * F_env * ms_comp * so;
+        }
     }
     // sky_fill drops out as a separate term РІР‚вЂќ it's been folded into
     // ambient_sky above. Zero it so the addition below stays valid.
