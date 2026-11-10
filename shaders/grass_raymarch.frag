@@ -444,7 +444,7 @@ vec3 sample_sky_grad(vec3 dir) {
 
 void main() {
     // Reconstruct world ray from screen UV via inverse view-proj.
-    vec2 uv  = (gl_FragCoord.xy + 0.5) * scene.viewport.zw;
+    vec2 uv  = gl_FragCoord.xy * scene.viewport.zw;
     vec4 ndc = vec4(uv * 2.0 - 1.0, 1.0, 1.0);
     vec4 wp4 = pc.model * ndc;        // model = inv(view_proj)
     vec3 ro  = scene.camera_pos.xyz;

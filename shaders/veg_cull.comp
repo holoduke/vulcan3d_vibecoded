@@ -98,7 +98,9 @@ void main() {
     // the finer LOD k-1. f = 0 -> pure `lod`, 1 -> pure `lod-1`.
     if (lod > 0) {
         float t = th[lod - 1];
-        float f = clamp((px - t * 0.85) / (t * 0.30), 0.0, 1.0);   // 0 below, 1 at threshold
+        // Reaches 1 exactly at the threshold, where `lod` flips to the finer
+        // one (the old /0.30 band only got to 0.5 there -> visible pop).
+        float f = clamp((px - t * 0.85) / (t * 0.15), 0.0, 1.0);
         if (f > 0.0) {
             emit(a, uint(lod), i, f);                 // draws where noise >= f
             emit(a, uint(lod - 1), i | 0x80000000u, f); // draws where noise <  f

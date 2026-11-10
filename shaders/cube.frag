@@ -771,15 +771,15 @@ vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
     // 2 of 3 normal-map taps + their TBN math when one axis dominates.
     if (blend.x >= 0.95) {
         vec3 nx = texture(ntex, wp.zy).rgb * 2.0 - 1.0;
-        return normalize(vec3(N.x * sign(N.x) + nx.z * sign(N.x), nx.y, nx.x));
+        return normalize(vec3(N.x + nx.z * sign(N.x), nx.y, nx.x));
     }
     if (blend.y >= 0.95) {
         vec3 ny = texture(ntex, wp.xz).rgb * 2.0 - 1.0;
-        return normalize(vec3(ny.x, N.y * sign(N.y) + ny.z * sign(N.y), ny.y));
+        return normalize(vec3(ny.x, N.y + ny.z * sign(N.y), ny.y));
     }
     if (blend.z >= 0.95) {
         vec3 nz = texture(ntex, wp.xy).rgb * 2.0 - 1.0;
-        return normalize(vec3(nz.x, nz.y, N.z * sign(N.z) + nz.z * sign(N.z)));
+        return normalize(vec3(nz.x, nz.y, N.z + nz.z * sign(N.z)));
     }
 
     vec3 nx = texture(ntex, wp.zy).rgb * 2.0 - 1.0;
@@ -788,9 +788,9 @@ vec3 triplanar_normal(sampler2D ntex, vec3 wp, vec3 N) {
 
     // For each axis, build a world-space normal: the tangent-space sample's
     // .xy goes into the perpendicular plane, .z reinforces the axis.
-    vec3 wnx = vec3(N.x * sign(N.x) + nx.z * sign(N.x), nx.y, nx.x);
-    vec3 wny = vec3(ny.x, N.y * sign(N.y) + ny.z * sign(N.y), ny.y);
-    vec3 wnz = vec3(nz.x, nz.y, N.z * sign(N.z) + nz.z * sign(N.z));
+    vec3 wnx = vec3(N.x + nx.z * sign(N.x), nx.y, nx.x);
+    vec3 wny = vec3(ny.x, N.y + ny.z * sign(N.y), ny.y);
+    vec3 wnz = vec3(nz.x, nz.y, N.z + nz.z * sign(N.z));
 
     return normalize(wnx * blend.x + wny * blend.y + wnz * blend.z);
 }
@@ -1323,7 +1323,7 @@ void main() {
     // "no history available" and rebuilds variance from current-frame
     // neighborhood instead of reprojecting.
     {
-        vec2 current_uv = (gl_FragCoord.xy + 0.5) * scene.viewport.zw;
+        vec2 current_uv = gl_FragCoord.xy * scene.viewport.zw;
         if (vPrevClip.w > 0.0) {
             vec2 prev_ndc = vPrevClip.xy / vPrevClip.w;
             vec2 prev_uv = prev_ndc * vec2(0.5, 0.5) + vec2(0.5);
@@ -3735,7 +3735,9 @@ void main() {
     if (is_terrain_pre && scene.rt_flags.x != 0 &&
         scene.rt_params2.x > 1e-4 && cam_dist < 50.0) {
         const int kProbeN = 4;
-        const uint kProbeMask = 0xFDu;        // skip terrain BLAS (bit 0x02)
+        // Terrain instance mask is 0x05 (bits 0+2): 0xFD still hit it. 0xFA
+        // = every bit except 0 and 2 -> castle / brushes / props only.
+        const uint kProbeMask = 0xFAu;
         vec3 probe_origin = vWorldPos + vec3(0.0, 0.10, 0.0);
         int probe_misses = 0;
         for (int i = 0; i < kProbeN; ++i) {
@@ -3753,6 +3755,7 @@ void main() {
         sky_misses = probe_misses;
         sky_total  = kProbeN;
         sky_vis    = float(probe_misses) / float(kProbeN);
+        sky_vis    = mix(sky_vis, 1.0, smoothstep(35.0, 50.0, cam_dist));   // no ring at 50 m
     }
     if (N_gi > 0 && !is_terrain_pre && scene.rt_params2.x > 1e-4) {
         float gi_radius = scene.rt_params2.y;

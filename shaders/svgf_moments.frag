@@ -40,7 +40,7 @@ float lum(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
 void main() {
     ivec2 ip = ivec2(gl_FragCoord.xy);
-    vec2  uv = (gl_FragCoord.xy + 0.5) * mom.viewport.zw;
+    vec2  uv = gl_FragCoord.xy * mom.viewport.zw;
 
     // Current frame luminance moments at this pixel.
     vec3  cur_rgb = texelFetch(u_scene_color, ip, 0).rgb;

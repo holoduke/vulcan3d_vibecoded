@@ -190,7 +190,8 @@ void VulkanEngine::draw(uint32_t img_index) {
     // stale-but-valid depth that nothing samples anyway.
     bool sun_shadow_needed =
         rt_.grass_enabled || rt_.grass_raymarch_enabled ||
-        (rt_.water_enabled && rt_.water_shadows_enabled);
+        (rt_.water_enabled && rt_.water_shadows_enabled) ||
+        scatter_.instance_count > 0;   // scatter.vert samples it every frame
     if (sun_shadow_needed) {
         render_sun_shadow_pass(frame.command_buffer);
     }
@@ -552,6 +553,18 @@ void VulkanEngine::draw(uint32_t img_index) {
               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
         };
         vkinit::transition_images_batch(frame.command_buffer, kPostWorld, 5);
+        // cube.frag imageStore()s the raw GI (svgf_gi_image_, GENERAL) that
+        // deferred_lighting samples next: make those writes visible.
+        {
+            VkMemoryBarrier2 mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, nullptr,
+                                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                 VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT };
+            VkDependencyInfo di{}; di.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            di.memoryBarrierCount = 1; di.pMemoryBarriers = &mb;
+            vkCmdPipelineBarrier2(frame.command_buffer, &di);
+        }
     }
 
     // ---------- Pass 1c: SSDM compose remap (Phase 4) ----------
@@ -915,7 +928,7 @@ void VulkanEngine::draw(uint32_t img_index) {
         pc_data.flare_params2 = glm::vec4(static_cast<float>(rt_.lens_flare_ghosts),
                                            rt_.lens_flare_aberration,
                                            rt_.lens_flare_enabled ? 1.0f : 0.0f,
-                                           0.0f);
+                                           skybox_.hdr ? 1.0f : 0.0f);   // .w: sky is HDR
         // Project the sun direction (treated as a directional light at infinity
         // — w = 0 in homogeneous coords) to NDC to find its screen-space UV.
         // The lens-flare shader uses this to gate ghost contributions to the

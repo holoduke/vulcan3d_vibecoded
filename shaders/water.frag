@@ -255,13 +255,19 @@ vec3 cos_hemi_basis(float u1, float u2, vec3 n, vec3 t, vec3 b) {
 float ignBase(vec2 p) {
     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
+// PCG3D hash (Jarzynski & Olano 2020), same as deferred_lighting.frag.
+// The previous IGN-based version put a sample's two coordinates on one
+// 1D curve (diagonal hatching in penumbrae / AO) and lost float
+// precision once the raw frame counter in seed.z grew large.
+uvec3 rm_pcg3d(uvec3 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
 float rmRand(uvec3 seed) {
-    // Same recipe as cube.frag::rand вЂ” shift the input position by
-    // the sample index along a magic vector so each sample's jitter
-    // is uncorrelated within a pixel but smooth across neighbours.
-    float s = float(seed.x) + 5.588238 * float(seed.z);
-    float t = float(seed.y) + 1.388765 * float(seed.z);
-    return ignBase(vec2(s, t));
+    return float(rm_pcg3d(seed).x) * (1.0 / 4294967296.0);
 }
 
 // Scene UBO вЂ” same layout as cube.frag's binding 0. Only a handful of
@@ -1083,7 +1089,7 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
     // sub-step shift breaks up the per-fragment march alignment, so
     // contour banding from a too-aggressive step factor disperses into
     // noise (then washes out under TAA). Free; no extra texture taps.
-    float jitter = rmRand(uvec3(gl_FragCoord.xy, 0u));
+    float jitter = ignBase(gl_FragCoord.xy);
     int kSteps = int(pc.tex_params.x);
     float kStep = pc.emissive.x;
     bool relax = pc.grass_params.y > 0.5;
@@ -2489,7 +2495,7 @@ void main() {
         if      (contrast == 1.0) { /* linear — no-op */ }
         else if (contrast == 2.0) { dif = dif * dif; }
         else if (contrast == 3.0) { dif = dif * dif * dif; }
-        else if (contrast == 0.5) { dif = dif * sqrt(dif); }
+        else if (contrast == 0.5) { dif = sqrt(dif); }   // x^0.5 (was x^1.5)
         else if (contrast == 4.0) { float n2 = dif * dif; dif = n2 * n2; }
         else                      { dif = pow(dif, contrast); }
     }
@@ -2995,7 +3001,7 @@ void main() {
         // step pattern is fixed in screen space вЂ” TAA's spatial
         // filter erases it. Per-frame variation made the dither
         // pattern shift between frames and TAA couldn't keep up.
-        float jStart = rmRand(uvec3(gl_FragCoord.xy, 7u));
+        float jStart = ignBase(gl_FragCoord.xy + vec2(39.1, 9.7));
         float t_v   = dt * jStart;
 
         vec3  scatter = vec3(0.0);

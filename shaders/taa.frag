@@ -114,7 +114,7 @@ vec3 variance_clip(ivec2 ip, out vec3 mn_out, out vec3 mx_out) {
 
 void main() {
     ivec2 ip = ivec2(gl_FragCoord.xy);
-    vec2 uv = (gl_FragCoord.xy + 0.5) * taa.viewport.zw;
+    vec2 uv = gl_FragCoord.xy * taa.viewport.zw;
 
     vec3 mn, mx;
     vec3 cur_raw = variance_clip(ip, mn, mx);
@@ -253,5 +253,9 @@ void main() {
     // history -> compose added (almost) no sky there and a dark rim
     // trailed every object edge against the sky while moving.
     if (any_sky) hist_a = clamp(hist_a, a_mn, a_mx);
+    // Last-line NaN/Inf guard: one bad sample (via the spatial filter or
+    // the raw centre) would otherwise live forever in history + bloom.
+    if (any(isnan(blended)) || any(isinf(blended))) blended = vec3(0.0);
+    blended = clamp(blended, vec3(0.0), vec3(64.0));
     outColor = vec4(blended, mix(cur_a, hist_a, alpha));
 }

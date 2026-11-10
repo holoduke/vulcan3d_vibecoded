@@ -261,7 +261,9 @@ vec2 equirect_uv(vec3 dir) {
 vec3 sample_sky(vec3 dir) {
     vec2 uv = equirect_uv(normalize(dir));
     vec3 sky = texture(u_skybox, uv).rgb;
-    bool is_hdr = max(max(sky.r, sky.g), sky.b) > 1.5;
+    // Per-image flag (was a per-pixel >1.5 test: HDR sky regions below 1.5
+    // took the LDR lift / halo / 40x disc path -> contour lines, double sun).
+    bool is_hdr = pc.flare_params2.w > 0.5;
 
     if (!is_hdr) {
         // LDR lift so the sky doesn't look flat once ACES squashes the scene.
@@ -315,10 +317,15 @@ vec3 sample_sky(vec3 dir) {
 // the output sample location. This is the "lanczos-2 like" core
 // before edge-direction biasing.
 float easu_lobe(float dist2) {
+    // AMD FsrEasuTap: base = 25/16*(2/5*x - 1)^2 - (25/16 - 1),
+    // window = (lob*x - 1)^2, lob = 1/4 (clip at x = 4). The previous
+    // version had both factors' signs wrong: every weight was <= 0, the
+    // sum hit the 1e-4 floor and the 2x2 clamp returned the darkest tap
+    // (whole image eroded ~1 px, dark rims on every edge).
     float d = clamp(dist2, 0.0, 4.0);
-    float wA = 0.4 * d - 1.0;
-    float wB = (25.0 / 16.0) * d - (25.0 / 16.0);
-    return (wA * wA - 1.0) * (wB * wB);
+    float wB = 0.4 * d - 1.0;
+    float wA = 0.25 * d - 1.0;
+    return ((25.0 / 16.0) * wB * wB - (25.0 / 16.0 - 1.0)) * (wA * wA);
 }
 
 // EASU directional weight — given the surface gradient direction
@@ -411,7 +418,7 @@ vec3 fsr1_easu(sampler2D tex, vec2 uv, vec2 src_size) {
     TAP(p,  1.0,  2.0)
     #undef TAP
 
-    vec3 result = sum / max(w_tot, 1e-4);
+    vec3 result = (abs(w_tot) > 1e-5) ? sum / w_tot : e;
 
     // Local 2×2 luma min/max box — clamp output to suppress any
     // overshoot/undershoot ringing from the directional weights.
@@ -516,7 +523,7 @@ void main() {
     // artifact at non-100% render scale. Use bilinear sampling at
     // the proper HR UV instead — this also upscales the LR data to
     // fill the full window.
-    vec2 sample_uv = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
+    vec2 sample_uv = gl_FragCoord.xy * pc.viewport.zw;
     // FSR1 EASU upscale for the colour history — edge-adaptive 12-tap
     // reconstruction that's much sharper than bilinear or Catmull-Rom
     // at non-100 % render scale, with no ringing halos.
@@ -555,13 +562,14 @@ void main() {
         vec4 sky_m = vec4(greaterThanEqual(dg, vec4(0.99999)));
         float sky_w = dot(bw, sky_m);
         if (sky_w > 0.0) {
-            vec2 uv = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
+            vec2 uv = gl_FragCoord.xy * pc.viewport.zw;
             vec3 dir = view_ray(uv);
             float T = dot(bw * sky_m, ag);
             const vec3 kClear = vec3(0.55, 0.72, 0.95);   // frame.cpp clear_color
-            // Pure sky: bilinear colour (EASU sharpening on the colour
-            // alone drew a dark rim around smoke silhouettes).
-            vec3 base = (sky_w > 0.999) ? texture(history_color, sample_uv).rgb : hdr;
+            // Bilinear colour whenever a sky tap is involved: T uses the
+            // bilinear weights, so only a bilinear base cancels the clear
+            // colour exactly (EASU weights left light / dark edge dots).
+            vec3 base = texture(history_color, sample_uv).rgb;
             hdr = base + (sample_sky(dir) - kClear) * T;
         }
     }
@@ -601,7 +609,7 @@ void main() {
     // Shafts are a "light streaks through silhouettes onto geometry"
     // effect; the sky already has its own sun disc + bloom + halo.
     if (pc.sun_dir.w > 0.001 && pc.sun_screen.z > 0.5 && depth < 0.99999) {
-        vec2  uv_here = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
+        vec2  uv_here = gl_FragCoord.xy * pc.viewport.zw;
         vec2  uv_sun  = pc.sun_screen.xy;
         vec2  d_total = uv_here - uv_sun;
         const int   kN     = 24;
@@ -734,7 +742,7 @@ void main() {
     // band on either side of the radius. Skipped for background
     // pixels (depth ≈ 1) so the ring doesn't draw on the sky.
     if (pc.brush_indicator.w > 0.5 && depth < 0.99999) {
-        vec2 uv = (gl_FragCoord.xy + 0.5) * pc.viewport.zw;
+        vec2 uv = gl_FragCoord.xy * pc.viewport.zw;
         // NDC for this pixel. Vulkan: gl_FragCoord.y is top-down, so
         // ndc.y = 1 - 2*uv.y. ndc.z uses depth directly (Vulkan z range
         // is [0,1], not [-1,1] like GL).
@@ -761,7 +769,7 @@ void main() {
     // Cheap (1 length, 1 smoothstep) and always on; deliberately mild so
     // it reads as atmosphere not as a black border.
     {
-        vec2 ndc = (gl_FragCoord.xy + 0.5) * pc.viewport.zw * 2.0 - 1.0;
+        vec2 ndc = gl_FragCoord.xy * pc.viewport.zw * 2.0 - 1.0;
         float r  = length(ndc);
         float vig = 1.0 - 0.18 * smoothstep(0.6, 1.4, r);
         mapped *= vig;

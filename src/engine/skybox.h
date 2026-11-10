@@ -21,15 +21,16 @@ struct Skybox {
     // the loaded image. Use this to drive the directional light so shadows in
     // the scene match the visible sun in the sky.
     glm::vec3     sun_direction{ 0.0f, 1.0f, 0.0f };
+    bool          hdr = false;   // RGBA32F EXR panorama (compose picks the HDR path)
 };
 
-// Load an LDR equirectangular sky panorama (JPG/PNG). The image is uploaded
-// as an RGBA8 sRGB Vulkan texture; the sampler does the sRGB→linear decode
-// for us. Caller owns the resources and must call destroy_skybox() to free.
 // Start decoding an .exr sky on a worker thread (no-op for other files /
 // missing paths). A later load_skybox() of the same path uses the result.
 void skybox_prefetch(const std::string& path);
 
+// Load an LDR equirectangular sky panorama (JPG/PNG). The image is uploaded
+// as an RGBA8 sRGB Vulkan texture; the sampler does the sRGB→linear decode
+// for us. Caller owns the resources and must call destroy_skybox() to free.
 Skybox load_skybox(VkDevice device, VmaAllocator alloc, VkQueue queue,
                    uint32_t queue_family, const std::string& path);
 

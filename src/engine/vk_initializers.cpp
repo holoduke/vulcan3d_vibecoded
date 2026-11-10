@@ -177,9 +177,12 @@ static VkPipelineStageFlags2 stage_for_layout(VkImageLayout layout) {
                    VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
         case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
             // Could be VS or FS; safe to cover both. Avoids ALL_COMMANDS
+            // Compute included: the Hi-Z build / veg cull read SHADER_READ
+            // images and were only ordered by luck.
             // which would also fence ray queries / compute / transfer.
             return VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
-                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
         case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
             return VK_PIPELINE_STAGE_2_COPY_BIT |

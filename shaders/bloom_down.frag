@@ -41,7 +41,7 @@ vec3 karis_avg(vec3 a, vec3 b, vec3 c, vec3 d) {
 }
 
 void main() {
-    vec2 uv = (gl_FragCoord.xy + 0.5) * pc.dst_extent.zw;
+    vec2 uv = gl_FragCoord.xy * pc.dst_extent.zw;
     vec2 t  = pc.src_extent.zw;  // texel size in source
 
     // 13-tap "box of boxes" pattern (CoD: AW).

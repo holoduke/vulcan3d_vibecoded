@@ -971,7 +971,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                 PushConstants pc{};
                 pc.mvp = vp * model;
                 pc.model = model;
-                pc.prev_mvp = pc.mvp;
+                pc.prev_mvp = prev_vp * model;   // camera motion (was zero -> TAA smear)
                 pc.color = col;
                 pc.emissive = glm::vec4(0.0f);
                 pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 1.0f);

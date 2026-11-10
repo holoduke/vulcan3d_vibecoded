@@ -422,7 +422,9 @@ void main() {
             float inv_strata = 1.0 / float(strata);
             for (int sy = 0; sy < strata && taken < N_s; ++sy) {
                 for (int sx = 0; sx < strata && taken < N_s; ++sx) {
-                    int idx = taken;
+                    // Interleave the two checkerboard parities over the full
+                    // sample set (both used to trace the same first half).
+                    int idx = taken * 2 + parity;
                     float r1 = rand(seed_stable + uvec3(uint(idx), 11u, 47u));
                     float u1 = (float(sx) + r1) * inv_strata;
                     float r = sqrt(u1) * penumbra;
@@ -612,7 +614,9 @@ void main() {
     if (material_id == 3 && scene.rt_flags.x != 0 &&
         gi_strength > 1e-4 && cam_dist < 50.0) {
         const int kProbeN = 4;
-        const uint kProbeMask = 0xFDu;
+        // Terrain instance mask is 0x05 (bits 0+2): 0xFD still hit it. 0xFA
+        // = every bit except 0 and 2 -> castle / brushes / props only.
+        const uint kProbeMask = 0xFAu;
         vec3 probe_origin = world_pos + vec3(0.0, 0.10, 0.0);
         int probe_misses = 0;
         for (int i = 0; i < kProbeN; ++i) {
@@ -628,6 +632,7 @@ void main() {
             }
         }
         sky_vis = float(probe_misses) / float(kProbeN);
+        sky_vis = mix(sky_vis, 1.0, smoothstep(35.0, 50.0, cam_dist));   // no ring at 50 m
     }
     // sky_vis must be measured even when gi_strength is 0, otherwise
     // the ambient block above receives sky_vis=1.0 (assumed open sky)
@@ -868,7 +873,11 @@ void main() {
                         vec3  tn = octa_decode(texture(u_gbuffer1, tuv).rg);
                         // Edge stops: depth + normal similarity prevent the
                         // wide kernel from bleeding GI across geometry.
-                        float wz = exp(-abs(tz - z) * 800.0);
+                        // Relative LINEAR-distance stop (raw D32 depth is so
+                        // compressed past a few metres that 800*|dz| ~ 0).
+                        vec4  tw4 = pc.inv_vp * vec4(tuv * 2.0 - 1.0, tz, 1.0);
+                        float tdist = distance(tw4.xyz / tw4.w, scene.camera_pos.xyz);
+                        float wz = exp(-abs(tdist - cam_dist) / (0.02 * cam_dist + 0.05));
                         float wn = pow(max(dot(tn, N), 0.0), 16.0);
                         // Spatial falloff so far taps contribute less.
                         float wd = exp(-dot(kTapF[ti], kTapF[ti]) * 0.12);

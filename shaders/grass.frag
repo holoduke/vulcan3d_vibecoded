@@ -181,7 +181,7 @@ void main() {
     // because TAA reprojects against the same screen pixel from the
     // previous frame (which was a different blade or sky).
     {
-        vec2 current_uv = (gl_FragCoord.xy + 0.5) * scene.viewport.zw;
+        vec2 current_uv = gl_FragCoord.xy * scene.viewport.zw;
         if (vPrevClip.w > 0.0) {
             vec2 prev_ndc = vPrevClip.xy / vPrevClip.w;
             vec2 prev_uv  = prev_ndc * vec2(0.5, 0.5) + vec2(0.5);

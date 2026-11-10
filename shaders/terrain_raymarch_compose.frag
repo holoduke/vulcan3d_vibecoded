@@ -68,7 +68,7 @@ void main() {
     // textures. The LR sampler is LINEAR, so the centre tap is a
     // free bilinear upscale — the sky-sentinel discard below
     // avoids dragging sky colour into terrain edges.
-    vec2 uv = (gl_FragCoord.xy + 0.5) * scene.viewport.zw;
+    vec2 uv = gl_FragCoord.xy * scene.viewport.zw;
     float lr_depth = texture(u_lr_depth, uv).r;
 
     // Sky pixels: raymarch leaves depth = 1.0 on miss. Discard preserves

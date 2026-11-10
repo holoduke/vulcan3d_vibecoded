@@ -13,7 +13,7 @@ layout(push_constant) uniform PC {
 } pc;
 
 void main() {
-    vec2 uv = (gl_FragCoord.xy + 0.5) * pc.dst_extent.zw;
+    vec2 uv = gl_FragCoord.xy * pc.dst_extent.zw;
     vec2 t  = pc.src_extent.zw * pc.params.x;
 
     // 3x3 tent kernel (1, 2, 1 / 2, 4, 2 / 1, 2, 1) / 16:

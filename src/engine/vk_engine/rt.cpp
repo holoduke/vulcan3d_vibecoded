@@ -831,6 +831,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         sig = mix64(sig, uint64_t(uint32_t(cx)) * 73856093ull ^ uint64_t(uint32_t(cz)) * 19349663ull);
     }
     for (const auto& v : aa_) { sig = mix64(sig, hash_f(v.turret_yaw)); sig = mix64(sig, hash_f(v.gun_pitch)); }
+    for (const auto& d : doors_) sig = mix64(sig, hash_f(d.angle));   // swinging doors move BLAS instances
     if (tlas_first_build_done_ && sig == prev_dyn_signature_) {
         return;   // tlas_ contents still valid — skip build + signal
     }

@@ -365,15 +365,9 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
     pcd.inv_vp = current_frame_view_.inv_vp;
     pcd.prev_vp = prev_view_proj_valid_ ? prev_view_proj_
                                         : current_frame_view_.vp;
-    // Slot 0: muzzle flash. The scene UBO already has muzzle_pos + colour;
-    // mirror them here so the deferred path responds to the same trigger.
-    if (muzzle_flash_timer_ > 0.0f) {
-        const float t = std::min(1.0f, muzzle_flash_timer_ / kMuzzleFlashDuration);
-        const float intensity = t * t * 12.0f;
-        const glm::vec3 muzzle = player_.eye_position() + player_.forward() * 0.6f;
-        pcd.light_pos[0] = glm::vec4(muzzle, 6.0f);   // 6 m radius
-        pcd.light_col[0] = glm::vec4(1.00f, 0.85f, 0.55f, intensity);
-    }
+    // Slot 0 used to mirror the muzzle flash here - but the shader also
+    // applies the UBO muzzle light (shadow-tested, gun-gated), so it was
+    // lit twice, through walls, and blew the gun out. UBO light only now.
     // Slots 2-3 of light_pos / light_col carry the clutter shadow light-VP
     // (columns 0-1 in light_pos, 2-3 in light_col; shader loop uses 0-1).
     pcd.light_pos[2] = clutter_shadow_vp_[0]; pcd.light_pos[3] = clutter_shadow_vp_[1];

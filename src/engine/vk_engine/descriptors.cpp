@@ -615,13 +615,14 @@ void VulkanEngine::update_scene_ubo() {
                                    rt_.water_level,
                                    rt_.water_wave_strength,
                                    water_t);
-    // water_color_shallow.w doubles as the wave-frequency multiplier
-    // (was unused). Read on the shader side as wave_scale.
-    data.water_color_shallow.w = std::max(0.05f, rt_.water_wave_scale);
     // water_color.w doubles as the "shadows enabled" flag (0 / 1).
     data.water_color  = glm::vec4(rt_.water_color,
                                    rt_.water_shadows_enabled ? 1.0f : 0.0f);
     data.water_color_shallow = glm::vec4(rt_.water_color_shallow, 0.0f);
+    // water_color_shallow.w doubles as the wave-frequency multiplier
+    // (was unused). Read on the shader side as wave_scale.
+    // (Must come AFTER the vec4 assignment above, which used to zero it.)
+    data.water_color_shallow.w = std::max(0.05f, rt_.water_wave_scale);
     // water_shore.w doubles as the transparency / underwater
     // showthrough strength (0 = opaque, 1 = shallow shows terrain).
     data.water_shore = glm::vec4(rt_.water_shore_blend,

@@ -114,7 +114,7 @@ void main() {
     outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)), 1.0 / 255.0);
     outGBuffer1 = vec4(_octa_encode(N), 0.6, 0.0);
     {
-        vec2 current_uv = (gl_FragCoord.xy + 0.5) * scene.viewport.zw;
+        vec2 current_uv = gl_FragCoord.xy * scene.viewport.zw;
         if (vPrevClip.w > 0.0) {
             vec2 prev_ndc = vPrevClip.xy / vPrevClip.w;
             outMotion = current_uv - (prev_ndc * 0.5 + 0.5);

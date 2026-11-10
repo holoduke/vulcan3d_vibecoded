@@ -205,6 +205,7 @@ Skybox load_skybox(VkDevice device, VmaAllocator alloc, VkQueue queue,
         HdrLoadResult hdr = (g_prefetch.valid() && g_prefetch_path == path)
                                 ? g_prefetch.get() : load_exr(path);
         if (!hdr.ok) return sb;
+        sb.hdr = true;
         sb.width = static_cast<uint32_t>(hdr.w);
         sb.height = static_cast<uint32_t>(hdr.h);
         sb.sun_direction = extract_sun_direction_float(hdr.rgba, hdr.w, hdr.h);

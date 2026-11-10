@@ -66,7 +66,7 @@ void neighborhood_box(ivec2 lr_ip, out vec3 mn, out vec3 mx, out vec3 center) {
 
 void main() {
     // native pixel → native UV in [0,1]
-    vec2 full_uv = (gl_FragCoord.xy + 0.5) * taau.full_viewport.zw;
+    vec2 full_uv = gl_FragCoord.xy * taau.full_viewport.zw;
     // Same UV maps to LR coords (bilinear sample handles sub-pixel)
     vec2 lr_uv = full_uv;
     ivec2 lr_ip = ivec2(lr_uv * taau.lr_viewport.xy);

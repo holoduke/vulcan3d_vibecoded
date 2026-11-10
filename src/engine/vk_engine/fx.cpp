@@ -663,6 +663,20 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
                             0, 1, &scene_desc_set_, 0, nullptr);
 
+    // Opaque cloth FIRST: drawn after the volumes it overwrote smoke that
+    // is in front of a flag (no depth write in this pass).
+    if (total > 0 && r_cloth.second > 0) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fx_ribbon_pipeline_);
+        VkDeviceSize off = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &fx_vbuf_[slot], &off);
+        PushConstants pc{};
+        pc.mvp = fv.vp;
+        pc.model = glm::mat4(1.0f);
+        pc.color = glm::vec4(3.0f, 1.0f, now, 0.0f);
+        vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages, 0,
+                           sizeof(PushConstants), &pc);
+        vkCmdDraw(cmd, r_cloth.second, 1, r_cloth.first, 0);
+    }
     // Volumes.
     if (!vols.empty()) {
         VkDeviceSize off = 0;
@@ -704,7 +718,6 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
                                sizeof(PushConstants), &pc);
             vkCmdDraw(cmd, r.second, 1, r.first, 0);
         };
-        draw(r_cloth, 3.0f, 1.0f);   // opaque cloth before the glows
         draw(r_smoke, 0.0f, 1.0f);
         draw(r_glow,  1.0f, 1.0f);
         draw(r_flash, 2.0f, 1.0f);
