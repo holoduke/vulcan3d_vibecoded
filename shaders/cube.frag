@@ -279,6 +279,8 @@ layout(set = 0, binding = 12) uniform sampler2D u_height[6];
 // approximate grass-cast shadow on the ground by walking a few short
 // steps along the sun's XZ direction and accumulating mask coverage.
 layout(set = 0, binding = 13) uniform sampler2D u_grass_mask;
+// Absolute terrain heightmap (R32F, same as terrain.vert binding 17).
+layout(set = 0, binding = 17) uniform sampler2D u_heightmap_full;
 
 // Terrain aux bake (AAA Phases 4/5): R = curvature (0.5 flat, <0.5
 // concave gully, >0.5 convex ridge), G = sky visibility (horizon AO).
@@ -847,6 +849,31 @@ vec3 t_noised(in vec2 p) {
     return vec3(v, dv);
 }
 const mat2 t_m2 = mat2(0.8, -0.6, 0.6, 0.8);
+
+// ---- Raymarch-matched terrain micro-detail ----
+// The heightmap bakes octaves 0..8 of the raymarcher's eroded FBM
+// (terrain_raymarch.frag terrainM: scale 0.003, height 120, m2 rotation,
+// erosion 1/(1+|d|^2)) at 1 m. The raymarcher adds octaves 9..19 per
+// pixel - that IS its extra ridge / erosion detail. Same accumulator here,
+// returning only the part ABOVE octave 8, with octaves faded out once
+// their wavelength drops below ~2 pixels (`fp` = metres per pixel).
+float terrain_fbm_detail(vec2 xz, float fp) {
+    vec2  p = xz * 0.003;
+    float a = 0.0, b = 1.0, a_base = 0.0;
+    vec2  d = vec2(0.0);
+    for (int i = 0; i < 20; ++i) {
+        float wl = 333.333 * exp2(-float(i));          // octave wavelength (m)
+        float w  = (i < 9) ? 1.0 : smoothstep(fp * 2.0, fp * 4.0, wl);
+        if (w <= 0.0) break;
+        vec3 n = t_noised(p);
+        d += n.yz;
+        a += b * n.x * w / (1.0 + dot(d, d));
+        if (i == 8) a_base = a;
+        b *= 0.5;
+        p = t_m2 * p * 2.0;
+    }
+    return (a - a_base) * 120.0;
+}
 
 // FBM with derivative erosion — `n.x / (1 + |∇d|²)` damps high-freq
 // octaves on steep slopes, producing the ridge/valley structure
@@ -1565,6 +1592,38 @@ void main() {
         const vec3 rock   = vec3(0.40, 0.38, 0.36);
         const vec3 snow   = vec3(0.95, 0.95, 0.97);
 
+        // ---- Raymarch-matched relief (per-pixel normal) ----
+        // 1. Base normal from the full 1 m heightmap per PIXEL at every
+        //    distance (the CLOD vertex normal at range comes from a
+        //    coarse LOD grid and smooths away ridges / rock exposure).
+        // 2. Plus the FBM octaves the heightmap can't hold (raymarcher
+        //    octaves 9..19), faded per octave by pixel footprint.
+        // 3. Plus the raymarcher's close-up micro-bump.
+        // Done before slope / material classification so the detail also
+        // drives rock-vs-snow / grass exposure like the raymarched terrain.
+        {
+            float fp = cam_dist * 2.0 / max(scene.viewport.y, 1.0);   // ~m per pixel
+            float he = max(1.0, fp);
+            #define HM(xz) textureLod(u_heightmap_full, (((xz) - pc.emissive.xy) * pc.emissive.z + 0.5) * pc.emissive.w, 0.0).r
+            float hxp = HM(vWorldPos.xz + vec2(he, 0.0)), hxm = HM(vWorldPos.xz - vec2(he, 0.0));
+            float hzp = HM(vWorldPos.xz + vec2(0.0, he)), hzm = HM(vWorldPos.xz - vec2(0.0, he));
+            #undef HM
+            vec2 g = vec2(hxp - hxm, hzp - hzm) / (2.0 * he);
+            if (fp < 0.33) {
+                float eps = max(0.02, fp);
+                float h0 = terrain_fbm_detail(vWorldPos.xz, fp);
+                float hx = terrain_fbm_detail(vWorldPos.xz + vec2(eps, 0.0), fp);
+                float hz = terrain_fbm_detail(vWorldPos.xz + vec2(0.0, eps), fp);
+                g += vec2(hx - h0, hz - h0) / eps;
+            }
+            N = normalize(vec3(-g.x, 1.0, -g.y));
+            float mw = 1.0 - smoothstep(15.0, 60.0, cam_dist);
+            if (mw > 0.05) {
+                vec3 d1 = t_noised(vWorldPos.xz * 4.0), d2 = t_noised(vWorldPos.xz * 13.0);
+                vec2 gm = (d1.yz * 0.30 + d2.yz * 0.18) * mw;
+                N = normalize(N + vec3(-gm.x, 0.0, -gm.y) * 0.45);
+            }
+        }
         float h = vWorldPos.y;
         // Slope: 0 = flat (normal up), 1 = vertical wall.
         float slope = 1.0 - clamp(N.y, 0.0, 1.0);
@@ -1654,6 +1713,9 @@ void main() {
         float t_dirt = WIDE_BAND(scene.terrain_h_low.z,  scene.terrain_h_low.w,  jh);
         float t_rock = WIDE_BAND(scene.terrain_h_high.x, scene.terrain_h_high.y, jh);
         float t_snow = WIDE_BAND(scene.terrain_h_high.z, scene.terrain_h_high.w, jh);
+        // Snow only settles on flatter faces (raymarcher getMaterial rule);
+        // steep micro-faces stay bare rock -> mottled snow / rock slopes.
+        t_snow *= smoothstep(0.30, 0.72, N.y);
         #undef WIDE_BAND
 
         vec3 base = mix(sand, grass, t_sand);
@@ -1704,7 +1766,11 @@ void main() {
         // so this doesn't reintroduce per-triangle classification noise.
         steep_raw = clamp(steep_raw + max(convexity, 0.0) * 0.30 * slope, 0.0, 1.0);
         float steep_dist = cam_dist;    // P5: use hoisted distance
-        float steep_w = 1.0 - smoothstep(80.0, 200.0, steep_dist);
+        // No distance fade any more: N is now a per-pixel heightmap+FBM
+        // normal (not the coarse LOD vertex normal that caused per-
+        // triangle rock/grass flicker), so far cliffs expose rock like
+        // the raymarched terrain.
+        float steep_w = 1.0 + 0.0 * steep_dist;
         float steep = steep_raw * steep_w * 0.85;
         base = mix(base, rock, steep);
 
