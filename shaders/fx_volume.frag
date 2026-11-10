@@ -168,9 +168,10 @@ void main() {
     const int N = 40;
     float span = t1 - t0;
     float dt = span / float(N);
-    // Interleaved-gradient-noise jitter (TAA resolves the banding).
+    // Interleaved-gradient-noise jitter, frame-stable: a per-frame offset
+    // made drifting smoke shimmer under TAA history rejection.
     float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy +
-                       float(scene.rt_flags.w % 64) * 5.588238, vec2(0.06711056, 0.00583715))));
+                       vec2(0.0), vec2(0.06711056, 0.00583715))));
     float t = t0 + dt * ign;
     float T = 1.0;
     vec3  acc = vec3(0.0);

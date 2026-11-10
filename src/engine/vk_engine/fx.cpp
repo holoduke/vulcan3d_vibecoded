@@ -203,7 +203,21 @@ void VulkanEngine::tick_fx(float dt) {
     if (dt <= 0.0f) return;
     dt = std::min(dt, 0.05f);
     tick_flags(dt);
-    for (auto& e : explosions_) e.t += dt;
+    for (auto& e : explosions_) {
+        e.t += dt;
+        // Smoke drift is integrated (not wind * age): gusts then only
+        // nudge the cloud instead of teleporting every puff at once.
+        if (e.t > 0.6f) e.drift += wind_vel_ * 0.35f * dt;
+    }
+    // Delayed secondary detonations (crash fuel / ordnance cook-off).
+    for (size_t i = 0; i < pending_booms_.size();) {
+        pending_booms_[i].delay -= dt;
+        if (pending_booms_[i].delay <= 0.0f) {
+            const PendingBoom b = pending_booms_[i];
+            pending_booms_.erase(pending_booms_.begin() + i);
+            spawn_explosion(b.pos, b.size, b.ground);
+        } else ++i;
+    }
     explosions_.erase(std::remove_if(explosions_.begin(), explosions_.end(),
                                      [](const Explosion& e) { return e.t > 20.0f; }),
                       explosions_.end());
@@ -376,21 +390,39 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
     // Contrails + afterburner glow.
     for (const auto& f : spacejet_flights_) {
         if (f.trail.size() >= 2) {
-            std::vector<glm::vec3> p; std::vector<float> w, a;
+            // Contrail (white vapour) up to the moment of the hit, then a
+            // thick, dark, oily smoke column from the burning wreck. The two
+            // strips share the split point so the trail stays continuous.
+            std::vector<glm::vec3> p, sp; std::vector<float> w, a, sw, sa;
             p.reserve(f.trail.size() + 1);
             for (const auto& tp : f.trail) {
                 float age = f.t - tp.t;
+                if (tp.smoke > 0.5f) {
+                    if (sp.empty() && !p.empty()) {   // bridge from the contrail
+                        sp.push_back(p.back()); sw.push_back(w.back()); sa.push_back(a.back());
+                    }
+                    sp.push_back(tp.p + glm::vec3(0.0f, age * 1.4f, 0.0f) + wind_vel_ * (0.25f * age));
+                    float wd = (1.2f + age * 2.1f) * f.scale;
+                    sw.push_back(min_w(tp.p, wd, 1.2f));
+                    float life = 1.0f - age / 6.0f;
+                    sa.push_back(std::max(0.0f, life) * std::min(1.0f, age * 4.0f + 0.3f) * 0.95f);
+                    continue;
+                }
                 p.push_back(tp.p + glm::vec3(0.0f, age * 0.6f, 0.0f));   // slow rise
                 float wd = (0.45f + age * 0.75f + std::min(tp.g, 8.0f) * 0.05f) * f.scale;
                 w.push_back(min_w(tp.p, wd, 0.8f));
                 float life = 1.0f - age / 6.0f;
                 a.push_back(std::max(0.0f, life * life) * 0.55f);
             }
-            if (!f.dead) {
+            if (!f.dead && !f.destroying) {
                 glm::vec3 ex = f.pos - f.fwd * (3.0f * f.scale * 0.9f);
                 p.push_back(ex); w.push_back(min_w(ex, 0.35f * f.scale, 0.8f)); a.push_back(0.0f);
             }
+            if (!f.dead && f.destroying) {
+                sp.push_back(f.pos); sw.push_back(min_w(f.pos, 1.0f * f.scale, 1.2f)); sa.push_back(0.6f);
+            }
             smoke.strip(p, w, a, glm::vec3(0.92f, 0.93f, 0.95f));
+            smoke.strip(sp, sw, sa, glm::vec3(0.07f, 0.065f, 0.06f));
         }
         if (!f.dead) {
             glm::vec3 ex = f.pos - f.fwd * (3.0f * f.scale * 0.95f);
@@ -523,7 +555,7 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
                 p.y += up_v * e1 + 2.2f * s * std::min(tt, 8.0f) * (1.0f - std::exp(-tt * 0.4f));
                 if (e.ground) p.y += 3.0f * s;
                 // Wind drift ramps in as the puff loses its own momentum.
-                p += wind_vel_ * 0.35f * std::max(0.0f, tt - 0.6f);
+                p += e.drift * glm::smoothstep(0.0f, 1.2f, tt);
                 Vol v{};
                 v.r = s * (2.2f + 1.8f * std::sqrt(tt)) * (k == 0 ? 1.1f : 0.8f + 0.3f * hk2);
                 v.r = std::min(v.r, 8.5f * s);
@@ -533,7 +565,7 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
                 v.dens = 1.0f * (1.0f - glm::smoothstep(1.5f, 12.0f, tt) * 0.7f);
                 v.heat = 0.55f * std::exp(-tt * 1.6f);               // embers glow early on
                 v.fade = glm::smoothstep(0.0f, 0.5f, tt) * (1.0f - glm::smoothstep(8.0f, 15.5f - start, tt));
-                v.scroll = tt;                                        // shader: boiling time
+                v.scroll = tt * 0.45f;                                // shader: slow boiling time
                 vols.push_back(v);
             }
         }

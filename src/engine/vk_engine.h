@@ -949,7 +949,7 @@ private:
         float     turn_g      = 0.0f;       // current lateral load (for vapour)
         bool      bomb_dropped = false;
         // Contrail: exhaust positions sampled every ~40 ms (newest last).
-        struct TrailPt { glm::vec3 p; float t; float g; };
+        struct TrailPt { glm::vec3 p; float t; float g; float smoke = 0.0f; };
         std::vector<TrailPt> trail;
         float     trail_acc = 0.0f;
         // Combat state: 3 hits to kill. hit_flash_t > 0 -> red tint.
@@ -961,6 +961,13 @@ private:
         float     destroy_t    = 0.0f;
         bool      dead         = false;     // remove next tick
         int       aa_hits      = 0;         // anti-aircraft rounds taken
+        // Crash: 0 spiral dive, 1 flat spin, 2 tumbling break-up, 3 burning
+        // glide-in (picked when shot down). Ballistic velocity + tumble.
+        int       crash_kind   = -1;
+        glm::vec3 crash_vel{0.0f};
+        glm::vec3 tumble_axis{1.0f, 0.0f, 0.0f};
+        float     tumble_rate  = 0.0f;
+        bool      broke_up     = false;
     };
     // Free-falling bomb dropped by a jet near the castle.
     struct Bomb {
@@ -979,8 +986,11 @@ private:
         float     size  = 1.0f;     // 1 = bomb-sized (fireball ~14 m)
         float     seed  = 0.0f;
         bool      ground = true;    // ground burst: dust ring + scorch
+        glm::vec3 drift{0.0f};      // integrated wind drift of the smoke
     };
     std::vector<Explosion> explosions_;
+    struct PendingBoom { glm::vec3 pos; float size; bool ground; float delay; };
+    std::vector<PendingBoom> pending_booms_;
     // Cloth flags on selected tower tops (fx.cpp): Verlet grid pinned to
     // a pole, gravity + per-triangle aerodynamic wind force + gusts.
     struct Flag {
