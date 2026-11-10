@@ -458,9 +458,34 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
         return road->distance(x, z);
     };
     const float road_clear = road ? road->half_width + road->shoulder : 0.0f;
+    // Forest density 0..1 (1 = closed forest). Large-scale noise with high
+    // contrast (thick woods / open meadows / thin edges) plus hand-placed
+    // zones: dense forest on the far (north-west) shore of the castle
+    // lake, an open ring around the castle, and big treeless meadows.
+    auto blob = [](float x0, float z0, float cx, float cz, float r) {
+        float dx = (x0 - cx) / r, dz = (z0 - cz) / r;
+        return std::exp(-(dx * dx + dz * dz) * 2.0f);
+    };
     auto forest = [&](float x, float z) {
-        return fbm(glm::vec3(x * 0.0065f, 11.0f, z * 0.0065f), 3) * 0.75f +
-               fbm(glm::vec3(x * 0.021f, 4.0f, z * 0.021f), 2) * 0.45f;
+        float n = fbm(glm::vec3(x * 0.0042f, 11.0f, z * 0.0042f), 3) * 0.8f +
+                  fbm(glm::vec3(x * 0.017f, 4.0f, z * 0.017f), 2) * 0.35f;
+        float d = std::clamp((n - 0.50f) * 6.0f, 0.0f, 1.0f);
+        d = std::max(d, std::min(1.0f, blob(x, z, -70.0f, -200.0f, 190.0f) * 1.6f));   // far shore
+        d = std::max(d, std::min(1.0f, blob(x, z, -230.0f, -60.0f, 120.0f) * 1.3f));
+        float clear = 1.0f - std::clamp((std::sqrt(x * x + z * z) - 75.0f) / 40.0f, 0.0f, 1.0f);
+        clear = std::max(clear, blob(x, z, 170.0f, 140.0f, 110.0f) * 1.4f);           // SE meadow
+        clear = std::max(clear, blob(x, z, 40.0f, 330.0f, 120.0f) * 1.4f);
+        return std::clamp(d * (1.0f - std::min(clear, 1.0f)), 0.0f, 1.0f);
+    };
+    // Dry ground: the trunk AND a 3.5 m ring above water + margin, so
+    // shore slopes don't put trees (or their crowns) in the lake.
+    auto dry = [&](float x, float z, float margin) {
+        if (h_at(x, z) < P.water_level + margin) return false;
+        for (int k = 0; k < 6; ++k) {
+            float a = float(k) * 1.0472f;
+            if (h_at(x + std::cos(a) * 3.5f, z + std::sin(a) * 3.5f) < P.water_level + 0.6f) return false;
+        }
+        return true;
     };
     // 2.5 m occupancy grid keeps trunks apart.
     std::unordered_set<int64_t> occ;
@@ -531,10 +556,11 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
         if (std::sqrt(x * x + z * z) < P.castle_clear) continue;
         if (road_d(x, z) < road_clear + 4.5f) continue;
         float h = h_at(x, z);
-        if (h < std::max(P.grass_band_lo, P.water_level + 1.5f) || h > P.tree_line) continue;
+        if (h < std::max(P.grass_band_lo, P.water_level + 2.0f) || h > P.tree_line) continue;
+        if (!dry(x, z, 2.0f)) continue;
         if (ny_at(x, z) < 0.72f) continue;
         float f = forest(x, z);
-        float dens = std::clamp((f - 0.47f) * 4.0f, 0.0f, 1.0f) + 0.01f;
+        float dens = f * f + 0.004f;                  // rare lone trees in meadows
         if (u() > dens) continue;
         bool pine = u() < std::clamp((h - 28.0f) / 30.0f, 0.15f, 0.95f);
         float scale = 0.75f + 0.55f * u();
@@ -560,7 +586,9 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
         if (h < P.water_level + 1.0f || h > P.tree_line + 8.0f) continue;
         if (ny_at(x, z) < 0.75f) continue;
         float f = forest(x, z);
-        float dens = std::clamp(1.0f - std::abs(f - 0.47f) * 6.0f, 0.0f, 1.0f) * 0.6f + 0.02f;
+        if (!dry(x, z, 1.2f)) continue;
+        // Undergrowth inside forests + thickets along the edges.
+        float dens = std::clamp(f * 0.45f + (1.0f - std::abs(f - 0.4f) * 3.0f) * 0.5f, 0.0f, 1.0f) * 0.7f + 0.01f;
         if (u() > dens) continue;
         float scale = 0.6f + 0.9f * u();
         const auto& pool = by_species[2];

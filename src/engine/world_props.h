@@ -32,7 +32,7 @@ struct WorldPropParams {
     int   seed          = 0x5EED;
     // GPU-instanced vegetation (whole map).
     float veg_half_extent = 1000.0f;
-    int   max_trees       = 45000;
+    int   max_trees       = 80000;
     int   tree_attempts   = 3000000;
     int   max_bushes      = 30000;
     int   max_formations  = 650;

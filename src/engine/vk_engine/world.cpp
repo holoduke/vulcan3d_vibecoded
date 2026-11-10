@@ -22,6 +22,25 @@
 namespace qlike {
 
 void VulkanEngine::init_world() {
+    // load_settings() runs AFTER init_world, but world generation (road
+    // levelling, vegetation / rock / scatter placement) depends on the
+    // water level and terrain bands. Peek those keys from the cfg now -
+    // with the defaults (water 2 m vs the saved 20.9 m) trees were placed
+    // in the lake.
+    {
+        std::ifstream sf(kSettingsPath);
+        std::string line;
+        while (std::getline(sf, line)) {
+            auto eq = line.find(" = ");
+            if (eq == std::string::npos) continue;
+            std::string k = line.substr(0, eq);
+            float v = 0.0f;
+            try { v = std::stof(line.substr(eq + 3)); } catch (...) { continue; }
+            if (k == "water_level") rt_.water_level = v;
+            else if (k == "terrain_h_dirt_rock_start") rt_.terrain_h_dirt_rock_start = v;
+            else if (k == "terrain_h_rock_snow_start") rt_.terrain_h_rock_snow_start = v;
+        }
+    }
     cube_mesh_ = create_cube_mesh(device_, allocator_, graphics_queue_, graphics_queue_family_);
     cylinder_mesh_ = create_cylinder_mesh(device_, allocator_,
                                           graphics_queue_, graphics_queue_family_);
