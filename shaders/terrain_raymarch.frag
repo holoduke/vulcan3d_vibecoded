@@ -2565,7 +2565,18 @@ void main() {
         // each pixel's shadow cone slightly and produces dither.
         vec3 origin = pos + sunDir * 0.1;
         // Per-pixel + per-frame seed вЂ” TAA averages noisy samples.
-        uvec3 seed_base = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
+        // World-anchored seed. The per-pixel + per-frame seed relied on
+        // TAA to average it, but DLSS keeps it as detail: under tree
+        // canopies (wide penumbra, every pixel partly lit) the ground was
+        // a speckle that re-rolled every frame and crawled with the camera.
+        // Hash the ground position on a grid matched to the pixel
+        // footprint instead (power-of-two cell): the grain stays put on
+        // the ground like texture.
+        float rm_cell = exp2(ceil(log2(max(cam_dist_pos * 2.0 * scene.viewport.w, 1e-4))));
+        ivec3 rm_q = ivec3(floor((pos + vec3(0.0, 0.25 * rm_cell, 0.0)) / rm_cell));
+        uvec3 seed_base = rm_pcg3d(uvec3(rm_q) +
+                                   uvec3(0u, 0u, uint(int(log2(rm_cell)) + 64) * 7919u));
+        seed_base.z = 0u;
 
         // 1. Blocker search (4 rays, 4Г— softness cone).
         const int kBlocker = 4;

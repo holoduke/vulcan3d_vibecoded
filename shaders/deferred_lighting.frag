@@ -405,6 +405,21 @@ void main() {
     vec3 wp_safe = world_pos + (view_vec / max(cam_dist, 1e-3)) *
                    min(0.002 + cam_dist * cam_dist * 4.0e-6, 2.5);
 
+    // World-anchored noise seed for shadow / AO jitter. A screen-pixel
+    // seed printed the SAME noise pattern on screen whatever the camera
+    // did, so the world slid through a fixed grain. Hash the world
+    // position on a grid matched to the pixel footprint (power-of-two
+    // cell, ~1-2 px) instead: the grain sticks to surfaces like texture.
+    {
+        vec4 w2 = pc.inv_vp * vec4(ndc + vec2(2.0 * scene.viewport.z, 0.0), z, 1.0);
+        float fp = max(distance(w2.xyz / w2.w, world_pos), 1e-4);
+        float lvl = ceil(log2(fp));
+        float cell = exp2(lvl);
+        ivec3 q = ivec3(floor((world_pos + N * (0.25 * cell)) / cell));
+        seed_stable = pcg3d(uvec3(q) + uvec3(0u, 0u, uint(int(lvl) + 64) * 7919u));
+        seed_stable.z = 0u;
+    }
+
     // ---------------------------------------------------------------
     //  Sun direct
     // ---------------------------------------------------------------
@@ -514,7 +529,10 @@ void main() {
             // different at any single frame readback.
             int N_s = max(1, min(int(scene.rt_flags.y), 32));
             ivec2 ip2     = ivec2(gl_FragCoord.xy);
-            int   parity  = ((ip2.x + ip2.y) ^ int(scene.rt_flags.w)) & 1;
+            // Half-set selection is world-anchored too (was (x+y)^frame:
+            // the two halves alternated every frame and, without a TAA to
+            // merge them under DLSS, the penumbra re-rolled each frame).
+            int   parity  = int(seed_stable.y & 1u);
             int   N_s_eff = max(1, (N_s + (parity == 0 ? 1 : 0)) / 2);
             N_s = N_s_eff;
             int taken = 0;
@@ -676,10 +694,10 @@ void main() {
         // Azimuths stratified around the circle with ONE random rotation
         // per pixel (was independent random phi per tap: 4 taps could all
         // land on one side, the main source of salt-and-pepper AO).
-        float rot = hash12(gl_FragCoord.xy + vec2(5.0, 23.0));
+        float rot = rand(seed_stable + uvec3(7u, 5u, 23u));
         for (int i = 0; i < n_taps; ++i) {
             float r1 = (float(i) + rot) / float(n_taps);
-            float r2 = hash12(gl_FragCoord.xy + vec2(i * 7.0, 91.0));
+            float r2 = rand(seed_stable + uvec3(uint(i), 7u, 91u));
             float phi = r1 * 6.28318530718;
             float ct = sqrt(r2);              // cosine-weighted hemisphere
             float st = sqrt(1.0 - r2);
@@ -719,17 +737,22 @@ void main() {
     // terrain pixels came out ~17% brighter than forward.
     if (material_id == 3 && scene.rt_flags.x != 0 &&
         gi_strength > 1e-4 && cam_dist < 50.0) {
-        const int kProbeN = 4;
+        // FIXED cosine-distributed directions (golden-angle spiral), the
+        // same for every pixel. 4 random rays per pixel made sky_vis a
+        // 0 / .25 / .5 / .75 / 1 speckle under tree canopies that re-rolled
+        // every frame (DLSS jitter moves the sample point) - the crawling
+        // noise in shadowed ground. With shared directions sky_vis is a
+        // deterministic function of world position: smooth, stable.
+        const int kProbeN = 16;
         // Terrain instance mask is 0x05 (bits 0+2): 0xFD still hit it. 0xFA
         // = every bit except 0 and 2 -> castle / brushes / props only.
         const uint kProbeMask = 0xFAu;
         vec3 probe_origin = world_pos + vec3(0.0, 0.10, 0.0);
         int probe_misses = 0;
         for (int i = 0; i < kProbeN; ++i) {
-            float r1 = rand(seed_stable + uvec3(uint(i), 41u, 67u));
-            float r2 = rand(seed_stable + uvec3(uint(i), 13u, 89u));
+            float r1 = (float(i) + 0.5) / float(kProbeN);
             float r_h = sqrt(r1);
-            float phi = 6.28318530718 * r2;
+            float phi = 2.39996323 * float(i) + 0.7;
             vec3 dir = vec3(r_h * cos(phi),
                             sqrt(max(0.0, 1.0 - r1)),
                             r_h * sin(phi));
