@@ -1,4 +1,5 @@
 #version 460
+#extension GL_EXT_ray_query : require
 
 // Raymarched grass — fullscreen pass that walks an SDF blade field.
 // Adapted from MonterMan / iq's "grass field with blades" shadertoy
@@ -115,6 +116,9 @@ layout(set = 0, binding = 8) uniform sampler2D u_heightmap;
 
 // Sun shadow map (binding 7). sampler2DShadow returns 0..1 PCF result.
 layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
+// Scene TLAS - RT sun shadow on blades (trees / castle / props are not
+// all in the raster shadow map).
+layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 
 // Grass eligibility mask. R8 1024² — single source of truth shared
 // with terrain_raymarch.frag. CPU-baked from the same FBM (presence)
@@ -322,6 +326,9 @@ struct MapCtx {
     float water_y;
 };
 
+// Rotation of the blade that won the last map() call (= the hit blade
+// after the march): gives the blade face normal for lighting.
+float g_blade_rot = 0.0;
 float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
     out_blade_hit = false;
     float terrainY = sampleHeight_lod(p.xz, ray_t);
@@ -422,6 +429,7 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
             if (bladeDist < d) {
                 d = bladeDist;
                 out_blade_hit = true;
+                g_blade_rot = r.z * kPi2;
             }
         }
     }
@@ -596,6 +604,19 @@ void main() {
             }
         }
     }
+    // RT sun shadow: trees, castle and props cast onto the grass (the
+    // raster shadow map misses most of them). One ray per grass pixel,
+    // started a little up the sun direction so the blade's own ground
+    // (terrain BLAS) can't self-hit at the base.
+    if (sun_lit > 0.0 && L.y > 0.0) {
+        rayQueryEXT rq;
+        rayQueryInitializeEXT(rq, topLevelAS,
+                              gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                              0x01u, p + vec3(0.0, 0.04, 0.0), 0.3, L, 300.0);
+        while (rayQueryProceedEXT(rq)) {}
+        if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT)
+            sun_lit = 0.0;
+    }
 
     // Per-blade colour: lerp between bottom (base) and top (tip) by
     // height above ground. Both ends are user-driven via UI sliders
@@ -640,8 +661,17 @@ void main() {
     // don't all shade identically. ±0.25 around base, then half-
     // Lambert wrap so the shadow side isn't pitch-black.
     float blade_var = hash12(floor(p.xz / 0.20)) - 0.5;  // [-0.5, 0.5]
-    float n_dot_l_var = clamp(n_dot_l + blade_var * 0.5, 0.0, 1.0);
-    float n_dot_l_wrap = n_dot_l_var * 0.7 + 0.3;        // wrap by 0.3
+    // Blade face normal from the hit blade's rotation (the blade is a
+    // flat strip with its face along local z), turned toward the viewer
+    // and leaned toward the ground normal for the blade's curl. The face
+    // turned to the sun is lit; the far side only gets light transmitted
+    // through the leaf - a real dark side instead of every blade shaded
+    // like the flat ground beneath it.
+    vec3 Nf = vec3(-sin(g_blade_rot), 0.0, cos(g_blade_rot));
+    if (dot(Nf, rd) > 0.0) Nf = -Nf;
+    vec3 Nb = normalize(Nf + N * 0.45);
+    float ndl_b = dot(Nb, L) + blade_var * 0.3;
+    float n_dot_l_wrap = (ndl_b > 0.0) ? ndl_b : -ndl_b * 0.18;
 
     vec3 sun_term = scene.sun_color.rgb * scene.sun_color.a *
                     (n_dot_l_wrap * sun_lit);
