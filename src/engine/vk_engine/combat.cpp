@@ -116,7 +116,7 @@ void VulkanEngine::fire_projectile(glm::vec3 origin, glm::vec3 direction) {
         // Shot is "local" — happens at the camera, mostly bypasses 3D
         // attenuation. Light pitch jitter so rapid fire doesn't sound
         // mechanical.
-        audio_->play_local(ClipID::Shot, 0.7f, 0.05f, 0.06f);
+        audio_->play_local(ClipID::Laser, 0.7f, 0.05f, 0.06f);
     }
 
     Projectile p{};

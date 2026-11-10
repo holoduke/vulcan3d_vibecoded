@@ -98,6 +98,9 @@ void VulkanEngine::init() {
     audio_->load_clip(ClipID::Shot,   "assets/sounds/shot.ogg");
     audio_->load_clip(ClipID::Impact, "assets/sounds/impact.ogg");
     audio_->load_clip(ClipID::Jump,   "assets/sounds/jump.ogg");
+    // Single shot cut from laser_gun_#4 (0.045-0.225 s, 100 ms fade, -3.5 dB
+    // to sit at the old shot level).
+    audio_->load_clip(ClipID::Laser,  "assets/sounds/laser_shot.wav");
     init_vulkan();
     init_pipeline_cache();
     init_swapchain();

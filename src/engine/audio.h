@@ -15,6 +15,7 @@ enum class ClipID : uint8_t {
     Shot = 0,
     Impact,
     Jump,
+    Laser,      // player laser gun (assets/sounds/laser_shot.wav)
     Count
 };
 
