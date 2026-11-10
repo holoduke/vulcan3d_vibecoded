@@ -192,6 +192,8 @@ void VulkanEngine::draw(uint32_t img_index) {
         render_sun_shadow_pass(frame.command_buffer);
     }
     prof_mark(frame.command_buffer, "sun_shadow_map");
+    render_clutter_shadow(frame.command_buffer);
+    prof_mark(frame.command_buffer, "clutter_shadow");
 
     // Batch the world-pass attachment transitions into a single
     // vkCmdPipelineBarrier2 — was 3 separate barrier calls each

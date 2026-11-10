@@ -256,6 +256,7 @@ void VulkanEngine::init() {
     init_fx();
     init_flags();
     init_vegetation_pipelines();
+    init_clutter_shadow();
     init_imgui();
     update_scene_ubo();
     present_loader_frame("Ready",                 1.00f);
@@ -1143,6 +1144,7 @@ void VulkanEngine::shutdown() {
     // owns those bodies. Otherwise the renderer's deferred destruction could
     // deref freed Jolt body data.
     guarded("destroy_veg",    [&]{ destroy_vegetation(); });
+    guarded("destroy_clutter_shadow", [&]{ destroy_clutter_shadow(); });
     guarded("destroy_castle", [&]{ destroy_castle_meshes(); });
     guarded("destroy_rt",     [&]{ destroy_rt(); });
     guarded("physics_.reset", [&]{ physics_.reset(); });

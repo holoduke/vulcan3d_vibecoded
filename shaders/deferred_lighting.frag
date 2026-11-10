@@ -93,6 +93,8 @@ layout(set = 0, binding = 11) uniform sampler2D u_motion;
 // luminance and shorten it. Negative = no history yet.
 layout(set = 0, binding = 12, r16f) uniform image2D u_gi_fast0;
 layout(set = 0, binding = 13, r16f) uniform image2D u_gi_fast1;
+// Small-object sun shadow map (flowers / ferns / clutter rocks only).
+layout(set = 0, binding = 14) uniform sampler2D u_clutter_shadow;
 
 layout(push_constant) uniform PC {
     mat4 inv_vp;
@@ -497,6 +499,29 @@ void main() {
         // Per-pixel relief self-shadow from cube.frag's terrain POM sun
         // march, packed into gbuffer1.b (1 = fully lit) for material 3.
         shadow = 1.0 - (1.0 - shadow) * clamp(roughness, 0.0, 1.0);
+        // Small-object shadows (flowers, ferns, clutter rocks): dedicated
+        // depth map of ONLY those casters around the camera (light-VP in
+        // the spare light slots), so the terrain receiver can't self-acne.
+        mat4 cvp = mat4(pc.light_pos[2], pc.light_pos[3], pc.light_col[2], pc.light_col[3]);
+        if (cvp[3].w > 0.5 && scene.rt_params.w > 1e-3) {
+            vec4 lc = cvp * vec4(world_pos, 1.0);
+            vec2 luv = lc.xy * 0.5 + 0.5;
+            if (all(greaterThan(luv, vec2(0.002))) && all(lessThan(luv, vec2(0.998))) &&
+                lc.z > 0.0 && lc.z < 1.0) {
+                vec2 ts = 1.0 / vec2(textureSize(u_clutter_shadow, 0));
+                float occ = 0.0;
+                for (int y = -1; y <= 1; ++y)
+                    for (int x = -1; x <= 1; ++x) {
+                        float zc = textureLod(u_clutter_shadow, luv + vec2(x, y) * ts, 0.0).r;
+                        occ += (zc < lc.z - 0.0004) ? 1.0 : 0.0;
+                    }
+                occ /= 9.0;
+                // Fade out toward the map edge.
+                float edge = min(min(luv.x, luv.y), min(1.0 - luv.x, 1.0 - luv.y));
+                occ *= smoothstep(0.0, 0.08, edge) * clamp(scene.rt_params.w, 0.0, 1.0);
+                shadow = max(shadow, occ * 0.85);
+            }
+        }
     }
 
     // ---------------------------------------------------------------
@@ -1068,7 +1093,7 @@ void main() {
     //  packs up to 4 active lights per frame.
     // ---------------------------------------------------------------
     vec3 point_term = vec3(0.0);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 2; ++i) {   // slots 2-3 carry the clutter shadow matrix
         float radius = pc.light_pos[i].w;
         if (radius < 1e-3) continue;
         vec3 lp = pc.light_pos[i].xyz;

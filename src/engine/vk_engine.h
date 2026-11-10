@@ -1283,6 +1283,16 @@ private:
     VkShaderModule veg_depth_frag_module_ = VK_NULL_HANDLE, veg_hiz_module_ = VK_NULL_HANDLE;
     glm::mat4     veg_prev_vp_{1.0f};
     uint32_t tlas_refits_ = 0;
+    VkImage        clutter_shadow_image_ = VK_NULL_HANDLE;
+    VmaAllocation  clutter_shadow_alloc_ = nullptr;
+    VkImageView    clutter_shadow_view_ = VK_NULL_HANDLE;
+    VkPipelineLayout clutter_shadow_layout_ = VK_NULL_HANDLE;
+    VkPipeline     clutter_shadow_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule clutter_shadow_vert_ = VK_NULL_HANDLE;
+    glm::mat4      clutter_shadow_vp_{0.0f};
+    void init_clutter_shadow();
+    void destroy_clutter_shadow();
+    void render_clutter_shadow(VkCommandBuffer cmd);
     float hitch_prev_[6] = {};   // main-loop section ms of the previous frame
     float hitch_draw_[3] = {};   // draw(): tlas fence wait, cpu build, record+submit
     VkImage       veg_hiz_image_ = VK_NULL_HANDLE;

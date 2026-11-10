@@ -285,6 +285,7 @@ add_library(qlike_engine STATIC
     src/engine/vk_engine/castle_mesh.cpp
     src/engine/vk_engine/fx.cpp
     src/engine/vk_engine/vegetation.cpp
+    src/engine/vk_engine/clutter_shadow.cpp
     src/engine/vk_engine/post.cpp
     src/engine/vk_engine/bloom.cpp
     src/engine/vk_engine/taa.cpp
