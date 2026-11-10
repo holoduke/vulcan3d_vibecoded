@@ -817,12 +817,24 @@ vec2 pom_march(int hix, vec2 uv0, vec3 Vt, float hs, vec2 gdx, vec2 gdy) {
     float wgt    = after / min(after - before, -1e-5);
     return mix(uv, puv, clamp(wgt, 0.0, 1.0));
 }
+// Relief silhouette clipping on curved surfaces. For a cylinder of radius
+// R = 1/curv, a view ray hitting the surface with cos(angle) = c can reach
+// at most R * (1 - sqrt(1 - c^2)) below it before it leaves the solid
+// again - if the parallax hit is deeper, this pixel shows what is behind
+// (bumpy stone outline instead of a perfectly smooth tower edge). Flat
+// faces (curv ~ 0) are never clipped.
+bool pom_silhouette_clip(float depth_m, float c, float curv) {
+    if (curv < 0.02) return false;
+    c = clamp(c, 0.0, 1.0);
+    float max_d = (1.0 / curv) * (1.0 - sqrt(max(0.0, 1.0 - c * c)));
+    return depth_m > max_d + 0.005;
+}
 // Cavity darkening x parallax self-shadow toward the sun (Tatarchuk 2006).
 // Deferred lighting shades the FLAT surface, so these cues are what make
 // the relief read as depth; they go into albedo, recomputed every frame.
 float pom_shade(int hix, vec2 uv, vec3 Lt, float hs, vec2 gdx, vec2 gdy) {
     float h0  = textureGrad(u_height[hix], uv, gdx, gdy).r;
-    float cav = mix(0.62, 1.0, smoothstep(0.0, 0.7, h0));
+    float cav = mix(0.80, 1.0, smoothstep(0.0, 0.6, h0));
     float vis = 1.0;
     if (Lt.z > 0.05 && h0 < 0.98) {
         vec2 sP = Lt.xy / max(Lt.z, 0.15) * hs * (1.0 - h0);
@@ -833,9 +845,9 @@ float pom_shade(int hix, vec2 uv, vec3 Lt, float hs, vec2 gdx, vec2 gdy) {
             float sh = textureGrad(u_height[hix], uv + sP * t, gdx, gdy).r;
             occ = max(occ, (sh - rh) * (1.0 - t));
         }
-        vis = 1.0 - 0.55 * smoothstep(0.0, 0.12, occ);
+        vis = 1.0 - 0.40 * smoothstep(0.0, 0.12, occ);
     } else if (Lt.z <= 0.05) {
-        vis = 0.8;   // face turned away from the sun: crevices stay dark
+        vis = 0.9;   // face turned away from the sun: crevices stay a bit darker
     }
     return cav * vis;
 }
@@ -1638,6 +1650,9 @@ void main() {
     vec3  sample_pos     = (obj_space ? vObjectPos : vWorldPos) * scale;
     vec3  proj_n         = obj_space ? normalize(vObjectNormal) : N;
     float mesh_pom_shade = 1.0;   // cavity + self-shadow, applied to albedo below
+    // Surface curvature 1/R (|dN| / |dP|) for relief silhouette clipping on
+    // curved meshes (round towers). Taken here, in uniform control flow.
+    const float mesh_curv = length(fwidth(N)) / max(length(fwidth(vWorldPos)), 1e-5);
     // ---- Parallax occlusion for triplanar MESH surfaces ----
     // The brush SPOM path below needs brush face data and excludes mesh
     // draws. Steep-parallax march in the dominant triplanar plane; the
@@ -1645,7 +1660,7 @@ void main() {
     if (is_mesh_draw && pc.grass_params.z > 0.5 && albedo_idx_raw >= 0 &&
         scene.spom_params.x > 0.01) {
         int   hix   = height_idx_for_albedo(albedo_idx_raw);
-        float fadeP = 1.0 - smoothstep(12.0, 40.0, distance(vWorldPos, scene.camera_pos.xyz));
+        float fadeP = 1.0 - smoothstep(30.0, 65.0, distance(vWorldPos, scene.camera_pos.xyz));
         if (hix >= 0 && fadeP > 0.01) {
             vec3 an = abs(N);
             vec3 Tp, Bp, Fp;
@@ -1658,8 +1673,15 @@ void main() {
                 // uv = (dot(p,T), dot(p,B)) == triplanar_sample's wp.zy / wp.xz / wp.xy
                 vec2  uv0 = vec2(dot(sample_pos, Tp), dot(sample_pos, Bp));
                 vec2  gdx = dFdx(uv0), gdy = dFdy(uv0);
-                float hs  = 0.11 * scene.spom_params.x * fadeP;
+                // Relief depth in METRES like the brush box relief (stones ~4 cm
+                // of relief per 1/scale m of tile), converted to uv units.
+                float hs  = clamp(0.05 / max(scale, 0.01), 0.06, 0.3) * scale *
+                            scene.spom_params.x * fadeP;
                 vec2  uv  = pom_march(hix, uv0, Vt, hs, gdx, gdy);
+                {   // silhouette clip (see pom_silhouette_clip)
+                    float dm = (1.0 - textureGrad(u_height[hix], uv, gdx, gdy).r) * hs / max(scale, 1e-4);
+                    if (pom_silhouette_clip(dm, dot(Vw, N), mesh_curv)) discard;
+                }
                 sample_pos += Tp * (uv.x - uv0.x) + Bp * (uv.y - uv0.y);
                 vec3 Lt = vec3(dot(L, Tp), dot(L, Bp), dot(L, Fp));
                 mesh_pom_shade = mix(1.0, pom_shade(hix, uv, Lt, hs, gdx, gdy), fadeP);
@@ -2547,11 +2569,11 @@ void main() {
                 // Depth proportional to the texture tile (castle walls tile
                 // every ~8 m -> big stones -> ~20 cm mortar relief; a fixed
                 // 4 cm read as flat). Capped so thin brushes stay solid.
-                float br_Dm   = clamp(0.025 / max(scale, 0.01), 0.04, 0.25);
+                float br_Dm   = clamp(0.05 / max(scale, 0.01), 0.06, 0.3);
                 br_Dm = min(br_Dm, 0.3 * min(min(face_size.x, face_size.y),
                                              face_size.z));
                 br_Dm *= max(0.0, scene.spom_params.x) *
-                         (1.0 - smoothstep(25.0, 60.0, br_dist));
+                         (1.0 - smoothstep(35.0, 70.0, br_dist));
                 if (br_Dm > 0.002) {
                     vec3  ro = vWorldPos;
                     vec3  rd = normalize(vWorldPos - scene.camera_pos.xyz);
@@ -2958,7 +2980,7 @@ void main() {
             // pom_shade(). The old forward path got them from RT rays fired
             // out of the displaced crevice; deferred shades the flat face.
             {
-                float fadeB = 1.0 - smoothstep(12.0, 40.0, distance(vWorldPos, scene.camera_pos.xyz));
+                float fadeB = 1.0 - smoothstep(30.0, 65.0, distance(vWorldPos, scene.camera_pos.xyz));
                 if (fadeB > 0.01 && scene.spom_params.x > 0.01) {
                     int  hb = clamp(spom_h_idx, 0, 5);
                     vec3 Lt = vec3(dot(L, spom_T), dot(L, spom_B), dot(L, spom_face_n));
@@ -2994,17 +3016,34 @@ void main() {
             // Parallax occlusion on UV-mapped meshes (castle towers / keep).
             {
                 int   hix   = height_idx_for_albedo(albedo_idx_raw);
-                float fadeP = 1.0 - smoothstep(12.0, 40.0, distance(vWorldPos, scene.camera_pos.xyz));
+                float fadeP = 1.0 - smoothstep(30.0, 65.0, distance(vWorldPos, scene.camera_pos.xyz));
                 if (hix >= 0 && fadeP > 0.01 && scene.spom_params.x > 0.01) {
                     vec3 Tn = normalize(Tm), Bn = normalize(Bm);
                     vec3 Vw = normalize(scene.camera_pos.xyz - vWorldPos);
                     vec3 Vt = vec3(dot(Vw, Tn), dot(Vw, Bn), dot(Vw, N));
                     if (Vt.z > 0.12) {
-                        float hs = 0.11 * scene.spom_params.x * fadeP;
+                        // uv per metre from the derivatives -> relief in metres
+                        float uvpm = sqrt(max(dot(du1, du1), dot(du2, du2)) /
+                                          max(max(dot(dp1, dp1), dot(dp2, dp2)), 1e-10));
+                        float hs = clamp(0.05 / max(uvpm, 0.01), 0.06, 0.3) * uvpm *
+                                   scene.spom_params.x * fadeP;
                         vec2 uvp = pom_march(hix, muv, Vt, hs, du1, du2);
+                        {   // relief silhouette on round towers
+                            float dm = (1.0 - textureGrad(u_height[hix], uvp, du1, du2).r) * hs / max(uvpm, 1e-4);
+                            if (pom_silhouette_clip(dm, Vt.z, mesh_curv)) discard;
+                        }
                         vec3 Lt = vec3(dot(L, Tn), dot(L, Bn), dot(L, N));
                         mesh_pom_shade = mix(1.0, pom_shade(hix, uvp, Lt, hs, du1, du2), fadeP);
                         muv = uvp;
+                    } else if (mesh_curv > 0.02) {
+                        // Grazing silhouette pixels (no march): clip by the
+                        // height at the unshifted uv - the stone outline.
+                        float uvpm = sqrt(max(dot(du1, du1), dot(du2, du2)) /
+                                          max(max(dot(dp1, dp1), dot(dp2, dp2)), 1e-10));
+                        float hs = clamp(0.05 / max(uvpm, 0.01), 0.06, 0.3) * uvpm *
+                                   scene.spom_params.x * fadeP;
+                        float dm = (1.0 - textureGrad(u_height[hix], muv, du1, du2).r) * hs / max(uvpm, 1e-4);
+                        if (pom_silhouette_clip(dm, Vt.z, mesh_curv)) discard;
                     }
                 }
             }

@@ -350,8 +350,8 @@ Level make_arena(float r, float wh) {
 
         const auto castle_tint  = T(0.95f, 0.92f, 0.86f);  // warm sandstone
         const auto castle_proto = T(0.55f, 0.50f, 0.42f);
-        const float wall_uv  = 0.12f;          // ~8.3 m texture repeat
-        const float cren_uv  = 0.18f;
+        const float wall_uv  = 0.22f;          // ~4.5 m texture repeat (~55 cm stones)
+        const float cren_uv  = 0.30f;
         const float stone_tile = 1.0f / wall_uv;
         const auto stair_tint   = T(0.92f, 0.85f, 0.75f);
         const auto stair_proto  = T(0.50f, 0.35f, 0.20f);

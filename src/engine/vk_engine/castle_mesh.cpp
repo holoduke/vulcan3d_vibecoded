@@ -151,6 +151,11 @@ void VulkanEngine::draw_castle_meshes(VkCommandBuffer cmd, const glm::mat4& vp,
     VkDeviceSize off = 0;
     for (const auto& g : castle_meshes_) {
         if (!aabb_visible(fr, g.bmin, g.bmax)) continue;
+        // Depth PRE-pass: skip the relief stone parts. cube.frag discards
+        // their silhouette pixels (parallax relief clipping on curved
+        // towers); the flat pre-pass depth would hide those cut-outs.
+        if (depth_only && !shadow_layout && rt_.spom_strength > 0.01f &&
+            (g.tex_albedo == 1 || g.tex_albedo == 4)) continue;
         vkCmdBindVertexBuffers(cmd, 0, 1, &g.mesh.vertex_buffer, &off);
         vkCmdBindIndexBuffer(cmd, g.mesh.index_buffer, 0, VK_INDEX_TYPE_UINT32);
         if (shadow_layout) {
