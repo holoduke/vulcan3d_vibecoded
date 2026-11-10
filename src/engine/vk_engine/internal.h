@@ -355,6 +355,10 @@ struct SceneUBO {
     // Clutter (flowers / ferns / small rocks) sun-shadow light VP; [3].w = 0
     // when the map is not rendered this frame. Read by terrain_raymarch.frag.
     glm::mat4  clutter_vp;
+    // Physical sky for raymarched terrain / water reflections + GI misses:
+    // x = sky_mode active (sky-view LUT bound at scene binding 30),
+    // y = atmosphere radiance scale (intensity * pi; times sun colour).
+    glm::vec4  atmo_params;
 };
 
 // ---- KHR ray tracing entry points ----

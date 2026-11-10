@@ -47,7 +47,7 @@ void VulkanEngine::init_atmosphere() {
         ici.mipLevels = 1; ici.arrayLayers = 1;
         ici.samples = VK_SAMPLE_COUNT_1_BIT;
         ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         VmaAllocationCreateInfo aci{};
         aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         vk_check(vmaCreateImage(allocator_, &ici, &aci, &im.image, &im.alloc, nullptr), name);
@@ -66,6 +66,19 @@ void VulkanEngine::init_atmosphere() {
     vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_, [&](VkCommandBuffer cb) {
         for (AtmoImage* im : { &atmo_trans_, &atmo_ms_, &atmo_sky_, &atmo_ap_ })
             vkinit::transition_image(cb, im->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        // Sky-view LUT is read by the raymarched terrain BEFORE this frame's
+        // atmosphere dispatch: start it at zero, not undefined memory.
+        VkMemoryBarrier2 mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, nullptr,
+                             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                             VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT };
+        VkDependencyInfo di{}; di.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        di.memoryBarrierCount = 1; di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cb, &di);
+        VkClearColorValue z{};
+        VkImageSubresourceRange rr{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdClearColorImage(cb, atmo_sky_.image, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rr);
+        vkCmdPipelineBarrier2(cb, &di);
     });
     {
         VkSamplerCreateInfo si{};
@@ -139,6 +152,16 @@ void VulkanEngine::init_atmosphere() {
         vk_check(vkCreateComputePipelines(device_, pipeline_cache_, 1, &cci, nullptr, &atmo_pipeline_),
                  "atmo pipeline");
         vkDestroyShaderModule(device_, m, nullptr);
+    }
+    // Scene set binding 30: the sky-view LUT for raymarched terrain / water.
+    if (scene_desc_set_) {
+        VkDescriptorImageInfo si{ atmo_sampler_, atmo_sky_.view, VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet w{};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = scene_desc_set_; w.dstBinding = 30; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &si;
+        vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
     }
     atmo_luts_ready_ = false;
     log::info("[atmosphere] Hillaire 2020 sky: LUTs + aerial perspective ready");

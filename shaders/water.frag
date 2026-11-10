@@ -382,7 +382,18 @@ layout(set = 0, binding = 0) uniform Scene {
     vec4 voxel_origin;     // xyz = world origin, .w = enabled (0/1)
     vec4 voxel_dims;       // xyz = extent (m), .w = voxel size (m)
     vec4 voxel_grid;       // xyz = brick grid dims, .w = brick size (m)
+    vec4 road_info;
+    vec4 road_bbox;
+    vec4 road_pts[64];
+    vec4 grass_rm_params;
+    vec4 grass_rm_params2;
+    mat4 clutter_vp;
+    vec4 atmo_params;      // x physical sky on, y radiance scale
 } scene;
+
+#include "atmosphere.glsl"
+// Atmosphere sky-view LUT (atmosphere.comp; GENERAL layout).
+layout(set = 0, binding = 30) uniform sampler2D u_skyview;
 
 // Voxel brickmap atlas + shape directory. Shared with cube.frag at the
 // same binding slots — both shaders live in the same descriptor set.
@@ -527,7 +538,18 @@ float distanceFogAmount(vec3 p_world, vec3 cam) {
 // scene's sky colour, with a small sun-tinted lift near the horizon.
 // Used as the "no-noise" reference for the GI softener and as the
 // sample value for hemisphere rays that miss any occluder.
+// Physical sky (sky-view LUT, scene binding 30) when sky_mode is on.
+vec3 phys_sky(vec3 dir) {
+    vec3 sun = normalize(scene.sun_direction.xyz);
+    float elev = asin(clamp(dir.y, -1.0, 1.0));
+    float az = 0.0;
+    if (dot(dir.xz, dir.xz) > 1e-8 && dot(sun.xz, sun.xz) > 1e-8)
+        az = acos(clamp(dot(normalize(dir.xz), normalize(sun.xz)), -1.0, 1.0));
+    return textureLod(u_skyview, skyview_uv(elev, az), 0.0).rgb *
+           scene.sun_color.rgb * scene.sun_color.a * scene.atmo_params.y;
+}
 vec3 sample_sky_atmosphere(vec3 dir) {
+    if (scene.atmo_params.x > 0.5) return phys_sky(dir);
     float up = clamp(dir.y, 0.0, 1.0);
     vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;
     vec3 zenith  = scene.sky_color.rgb;
@@ -541,6 +563,7 @@ vec3 sample_sky_atmosphere(vec3 dir) {
 // pow(8) cosine and the 0.08 multiplier so it doesn't spike on
 // near-grazing samples; matches cube.frag's path-trace estimator.
 vec3 sample_sky(vec3 dir) {
+    if (scene.atmo_params.x > 0.5) return phys_sky(dir);
     vec3  L = normalize(scene.sun_direction.xyz);
     float up = clamp(dir.y, 0.0, 1.0);
     vec3 horizon = scene.sky_color.rgb * 0.55 + scene.sun_color.rgb * 0.10;

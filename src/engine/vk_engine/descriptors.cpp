@@ -64,7 +64,7 @@ void VulkanEngine::init_descriptors() {
         // +1 (now 11) for the terrain aux bake (curvature + sky-vis)
         // at binding 26 — AAA terrain Phases 4/5.
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            kTextureCount * 2 + 15 + kSpomMaterialCount },
+            kTextureCount * 2 + 16 + kSpomMaterialCount },
     };
     VkDescriptorPoolCreateInfo pci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -84,7 +84,7 @@ void VulkanEngine::init_descriptors() {
     //              terrain_raymarch_scale < 1.
     //          15=ReSTIR reservoir SSBO (read prev), 16=write cur.
     //              Owned by restir.cpp; cube.frag's GI loop reads/writes.
-    VkDescriptorSetLayoutBinding bindings[30]{};
+    VkDescriptorSetLayoutBinding bindings[31]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -311,11 +311,17 @@ void VulkanEngine::init_descriptors() {
     bindings[29].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[29].descriptorCount = 1;
     bindings[29].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Binding 30: atmosphere sky-view LUT (GENERAL) - raymarched terrain /
+    // water reflections + GI misses use the physical sky (atmosphere.cpp).
+    bindings[30].binding = 30;
+    bindings[30].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[30].descriptorCount = 1;
+    bindings[30].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo lci{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
-        .bindingCount = 30, .pBindings = bindings,
+        .bindingCount = 31, .pBindings = bindings,
     };
     vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr,
                                          &scene_desc_set_layout_),
@@ -350,6 +356,8 @@ void VulkanEngine::update_scene_ubo() {
     SceneUBO data{};
     update_clutter_shadow_vp();
     data.clutter_vp = clutter_shadow_vp_;
+    data.atmo_params = glm::vec4((rt_.sky_mode == 1 && atmo_sky_.view) ? 1.0f : 0.0f,
+                                 rt_.atmosphere_intensity * 3.14159265f, 0.0f, 0.0f);
     float pitch = glm::radians(rt_.sun_pitch_deg);
     float yaw   = glm::radians(rt_.sun_yaw_deg);
     glm::vec3 sun(std::cos(pitch) * std::sin(yaw),
