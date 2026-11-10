@@ -249,6 +249,9 @@ private:
     void init_exposure();      // called from init_compose()
     void destroy_exposure();
     void dispatch_exposure(VkCommandBuffer cmd);
+    void init_atmosphere();    // called from init_compose()
+    void destroy_atmosphere();
+    void dispatch_atmosphere(VkCommandBuffer cmd);   // per frame, before compose
     void run_bloom_chain(VkCommandBuffer cmd);
     void init_skybox();
     void destroy_skybox_resources();
@@ -2035,6 +2038,18 @@ private:
     VkPipelineLayout       exposure_pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline             exposure_pipeline_ = VK_NULL_HANDLE;
     double                 exposure_last_t_ = 0.0;
+    // Physical atmosphere (Hillaire 2020): transmittance, multi-scatter and
+    // sky-view LUTs + aerial-perspective froxel volume (atmosphere.cpp).
+    // All images live in GENERAL (storage in atmosphere.comp, sampled in compose).
+    struct AtmoImage { VkImage image = VK_NULL_HANDLE; VmaAllocation alloc = nullptr; VkImageView view = VK_NULL_HANDLE; };
+    AtmoImage              atmo_trans_, atmo_ms_, atmo_sky_, atmo_ap_;
+    VkSampler              atmo_sampler_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout  atmo_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool       atmo_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet        atmo_set_ = VK_NULL_HANDLE;
+    VkPipelineLayout       atmo_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline             atmo_pipeline_ = VK_NULL_HANDLE;
+    bool                   atmo_luts_ready_ = false;
     VkShaderModule         compose_frag_module_ = VK_NULL_HANDLE;
 
     // --- Bloom mip chain (Karis-style downsample + tent upsample) ---

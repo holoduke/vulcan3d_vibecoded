@@ -288,6 +288,7 @@ add_library(qlike_engine STATIC
     src/engine/vk_engine/clutter_shadow.cpp
     src/engine/vk_engine/aa.cpp
     src/engine/vk_engine/post.cpp
+    src/engine/vk_engine/atmosphere.cpp
     src/engine/vk_engine/bloom.cpp
     src/engine/vk_engine/taa.cpp
     src/engine/vk_engine/fsr2.cpp
@@ -404,6 +405,9 @@ file(GLOB SHADER_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/shaders/*.tese"
     "${CMAKE_SOURCE_DIR}/shaders/*.comp")
 # (grass_raymarch.frag picked up by the glob above)
+# Shared GLSL headers (#include "xxx.glsl"): every shader depends on all of
+# them so editing a header rebuilds its users.
+file(GLOB SHADER_INCLUDES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/shaders/*.glsl")
 
 set(SHADER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
@@ -418,7 +422,7 @@ foreach(SHADER ${SHADER_SOURCES})
         # elimination, common-subexpression elim, loop unrolling.
         # Equivalent to running spirv-opt -O on the output.
         COMMAND ${Vulkan_GLSLC_EXECUTABLE} --target-env=vulkan1.3 -O ${SHADER} -o ${SPV_OUT}
-        DEPENDS ${SHADER}
+        DEPENDS ${SHADER} ${SHADER_INCLUDES}
         COMMENT "Compiling shader ${SHADER_NAME}"
         VERBATIM)
     list(APPEND COMPILED_SHADERS ${SPV_OUT})

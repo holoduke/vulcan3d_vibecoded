@@ -240,6 +240,10 @@ void VulkanEngine::save_settings() const {
     f << "gi_shadow_max_bounce = " << rt_.gi_shadow_max_bounce << "\n";
     f << "ao_floor = "             << rt_.ao_floor             << "\n";
     f << "auto_exposure_strength = " << rt_.auto_exposure_strength << "\n";
+    f << "sky_mode = " << rt_.sky_mode << "\n";
+    f << "atmosphere_intensity = " << rt_.atmosphere_intensity << "\n";
+    f << "aerial_scale = " << rt_.aerial_scale << "\n";
+    f << "aerial_max_km = " << rt_.aerial_max_km << "\n";
     f << "use_merged_static_blas = " << (rt_.use_merged_static_blas ? 1 : 0) << "\n";
     f << "terrain_brush_radius = "   << terrain_brush_radius_   << "\n";
     f << "terrain_brush_strength = " << terrain_brush_strength_ << "\n";
@@ -695,6 +699,10 @@ void VulkanEngine::load_settings() {
             else if (key == "gi_shadow_max_bounce") rt_.gi_shadow_max_bounce = std::stoi(val);
             else if (key == "ao_floor")             rt_.ao_floor = std::stof(val);
             else if (key == "auto_exposure_strength") rt_.auto_exposure_strength = std::stof(val);
+            else if (key == "sky_mode") rt_.sky_mode = std::stoi(val);
+            else if (key == "atmosphere_intensity") rt_.atmosphere_intensity = std::stof(val);
+            else if (key == "aerial_scale") rt_.aerial_scale = std::stof(val);
+            else if (key == "aerial_max_km") rt_.aerial_max_km = std::stof(val);
             else if (key == "use_merged_static_blas") rt_.use_merged_static_blas = (std::stoi(val) != 0);
             else if (key == "terrain_brush_radius")   terrain_brush_radius_   = std::stof(val);
             else if (key == "terrain_brush_strength") terrain_brush_strength_ = std::stof(val);

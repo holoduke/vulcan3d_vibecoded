@@ -856,6 +856,8 @@ void VulkanEngine::draw(uint32_t img_index) {
     // is a real intermittent device-lost risk under load.
     // Auto-exposure: reduce the final HDR image to an adapted log-luminance
     // (compose binding 4) before the compose pass reads it.
+    // Physical sky LUTs + aerial perspective for compose (sky_mode 1).
+    if (rt_.sky_mode == 1) dispatch_atmosphere(frame.command_buffer);
     dispatch_exposure(frame.command_buffer);
     vkinit::transition_image_src_stage(
         frame.command_buffer, swapchain_images_[img_index],
@@ -902,6 +904,9 @@ void VulkanEngine::draw(uint32_t img_index) {
             // is under the brush hit (no separate gizmo geometry).
             glm::vec4 brush_indicator;
             glm::mat4 inv_view_proj;
+            // Physical sky: x = sky_mode (1 = atmosphere), y = intensity,
+            // z = camera radius in planet space (km), w = AP max distance (km).
+            glm::vec4 atmo;
         } pc_data{};
         float w = static_cast<float>(swapchain_extent_.width);
         float h = static_cast<float>(swapchain_extent_.height);
@@ -977,6 +982,10 @@ void VulkanEngine::draw(uint32_t img_index) {
             pc_data.brush_indicator = glm::vec4(0.0f);
         }
         pc_data.inv_view_proj = last_inv_view_proj_;   // cached
+        pc_data.atmo = glm::vec4((rt_.sky_mode == 1 && atmo_pipeline_) ? 1.0f : 0.0f,
+                                 std::max(0.0f, rt_.atmosphere_intensity),
+                                 6360.0f + std::max(current_frame_view_.eye_pos.y, 1.0f) * 0.001f,
+                                 std::max(0.5f, rt_.aerial_max_km));
         vkCmdPushConstants(frame.command_buffer, compose_pipeline_layout_,
                            VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(pc_data), &pc_data);

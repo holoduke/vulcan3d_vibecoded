@@ -80,6 +80,13 @@ struct RtSettings {
         // through a doorway over-expose into bloom. Strength 0 = off,
         // 1 = full eye-adaptation, ~0.5 = stylised (the default).
         float auto_exposure_strength = 0.5f;
+        // Physical sky (Hillaire 2020): 1 = atmosphere LUT sky + aerial
+        // perspective, 0 = HDRI panorama. intensity scales sky radiance,
+        // aerial_scale stretches haze distances (game scale vs real km).
+        int   sky_mode = 1;
+        float atmosphere_intensity = 5.0f;   // calibrated vs the old HDRI sky brightness
+        float aerial_scale = 6.0f;
+        float aerial_max_km = 8.0f;
         // Static-castle BLAS merging: true = one BLAS for all 151 brushes
         // (the merged path baked at level load), false = per-brush TLAS
         // instance pointing at the shared cube BLAS (the original path).

@@ -1,0 +1,184 @@
+#version 460
+// Atmosphere LUT generation (Hillaire 2020). One shader, four passes
+// selected by pc.sun.w:
+//   0 transmittance LUT   (init)
+//   1 multi-scattering LUT (init, needs 0)
+//   2 sky-view LUT        (per frame, needs 0 + 1)
+//   3 aerial-perspective froxel volume (per frame, needs 0 + 1)
+#include "atmosphere.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D u_trans;
+layout(set = 0, binding = 1) uniform sampler2D u_ms;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D o_trans;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D o_ms;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D o_sky;
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image3D o_ap;
+
+layout(push_constant) uniform PC {
+    vec4 sun;      // xyz = direction toward the sun (world == planet frame), w = pass
+    vec4 cam;      // xyz = camera position in planet space (km), w = aerial distance scale
+    vec4 eye;      // xyz = camera world position (m), w = AP max distance (km, unscaled)
+    mat4 inv_vp;   // world inverse view-projection (froxel directions)
+} pc;
+
+vec3 trans_lookup(float r, float mu) { return textureLod(u_trans, trans_uv(r, mu), 0.0).rgb; }
+vec3 ms_lookup(float r, float mu_s)  { return textureLod(u_ms, ms_uv(r, mu_s), 0.0).rgb; }
+
+// Single + multiple scattering source at point p (planet space, km).
+vec3 scatter_source(vec3 p, vec3 rd, vec3 sun, Medium m) {
+    float r = length(p);
+    vec3  up = p / r;
+    float mu_s = dot(up, sun);
+    vec3  ts = trans_lookup(r, mu_s);
+    float shadow = (ray_sphere(p, sun, kBottomRadius) > 0.0) ? 0.0 : 1.0;   // planet shadow
+    float c = dot(rd, sun);
+    vec3 single = (m.scat_r * phase_rayleigh(c) + m.scat_m * phase_mie(c)) * ts * shadow;
+    vec3 multi  = (m.scat_r + m.scat_m) * ms_lookup(r, mu_s);
+    return single + multi;
+}
+
+// Integrate in-scattered radiance (unit sun illuminance) + transmittance
+// along [0, t_max] with Hillaire's energy-conserving step integration.
+void integrate(vec3 ro, vec3 rd, vec3 sun, float t_max, int steps,
+               inout vec3 L, inout vec3 T) {
+    float dt = t_max / float(steps);
+    for (int i = 0; i < steps; ++i) {
+        vec3 p = ro + rd * ((float(i) + 0.3) * dt);
+        Medium m = sample_medium(length(p) - kBottomRadius);
+        vec3 S  = scatter_source(p, rd, sun, m);
+        vec3 st = exp(-m.ext * dt);
+        vec3 Sint = (S - S * st) / max(m.ext, vec3(1e-7));
+        L += T * Sint;
+        T *= st;
+    }
+}
+
+float ray_length(vec3 ro, vec3 rd) {
+    float tg = ray_sphere(ro, rd, kBottomRadius);
+    float tt = ray_sphere(ro, rd, kTopRadius);
+    if (tg > 0.0) return tg;
+    return max(tt, 0.0);
+}
+
+void pass_transmittance(ivec2 px) {
+    if (any(greaterThanEqual(px, kTransLut))) return;
+    vec2 uv = (vec2(px) + 0.5) / vec2(kTransLut);
+    float r, mu;
+    trans_params(uv, r, mu);
+    vec3 ro = vec3(0.0, r, 0.0);
+    vec3 rd = vec3(sqrt(max(0.0, 1.0 - mu * mu)), mu, 0.0);
+    float tmax = ray_sphere(ro, rd, kTopRadius);
+    vec3 od = vec3(0.0);
+    const int N = 40;
+    float dt = max(tmax, 0.0) / float(N);
+    for (int i = 0; i < N; ++i) {
+        vec3 p = ro + rd * ((float(i) + 0.5) * dt);
+        od += sample_medium(length(p) - kBottomRadius).ext * dt;
+    }
+    imageStore(o_trans, px, vec4(exp(-od), 1.0));
+}
+
+// Hillaire 2020 sec. 5.5: second-order isotropic luminance + transfer
+// factor f_ms, infinite-order closed form Psi = L2 / (1 - f_ms).
+void pass_multiscatter(ivec2 px) {
+    if (any(greaterThanEqual(px, kMsLut))) return;
+    vec2 uv = (vec2(px) + 0.5) / vec2(kMsLut);
+    float mu_s = uv.x * 2.0 - 1.0;
+    float r = kBottomRadius + uv.y * (kTopRadius - kBottomRadius);
+    vec3 ro = vec3(0.0, r, 0.0);
+    vec3 sun = vec3(sqrt(max(0.0, 1.0 - mu_s * mu_s)), mu_s, 0.0);
+    vec3 L2 = vec3(0.0), fms = vec3(0.0);
+    const int SQ = 8;
+    for (int a = 0; a < SQ; ++a) {
+        for (int b = 0; b < SQ; ++b) {
+            float th = kAtmoPI * (float(a) + 0.5) / float(SQ);
+            float ph = acos(1.0 - 2.0 * (float(b) + 0.5) / float(SQ));
+            vec3 rd = vec3(cos(th) * sin(ph), cos(ph), sin(th) * sin(ph));
+            float tmax = ray_length(ro, rd);
+            const int N = 20;
+            float dt = tmax / float(N);
+            vec3 T = vec3(1.0), L = vec3(0.0), F = vec3(0.0);
+            for (int i = 0; i < N; ++i) {
+                vec3 p = ro + rd * ((float(i) + 0.3) * dt);
+                float pr = length(p);
+                Medium m = sample_medium(pr - kBottomRadius);
+                vec3 ts = trans_lookup(pr, dot(p / pr, sun));
+                float sh = (ray_sphere(p, sun, kBottomRadius) > 0.0) ? 0.0 : 1.0;
+                vec3 scat = m.scat_r + m.scat_m;
+                vec3 S = scat * (1.0 / (4.0 * kAtmoPI)) * ts * sh;   // isotropic phase
+                vec3 st = exp(-m.ext * dt);
+                vec3 ie = (1.0 - st) / max(m.ext, vec3(1e-7));
+                L += T * S * ie;
+                F += T * scat * ie;
+                T *= st;
+            }
+            // Ground bounce (Lambert) when the ray hits the planet.
+            float tg = ray_sphere(ro, rd, kBottomRadius);
+            if (tg > 0.0) {
+                vec3 gp = ro + rd * tg;
+                float nl = max(dot(normalize(gp), sun), 0.0);
+                L += T * trans_lookup(kBottomRadius, nl) * nl * kGroundAlbedo / kAtmoPI;
+            }
+            L2 += L;
+            fms += F;
+        }
+    }
+    float inv = 1.0 / float(SQ * SQ);
+    L2 *= inv;
+    // Uniform sphere sampling: 4pi * mean * isotropic phase 1/4pi = mean.
+    fms *= inv;
+    vec3 psi = L2 / max(1.0 - fms, vec3(1e-3));
+    imageStore(o_ms, px, vec4(psi, 1.0));
+}
+
+void pass_skyview(ivec2 px) {
+    if (any(greaterThanEqual(px, kSkyViewLut))) return;
+    vec2 uv = (vec2(px) + 0.5) / vec2(kSkyViewLut);
+    float elev, az;
+    skyview_params(uv, elev, az);
+    vec3 ro = pc.cam.xyz;
+    float r = length(ro);
+    vec3 up = ro / r;
+    // Local frame: up, sun azimuth axis.
+    vec3 sun = normalize(pc.sun.xyz);
+    vec3 sh = sun - up * dot(sun, up);
+    vec3 fwd = (dot(sh, sh) > 1e-6) ? normalize(sh) : vec3(1.0, 0.0, 0.0);
+    vec3 side = cross(up, fwd);
+    vec3 rd = up * sin(elev) + (fwd * cos(az) + side * sin(az)) * cos(elev);
+    float tmax = ray_length(ro, rd);
+    vec3 L = vec3(0.0), T = vec3(1.0);
+    integrate(ro, rd, sun, tmax, 30, L, T);
+    imageStore(o_sky, px, vec4(L, 1.0));
+}
+
+// Aerial perspective: one thread per froxel column, 32 depth slices with a
+// quadratic distribution up to eye.w km; each slice stores the in-scatter
+// (unit sun) and the mean transmittance from the camera to that depth.
+void pass_aerial(ivec2 px) {
+    if (any(greaterThanEqual(px, ivec2(32)))) return;
+    vec2 uv = (vec2(px) + 0.5) / 32.0;
+    vec4 wf = pc.inv_vp * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+    vec3 rd = normalize(wf.xyz / wf.w - pc.eye.xyz);
+    vec3 ro = pc.cam.xyz;
+    vec3 sun = normalize(pc.sun.xyz);
+    vec3 L = vec3(0.0), T = vec3(1.0);
+    float prev = 0.0;
+    for (int k = 0; k < 32; ++k) {
+        float s = (float(k) + 1.0) / 32.0;
+        float d = pc.eye.w * s * s * pc.cam.w;          // km, scaled
+        integrate(ro + rd * prev, rd, sun, d - prev, 2, L, T);
+        prev = d;
+        imageStore(o_ap, ivec3(px, k), vec4(L, dot(T, vec3(1.0 / 3.0))));
+    }
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    int pass = int(pc.sun.w + 0.5);
+    if (pass == 0) pass_transmittance(px);
+    else if (pass == 1) pass_multiscatter(px);
+    else if (pass == 2) pass_skyview(px);
+    else pass_aerial(px);
+}

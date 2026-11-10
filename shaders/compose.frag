@@ -54,7 +54,51 @@ layout(push_constant) uniform ComposePC {
     // ring band so the radius shows on whatever surface the brush hit.
     vec4 brush_indicator;
     mat4 inv_view_proj;  // for view-ray reconstruction
+    vec4 atmo;           // x sky_mode (1 = physical), y intensity, z camera radius (km), w AP max km
 } pc;
+
+#include "atmosphere.glsl"
+// Physical atmosphere (atmosphere.comp, GENERAL layout).
+layout(set = 0, binding = 5) uniform sampler2D u_atmo_trans;
+layout(set = 0, binding = 6) uniform sampler2D u_atmo_sky;
+layout(set = 0, binding = 7) uniform sampler3D u_atmo_ap;
+
+vec3 atmo_sun_illum() {
+    // x pi: the engine folds 1/pi into its sun intensity (diffuse =
+    // albedo * E * N.L), Hillaire LUTs are per unit PHYSICAL illuminance.
+    return pc.sun_color.rgb * pc.sun_color.a * pc.atmo.y * 3.14159265;
+}
+// Sky radiance from the sky-view LUT + a transmittance-tinted sun disc.
+vec3 atmo_sky(vec3 dir) {
+    vec3 sun = normalize(pc.sun_dir.xyz);
+    float elev = asin(clamp(dir.y, -1.0, 1.0));
+    vec2 dxz = dir.xz, sxz = sun.xz;
+    float az = 0.0;
+    if (dot(dxz, dxz) > 1e-8 && dot(sxz, sxz) > 1e-8)
+        az = acos(clamp(dot(normalize(dxz), normalize(sxz)), -1.0, 1.0));
+    vec3 L = textureLod(u_atmo_sky, skyview_uv(elev, az), 0.0).rgb;
+    // Sun disc (0.27 deg radius, soft limb), dimmed by the atmosphere and
+    // hidden below the horizon.
+    float c = dot(dir, sun);
+    float disc = smoothstep(0.99996, 0.999985, c);
+    if (disc > 0.0 && dir.y > -0.02) {
+        vec3 ts = textureLod(u_atmo_trans, trans_uv(pc.atmo.z, dir.y), 0.0).rgb;
+        L += ts * disc * 60.0;
+    }
+    return L * atmo_sun_illum();
+}
+// Aerial perspective at world distance d_km: rgb in-scatter (unit sun),
+// a = transmittance. Slices are quadratic in distance (atmosphere.comp).
+vec4 atmo_aerial(vec2 uv, float d_km) {
+    float s = sqrt(clamp(d_km / pc.atmo.w, 0.0, 1.0));
+    float w = s * 32.0 - 1.0;
+    if (w < 0.0) {
+        vec4 a0 = textureLod(u_atmo_ap, vec3(uv, 0.5 / 32.0), 0.0);
+        float f = clamp(s * 32.0, 0.0, 1.0);
+        return vec4(a0.rgb * f, mix(1.0, a0.a, f));
+    }
+    return textureLod(u_atmo_ap, vec3(uv, (w + 0.5) / 32.0), 0.0);
+}
 
 vec3 aces_fitted(vec3 x) {
     const mat3 in_m = mat3(
@@ -575,8 +619,21 @@ void main() {
             // bilinear weights, so only a bilinear base cancels the clear
             // colour exactly (EASU weights left light / dark edge dots).
             vec3 base = texture(history_color, sample_uv).rgb;
-            hdr = base + (sample_sky(dir) - kClear) * T;
+            vec3 sky_rad = (pc.atmo.x > 0.5) ? atmo_sky(dir) : sample_sky(dir);
+            hdr = base + (sky_rad - kClear) * T;
         }
+    }
+
+    // Aerial perspective (physical sky): in-scatter + extinction between
+    // the camera and every geometry pixel, from the froxel volume - the
+    // distance haze that ties far mountains / forests into the sky colour.
+    if (pc.atmo.x > 0.5 && depth < 0.99999) {
+        vec2 uvp = gl_FragCoord.xy * pc.viewport.zw;
+        vec4 wp  = pc.inv_view_proj * vec4(uvp * 2.0 - 1.0, depth, 1.0);
+        vec4 ep  = pc.inv_view_proj * vec4(uvp * 2.0 - 1.0, 0.0, 1.0);   // near plane ~ eye
+        float dkm = distance(wp.xyz / wp.w, ep.xyz / ep.w) * 0.001;
+        vec4 ap = atmo_aerial(uvp, dkm);
+        hdr = hdr * ap.a + ap.rgb * atmo_sun_illum();
     }
 
     // FSR1 RCAS — robust contrast-adaptive sharpening on the EASU-
