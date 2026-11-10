@@ -399,37 +399,32 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
             if (elig < kEligThresh) continue;
             // Density-driven per-cell skip — only hash the cells we
             // didn't already reject by mask.
-            vec4 r = hash42(nId);
-            if (r.x > density_eff) continue;
+            // Up to two blades per cell: density 0..1 fills cells, 1..2 adds
+            // a second blade (near rings only - the far single-cell path
+            // keeps one). Each blade gets its own lean and width variation.
+            const int nb = (density_eff > 1.0 && rad > 0) ? 2 : 1;
+            for (int bi = 0; bi < nb; ++bi) {
+            vec4 r = hash42(nId + vec2(31.7, 47.3) * float(bi));
+            if (r.x > density_eff - float(bi)) continue;
             vec3 np = lp - vec3(float(dx), 0.0, float(dy)) * kPeriod;
             // Per-blade rotation + sub-cell xy offset.
             np.xz = rotate2d(r.z * kPi2) * np.xz;
             np.xz += (r.xy - 0.5) * kPeriod;
-            // World blade-height factor. The SDF blade is ~1.7 units
-            // tall intrinsically; pc.grass_params.w carries the UI
-            // height slider, ×0.21 lands the default (≈1.0) at
-            // ~0.25-0.37 m blades — lawn scale, matching the instanced
-            // raster grass. (Was unscaled: every blade was 1.1-1.7 m
-            // and read as sparse dark spears towering over the lawn.)
             float bh = clamp(pc.grass_params.w, 0.05, 3.0) * 0.36;
-            // Wind sway — bend the blade as a function of height (np.y).
-            // Per-blade phase + global time. Magnitude scales with wind
-            // strength (pc.color.y); profile normalised to blade height.
+            // Wind sway + a per-blade static lean (some blades stand, some
+            // splay out), bending with height.
             float wind_t = pc.color.z + r.w * kPi2;
             float bend   = sin(wind_t * 1.4) * pc.color.y * 0.025;
-            np.x += bend * smoothstep(0.0, 1.7 * bh, np.y);
-            // sqrt(r.w) gives a more uniform-looking height distribution
-            // than the raw [0,1] hash.
+            float lean   = (fract(r.w * 13.7 + r.z * 5.3) - 0.5) * 0.30;
+            np.x += (bend + lean * bh) * smoothstep(0.0, 1.7 * bh, np.y);
             float scale = max(0.65, sqrt(r.w)) * bh;
-            // Multiply the scaled-space SDF back by `scale` so the
-            // returned value is a true (conservative) world distance —
-            // sdf(p/s) alone overestimates by 1/s for s < 1 and lets the
-            // sphere-trace tunnel straight through thin blades.
-            float bladeDist = sdGrassBlade(np / scale, 0.002 / scale) * scale;
+            float thick = 0.002 * (0.7 + 0.8 * fract(r.z * 7.1));
+            float bladeDist = sdGrassBlade(np / scale, thick / scale) * scale;
             if (bladeDist < d) {
                 d = bladeDist;
                 out_blade_hit = true;
                 g_blade_rot = r.z * kPi2;
+            }
             }
         }
     }
@@ -493,7 +488,7 @@ void main() {
         float slope_n_min = scene.grass_extra.z;
         ctx.slope_max = sqrt(max(1e-4,
                                   1.0 / max(slope_n_min * slope_n_min, 1e-4) - 1.0));
-        float density   = clamp(scene.grass_color_top.w, 0.0, 1.0);
+        float density   = clamp(scene.grass_color_top.w, 0.0, 2.0);   // >1: 2nd blade per cell
         float dist_dens = clamp(scene.grass_extra.w, 0.0, 1.0);
         float far_mul   = max(1.0 - dist_dens * 0.85, 0.0);
         ctx.density_eff_near = density;
