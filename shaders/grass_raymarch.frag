@@ -532,7 +532,12 @@ void main() {
             // ~all steps were spent sphere-tracing through air.
             vec3  ps = sp.xyz / sp.w;
             float yS = sampleHeight_lod(ps.xz, t_surf);
-            if (abs(ps.y - yS) < 0.6) {
+            // NOT when the prepass surface is under water: the depth there
+            // is the lake BED (water isn't in the prepass), far behind the
+            // shore blades that silhouette against the water - starting
+            // the march near the bed skipped them all (no grass in front
+            // of water).
+            if (abs(ps.y - yS) < 0.6 && ps.y > scene.water_params.y + 0.05) {
                 vec3  Ns   = calcTerrainNormalApprox(ps.xz, yS, t_surf);
                 float cosg = abs(dot(rd, Ns));
                 float back = min(14.0, 0.9 / max(cosg, 0.06));
