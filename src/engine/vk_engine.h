@@ -2115,6 +2115,9 @@ private:
     PFN_vkAcquireNextImageKHR sl_acquire_fn_ = nullptr;
     PFN_vkQueuePresentKHR     sl_present_fn_ = nullptr;
     VkShaderModule         compose_frag_module_ = VK_NULL_HANDLE;
+    VkShaderModule         sky_fill_frag_module_ = VK_NULL_HANDLE;   // compose.frag -DSKY_FILL
+    VkPipeline             sky_fill_pipeline_ = VK_NULL_HANDLE;
+    bool                   atmo_dispatched_this_frame_ = false;
 
     // --- Bloom mip chain (Karis-style downsample + tent upsample) ---
     static constexpr int kBloomMips = 5;

@@ -94,6 +94,17 @@ void VulkanEngine::init_compose() {
     ccfg.depth_test = false;
     ccfg.depth_write = false;
     compose_pipeline_ = vkpipe::build_graphics_pipeline(device_, ccfg);
+    // Sky fill (compose.frag -DSKY_FILL): same layout / set / push
+    // constants, renders into the render-res scene colour before DLSS.
+    {
+        std::string sd3 = QLIKE_SHADER_DIR;
+        sky_fill_frag_module_ = vkpipe::load_shader_module(device_, sd3 + "/sky_fill.frag.spv");
+        vkpipe::GraphicsPipelineConfig scfg = ccfg;
+        scfg.frag = sky_fill_frag_module_;
+        scfg.color_format = scene_color_format_;
+        scfg.dst_alpha_add_blend = true;
+        sky_fill_pipeline_ = vkpipe::build_graphics_pipeline(device_, scfg);
+    }
     log::info("Compose pass initialized (ACES Fitted tonemap + sRGB encode)");
 }
 
@@ -183,6 +194,9 @@ void VulkanEngine::rewrite_compose_image_bindings() {
 void VulkanEngine::destroy_compose() {
     destroy_exposure();
     destroy_atmosphere();
+    if (sky_fill_pipeline_)        vkDestroyPipeline(device_, sky_fill_pipeline_, nullptr);
+    if (sky_fill_frag_module_)     vkDestroyShaderModule(device_, sky_fill_frag_module_, nullptr);
+    sky_fill_pipeline_ = VK_NULL_HANDLE; sky_fill_frag_module_ = VK_NULL_HANDLE;
     if (compose_pipeline_)         vkDestroyPipeline(device_, compose_pipeline_, nullptr);
     if (compose_pipeline_layout_)  vkDestroyPipelineLayout(device_, compose_pipeline_layout_, nullptr);
     if (compose_frag_module_)      vkDestroyShaderModule(device_, compose_frag_module_, nullptr);

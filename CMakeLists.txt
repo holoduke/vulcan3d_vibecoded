@@ -468,6 +468,20 @@ add_custom_command(
     VERBATIM)
 list(APPEND COMPILED_SHADERS ${CUBE_GBUF_SPV})
 
+# Sky-fill variant of compose.frag: writes the real sky into the render-res
+# scene colour BEFORE DLSS (exact colour/alpha alignment), so DLSS upscales
+# a finished sky instead of compose rebuilding it at silhouettes afterwards.
+set(SKY_FILL_SPV "${SHADER_OUTPUT_DIR}/sky_fill.frag.spv")
+add_custom_command(
+    OUTPUT ${SKY_FILL_SPV}
+    COMMAND ${Vulkan_GLSLC_EXECUTABLE} --target-env=vulkan1.3 -O
+            -DSKY_FILL=1 -fshader-stage=frag
+            ${CMAKE_SOURCE_DIR}/shaders/compose.frag -o ${SKY_FILL_SPV}
+    DEPENDS ${CMAKE_SOURCE_DIR}/shaders/compose.frag ${SHADER_INCLUDES}
+    COMMENT "Compiling shader sky_fill.frag (compose sky-fill variant)"
+    VERBATIM)
+list(APPEND COMPILED_SHADERS ${SKY_FILL_SPV})
+
 if(COMPILED_SHADERS)
     add_custom_target(shaders ALL DEPENDS ${COMPILED_SHADERS})
     add_dependencies(quake_like shaders)

@@ -61,6 +61,10 @@ struct GraphicsPipelineConfig {
     // attachments. Output alpha 0 = purely additive. Used by the FX pass.
     bool premultiplied_blend = false;
 
+    // Sky fill: colour += src * dst.alpha (dst alpha = sky coverage),
+    // alpha left untouched.
+    bool dst_alpha_add_blend = false;
+
     // Enables VK_DYNAMIC_STATE_DEPTH_BIAS so the caller can drive depth
     // bias per-frame via vkCmdSetDepthBias. Required for the shadow-map
     // depth-only pipeline (slope-scale + constant bias to combat acne).

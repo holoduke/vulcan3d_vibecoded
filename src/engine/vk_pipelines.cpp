@@ -147,8 +147,16 @@ VkPipeline build_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig
     for (uint32_t ai = 0; ai < resolved_color_count; ++ai) {
         VkPipelineColorBlendAttachmentState& blend = blends[ai];
         bool alpha_blend = cfg.alpha_blend_color0_only && ai == 0;
-        blend.blendEnable = (cfg.additive_blend || alpha_blend || cfg.premultiplied_blend) ? VK_TRUE : VK_FALSE;
-        if (cfg.premultiplied_blend) {
+        blend.blendEnable = (cfg.additive_blend || alpha_blend || cfg.premultiplied_blend ||
+                             cfg.dst_alpha_add_blend) ? VK_TRUE : VK_FALSE;
+        if (cfg.dst_alpha_add_blend) {
+            blend.srcColorBlendFactor = VK_BLEND_FACTOR_DST_ALPHA;
+            blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend.alphaBlendOp        = VK_BLEND_OP_ADD;
+        } else if (cfg.premultiplied_blend) {
             blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
             blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             blend.colorBlendOp        = VK_BLEND_OP_ADD;

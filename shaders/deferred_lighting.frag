@@ -345,7 +345,15 @@ void main() {
     // descriptor set. Pass scene_color through so the forward sky path
     // wins at depth=1, matching cube.frag's behaviour exactly.
     if (z >= 0.999999) {
-        outColor = vec4(texture(u_scene_color, uv).rgb, 1.0);
+        // Clear-colour sky pixels get the frame sky colour instead (compose
+        // subtracts the same value via pc.sky_color before adding the real
+        // sky): any DLSS colour-vs-alpha mismatch at silhouettes then
+        // scales (sky - ~sky) instead of (sky - light-blue clear), which
+        // left dotted dark pixels along every edge against the sky.
+        vec3 sc = texture(u_scene_color, uv).rgb;
+        if (all(lessThan(abs(sc - vec3(0.55, 0.72, 0.95)), vec3(0.004))))
+            sc = scene.sky_color.rgb;
+        outColor = vec4(sc, 1.0);
         return;
     }
     vec4 clip = vec4(ndc, z, 1.0);
@@ -390,7 +398,9 @@ void main() {
     // albedo as "no real gbuffer write here" and pass scene_color.
     if (material_id >= 5 || material_id == 0 ||
         dot(g0.rgb, vec3(1.0)) < 1e-4) {
-        outColor = vec4(texture(u_scene_color, uv).rgb, 1.0);
+        // alpha 0 = geometry: carries exact sky COVERAGE through DLSS
+        // (sky pixels keep 1, FX multiply it down to transmittance).
+        outColor = vec4(texture(u_scene_color, uv).rgb, 0.0);
         return;
     }
 
@@ -1454,6 +1464,6 @@ void main() {
         if (fog_t > 1e-4) lit = mix(lit, fog_rgb, fog_t);
     }
 
-    outColor = vec4(lit, 1.0);
+    outColor = vec4(lit, 0.0);   // alpha 0 = geometry (sky coverage, see above)
 }
 

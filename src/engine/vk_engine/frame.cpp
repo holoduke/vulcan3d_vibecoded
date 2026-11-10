@@ -53,6 +53,29 @@
 #endif
 
 namespace qlike {
+// Compose push constants (compose.frag + its -DSKY_FILL variant).
+struct ComposePC {
+    glm::vec4 viewport;
+    glm::vec4 bloom_params;
+    glm::vec4 sun_dir;
+    glm::vec4 sun_color;
+    glm::vec4 sky_color;
+    glm::vec4 flare_params;   // strength, threshold, dispersal, halo_w
+    glm::vec4 flare_params2;  // ghost_count, aberration, enabled, _
+    glm::vec4 sun_screen;     // xy = sun screen-uv, z = visibility (0/1), w = spare
+    glm::vec4 sharpen_params; // x = post-TAA unsharp strength, yzw spare
+    // Brush indicator ring drawn on the terrain in compose.frag.
+    // xy = brush world XZ, z = brush radius (m), w = enabled (0/1).
+    // Reconstructs each pixel's world position from depth +
+    // inv_view_proj so the ring projects onto whatever surface
+    // is under the brush hit (no separate gizmo geometry).
+    glm::vec4 brush_indicator;
+    glm::mat4 inv_view_proj;
+    // Physical sky: x = sky_mode (1 = atmosphere), y = intensity,
+    // z = camera radius in planet space (km), w = AP max distance (km).
+    glm::vec4 atmo;
+    glm::vec4 tone;   // x = tonemap mode (0 ACES, 1 AgX, 2 PBR Neutral)
+};
 
 void VulkanEngine::draw(uint32_t img_index) {
     auto& frame = current_frame();
@@ -710,6 +733,69 @@ void VulkanEngine::draw(uint32_t img_index) {
 
     prof_mark(frame.command_buffer, "taa");
 
+    // ---------- Pass 2.15: sky fill (DLSS path) ----------
+    // Put the real sky (atmosphere + clouds) into the render-res scene
+    // colour BEFORE DLSS. Sky coverage lives in the colour's alpha, written
+    // at the same jittered positions as the colour, so the blend
+    // (colour += (sky - placeholder) * dst.alpha) is exact per pixel. DLSS
+    // then upscales a finished image; compose no longer rebuilds the sky
+    // at silhouettes from a mismatched depth / upscaled alpha (dark rims).
+    atmo_dispatched_this_frame_ = false;
+    if (rt_.fsr2_enabled && rt_.fsr_backend == 2 && dlss_active() &&
+        deferred_lighting_active_ && sky_fill_pipeline_ != VK_NULL_HANDLE) {
+        VkCommandBuffer cmd = frame.command_buffer;
+        if (rt_.sky_mode == 1) {
+            dispatch_atmosphere(cmd);
+            atmo_dispatched_this_frame_ = true;
+        }
+        vkinit::transition_image(cmd, scene_color_image_,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        auto sc_att = vkinit::color_attachment_info(scene_color_view_, nullptr,
+                                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingInfo ri{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .pNext = nullptr, .flags = 0,
+            .renderArea = { {0, 0}, render_extent_ },
+            .layerCount = 1, .viewMask = 0,
+            .colorAttachmentCount = 1, .pColorAttachments = &sc_att,
+            .pDepthAttachment = nullptr, .pStencilAttachment = nullptr,
+        };
+        vkCmdBeginRendering(cmd, &ri);
+        VkViewport vp{ 0.0f, 0.0f, float(render_extent_.width), float(render_extent_.height), 0.0f, 1.0f };
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        VkRect2D sc{ {0, 0}, render_extent_ };
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_fill_pipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compose_pipeline_layout_,
+                                0, 1, &compose_desc_sets_[history_write_slot_], 0, nullptr);
+        ComposePC sp{};
+        const float rw = float(render_extent_.width), rh = float(render_extent_.height);
+        sp.viewport = glm::vec4(rw, rh, 1.0f / rw, 1.0f / rh);
+        {
+            float pitch = glm::radians(rt_.sun_pitch_deg), yaw = glm::radians(rt_.sun_yaw_deg);
+            glm::vec3 sun = glm::normalize(glm::vec3(std::cos(pitch) * std::sin(yaw), std::sin(pitch),
+                                                     std::cos(pitch) * std::cos(yaw)));
+            sp.sun_dir = glm::vec4(sun, rt_.sun_shaft_intensity);
+        }
+        sp.sun_color = glm::vec4(rt_.sun_color, rt_.sun_intensity * rt_.sun_glare_strength);
+        sp.sky_color = glm::vec4(last_sky_rgb_, 1.0f);
+        sp.flare_params2 = glm::vec4(0.0f, 0.0f, 0.0f, skybox_.hdr ? 1.0f : 0.0f);
+        sp.inv_view_proj = last_inv_view_proj_;
+        sp.atmo = glm::vec4((rt_.sky_mode == 1 && atmo_pipeline_) ? 1.0f : 0.0f,
+                            std::max(0.0f, rt_.atmosphere_intensity),
+                            6360.0f + std::max(current_frame_view_.eye_pos.y, 1.0f) * 0.001f,
+                            std::max(0.5f, rt_.aerial_max_km));
+        vkCmdPushConstants(cmd, compose_pipeline_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           sizeof(sp), &sp);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRendering(cmd);
+        vkinit::transition_image(cmd, scene_color_image_,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        prof_mark(cmd, "sky_fill");
+    }
+
     // ---------- Pass 2.2: FSR2 dispatch (optional, replaces TAAU) ----------
     // When FSR2 is on, the SDK does its own temporal accumulation +
     // upscale from raw scene_color/depth/motion (NOT from the TAA history,
@@ -870,7 +956,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     // Auto-exposure: reduce the final HDR image to an adapted log-luminance
     // (compose binding 4) before the compose pass reads it.
     // Physical sky LUTs + aerial perspective for compose (sky_mode 1).
-    if (rt_.sky_mode == 1) dispatch_atmosphere(frame.command_buffer);
+    if (rt_.sky_mode == 1 && !atmo_dispatched_this_frame_) dispatch_atmosphere(frame.command_buffer);
     if (rt_.fog_volumetric && fog_pipeline_) dispatch_fog(frame.command_buffer);
     prof_mark(frame.command_buffer, "sky_clouds");
     dispatch_exposure(frame.command_buffer);
@@ -902,28 +988,7 @@ void VulkanEngine::draw(uint32_t img_index) {
         vkCmdBindDescriptorSets(frame.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 compose_pipeline_layout_, 0, 1,
                                 &compose_desc_sets_[history_write_slot_], 0, nullptr);
-        struct ComposePC {
-            glm::vec4 viewport;
-            glm::vec4 bloom_params;
-            glm::vec4 sun_dir;
-            glm::vec4 sun_color;
-            glm::vec4 sky_color;
-            glm::vec4 flare_params;   // strength, threshold, dispersal, halo_w
-            glm::vec4 flare_params2;  // ghost_count, aberration, enabled, _
-            glm::vec4 sun_screen;     // xy = sun screen-uv, z = visibility (0/1), w = spare
-            glm::vec4 sharpen_params; // x = post-TAA unsharp strength, yzw spare
-            // Brush indicator ring drawn on the terrain in compose.frag.
-            // xy = brush world XZ, z = brush radius (m), w = enabled (0/1).
-            // Reconstructs each pixel's world position from depth +
-            // inv_view_proj so the ring projects onto whatever surface
-            // is under the brush hit (no separate gizmo geometry).
-            glm::vec4 brush_indicator;
-            glm::mat4 inv_view_proj;
-            // Physical sky: x = sky_mode (1 = atmosphere), y = intensity,
-            // z = camera radius in planet space (km), w = AP max distance (km).
-            glm::vec4 atmo;
-            glm::vec4 tone;   // x = tonemap mode (0 ACES, 1 AgX, 2 PBR Neutral)
-        } pc_data{};
+        ComposePC pc_data{};
         float w = static_cast<float>(swapchain_extent_.width);
         float h = static_cast<float>(swapchain_extent_.height);
         pc_data.viewport = glm::vec4(w, h, 1.0f / w, 1.0f / h);
@@ -950,7 +1015,9 @@ void VulkanEngine::draw(uint32_t img_index) {
         // brightness, not how much the sun illuminates the world.
         pc_data.sun_color = glm::vec4(rt_.sun_color,
                                       rt_.sun_intensity * rt_.sun_glare_strength);
-        pc_data.sky_color = glm::vec4(rt_.sky_color, 0.0f);
+        // Sky colour deferred wrote into clear sky pixels (w = 1 when the
+        // deferred pass ran); compose subtracts it before adding the sky.
+        pc_data.sky_color = glm::vec4(last_sky_rgb_, deferred_lighting_active_ ? 1.0f : 0.0f);
         pc_data.flare_params = glm::vec4(rt_.lens_flare_strength,
                                           rt_.lens_flare_threshold,
                                           rt_.lens_flare_dispersal,
@@ -998,7 +1065,10 @@ void VulkanEngine::draw(uint32_t img_index) {
             pc_data.brush_indicator = glm::vec4(0.0f);
         }
         pc_data.inv_view_proj = last_inv_view_proj_;   // cached
-        pc_data.tone = glm::vec4(float(rt_.tonemap_mode),
+        // tone.x: tonemap mode, +8 = colour is DLSS output whose alpha
+        // carries exact sky coverage (deferred writes geometry alpha 0).
+        pc_data.tone = glm::vec4(float(rt_.tonemap_mode) +
+                                     ((compose_uses_dlss_ && deferred_lighting_active_) ? 8.0f : 0.0f),
                                  (rt_.fog_volumetric && fog_pipeline_) ? std::max(20.0f, rt_.fog_max_dist) : 0.0f,
                                  hdr_active_ ? std::max(80.0f, rt_.hdr_paper_nits) : 0.0f,
                                  std::max(rt_.hdr_peak_nits, rt_.hdr_paper_nits));

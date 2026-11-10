@@ -637,6 +637,27 @@ vec4 fog_at(vec2 uvp, float dm) {
     return (s < 0.0) ? mix(vec4(0.0, 0.0, 0.0, 1.0), fs, clamp(s + 1.0, 0.0, 1.0)) : fs;
 }
 
+#ifdef SKY_FILL
+// Sky fill (render resolution, before DLSS). Blend state: colour +=
+// src * dst.alpha (dst.alpha = this pixel's sky coverage x FX transmittance,
+// written by deferred lighting / FX at the same jittered positions as the
+// colour), alpha untouched. Adds (real sky - placeholder) so the scene
+// colour holds the finished sky and DLSS upscales it with the geometry -
+// no post-upscale reconstruction at silhouettes (the dark rim).
+void main() {
+    float d = texelFetch(history_depth, ivec2(gl_FragCoord.xy), 0).r;
+    if (d < 0.99999) discard;
+    vec2 uv = gl_FragCoord.xy * pc.viewport.zw;
+    vec3 dir = view_ray(uv);
+    vec3 sky_rad = (pc.atmo.x > 0.5) ? atmo_sky(dir) : sample_sky(dir);
+    if (pc.atmo.x > 0.5) {
+        vec4 cl = textureLod(u_clouds, uv, 0.0);
+        sky_rad = sky_rad * (1.0 - cl.a) + cl.rgb;
+    }
+    vec3 X = (pc.sky_color.w > 0.5) ? pc.sky_color.rgb : vec3(0.55, 0.72, 0.95);
+    outColor = vec4(sky_rad - X, 0.0);
+}
+#else
 void main() {
     ivec2 ip = ivec2(gl_FragCoord.xy);
     // texelFetch indexes by integer texel coords, not UVs. When the
@@ -695,11 +716,43 @@ void main() {
         vec4 bw  = vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y));
         vec4 sky_m = vec4(greaterThanEqual(dg, vec4(0.99999)));
         float sky_w = dot(bw, sky_m);
-        if (sky_w > 0.0) {
+        if (pc.tone.x > 7.5) {
+            // DLSS output: alpha is the upscaled sky COVERAGE x FX
+            // transmittance (deferred writes geometry alpha 0), aligned
+            // with the colour by construction. The depth taps come from
+            // the JITTERED render-res depth - classifying silhouettes with
+            // them put sky on roof pixels (dark rim) and missed it on sky
+            // pixels (light rim), shifting every frame.
+            float a = clamp(texture(history_color, sample_uv).a, 0.0, 1.0);
+            if (a > 0.002) {
+                vec2 uv = gl_FragCoord.xy * pc.viewport.zw;
+                vec3 dir = view_ray(uv);
+                vec3 kClear = (pc.sky_color.w > 0.5) ? pc.sky_color.rgb : vec3(0.55, 0.72, 0.95);   // what deferred left in sky pixels
+                vec3 base = texture(history_color, sample_uv).rgb;
+                vec3 sky_rad = (pc.atmo.x > 0.5) ? atmo_sky(dir) : sample_sky(dir);
+                if (pc.atmo.x > 0.5) {
+                    vec4 cl = textureLod(u_clouds, sample_uv, 0.0);
+                    sky_rad = sky_rad * (1.0 - cl.a) + cl.rgb;
+                }
+                // The sky is already in the colour (sky-fill pass before
+                // DLSS); alpha only splits sky / object for haze + fog.
+                hdr = base;
+                if (sky_w < 0.999) {
+                    edge_w = a;
+                    edge_sky = sky_rad * a;
+                }
+            } else {
+                edge_w = 0.0;             // DLSS says geometry (whatever the depth taps say)
+            }
+            if (edge_w < 1.0) {
+                float ow = dot(bw, 1.0 - sky_m);
+                obj_depth = (ow > 1e-4) ? dot(bw * (1.0 - sky_m), dg) / ow : 0.9999;
+            }
+        } else if (sky_w > 0.0) {
             vec2 uv = gl_FragCoord.xy * pc.viewport.zw;
             vec3 dir = view_ray(uv);
             float T = dot(bw * sky_m, ag);
-            const vec3 kClear = vec3(0.55, 0.72, 0.95);   // frame.cpp clear_color
+            vec3 kClear = (pc.sky_color.w > 0.5) ? pc.sky_color.rgb : vec3(0.55, 0.72, 0.95);   // what deferred left in sky pixels
             // Bilinear colour whenever a sky tap is involved: T uses the
             // bilinear weights, so only a bilinear base cancels the clear
             // colour exactly (EASU weights left light / dark edge dots).
@@ -920,7 +973,7 @@ void main() {
     // values defensively.
     hdr = clamp(hdr, vec3(0.0), vec3(64.0));
 
-    int tm = int(pc.tone.x + 0.5);
+    int tm = int(pc.tone.x + 0.5) & 7;
     vec3 mapped = (tm == 1) ? agx(hdr) : (tm == 2) ? pbr_neutral(hdr) : aces_fitted(hdr);
     // Tone controls applied post-tonemap, pre-sRGB. Order: brightness
     // (linear scale) -> contrast (pivot around 0.5) -> gamma curve.
@@ -999,3 +1052,4 @@ void main() {
     enc += (ign - 0.5) / 255.0;
     outColor = vec4(enc, 1.0);
 }
+#endif  // SKY_FILL
