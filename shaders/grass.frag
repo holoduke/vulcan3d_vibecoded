@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_ray_query : require
 
 layout(location = 0) in vec3 vNormal;
@@ -30,42 +31,7 @@ vec2 _grass_octa_encode(vec3 n) {
     return e * 0.5 + 0.5;
 }
 
-layout(set = 0, binding = 0) uniform SceneUBO {
-    vec4  sun_direction;
-    vec4  sun_color;
-    vec4  ambient;
-    vec4  sky_color;
-    ivec4 rt_flags;
-    vec4  rt_params;
-    ivec4 rt_flags2;
-    vec4  rt_params2;
-    vec4  camera_pos;
-    vec4  rt_lod;
-    vec4  viewport;
-    vec4  muzzle_pos;
-    vec4  muzzle_color;
-    vec4  terrain_params;
-    vec4  terrain_h_low;
-    vec4  terrain_h_high;
-    vec4  grass_extra;   // x: height_scale, y: alpha_cutoff, z: slope_n_min, w: distance_density
-    vec4  grass_extra2;  // x: alt_min, y: alt_max, z: shadow_map_world_half
-    mat4  light_vp;      // unused in frag, keeps UBO layout identical
-    // Trailing fields. Most are unused here but the layout MUST line up
-    // so the side-lit knob at the tail maps to the right UBO offset.
-    // Mirror the cube.frag / internal.h order exactly. Adding a new
-    // field below requires the matching SceneUBO entry on the C++ side.
-    vec4  terrain_extra;
-    vec4  _scene_pad[24];
-    vec4  restir_params;
-    vec4  spom_params;
-    vec4  terrain_local_info;
-    vec4  _terrain_max_grid[256];
-    vec4  terrain_disp_params;
-    vec4  terrain_antitile_params;
-    vec4  grass_shadow_on_terrain_params;
-    // Side-lit grass shading. .x = strength, .y = master toggle.
-    vec4  grass_side_lit_params;
-} scene;
+#include "scene_ubo.glsl"
 
 // (Per-pixel sun_blocked() ray query was removed — the rasterised sun
 // shadow map at binding 7 covers grass shadowing now, sampled in

@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 
 // Ground clutter fragment: rock-textured Lambert with the scene's sun +
 // shadow + sky ambient. Ships pre-shaded colour through the gbuffer as
@@ -32,30 +33,7 @@ layout(location = 3) out vec4 outGBuffer1;
 const int kTextureCount = 15;
 layout(set = 0, binding = 3) uniform sampler2D u_albedo[kTextureCount];
 
-layout(set = 0, binding = 0) uniform SceneUBO {
-    vec4  sun_direction;
-    vec4  sun_color;
-    vec4  ambient;
-    vec4  sky_color;
-    ivec4 rt_flags;
-    vec4  rt_params;
-    ivec4 rt_flags2;
-    vec4  rt_params2;
-    vec4  camera_pos;
-    vec4  rt_lod;
-    vec4  viewport;
-    vec4  muzzle_pos;
-    vec4  muzzle_color;
-    vec4  terrain_params;
-    vec4  terrain_h_low;
-    vec4  terrain_h_high;
-    vec4  grass_extra;
-    vec4  grass_extra2;
-    mat4  light_vp;
-    vec4  terrain_extra;
-    vec4  _scene_pad[24];
-    vec4  restir_params;   // .zw = jitter delta (motion vectors)
-} scene;
+#include "scene_ubo.glsl"
 
 vec2 _octa_encode(vec3 n) {
     n /= (abs(n.x) + abs(n.y) + abs(n.z));

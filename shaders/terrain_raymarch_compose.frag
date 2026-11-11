@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 
 // Bilinear upscale + depth-aware composite for the half-res procedural
 // raymarched terrain. Runs as a fullscreen-tri AT THE START of the main
@@ -18,19 +19,7 @@
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
 
-layout(set = 0, binding = 0) uniform Scene {
-    vec4 sun_direction;
-    vec4 sun_color;
-    vec4 ambient;
-    vec4 sky_color;
-    ivec4 rt_flags;
-    vec4 rt_params;
-    ivec4 rt_flags2;
-    vec4 rt_params2;
-    vec4 camera_pos;
-    vec4 rt_lod;
-    vec4 viewport;
-} scene;
+#include "scene_ubo.glsl"
 
 // Push constants — same layout as cube.frag's PushConstants. We use
 //   pc.color.x = sharpen strength (0 = off, 1 = aggressive)

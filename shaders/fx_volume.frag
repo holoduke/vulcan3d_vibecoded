@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 // Raymarched explosion volume (fireball / smoke column / ground dust).
 //
 // Technique (volumetric explosions as used in games, cf. Dunn,
@@ -29,19 +30,7 @@ layout(push_constant) uniform PC {
     vec4 grass_params;
 } pc;
 
-layout(set = 0, binding = 0) uniform Scene {
-    vec4  sun_direction;
-    vec4  sun_color;
-    vec4  ambient;
-    vec4  sky_color;
-    ivec4 rt_flags;
-    vec4  rt_params;
-    ivec4 rt_flags2;
-    vec4  rt_params2;
-    vec4  camera_pos;
-    vec4  rt_lod;
-    vec4  viewport;
-} scene;
+#include "scene_ubo.glsl"
 
 // Prepass depth copy (terrain + castle meshes): bounds the march so the
 // fireball is cut by the ground instead of showing through it.

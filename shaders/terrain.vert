@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 
 // Quadtree CDLOD terrain vertex shader (vertex-free: no per-chunk
 // geometry). One shared grid patch is drawn instanced; each instance is
@@ -39,41 +40,7 @@ layout(set = 0, binding = 12) uniform sampler2D u_height[6];
 // Absolute terrain heightmap (R32F, (dim+1)^2, bilinear, clamp).
 layout(set = 0, binding = 17) uniform sampler2D u_heightmap_full;
 
-layout(set = 0, binding = 0) uniform SceneUBO {
-    vec4  sun_direction;
-    vec4  sun_color;
-    vec4  ambient;
-    vec4  sky_color;
-    ivec4 rt_flags;
-    vec4  rt_params;
-    ivec4 rt_flags2;
-    vec4  rt_params2;
-    vec4  camera_pos;
-    vec4  rt_lod;
-    vec4  viewport;
-    vec4  muzzle_pos;
-    vec4  muzzle_color;
-    vec4  terrain_params;
-    vec4  terrain_h_low;
-    vec4  terrain_h_high;
-    vec4  grass_extra;
-    vec4  grass_extra2;
-    mat4  light_vp;
-    vec4  terrain_extra;
-    vec4  _scene_pad[24];
-    vec4  restir_params;
-    vec4  spom_params;          // .z = ground tile metres (UI slider)
-    // Extended prefix (same as cube.vert) to reach the castle road.
-    vec4  _terrain_local_info;
-    vec4  _terrain_max_grid[256];
-    vec4  _terrain_disp_params;
-    vec4  _terrain_antitile_params;
-    vec4  _grass_shadow_on_terrain_params;
-    vec4  _grass_side_lit_params;
-    vec4  _voxel_origin, _voxel_dims, _voxel_grid;
-    vec4  road_info, road_bbox;   // .x count, .y paved half-width, .z verge
-    vec4  road_pts[64];
-} scene;
+#include "scene_ubo.glsl"
 
 // 0 on the paved road + verge, 1 off it: the rocky / FBM ground bumps
 // must not continue under the cobbles (the road is levelled in the

@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_ray_query : require
 #extension GL_ARB_conservative_depth : require
 
@@ -81,96 +82,7 @@ vec2 octa_encode(vec3 n) {
     return e * 0.5 + 0.5;
 }
 
-layout(set = 0, binding = 0) uniform SceneUBO {
-    vec4  sun_direction;
-    vec4  sun_color;
-    vec4  ambient;
-    vec4  sky_color;
-    ivec4 rt_flags;     // x:shadow_on, y:shadow_samples, z:ao_samples, w:frame
-    vec4  rt_params;    // x:shadow_softness, y:ao_radius, z:ambient_strength, w:shadow_strength
-    ivec4 rt_flags2;    // x:gi_samples, y:reflections_on, z:gi_bounces, w:ao_mode
-                        //   ao_mode: 0=off, 1=fast (2 short rays), 2=RTAO (full),
-                        //            3=HBAO (horizon-angle, contact AO)
-    vec4  rt_params2;   // x:gi_strength, y:gi_radius, z:reflection_strength,
-                        // w:shadow_curve (0=linear, 1=cubic)
-    vec4  camera_pos;   // xyz = world-space eye
-    vec4  rt_lod;       // x:lod_near, y:lod_far
-    vec4  viewport;     // x:w, y:h, z:1/w, w:1/h — used by motion-vec output
-    // Muzzle flash dynamic light. xyz = world-space origin, .w = intensity
-    // (0 disables the contribution). Color/radius live in muzzle_color.
-    vec4  muzzle_pos;
-    vec4  muzzle_color; // rgb = color (linear), w = falloff radius (m)
-    // Terrain shader knobs:
-    //   terrain_params.x = fog_strength (atmospheric perspective)
-    //   terrain_params.y = wrap_strength (half-Lambert)
-    //   terrain_params.z = detail_strength (texture brightness)
-    //   terrain_params.w = shadow_softness_scale (PCSS cone × this)
-    vec4  terrain_params;
-    // Per-layer height-blend smoothstep edges:
-    //   terrain_h_low.xy  = sand→grass start..end
-    //   terrain_h_low.zw  = grass→dirt start..end
-    //   terrain_h_high.xy = dirt→rock start..end
-    //   terrain_h_high.zw = rock→snow start..end
-    vec4  terrain_h_low;
-    vec4  terrain_h_high;
-    vec4  grass_extra;       // unused in cube.frag — laid out so grass_extra2.w is reachable
-    vec4  grass_extra2;      // .w = terrain_debug_mode (0=off, 1=Lambert, 2=normal, 3=face)
-    mat4  light_vp;          // unused in cube.frag — keeps UBO layout aligned
-    vec4  terrain_extra;     // .x = terrain shading contrast (n_dot_l power)
-    // 24 vec4 padding fields between terrain_extra and restir_params on
-    // the C++ side. cube.frag doesn't read any of them today (water,
-    // shore tints, distance fog, grass colours, etc. are consumed by
-    // terrain_raymarch.frag and grass_raymarch.frag). If a future
-    // change adds a use, replace the right slot with a named field.
-    vec4  _scene_pad[24];
-    // ReSTIR GI runtime knobs (see docs/restir_plan.md).
-    //   .x = enabled (0/1) — gates the temporal reservoir read below
-    //   .y = M_max (sample-count cap)
-    //   .z = disocclusion normal-dot threshold
-    vec4  restir_params;
-    // SPOM tuning. .x scales the per-pixel height-march depth (1 =
-    // engine default, 0 = flat / disabled). Other components reserved.
-    vec4  spom_params;
-    // Terrain local info — most slots used by other shaders. cube.frag
-    // only reads .z (half-rate-shadow consumer toggle: 1 means sample
-    // the binding-18 u_shadow_lr texture for brush/dyn surfaces instead
-    // of running the inline blocker+PCSS block below).
-    vec4  terrain_local_info;
-    // 32x32 hi-Z max-cell grid used by other shaders. cube.frag doesn't
-    // sample it but the layout must include it so the trailing
-    // terrain_disp_params below maps to the right UBO offset.
-    vec4  _terrain_max_grid[256];
-    // Rocky-grass vertex displacement + POM far-fade knobs.
-    //   .x = vertex displacement amplitude (m)
-    //   .y = displacement smoothing mip-bias (0 = crisp)
-    //   .z = per-pixel POM far-fade distance (m)
-    vec4  terrain_disp_params;
-    // Anti-tile ground sampling. .x = master toggle, .y = rotated-sample
-    // blend strength. Sampled in the is_terrain splat path only.
-    vec4  terrain_antitile_params;
-    // Grass-cast shadow on rasterised terrain (mask-march along sun XZ).
-    //   .x = strength (0 = off), .y = sample count, .z = max walk dist,
-    //   .w = master toggle (0/1 -- the C++ side gates this independently
-    //        of strength so a saved profile stays predictable).
-    vec4  grass_shadow_on_terrain_params;
-    // Side-lit grass shading -- consumed by grass.frag / grass_raymarch.frag.
-    // cube.frag carries the field so the UBO layout stays aligned.
-    //   .x = strength, .y = master toggle.
-    vec4  grass_side_lit_params;
-    // Voxel building (Session B). voxel_origin.w = enabled gate.
-    //   voxel_origin.xyz = world origin, .w = enabled (0/1)
-    //   voxel_dims.xyz   = world extent (m), .w = voxel size (m)
-    //   voxel_grid.xyz   = brick grid dims, .w = brick size (m)
-    vec4  voxel_origin;
-    vec4  voxel_dims;
-    vec4  voxel_grid;
-    // Castle road (see SceneUBO): .x count, .y paved half-width, .z verge.
-    vec4  road_info;
-    vec4  road_bbox;
-    vec4  road_pts[64];
-    vec4  grass_rm_params;    // .x blade height, .y wind, .z time, .w density
-    vec4  grass_rm_params2;   // .x slope_max, .y shadow on, .z strength
-} scene;
+#include "scene_ubo.glsl"
 
 // Half-rate shadow producer output, sampled when terrain_local_info.z
 // is on. linear_sampler_ → bilinear interpolation across the 4 nearest
@@ -1777,7 +1689,7 @@ void main() {
         terrain_sky_vis = t_aux.y;
 
         // ---- Automatic beach band from the live water level ----
-        // scene._scene_pad[0] aliases the C++ water_params
+        // scene.water_params aliases the C++ water_params
         // (.x = water enabled, .y = level). Sand owns everything from
         // below the waterline up into a band above it; grass/dirt NEVER
         // appear under or right at the water, with zero manual tuning.
@@ -1789,8 +1701,8 @@ void main() {
         // beach on gentle ground, a thin sand strip on steep coast — so
         // it visually hugs the shore instead of ringing the terrain at
         // one elevation.
-        float wtr_lvl = scene._scene_pad[0].y;
-        float wtr_on  = step(0.5, scene._scene_pad[0].x);
+        float wtr_lvl = scene.water_params.y;
+        float wtr_on  = step(0.5, scene.water_params.x);
         // (1) HARD guarantee: everything at or below the water line is
         // sand, ALWAYS — independent of any noise. This is what stops
         // grass ever appearing under water.
@@ -2152,7 +2064,7 @@ void main() {
         // visibility channel as the relief self-shadow (gbuffer1.b ->
         // deferred_lighting), so it works in the deferred path too.
         if (scene.grass_rm_params2.y > 0.5 && _grass_present > 0.02 &&
-            (scene._scene_pad[0].x < 0.5 || vWorldPos.y > scene._scene_pad[0].y + 0.05)) {
+            (scene.water_params.x < 0.5 || vWorldPos.y > scene.water_params.y + 0.05)) {
             float gstr = scene.grass_rm_params2.z;
             float near_w = 1.0 - smoothstep(13.0, 26.0, cam_dist);
             float far_vis = 1.0 - 0.45 * gstr * _grass_present *
@@ -2483,8 +2395,8 @@ void main() {
         // visible through the transparent water plane would otherwise
         // get the cavity-darken stacked on top of the water tint and
         // read as dark blotches on the lake floor.
-        float _wtr_lvl_far = scene._scene_pad[0].y;
-        float _wtr_on_far  = scene._scene_pad[0].x;
+        float _wtr_lvl_far = scene.water_params.y;
+        float _wtr_on_far  = scene.water_params.x;
         float above_water = (_wtr_on_far > 0.5)
             ? smoothstep(_wtr_lvl_far - 0.20, _wtr_lvl_far + 0.40, vWorldPos.y)
             : 1.0;
@@ -3575,8 +3487,8 @@ void main() {
         // shadow stacked with the see-through water tint reads as
         // black blotches when looking through the lake at a sandy
         // bottom near a grassy shore.
-        float _wtr_lvl_gs = scene._scene_pad[0].y;
-        float _wtr_on_gs  = scene._scene_pad[0].x;
+        float _wtr_lvl_gs = scene.water_params.y;
+        float _wtr_on_gs  = scene.water_params.x;
         bool above_water_gs = (_wtr_on_gs < 0.5) ||
                               (vWorldPos.y > _wtr_lvl_gs + 0.05);
         if (is_terrain_pre &&
@@ -4277,8 +4189,8 @@ void main() {
     // the scene never loses depth cues even if the user zeroes the
     // fog slider.
     {
-        vec4 dfog_col  = scene._scene_pad[17];
-        vec4 dfog_par  = scene._scene_pad[18];
+        vec4 dfog_col  = scene.distance_fog_color;
+        vec4 dfog_par  = scene.distance_fog_params;
         vec3 view_dir  = normalize(vWorldPos - scene.camera_pos.xyz);
         float fog_t    = 0.0;
         vec3  fog_rgb  = dfog_col.rgb;

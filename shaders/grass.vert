@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_ray_query : require
 
 // Per-vertex blade-mesh attributes (5-vert ribbon).
@@ -12,27 +13,7 @@ layout(location = 3) in vec4 inWorldPos;  // .xyz = blade base, .w = pad
 layout(location = 4) in vec4 inRotHeight; // .x = rotation_y, .y = height_factor, .zw = pad
 layout(location = 5) in vec4 inTint;      // .xyz = tint, .w = pad
 
-layout(set = 0, binding = 0) uniform SceneUBO {
-    vec4  sun_direction;
-    vec4  sun_color;
-    vec4  ambient;
-    vec4  sky_color;
-    ivec4 rt_flags;
-    vec4  rt_params;
-    ivec4 rt_flags2;
-    vec4  rt_params2;
-    vec4  camera_pos;
-    vec4  rt_lod;
-    vec4  viewport;
-    vec4  muzzle_pos;
-    vec4  muzzle_color;
-    vec4  terrain_params;
-    vec4  terrain_h_low;
-    vec4  terrain_h_high;
-    vec4  grass_extra;   // x: height_scale, y: alpha_cutoff, z: slope_n_min, w: distance_density
-    vec4  grass_extra2;  // x: alt_min, y: alt_max, z: shadow_map_world_half
-    mat4  light_vp;      // sun shadow map view-proj (world → light clip)
-} scene;
+#include "scene_ubo.glsl"
 
 layout(push_constant) uniform PC {
     mat4 mvp;

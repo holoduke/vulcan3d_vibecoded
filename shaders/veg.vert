@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 // GPU-driven vegetation / rock instances (vegetation.cpp). Draws come from
 // vkCmdDrawIndexedIndirect buckets (archetype x LOD) written by
 // veg_cull.comp; gl_InstanceIndex (incl. firstInstance) indexes the
@@ -21,41 +22,7 @@ layout(push_constant) uniform PC {
     vec4 grass_params;
 } pc;
 
-layout(set = 0, binding = 0) uniform SceneUBO {
-    vec4  sun_direction;
-    vec4  sun_color;
-    vec4  ambient;
-    vec4  sky_color;
-    ivec4 rt_flags;
-    vec4  rt_params;
-    ivec4 rt_flags2;
-    vec4  rt_params2;
-    vec4  camera_pos;
-    vec4  rt_lod;
-    vec4  viewport;
-    vec4  muzzle_pos;
-    vec4  muzzle_color;
-    vec4  terrain_params;
-    vec4  terrain_h_low;
-    vec4  terrain_h_high;
-    vec4  grass_extra;
-    vec4  grass_extra2;
-    mat4  light_vp;
-    vec4  terrain_extra;
-    vec4  _scene_pad[24];
-    vec4  restir_params;
-    vec4  spom_params;
-    vec4  _terrain_local_info;
-    vec4  _terrain_max_grid[256];
-    vec4  _terrain_disp_params;
-    vec4  _terrain_antitile_params;
-    vec4  _grass_shadow_on_terrain_params;
-    vec4  grass_side_lit_params;
-    vec4  _voxel_origin, _voxel_dims, _voxel_grid;
-    vec4  _road_info, _road_bbox;
-    vec4  _road_pts[64];
-    vec4  grass_rm_params;   // .y wind, .z time (s)
-} scene;
+#include "scene_ubo.glsl"
 
 struct VegInstance { vec4 pos_scale; vec4 rot_arch_phase; };
 layout(std430, set = 1, binding = 0) readonly buffer Instances { VegInstance inst[]; };

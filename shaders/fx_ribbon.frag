@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 // FX ribbons / billboards, premultiplied-alpha output (blend ONE,
 // ONE_MINUS_SRC_ALPHA): alpha = 0 output is purely additive (glows).
 //   pc.color.x = kind: 0 smoke trail, 1 glow beam (laser / afterburner),
@@ -20,19 +21,7 @@ layout(push_constant) uniform PC {
     vec4 grass_params;
 } pc;
 
-layout(set = 0, binding = 0) uniform Scene {
-    vec4  sun_direction;
-    vec4  sun_color;
-    vec4  ambient;
-    vec4  sky_color;
-    ivec4 rt_flags;
-    vec4  rt_params;
-    ivec4 rt_flags2;
-    vec4  rt_params2;
-    vec4  camera_pos;
-    vec4  rt_lod;
-    vec4  viewport;
-} scene;
+#include "scene_ubo.glsl"
 
 float h3(vec3 p) {
     p = fract(p * 0.3183099 + 0.1);

@@ -463,7 +463,7 @@ add_custom_command(
     COMMAND ${Vulkan_GLSLC_EXECUTABLE} --target-env=vulkan1.3 -O
             -DQLIKE_GBUFFER_ONLY=1 -fshader-stage=frag
             ${CMAKE_SOURCE_DIR}/shaders/cube.frag -o ${CUBE_GBUF_SPV}
-    DEPENDS ${CMAKE_SOURCE_DIR}/shaders/cube.frag
+    DEPENDS ${CMAKE_SOURCE_DIR}/shaders/cube.frag ${SHADER_INCLUDES}
     COMMENT "Compiling shader cube_gbuf.frag (G-buffer-only variant)"
     VERBATIM)
 list(APPEND COMPILED_SHADERS ${CUBE_GBUF_SPV})

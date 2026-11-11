@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_ray_query : require
 
 // Half-rate sun-shadow producer (roadmap item #4, Phase 2).
@@ -17,17 +18,7 @@
 // the full blocker-search + adaptive softness if Phase 3 measures
 // inadequate penumbra.
 
-layout(set = 0, binding = 0) uniform SceneUBO {
-    vec4  sun_direction;
-    vec4  sun_color;
-    vec4  ambient;
-    vec4  sky_color;
-    ivec4 rt_flags;     // .x:shadow_on, .y:shadow_samples, .w:frame
-    vec4  rt_params;    // .x:shadow_softness, .w:shadow_strength
-    ivec4 rt_flags2;
-    vec4  rt_params2;
-    vec4  camera_pos;
-} scene;
+#include "scene_ubo.glsl"
 
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 

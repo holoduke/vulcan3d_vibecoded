@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_ray_query : require
 
 // Raymarched grass — fullscreen pass that walks an SDF blade field.
@@ -25,90 +26,7 @@ layout(location = 1) out vec2 outMotion;
 layout(location = 2) out vec4 outGBuffer0;
 layout(location = 3) out vec4 outGBuffer1;
 
-layout(set = 0, binding = 0) uniform SceneUBO {
-    vec4  sun_direction;
-    vec4  sun_color;
-    vec4  ambient;
-    vec4  sky_color;
-    ivec4 rt_flags;
-    vec4  rt_params;
-    ivec4 rt_flags2;
-    vec4  rt_params2;
-    vec4  camera_pos;
-    vec4  rt_lod;
-    vec4  viewport;
-    vec4  muzzle_pos;
-    vec4  muzzle_color;
-    vec4  terrain_params;
-    vec4  terrain_h_low;
-    vec4  terrain_h_high;
-    vec4  grass_extra;
-    vec4  grass_extra2;
-    mat4  light_vp;
-    vec4  terrain_extra;
-    vec4  water_params;     // x: enabled, y: water level, z..w: unused here
-    vec4  water_color;
-    vec4  water_color_shallow;
-    vec4  water_shore;
-    // Layout match — terrain_raymarch.frag (and host SceneUBO) inserts
-    // these two between water_shore and fog_band. Unused in the grass
-    // pass, but the layout MUST stay aligned or every later field reads
-    // the wrong offset.
-    vec4  water_foam_color;
-    vec4  water_foam_params;
-    vec4  fog_band;
-    vec4  terrain_rt_extra;
-    // Grass colour palette + extras (UI-driven).
-    //   grass_color_top.rgb    = blade tip colour
-    //   grass_color_top.w      = raymarched grass density (0..1, per-cell skip)
-    //   grass_color_bottom.rgb = blade base colour
-    //   grass_color_bottom.w   = blade-base AO floor (0..1)
-    //   grass_color_ground.rgb     = CLOSE ground tint (terrain shader +
-    //                                 grass distance fade target)
-    //   grass_color_ground.w       = ground tint strength (terrain shader only)
-    //   grass_color_ground_far.rgb = FAR ground tint
-    vec4  grass_color_top;
-    vec4  grass_color_bottom;
-    vec4  grass_color_ground;
-    vec4  grass_color_ground_far;
-    // Layout padding: must mirror SceneUBO in internal.h. The terrain
-    // pass uses grass_shadow_params; grass shader doesn't need it but
-    // a missing field would shift grass_shore_color reads off-target.
-    vec4  grass_shadow_params;
-    // Shoreline grass tint — see SceneUBO comment in internal.h.
-    //   grass_shore_color.rgb = tint colour
-    //   grass_shore_color.w   = strength (0..1; 0 disables)
-    //   grass_shore_params.x  = fade distance (m above water level)
-    vec4  grass_shore_color;
-    vec4  grass_shore_params;
-    // Layout padding: terrain_shore_color/params consumed by terrain
-    // raymarch only; declared here so distance_fog lands at the right
-    // offset inside the shared SceneUBO.
-    vec4  terrain_shore_color;
-    vec4  terrain_shore_params;
-    // Distance fog — see SceneUBO comment in internal.h.
-    vec4  distance_fog_color;
-    vec4  distance_fog_params;
-    // Bare-terrain shore tint — consumed by terrain raymarch only;
-    // declared here only to keep the shared UBO offsets aligned.
-    vec4  terrain_shore_general_color;
-    vec4  terrain_shore_general_params;
-    vec4  terrain_sand_color;  // padding only — terrain raymarch uses
-    vec4  water_river_extra;   // padding — river-style tuning
-    vec4  water_river_extinct; // padding — river extinction
-    // Tail fields. We only consume grass_side_lit_params here, but the
-    // layout must reach it -- everything else is padding to match the
-    // shared SceneUBO offset map.
-    vec4  restir_params;
-    vec4  spom_params;
-    vec4  terrain_local_info;
-    vec4  _terrain_max_grid[256];
-    vec4  terrain_disp_params;
-    vec4  terrain_antitile_params;
-    vec4  grass_shadow_on_terrain_params;
-    // Side-lit grass shading. .x = strength, .y = master toggle.
-    vec4  grass_side_lit_params;
-} scene;
+#include "scene_ubo.glsl"
 
 // Heightmap (R32_SFLOAT) — shared with terrain raymarch + cube shaders.
 // kTerrainExtent matches terrain.cpp's world span (2048 m square).

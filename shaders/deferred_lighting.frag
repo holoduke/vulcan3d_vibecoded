@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_ray_query : require
 
 // Deferred lighting pass (Phases 3-6 of the deferred-render migration).
@@ -22,35 +23,7 @@
 layout(location = 0) in vec2 vUv;
 layout(location = 0) out vec4 outColor;
 
-layout(set = 0, binding = 0) uniform Scene {
-    vec4  sun_direction;
-    vec4  sun_color;
-    vec4  ambient;
-    vec4  sky_color;
-    ivec4 rt_flags;        // .x shadow_on, .y shadow_samples, .z ao_samples, .w frame
-    vec4  rt_params;       // .x shadow_softness, .y ao_radius, .z ambient_strength, .w shadow_strength
-    ivec4 rt_flags2;       // .w ao_mode
-    vec4  rt_params2;
-    vec4  camera_pos;
-    vec4  rt_lod;
-    vec4  viewport;
-    vec4  muzzle_pos;      // .xyz origin, .w intensity
-    vec4  muzzle_color;    // .rgb colour, .w radius (m)
-    // terrain_params.y = wrap_strength (sky-tint lift on back-facing
-    // terrain pixels — atmospheric scattering bounce onto shadow side).
-    // Other channels: .x fog_strength (unused here, fog has its own
-    // params below), .z detail_strength, .w shadow_softness_scale.
-    vec4  terrain_params;
-    // Remaining padding to reach the fog params at the same byte offsets
-    // cube.frag uses. 26 vec4 = terrain_h_low/high, grass_extra(x2),
-    // light_vp (4 vec4), terrain_extra, _scene_pad[0..16].
-    vec4  _pad_a[26];
-    // _scene_pad[17] in cube.frag — base fog tint .rgb + master strength .a.
-    vec4  distance_fog_color;
-    // _scene_pad[18] in cube.frag — .x density, .y start, .z height_top,
-    // .w max alpha.
-    vec4  distance_fog_params;
-} scene;
+#include "scene_ubo.glsl"
 
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 layout(set = 0, binding = 2) uniform sampler2D u_gbuffer0;

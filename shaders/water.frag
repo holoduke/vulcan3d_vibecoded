@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_ray_query : require
 
 // Procedural FBM heightfield ray-marched terrain — selectable alternate
@@ -272,124 +273,7 @@ float rmRand(uvec3 seed) {
 
 // Scene UBO — same layout as cube.frag's binding 0. Only a handful of
 // fields are read here (camera, sun, sky); the rest are unused.
-layout(set = 0, binding = 0) uniform Scene {
-    vec4 sun_direction;
-    vec4 sun_color;
-    vec4 ambient;
-    vec4 sky_color;
-    ivec4 rt_flags;
-    vec4 rt_params;
-    ivec4 rt_flags2;
-    vec4 rt_params2;
-    vec4 camera_pos;
-    vec4 rt_lod;
-    vec4 viewport;
-    vec4 muzzle_pos;
-    vec4 muzzle_color;
-    vec4 terrain_params;
-    vec4 terrain_h_low;
-    vec4 terrain_h_high;
-    vec4 grass_extra;
-    vec4 grass_extra2;
-    mat4 light_vp;
-    vec4 terrain_extra;
-    // Ocean / water plane:
-    //   water_params.x = enabled (0/1)
-    //   water_params.y = world Y of calm sea level
-    //   water_params.z = wave strength (m)
-    //   water_params.w = animation time (seconds)
-    //   water_color.rgb = deep-water tint
-    vec4 water_params;
-    vec4 water_color;
-    vec4 water_color_shallow;
-    // x: shore blend distance (m), y: shore noise strength,
-    // z: TLAS-reflection flag, w: water transparency.
-    vec4 water_shore;
-    // Shore-foam highlight band:
-    //   water_foam_color.rgb = tint, .a = strength (0 disables)
-    //   water_foam_params.x  = band width (m of noise-free depth)
-    vec4 water_foam_color;
-    vec4 water_foam_params;
-    // Fog band: x = y_start, y = y_top, z = noise strength.
-    vec4 fog_band;
-    // Per-pixel RT caps for the terrain shader (sliders exposed to UI):
-    //   x: PCSS sample cap
-    //   y: GI sample cap
-    //   z: final-colour AO multiplier strength (0..1)
-    //   w: GI bounces cap
-    vec4 terrain_rt_extra;
-    // Grass colour palette + extras (UI-driven).
-    //   grass_color_top.rgb    = blade tip colour
-    //   grass_color_top.w      = raymarched grass density (0..1)
-    //   grass_color_bottom.rgb = blade base colour
-    //   grass_color_bottom.w   = blade-base AO floor (0..1)
-    //   grass_color_ground.rgb     = CLOSE terrain tint
-    //   grass_color_ground.w       = ground tint strength (0..1)
-    //   grass_color_ground_far.rgb = FAR terrain tint
-    vec4 grass_color_top;
-    vec4 grass_color_bottom;
-    vec4 grass_color_ground;
-    vec4 grass_color_ground_far;
-    // Fake grass-cast shadows on raymarched terrain.
-    //   x: strength (0..1, 0 = off)
-    //   y: sample count (int 0..8 along sun-XZ direction)
-    //   z: max reach (m)
-    //   w: unused
-    vec4 grass_shadow_params;
-    // Layout padding: must mirror SceneUBO in internal.h. Grass shore
-    // tint slot is consumed by grass_raymarch.frag; declared here so
-    // terrain_shore_color (the next field) lands at the right offset.
-    vec4 grass_shore_color;
-    vec4 grass_shore_params;
-    // Shoreline TERRAIN tint — applied to bare ground in getMaterial.
-    //   terrain_shore_color.rgb = tint colour
-    //   terrain_shore_color.w   = strength (0..1; 0 disables)
-    //   terrain_shore_params.x  = fade distance (m above water level)
-    vec4 terrain_shore_color;
-    vec4 terrain_shore_params;
-    // Distance fog — see SceneUBO comment in internal.h.
-    vec4 distance_fog_color;   // rgb + strength a (0 = off)
-    vec4 distance_fog_params;  // x density, y start_dist, z height_top, w max_alpha
-    // GENERAL terrain shore tint — bare-terrain shore band.
-    vec4 terrain_shore_general_color;
-    vec4 terrain_shore_general_params;
-    // Sand base colour for the beach blend — was hardcoded.
-    vec4 terrain_sand_color;
-    // River water style extras — see SceneUBO comment in internal.h.
-    vec4 water_river_extra;     // x: flow angle (rad), y: time speed,
-                                // z: detail scale, w: foam amount
-    vec4 water_river_extinct;   // rgb: ext colour, w: density
-    // .x = ReSTIR enabled (always 0 — quarantined), .y = M_max,
-    // .zw = jitter UV delta (cur_jitter − prev_jitter) for FSR3
-    // motion-vec output, see descriptors.cpp.
-    vec4 restir_params;
-    // SPOM tuning — unused by terrain raymarch but present on the C++
-    // side; declared so the following offsets match.
-    vec4 spom_params;
-    vec4 terrain_local_info;          // reserved
-    // 32×32 hi-Z max-cell grid (64 m cells, 1024 floats packed 4 per
-    // vec4). Each cell = max terrain height in that footprint + 15 m
-    // safety. The marcher skips whole cells a rising ray is above.
-    vec4 terrain_max_grid[256];
-    // Trailing slots present in the C++ SceneUBO. Each shader picks its
-    // own subset of fields, but the order/offset MUST match C++ — these
-    // pads carry us up to the voxel_* fields.
-    vec4 terrain_disp_params;
-    vec4 terrain_antitile_params;
-    vec4 grass_shadow_on_terrain_params;
-    vec4 grass_side_lit_params;
-    // Voxel building — mirrors cube.frag's declarations exactly.
-    vec4 voxel_origin;     // xyz = world origin, .w = enabled (0/1)
-    vec4 voxel_dims;       // xyz = extent (m), .w = voxel size (m)
-    vec4 voxel_grid;       // xyz = brick grid dims, .w = brick size (m)
-    vec4 road_info;
-    vec4 road_bbox;
-    vec4 road_pts[64];
-    vec4 grass_rm_params;
-    vec4 grass_rm_params2;
-    mat4 clutter_vp;
-    vec4 atmo_params;      // x physical sky on, y radiance scale
-} scene;
+#include "scene_ubo.glsl"
 
 #include "atmosphere.glsl"
 // Atmosphere sky-view LUT (atmosphere.comp; GENERAL layout).
