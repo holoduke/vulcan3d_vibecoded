@@ -1,4 +1,4 @@
-﻿#include "game/level.h"
+#include "game/level.h"
 
 #include <glm/vec2.hpp>
 #include <glm/common.hpp>
@@ -51,7 +51,7 @@ collision::AABB to_render_aabb(const Brush& b) {
     return { b.center - half, b.center + half };
 }
 
-// Sentinel for "no separate fallback" вЂ” substitutes `rgb` so brushes added
+// Sentinel for "no separate fallback" — substitutes `rgb` so brushes added
 // without an explicit fallback look the same in textured and untextured mode
 // (lanterns, lamps, anything whose `rgb` is already the desired color).
 constexpr glm::vec3 kFallbackUseRgb(-1.0f, -1.0f, -1.0f);
@@ -70,7 +70,7 @@ void add(Level& lv, glm::vec3 center, glm::vec3 size, glm::vec3 rgb,
 
 void add_lamp(Level& lv, glm::vec3 center, glm::vec3 size, glm::vec3 rgb,
               glm::vec3 emissive) {
-    // Full-emissive shading bypasses albedo/normal entirely вЂ” set fallback
+    // Full-emissive shading bypasses albedo/normal entirely — set fallback
     // to rgb so the box looks identical in both texture modes.
     Brush b{ center, size, glm::vec4(rgb, 1.0f), emissive, true,
              -1, -1, 1.0f, glm::vec4(rgb, 1.0f) };
@@ -312,16 +312,16 @@ Level make_arena(float r, float wh) {
     constexpr int kTile2  = 6;     // keep interior floor
 
     // For each brush we pass two colors:
-    //   `tint`    вЂ” multiplies the texture (near-white so the texture's hue
+    //   `tint`    — multiplies the texture (near-white so the texture's hue
     //               dominates when textures are on)
-    //   `proto`   вЂ” the saturated prototype color used when textures are off
+    //   `proto`   — the saturated prototype color used when textures are off
     //
     // Without `proto`, switching textures off would leave near-white walls
-    // everywhere, with no distinguishing detail to mask RT GI noise вЂ” the
+    // everywhere, with no distinguishing detail to mask RT GI noise — the
     // user sees that as "stripes / weird texture / flicker on the wall."
     auto T = [](float r, float g, float b) { return glm::vec3(r, g, b); };
 
-    // Floor + arena perimeter walls removed вЂ” replaced by the procedural
+    // Floor + arena perimeter walls removed — replaced by the procedural
     // terrain heightmap (see src/engine/terrain.cpp). The castle below
     // sits on a flattened plateau in the heightmap so the brushes still
     // align at y=0..keep_h.
@@ -562,7 +562,7 @@ Level make_arena(float r, float wh) {
     }
 
     // Outer arena lanterns removed along with the floor + perimeter walls
-    // вЂ” they used to anchor the corners of the brick arena. With the
+    // — they used to anchor the corners of the brick arena. With the
     // open terrain there is nothing to corner.
     return lv;
 }

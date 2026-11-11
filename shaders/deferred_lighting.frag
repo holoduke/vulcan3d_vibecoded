@@ -37,7 +37,7 @@ layout(set = 0, binding = 0) uniform Scene {
     vec4  muzzle_pos;      // .xyz origin, .w intensity
     vec4  muzzle_color;    // .rgb colour, .w radius (m)
     // terrain_params.y = wrap_strength (sky-tint lift on back-facing
-    // terrain pixels РІР‚вЂќ atmospheric scattering bounce onto shadow side).
+    // terrain pixels — atmospheric scattering bounce onto shadow side).
     // Other channels: .x fog_strength (unused here, fog has its own
     // params below), .z detail_strength, .w shadow_softness_scale.
     vec4  terrain_params;
@@ -45,9 +45,9 @@ layout(set = 0, binding = 0) uniform Scene {
     // cube.frag uses. 26 vec4 = terrain_h_low/high, grass_extra(x2),
     // light_vp (4 vec4), terrain_extra, _scene_pad[0..16].
     vec4  _pad_a[26];
-    // _scene_pad[17] in cube.frag РІР‚вЂќ base fog tint .rgb + master strength .a.
+    // _scene_pad[17] in cube.frag — base fog tint .rgb + master strength .a.
     vec4  distance_fog_color;
-    // _scene_pad[18] in cube.frag РІР‚вЂќ .x density, .y start, .z height_top,
+    // _scene_pad[18] in cube.frag — .x density, .y start, .z height_top,
     // .w max alpha.
     vec4  distance_fog_params;
 } scene;
@@ -57,13 +57,13 @@ layout(set = 0, binding = 2) uniform sampler2D u_gbuffer0;
 layout(set = 0, binding = 3) uniform sampler2D u_gbuffer1;
 layout(set = 0, binding = 4) uniform sampler2D u_depth;
 layout(set = 0, binding = 5) uniform sampler2D u_sun_shadow;
-// scene_color from the forward pass РІР‚вЂќ used at sky pixels (depth=1) and
+// scene_color from the forward pass — used at sky pixels (depth=1) and
 // at pixels that aren't covered by the G-buffer write (particles,
 // decals, projectiles, anything drawn after cube.frag without a
 // G-buffer output). Lets the deferred path pass them through unmodified
 // instead of overwriting with reconstructed sky.
 layout(set = 0, binding = 6) uniform sampler2D u_scene_color;
-// Baked terrain shadow texture РІР‚вЂќ cube.frag uses this to put castle
+// Baked terrain shadow texture — cube.frag uses this to put castle
 // shadows on the terrain plateau. It's a 2048m-wide top-down texture
 // of the shadow factor sampled at vWorldPos.xz / 2048 + 0.5. Only
 // sampled when material_id == 3 (terrain receiver).
@@ -101,18 +101,18 @@ layout(set = 0, binding = 15) uniform sampler2D u_terrain_aux;
 
 layout(push_constant) uniform PC {
     mat4 inv_vp;
-    // Previous frame's view-proj РІР‚вЂќ reprojects world_pos into last
+    // Previous frame's view-proj — reprojects world_pos into last
     // frame's screen for the GI history fetch.
     mat4 prev_vp;
     // Per-frame point lights. .xyz = world position, .w = radius (m).
     // Per-light colour comes in light_colors with .a = intensity. Up to
-    // 4 active lights РІР‚вЂќ overflow lights drop. Inactive slots set radius
+    // 4 active lights — overflow lights drop. Inactive slots set radius
     // to 0 so the early-out gate culls them at no cost.
     vec4 light_pos[4];
     vec4 light_col[4];
 } pc;
 
-// Procedural sky РІР‚вЂќ verbatim port of cube.frag's sample_sky so deferred
+// Procedural sky — verbatim port of cube.frag's sample_sky so deferred
 // sky pixels match the forward output exactly.
 vec3 sample_sky(vec3 dir) {
     vec3 L = normalize(scene.sun_direction.xyz);
@@ -128,7 +128,7 @@ vec3 sample_sky(vec3 dir) {
     return sky;
 }
 
-// Octahedral normal decode РІР‚вЂќ matches cube.frag's encode.
+// Octahedral normal decode — matches cube.frag's encode.
 vec3 octa_decode(vec2 e) {
     e = e * 2.0 - 1.0;
     vec3 n = vec3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
@@ -156,7 +156,7 @@ bool any_hit(vec3 origin, vec3 dir, float t_max) {
     return any_hit_m(origin, dir, t_max, 0x01u);
 }
 
-// Closest-hit with t-value РІР‚вЂќ used by the PCSS blocker search.
+// Closest-hit with t-value — used by the PCSS blocker search.
 bool closest_hit_m(vec3 origin, vec3 dir, float t_max, uint mask, out float out_t) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
@@ -239,7 +239,7 @@ bool closest_hit(vec3 origin, vec3 dir, float t_max, out float out_t) {
     return closest_hit_m(origin, dir, t_max, 0x01u, out_t);
 }
 
-// 32-tap Vogel disk РІР‚вЂќ same one cube.frag uses for PCSS sample placement.
+// 32-tap Vogel disk — same one cube.frag uses for PCSS sample placement.
 const vec2 kVogel[32] = vec2[32](
     vec2( 0.176,  0.000), vec2(-0.272,  0.198),
     vec2( 0.034, -0.401), vec2( 0.353,  0.353),
@@ -259,7 +259,7 @@ const vec2 kVogel[32] = vec2[32](
     vec2(-0.243,  1.297), vec2(-0.901,  1.046)
 );
 
-// Per-pixel deterministic noise РІР‚вЂќ matches cube.frag's ign+rand pair so
+// Per-pixel deterministic noise — matches cube.frag's ign+rand pair so
 // the deferred shader picks the SAME Vogel disk rotations and shadow
 // sample sequences as the forward path. Different hash functions =
 // different shadow values per pixel = scene 3 / 7 pixel-level drift.
@@ -307,7 +307,7 @@ float spec_occlusion(float NoV, float ao, float r) {
     return clamp(pow(NoV + ao, exp2(-16.0 * r - 1.0)) - 1.0 + ao, 0.0, 1.0);
 }
 
-// Distance-LOD sample reducer РІР‚вЂќ same as cube.frag's lod_samples. Close
+// Distance-LOD sample reducer — same as cube.frag's lod_samples. Close
 // pixels get the full requested count; far pixels collapse toward 1.
 int lod_samples(int requested, float dist) {
     float lod_t = clamp((dist - scene.rt_lod.x) /
@@ -324,7 +324,7 @@ float hash12(vec2 p) {
 
 void main() {
     vec2 uv = vUv;
-    // seed_base РІР‚вЂќ matches cube.frag exactly (FragCoord int + frame & 7
+    // seed_base — matches cube.frag exactly (FragCoord int + frame & 7
     // in z slot). All shadow + GI + AO ray jitters derive from this
     // seed via rand() so deferred lighting picks the same Vogel disk
     // rotations cube.frag picks at the same pixel.
@@ -332,7 +332,7 @@ void main() {
                             uint(gl_FragCoord.y),
                             uint(scene.rt_flags.w) & 7u);
     // Frame-STABLE seed for shadows + AO (no temporal accumulator backs
-    // them, so per-frame seed cycling reads as flicker РІР‚вЂќ same split as
+    // them, so per-frame seed cycling reads as flicker — same split as
     // cube.frag). GI keeps frame-varying seeds; its accumulator below
     // needs them to converge.
     uvec3 seed_stable = uvec3(uint(gl_FragCoord.x),
@@ -340,7 +340,7 @@ void main() {
     float z = texture(u_depth, uv).r;
     // World-pos / view-direction reconstruction from depth + inverse-VP.
     vec2 ndc = uv * 2.0 - 1.0;
-    // Sky / depth-cleared pixels РІР‚вЂќ forward's compose pass samples an
+    // Sky / depth-cleared pixels — forward's compose pass samples an
     // equirect skybox texture we don't have bound in the deferred
     // descriptor set. Pass scene_color through so the forward sky path
     // wins at depth=1, matching cube.frag's behaviour exactly.
@@ -379,12 +379,12 @@ void main() {
     // Pre-shaded materials (5..8 = brush / voxel / water / raymarched
     // terrain) write LIT colour directly into scene_color in the
     // forward pass. G-buffer0 is R8G8B8A8_UNORM so its alpha=material_id
-    // round-trips, but HDR colour clamps to [0,1] РІР‚вЂќ sampling it here
+    // round-trips, but HDR colour clamps to [0,1] — sampling it here
     // would dim every bright pixel and break tonemap parity. Sample
     // scene_color instead so HDR is preserved bit-perfect.
     //
     // material_id 0 fall-through also reaches u_scene_color: that's
-    // particles / decals / grass / viewmodel РІР‚вЂќ anything drawn AFTER
+    // particles / decals / grass / viewmodel — anything drawn AFTER
     // cube.frag without G-buffer outputs. Those pixels need the forward
     // colour, not a re-shade of the geometry behind them.
     //
@@ -438,7 +438,7 @@ void main() {
     // dot(N, L), NOT dot(N, -L). The original deferred shader had the
     // sign flipped: ndl ended up negative on floor-facing pixels, the
     // double-sided fallback flipped N downward, and the subsequent
-    // shadow rays fired AWAY from the sun (into the ground) РІР‚вЂќ they
+    // shadow rays fired AWAY from the sun (into the ground) — they
     // missed real occluders and shadow stayed at 0, leaking direct sun
     // into deep interior pixels. That was the dominant scene 3 brightness
     // gap (8.3% SAD, 50% over reference). Match cube.frag exactly.
@@ -448,10 +448,10 @@ void main() {
 
     // PCSS-style soft shadow. Mirrors cube.frag's:
     //   1. Blocker search: N rays in a wide cone, take avg t.
-    //   2. Penumbra estimate proportional to avg_t Р“вЂ” softness.
+    //   2. Penumbra estimate proportional to avg_t × softness.
     //   3. Stratified shadow rays in the size-adapted cone.
     // Cull mask: terrain receivers use 0x02 (terrain-only casters) so
-    // brushes/castle don't shadow the open plateau РІР‚вЂќ cube.frag's same
+    // brushes/castle don't shadow the open plateau — cube.frag's same
     // rule. Brushes/dyn props use 0x01.
     uint shadow_mask = (material_id == 3) ? 0x02u : 0x01u;
     float shadow = 0.0;
@@ -466,7 +466,7 @@ void main() {
 
         // Terrain (material 3) needs an aggressive far-distance bias to
         // clear the rasterised-LOD-vs-BLAS height gap on distant ridges.
-        // Same formula cube.frag's forward terrain path uses РІР‚вЂќ without
+        // Same formula cube.frag's forward terrain path uses — without
         // it, kilometre-range mountain ridges false-hit their own BLAS
         // detail and the deferred path reproduces the "dark leaves"
         // splatter the forward fix already addressed. Brushes keep the
@@ -509,7 +509,7 @@ void main() {
                 ++hits;
             }
         }
-        // Always sample shadow rays РІР‚вЂќ even if the 2-tap blocker search
+        // Always sample shadow rays — even if the 2-tap blocker search
         // missed. Prior versions left shadow=0 in that case (treating
         // "no blocker = no shadow") but in tight interiors the blocker
         // cone occasionally threads a doorway and reports hits=0 even
@@ -528,14 +528,14 @@ void main() {
                                    base_softness * 0.25,
                                    base_softness * 6.0);
 
-            // Stratified shadow rays РІР‚вЂќ cube.frag's half-rate PCSS:
+            // Stratified shadow rays — cube.frag's half-rate PCSS:
             // each frame fires only HALF the ray budget alternating via
             // a per-pixel checkerboard + frame parity, then TAA's history
             // blend accumulates the missing samples over two frames so
             // steady-state quality matches full-rate. Without the
             // checkerboard, my deferred fires double the rays cube.frag
             // does per frame, producing slightly different per-pixel
-            // shadow values at edges РІР‚вЂќ same average over 2 frames but
+            // shadow values at edges — same average over 2 frames but
             // different at any single frame readback.
             int N_s = max(1, min(int(scene.rt_flags.y), 32));
             ivec2 ip2     = ivec2(gl_FragCoord.xy);
@@ -575,7 +575,7 @@ void main() {
 
     // Terrain receivers: sample the baked terrain shadow texture (covers
     // castle / static-brush shadows on the open plateau) and MAX with
-    // the inline-RT result. cube.frag does the same РІР‚вЂќ without this,
+    // the inline-RT result. cube.frag does the same — without this,
     // mask-0x02 RT shadows alone miss the castle and every terrain
     // pixel under the wall reads full sun. 5x5 Gaussian-ish PCF matches
     // cube.frag's blur exactly so the shadow softness lines up.
@@ -693,7 +693,7 @@ void main() {
     // With ao_samples=0 in the user's settings forward skips the AO ray
     // queries entirely and keeps ao=1.0. My deferred was firing them
     // anyway, producing a 0.4-0.7 ao multiplier that darkened ambient
-    // ~50% in indoor pixels РІР‚вЂќ visible as deferred-brighter elsewhere
+    // ~50% in indoor pixels — visible as deferred-brighter elsewhere
     // because the LACK of darkening was the issue. Wait, opposite: my
     // AO was darkening pixels forward DOESN'T darken, making deferred
     // dimmer. ...let me just match the gate.
@@ -734,7 +734,7 @@ void main() {
     }
 
     // ---------------------------------------------------------------
-    //  Path-traced GI (Phase 4b РІР‚вЂќ simplified port of cube.frag's loop)
+    //  Path-traced GI (Phase 4b — simplified port of cube.frag's loop)
     //
     //  Fires N cosine-weighted hemisphere rays around N. Each ray
     //  closest-hits the TLAS; on a miss it accumulates the sky tint.
@@ -743,7 +743,7 @@ void main() {
     //  absorbed by the sky_vis blend and the per-pixel hash).
     //
     //  sky_vis tracks the fraction of first-bounce rays that escape to
-    //  sky РІР‚вЂќ used below to attenuate the ambient/sky_fill terms so
+    //  sky — used below to attenuate the ambient/sky_fill terms so
     //  enclosed surfaces (castle interior) read as indoor rather than
     //  the same flat brightness as outdoors.
     // ---------------------------------------------------------------
@@ -755,10 +755,10 @@ void main() {
 
     // Terrain sky-vis probe (cube.frag lines 3010-3030). For terrain
     // receivers within 50m of the camera, fire 4 rays in a cosine
-    // hemisphere with mask 0xFD (everything EXCEPT terrain itself РІР‚вЂќ
+    // hemisphere with mask 0xFD (everything EXCEPT terrain itself —
     // hits castle / brushes but not terrain) and count misses. Without
     // this, terrain near the castle wall renders with full sky-fill
-    // ambient even though the castle blocks half the sky dome РІР‚вЂќ scene 2
+    // ambient even though the castle blocks half the sky dome — scene 2
     // terrain pixels came out ~17% brighter than forward.
     if (material_id == 3 && scene.rt_flags.x != 0 &&
         gi_strength > 1e-4 && cam_dist < 50.0) {
@@ -796,17 +796,17 @@ void main() {
     }
     // sky_vis must be measured even when gi_strength is 0, otherwise
     // the ambient block above receives sky_vis=1.0 (assumed open sky)
-    // and pumps full ambient_sky into deep interior pixels РІР‚вЂќ castle
+    // and pumps full ambient_sky into deep interior pixels — castle
     // interior gets ~50% brighter than forward. Run a short visibility
     // probe whenever N_gi > 0; gi_strength still gates the indirect-
     // light accumulation.
     //
     // The screen-space u_svgf_gi override is gone (it leaked other
-    // surfaces' light into walls РІР‚вЂќ see below), so the inner bounce
+    // surfaces' light into walls — see below), so the inner bounce
     // lighting now accumulates for EVERY material.
     bool skip_gi_inner = false;
     if (N_gi > 0) {
-        // Distance-LOD scaling РІР‚вЂќ match cube.frag. Close pixels get the
+        // Distance-LOD scaling — match cube.frag. Close pixels get the
         // full slider, far pixels collapse toward 1. Cap at 16 in the
         // deferred path so RT bandwidth doesn't explode (cube.frag also
         // caps internally via the half-rate parity trick).
@@ -819,7 +819,7 @@ void main() {
         int sky_hits = 0;
         // Frame-cycled seed offset: the temporal accumulator below needs
         // DIFFERENT ray directions every frame to converge to the true
-        // irradiance РІР‚вЂќ a frame-stable seed would just freeze the grain.
+        // irradiance — a frame-stable seed would just freeze the grain.
         vec2 fseed = vec2(float(scene.rt_flags.w & 31)) * vec2(17.13, 9.71);
         for (int i = 0; i < taken_gi; ++i) {
             float r1 = hash12(gl_FragCoord.xy + fseed + vec2(i * 13.0, 73.0));
@@ -909,7 +909,7 @@ void main() {
                     gi_indirect += hit_alb * hit_light;
                 }
             } else {
-                // Miss РІвЂ вЂ™ sky. Use sky_color tinted by direction.up so
+                // Miss → sky. Use sky_color tinted by direction.up so
                 // overhead rays brighten more than horizon ones. Skip
                 // the accumulation when svgf_gi will overwrite below.
                 if (!skip_gi_inner) {
@@ -925,7 +925,7 @@ void main() {
         // is written by cube.frag with imageStore from fragments running
         // LATE-Z (the wall pipeline writes gl_FragDepth, so occluded
         // fragments still execute their stores), and the deferred read
-        // happened at a plain screen UV РІР‚вЂќ geometry behind a wall could
+        // happened at a plain screen UV — geometry behind a wall could
         // stamp its irradiance into the wall's pixel and the wall then
         // shaded with the OTHER surface's light. Users bisected this as
         // "all walls have some degree of transparency, appears when
@@ -934,9 +934,9 @@ void main() {
         //
         // ---- Temporal GI denoiser ----
         // Accumulate the raw irradiance across frames (EMA up to M=28,
-        // РІвЂ°в‚¬ effective 28Р“вЂ” the per-frame ray count) with in-shader
+        // ≈ effective 28× the per-frame ray count) with in-shader
         // reprojection through prev_vp and per-channel disocclusion
-        // rejection РІР‚вЂќ the AAA pattern: denoise the SIGNAL, never the
+        // rejection — the AAA pattern: denoise the SIGNAL, never the
         // composed image.
         {
             ivec2 pix = ivec2(gl_FragCoord.xy);
@@ -1079,7 +1079,7 @@ void main() {
             }
             // Per-channel disocclusion: history that can't plausibly
             // belong to this surface (e.g. sky-blue irradiance on a
-            // beige wall РІР‚вЂќ equal LUMINANCE would fool a scalar test)
+            // beige wall — equal LUMINANCE would fool a scalar test)
             // restarts accumulation; moderate mismatch shortens it.
             // Firefly clamp: once history is converged (M >= 8), a single
             // outlier ray bundle must not flash the pixel. Cap the fresh
@@ -1195,17 +1195,17 @@ void main() {
     }
 
     // ---------------------------------------------------------------
-    //  Ambient + sky bounce РІР‚вЂќ mirrors cube.frag's ambient_ground +
+    //  Ambient + sky bounce — mirrors cube.frag's ambient_ground +
     //  ambient_sky split. ambient_ground is the "windowless room
     //  reflection" constant that AO can darken but never fully kills;
     //  ambient_sky is the open-sky contribution that fades when sky_vis
     //  drops (deep crevices). Without the split, per-pixel PCSS
     //  collapsing to shadow=1 + RTAO collapsing to ao=0 zeroes BOTH
-    //  ambient and sun РІвЂ вЂ™ pure black pixels (the scattered-black bug).
+    //  ambient and sun → pure black pixels (the scattered-black bug).
     // ---------------------------------------------------------------
     float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
     // Warm-bias the ambient sky tint (12 % sun colour). See the matching
-    // block in cube.frag РІР‚вЂќ the raw saturated Rayleigh blue reads as
+    // block in cube.frag — the raw saturated Rayleigh blue reads as
     // steel-blue on pure-shadow surfaces; bounce light off warm
     // geometry tonally lifts real shadows toward neutral.
     // ---- PBR surface terms (shared by sun, ambient and point lights) ----
@@ -1223,7 +1223,7 @@ void main() {
     float ambient_strength = clamp(scene.rt_params.z, 0.0, 1.0);
     // ambient.a is `terrain_ao_punch` on the C++ side (descriptors.cpp line
     // 341 packs it there), NOT a strength multiplier. cube.frag does
-    // `ambient.rgb * rt_params.z` only РІР‚вЂќ multiplying by `ambient.a` here
+    // `ambient.rgb * rt_params.z` only — multiplying by `ambient.a` here
     // (as the earlier port did) zeroed the entire ambient term whenever
     // terrain_ao_punch was 0, producing literal black on castle walls.
     vec3 ambient_ground = scene.ambient.rgb * ambient_strength;
@@ -1254,7 +1254,7 @@ void main() {
     // brightness forward shows in deeply-shadowed pixels (tiny GI bounce
     // + temporal-smoothed RTAO). Empirical sweep: removing the floor
     // regresses all scenes 0.03-0.05% mean SAD even though cube.frag has
-    // no floor of its own РІР‚вЂќ likely because forward's SVGF temporal
+    // no floor of its own — likely because forward's SVGF temporal
     // smoothing averages the per-pixel collapses out where mine can't.
     // Quadratic AO response: open areas (ao ~1) keep their brightness,
     // but occluded corners get pushed much darker before the floor —
@@ -1315,7 +1315,7 @@ void main() {
             spec_ambient = env * F_env * ms_comp * so;
         }
     }
-    // sky_fill drops out as a separate term РІР‚вЂќ it's been folded into
+    // sky_fill drops out as a separate term — it's been folded into
     // ambient_sky above. Zero it so the addition below stays valid.
     vec3 sky_fill = vec3(0.0);
 
@@ -1340,12 +1340,12 @@ void main() {
     //  Material-id tweaks
     // ---------------------------------------------------------------
     // Per-material tweaks (Phase 5):
-    //   2 (wood)    РІР‚вЂќ no change (default Lambert reads right)
-    //   3 (terrain) РІР‚вЂќ boosted ambient to match the open-sky shading
+    //   2 (wood)    — no change (default Lambert reads right)
+    //   3 (terrain) — boosted ambient to match the open-sky shading
     //                 cube.frag does on terrain pixels
-    //   4 (grass)   РІР‚вЂќ extra wrap-around fill so shadowed blades don't
+    //   4 (grass)   — extra wrap-around fill so shadowed blades don't
     //                 read pitch-black
-    //   5 (emissive) РІР‚вЂќ pass albedo through unchanged (brushes already
+    //   5 (emissive) — pass albedo through unchanged (brushes already
     //                  baked emissive colour into albedo)
     if (material_id == 3) {
         ambient_term *= 1.3;
@@ -1357,7 +1357,7 @@ void main() {
     }
 
     // ---------------------------------------------------------------
-    //  Point lights РІР‚вЂќ variable list driven by push constant. Muzzle
+    //  Point lights — variable list driven by push constant. Muzzle
     //  flash, lanterns, future fires all share this loop; the CPU
     //  packs up to 4 active lights per frame.
     // ---------------------------------------------------------------
@@ -1387,7 +1387,7 @@ void main() {
                diff_albedo * gi_indirect;
 
     // Terrain sky-bounce wrap (cube.frag lines 3322-3331). Back-facing
-    // terrain pixels (-NР’В·L > 0) pick up a sky-tinted lift to model
+    // terrain pixels (-N·L > 0) pick up a sky-tinted lift to model
     // atmospheric scattering bouncing onto the shadow side of slopes.
     // Without this, the back of distant ridges in scene 5 / 7 reads as
     // a flat dark patch where forward has a 30% sky-tint contribution.
@@ -1408,7 +1408,7 @@ void main() {
     }
 
     // ---------------------------------------------------------------
-    //  Atmospheric distance fog (verbatim port of cube.frag's expР’Р†
+    //  Atmospheric distance fog (verbatim port of cube.frag's exp²
     //  fog block with Henyey-Greenstein Mie scattering forward halo).
     //  Master gate on dfog_col.a so the menu's fog-strength slider
     //  controls it the same way for both renderers.

@@ -36,7 +36,7 @@ void VulkanEngine::init_viewmodel() {
     auto T = [](glm::vec3 t) { return glm::translate(glm::mat4(1.0f), t); };
     auto S = [](glm::vec3 s) { return glm::scale(glm::mat4(1.0f), s); };
 
-    // Dark-grey palette вЂ” gunmetal body, near-black sights/barrel,
+    // Dark-grey palette — gunmetal body, near-black sights/barrel,
     // very dark grip. Cooler than the previous bluish metal so the
     // gun reads as black-grey in the lower-right of the screen.
     const glm::vec4 metal(0.18f, 0.18f, 0.18f, 1.0f);
@@ -91,14 +91,14 @@ void VulkanEngine::init_viewmodel() {
         glm::vec3 extent = gltf.aabb_max - gltf.aabb_min;
         float max_side = std::max({extent.x, extent.y, extent.z, 1e-3f});
         // 0.55m max side reads better at first-person scale than the
-        // earlier 0.30m. The 180В° Y-rotation flips the gun's nose to
+        // earlier 0.30m. The 180° Y-rotation flips the gun's nose to
         // point forward (camera -Z); without it the assets/gun model
         // points back at the player.
-        // m254 asset orientation walk-through: bare в†’ pointed UP, pitch
-        // -90В°X в†’ pointed LEFT on its side. The asset's barrel axis
-        // turned out to be -X (not +X as previously assumed) вЂ” yaw
-        // +90В° around Y mapped that to +Z (toward the player) and the
-        // gun pointed backwards. Yaw -90В° flips it the other way so
+        // m254 asset orientation walk-through: bare → pointed UP, pitch
+        // -90°X → pointed LEFT on its side. The asset's barrel axis
+        // turned out to be -X (not +X as previously assumed) — yaw
+        // +90° around Y mapped that to +Z (toward the player) and the
+        // gun pointed backwards. Yaw -90° flips it the other way so
         // the barrel ends up along -Z (camera forward).
         float scale = 0.85f / max_side;
         glm::mat4 rot_yaw = glm::rotate(glm::mat4(1.0f),
@@ -143,10 +143,10 @@ void VulkanEngine::destroy_viewmodel() {
 void VulkanEngine::init_spacejet() {
     GltfModel gltf = load_gltf("assets/spacejet/scene.gltf");
     if (gltf.primitives.empty()) {
-        log::info("spacejet: no asset at assets/spacejet/scene.gltf РІР‚вЂќ skipping");
+        log::info("spacejet: no asset at assets/spacejet/scene.gltf — skipping");
         return;
     }
-    // Normalise to a sensible visual size РІР‚вЂќ scale so the asset's
+    // Normalise to a sensible visual size — scale so the asset's
     // longest dimension is ~6 m. Per-flight scale jitter multiplies
     // this base value.
     glm::vec3 center = (gltf.aabb_min + gltf.aabb_max) * 0.5f;
@@ -167,7 +167,7 @@ void VulkanEngine::init_spacejet() {
         sm.base_color = prim.base_color;
         spacejet_meshes_.push_back(std::move(sm));
     }
-    log::infof("spacejet: loaded %zu primitives, base_scale=%.3f РІР‚вЂќ flyover system armed",
+    log::infof("spacejet: loaded %zu primitives, base_scale=%.3f — flyover system armed",
                spacejet_meshes_.size(), spacejet_base_scale_);
 
     // Break-up chunks: classify every triangle by its centroid in raw model
@@ -946,7 +946,7 @@ void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,
         PushConstants pc{};
         pc.mvp = vp * model;
         pc.model = model;
-        // Viewmodel is camera-attached Р Р†Р вЂљРІР‚Сњ prev_mvp = mvp gives zero motion,
+        // Viewmodel is camera-attached — prev_mvp = mvp gives zero motion,
         // which is what we want for SVGF (the gun shouldn't smear when the
         // camera turns even though world points "moved").
         pc.prev_mvp = pc.mvp;
@@ -998,7 +998,7 @@ void VulkanEngine::draw_viewmodel(VkCommandBuffer cmd, const glm::mat4& vp,
     // Muzzle flash: a bright, short-lived emissive blob just past the muzzle
     // tip. Bloom downstream halos it dramatically. Anchored so the
     // back face of the (scale-animated) cube always sits past the
-    // barrel tip Р Р†Р вЂљРІР‚Сњ without this, the small fade-in/out cube floats
+    // barrel tip — without this, the small fade-in/out cube floats
     // forward of the tip because scale shrinks but center stays fixed.
     if (muzzle_flash_timer_ > 0.0f) {
         const float barrel_tip_z = -0.72f;  // matches barrel_zc - barrel_hl in init
@@ -1045,7 +1045,7 @@ void VulkanEngine::rebuild_dyn_render_cache() {
         // Reuse cached transform if the slot still maps to the same body AND
         // Jolt has put it to sleep.
         if (slot_matches && !physics_->is_body_active_h(handle)) {
-            // Sleeping Р Р†РІР‚В РІР‚в„ў no motion this frame. Drag prev_world forward.
+            // Sleeping → no motion this frame. Drag prev_world forward.
             dr.prev_world = dr.world;
             // Sleeping bodies: prev_model trails the cached model so
             // motion-vec emit stays zero. (model itself is unchanged.)
@@ -1086,13 +1086,13 @@ void VulkanEngine::rebuild_dyn_render_cache() {
 void VulkanEngine::rebuild_tick_aabbs() {
     // Static level + every dynamic box's world-space AABB envelope. With
     // rotated boxes we use the AABB of the rotated cube (over-approximation)
-    // Р Р†Р вЂљРІР‚Сњ the player's collision is still solid against tilted falling crates.
+    // — the player's collision is still solid against tilted falling crates.
     tick_aabbs_.clear();
     tick_aabbs_.reserve(world_.aabbs.size() + voxel_collision_aabbs_.size() +
                         dyn_props_.size());
     for (const auto& a : world_.aabbs) tick_aabbs_.push_back(a);
     // Voxel-tower solid boxes count as STATIC geometry (auto step-up onto
-    // carved ledges works). Must stay in the static prefix вЂ” the caller
+    // carved ledges works). Must stay in the static prefix — the caller
     // passes static_count = world_.aabbs.size() + voxel_collision_aabbs_.size().
     for (const auto& a : voxel_collision_aabbs_) tick_aabbs_.push_back(a);
     if (!physics_) return;
@@ -1111,7 +1111,7 @@ void VulkanEngine::rebuild_tick_aabbs() {
         const bool slot_matches = slot.body_id == dp.body_id;
         const bool active = physics_->is_body_active_h(dp.jolt_handle);
         if (slot_matches && !active) {
-            // Sleeping body in a slot we already populated Р Р†РІР‚В РІР‚в„ў AABB hasn't
+            // Sleeping body in a slot we already populated → AABB hasn't
             // moved since last compute, reuse.
             tick_aabbs_.push_back(slot.aabb);
             continue;
@@ -1143,7 +1143,7 @@ void VulkanEngine::init_doors() {
                                             // at meet line so the closed
                                             // panels don't z-fight in the
                                             // middle
-    const float panel_h_half    = 1.70f;   // 3.4 m tall вЂ” fits in 3.6 m gap
+    const float panel_h_half    = 1.70f;   // 3.4 m tall — fits in 3.6 m gap
     const float panel_t_half    = 0.06f;   // 12 cm thick wooden plank
     const float y_center        = plateau_y + panel_h_half + 0.05f;
 
@@ -1158,9 +1158,9 @@ void VulkanEngine::init_doors() {
     };
     // Panels now swing INWARD (toward the courtyard): the gatehouse has a
     // round-arched front passage that an outward swing would clip into.
-    // Left panel: hinge on -X side, swings outward (toward +Z) by ~85В°.
+    // Left panel: hinge on -X side, swings outward (toward +Z) by ~85°.
     doors_.push_back(make_door(-ent_half, +panel_w_half + 0.01f, -1.48f));
-    // Right panel: hinge on +X side, swings outward by -85В°.
+    // Right panel: hinge on +X side, swings outward by -85°.
     doors_.push_back(make_door(+ent_half, -panel_w_half - 0.01f, +1.48f));
 }
 
@@ -1210,7 +1210,7 @@ void VulkanEngine::draw_doors(VkCommandBuffer cmd, const glm::mat4& vp,
         pc.color      = glm::vec4(0.55f, 0.33f, 0.16f, 1.0f);   // wood tint
         pc.emissive   = glm::vec4(0.0f);
         // Wood048 lives at albedo index 2 (see init_textures specs[]).
-        // tex_params.x/y = albedo+normal slot, .z = uv scale, .w = 0 в†’
+        // tex_params.x/y = albedo+normal slot, .z = uv scale, .w = 0 →
         // world-space triplanar so the planks read consistently across
         // both panels.
         pc.tex_params = glm::vec4(2.0f, 2.0f, 0.7f, 0.0f);

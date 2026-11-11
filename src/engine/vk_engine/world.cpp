@@ -1,4 +1,4 @@
-﻿// World bring-up: init_world() builds the level brushes + cube/cylinder
+// World bring-up: init_world() builds the level brushes + cube/cylinder
 // meshes, loads the heightmap, places grass, and spawns the Jolt static
 // bodies. The subsystems that used to share this file were split out:
 //   - terrain_resources.cpp  (sculpt/height/CLOD/shadow-bake/aux textures)
@@ -48,31 +48,31 @@ void VulkanEngine::init_world() {
     world_ = game::make_arena();
     log::infof("world: %u brushes", static_cast<unsigned>(world_.brushes.size()));
     // Brush model matrices are baked later, AFTER the plateau y-lift
-    // below вЂ” building them here would cache un-lifted centers and the
+    // below — building them here would cache un-lifted centers and the
     // castle would render 22 m under the terrain (invisible).
 
     // Procedural terrain: generated first so the castle can be lifted to
-    // sit on the plateau height. Phase 1 is non-streaming Р Р†Р вЂљРІР‚Сњ one big mesh
-    // (~1kmР вЂ™Р вЂ ). See docs/terrain_plan.md for streaming/LOD/sculpt phases.
+    // sit on the plateau height. Phase 1 is non-streaming — one big mesh
+    // (~1km²). See docs/terrain_plan.md for streaming/LOD/sculpt phases.
     {
         HeightmapParams hp{};
         // Two constraints that fight each other:
         //   1. chunk_cells must be divisible by every LOD stride (1, 2, 4, 8)
-        //      so the stride-N index loop covers every cell Р Р†Р вЂљРІР‚Сњ otherwise the
+        //      so the stride-N index loop covers every cell — otherwise the
         //      lower-LOD index buffers leave a strip of cells uncovered at
-        //      the chunk's right/bottom edge Р Р†РІР‚В РІР‚в„ў visible square seams.
+        //      the chunk's right/bottom edge → visible square seams.
         //   2. Jolt's HeightFieldShape needs sample_count divisible by
         //      block_size in [2, 8].
         //
-        // chunk_cells / 8 means dim is divisible by 8 Р Р†РІР‚В РІР‚в„ў sample_count = dim+1
-        // is odd Р Р†РІР‚В РІР‚в„ў Jolt fails. Resolution: pick dim = 2048 cells (=32Р вЂњРІР‚вЂќ64),
+        // chunk_cells / 8 means dim is divisible by 8 → sample_count = dim+1
+        // is odd → Jolt fails. Resolution: pick dim = 2048 cells (=32×64),
         // chunk_cells = 64 (divisible by all four strides), and feed Jolt a
-        // 2048Р вЂњРІР‚вЂќ2048 sub-grid by truncating the last row/col of the 2049Р вЂ™Р вЂ 
-        // heightmap. The visual mesh uses the full 2049Р вЂ™Р вЂ  so the world edge
-        // stays continuous. Jolt loses one cell-width at the world edge Р Р†Р вЂљРІР‚Сњ
+        // 2048×2048 sub-grid by truncating the last row/col of the 2049²
+        // heightmap. The visual mesh uses the full 2049² so the world edge
+        // stays continuous. Jolt loses one cell-width at the world edge —
         // invisible since the player can't reach the world boundary.
-        // Heightmap resolution scale РІР‚вЂќ the user can pick higher density
-        // via the Terrain settings menu. Defaults to 1Р“вЂ” = the baseline
+        // Heightmap resolution scale — the user can pick higher density
+        // via the Terrain settings menu. Defaults to 1× = the baseline
         // 2048-cell grid. Higher values keep the world extent the same
         // (cell shrinks proportionally) so castle/grass/spawn positions
         // are unaffected.
@@ -82,9 +82,9 @@ void VulkanEngine::init_world() {
         hp.height_scale = 140.0f;
         // Plateau: tight extent (just past castle outer wall) + a
         // generous blend zone so the FBM ramps in smoothly. Without
-        // the long blend the procedural mountains (В±60 m peaks)
+        // the long blend the procedural mountains (±60 m peaks)
         // popped up immediately past the wall and looked super-spiky
-        // вЂ” the blend gives the player a "settled-into-the-hills"
+        // — the blend gives the player a "settled-into-the-hills"
         // approach instead.
         hp.plateau_extent = glm::vec2(11.5f, 11.5f);
         hp.plateau_height = 22.0f;
@@ -95,13 +95,13 @@ void VulkanEngine::init_world() {
         // mode. Rationale:
         //   * The raymarch shader evaluates this same FBM in-shader and
         //     adds sampleHeightDelta = (current в€’ baseline). The
-        //     baseline MUST be this FBM or, after a runtime meshв†’
+        //     baseline MUST be this FBM or, after a runtime mesh→
         //     raymarch toggle, the delta becomes a difference of two
-        //     unrelated noise fields layered on the shader FBM в†’
+        //     unrelated noise fields layered on the shader FBM →
         //     "way too spikey" terrain (the exact reported bug).
         //   * mesh / physics / grass / BLAS now all share ONE surface,
         //     so toggling modes is seamless and the world is
-        //     consistent вЂ” and the planned near-distance displacement-
+        //     consistent — and the planned near-distance displacement-
         //     LOD work needs the mesh to be this same FBM anyway.
         // generate_heightmap() (FastNoiseLite) is now legacy/unused.
         Heightmap hm = generate_heightmap_raymarch(hp);
@@ -114,10 +114,10 @@ void VulkanEngine::init_world() {
         // show the procedural surface.
         terrain_baseline_heights_ = hm.heights;
         // If the user has saved a sculpt-edited heightmap (via the
-        // Terrain РІвЂ вЂ™ Save heightmap button), load it now and overwrite
+        // Terrain → Save heightmap button), load it now and overwrite
         // the procedurally-generated one. Validates dim+cell match
-        // so a heightmap saved at 2048Р“вЂ”1m doesn't mis-load on a
-        // 4096Р“вЂ”0.5m level.
+        // so a heightmap saved at 2048×1m doesn't mis-load on a
+        // 4096×0.5m level.
         {
             std::ifstream hf("assets/level1_heights.bin", std::ios::binary);
             if (hf.is_open()) {
@@ -139,7 +139,7 @@ void VulkanEngine::init_world() {
                                "(%zu cells)", n);
                 } else {
                     log::warnf("[terrain] saved heightmap dim/cell mismatch "
-                               "РІР‚вЂќ ignoring (saved %dx %.3fm, want %dx %.3fm)",
+                               "— ignoring (saved %dx %.3fm, want %dx %.3fm)",
                                fdim, fcell, hm.dim, hm.cell);
                 }
             }
@@ -186,7 +186,7 @@ void VulkanEngine::init_world() {
         // no real peak is under-reported, and (b) moderate runtime
         // sculpt brush raises before a rebake. The marcher only uses
         // this to SKIP empty cells (never to declare sky), so a
-        // too-LOW value would clip terrain вЂ” hence the generous
+        // too-LOW value would clip terrain — hence the generous
         // margin. A too-HIGH value just costs a few extra FBM steps.
         {
             const int W = hm.dim + 1;                  // 2049 (row pitch)
@@ -194,11 +194,11 @@ void VulkanEngine::init_world() {
             // Cell boundaries MUST use `dim` (2048), NOT W (2049), so
             // they line up exactly with the shader's cellMaxHeight():
             //   shader c = floor((wp/2048 + 0.5) * 32) = floor(hm_x/64)
-            // Using W here gave (gx*2049)/32 в‰€ gx*64.03 вЂ” an off-by-
+            // Using W here gave (gx*2049)/32 в‰€ gx*64.03 — an off-by-
             // fraction that made the shader sample a NEIGHBOURING grid
             // cell at distance. If that neighbour's max was lower, the
             // marcher skipped a cell that actually held terrain the
-            // ray would hit в†’ distant low terrain showed as SKY.
+            // ray would hit → distant low terrain showed as SKY.
             const int D = hm.dim;                      // 2048
             // 40 m safety (was 15). The coarse heightmap-derived max
             // under-represents the shader FBM's sub-texel spikes; on
@@ -235,15 +235,15 @@ void VulkanEngine::init_world() {
             // Quadtree CLOD raster: shared instanced patch + min/max
             // pyramid. The vertex shader fetches heights from the
             // heightmap texture, so there is no per-chunk geometry to
-            // bake вЂ” startup cost is a single 4.5 k-vertex mesh upload.
+            // bake — startup cost is a single 4.5 k-vertex mesh upload.
             init_terrain_clod();
         } else {
-            log::info("[terrain] raymarch enabled вЂ” deferring mesh/CLOD "
+            log::info("[terrain] raymarch enabled — deferring mesh/CLOD "
                       "build (will lazy-build if raymarch is toggled off)");
         }
         // Lift every level brush by plateau_height so the castle's y=0
         // baseline lands on the plateau surface. Cheaper than rewriting
-        // level.cpp Р Р†Р вЂљРІР‚Сњ the brush AABBs / world matrices update through the
+        // level.cpp — the brush AABBs / world matrices update through the
         // same vector.
         for (auto& b : world_.brushes) b.center.y += hp.plateau_height;
         for (auto& a : world_.aabbs)   { a.min.y += hp.plateau_height;
@@ -282,7 +282,7 @@ void VulkanEngine::init_world() {
         // static model matrices used every frame by the depth pre-pass,
         // color pass and sun-shadow pass. Static brushes don't move
         // after this; rebuilding (translate*scale) ~190 Г— 3 passes per
-        // frame was ~25 Вµs/frame and a perfect cache target. (Perf P3.)
+        // frame was ~25 µs/frame and a perfect cache target. (Perf P3.)
         static_brush_models_.resize(world_.brushes.size());
         for (size_t i = 0; i < world_.brushes.size(); ++i) {
             const auto& b = world_.brushes[i];
@@ -296,35 +296,35 @@ void VulkanEngine::init_world() {
         // terrain (low altitude, gentle slope) gets covered. Cap at
         // 200k blades for a healthy density without bloating VRAM.
         GrassParams gp{};
-        // Cover the plateau too Р Р†Р вЂљРІР‚Сњ slopes, valleys, and the plateau
+        // Cover the plateau too — slopes, valleys, and the plateau
         // courtyard around the castle. Castle stones are excluded by
         // the keep-out rectangle below so blades never poke through
         // the brushes themselves.
-        // Placement bounds are GENEROUS Р Р†Р вЂљРІР‚Сњ the runtime altitude
+        // Placement bounds are GENEROUS — the runtime altitude
         // sliders (rt_.grass_alt_min/max) shape the visible band
         // without re-baking. Cover most reasonable terrain heights.
         gp.height_min = -20.0f;
         gp.height_max = 200.0f;
         // Concentrate blades in a 200m square around the castle so the
-        // density is high (~12 blades/mР вЂ™Р вЂ ) where the player actually
+        // density is high (~12 blades/m²) where the player actually
         // sees grass. Spreading them across the full 1km map gave
-        // ~0.5/mР вЂ™Р вЂ  (about a metre between blades Р Р†Р вЂљРІР‚Сњ looks bald).
+        // ~0.5/m² (about a metre between blades — looks bald).
         gp.half_extent = 200.0f;
         // Inner keep is ~6m square at origin. Keep blades out of the
         // keep interior only; the outer courtyard between keep and
         // perimeter walls gets grass too. Blades whose footprint
-        // overlaps a brush stay invisible Р Р†Р вЂљРІР‚Сњ the wall geometry occludes
+        // overlaps a brush stay invisible — the wall geometry occludes
         // them from outside views.
         gp.keep_out_xz = glm::vec2(12.0f, 12.0f);  // full castle footprint
         // 800k placed blades: density slider 0..4 maps to render
-        // fraction (density / 4) Р вЂњРІР‚вЂќ placed, so density=1.0 Р Р†РІР‚В РІР‚в„ў 200k,
-        // density=4.0 Р Р†РІР‚В РІР‚в„ў 800k. Earlier 2M cap meant density=4 fired
+        // fraction (density / 4) × placed, so density=1.0 → 200k,
+        // density=4.0 → 800k. Earlier 2M cap meant density=4 fired
         // ~10M sun shadow rays/frame (5 verts each) and pushed the
         // GPU into TDR. 800k keeps the worst case at ~4M rays which
         // the 4080 handles comfortably even with the rest of the
         // RT load (terrain shadows, AO, GI).
         gp.max_blades  = 800000;
-        // Skip 800k-blade placement when raymarch grass will be drawn вЂ”
+        // Skip 800k-blade placement when raymarch grass will be drawn —
         // the rasterised grass buffer would never get sampled. Toggling
         // raymarch grass OFF at runtime requires a restart.
         if (!rt_.grass_raymarch_enabled) {
@@ -332,7 +332,7 @@ void VulkanEngine::init_world() {
                                  graphics_queue_, graphics_queue_family_,
                                  hm, gp);
         } else {
-            log::info("[grass] raymarch grass enabled вЂ” deferring placement "
+            log::info("[grass] raymarch grass enabled — deferring placement "
                       "build (will lazy-build if raymarch grass is toggled off)");
         }
 
@@ -351,7 +351,7 @@ void VulkanEngine::init_world() {
     }
 
     physics_ = std::make_unique<PhysicsWorld>();
-    // Batch-add the level brushes Р Р†Р вЂљРІР‚Сњ Jolt's AddBodiesPrepare/Finalize takes
+    // Batch-add the level brushes — Jolt's AddBodiesPrepare/Finalize takes
     // the broadphase mutex once for the whole pile instead of per body.
     // For 150+ static brushes (the castle) this is the difference between
     // ~30 ms and ~3 ms at level load.
@@ -380,14 +380,14 @@ void VulkanEngine::init_world() {
     // Heightfield collision for terrain. Player + crates collide cleanly
     // against the bumpy ground. Jolt requires the sample-count side to be
     // divisible by some block_size in [2, 8]; with dim=2048 (sample_count
-    // = 2049, odd) we'd violate that, so we copy the first 2048Р вЂњРІР‚вЂќ2048 sub-
+    // = 2049, odd) we'd violate that, so we copy the first 2048×2048 sub-
     // grid into a packed buffer and pass that with dim=2047 (sample_count
-    // = 2048, block_size 8 Р Р†РЎС™РІР‚Сљ). Player can't reach the world edge so the
+    // = 2048, block_size 8 ✓). Player can't reach the world edge so the
     // single-cell shrinkage is invisible.
     if (!terrain_data_.heights.empty()) {
         const int W = terrain_data_.dim + 1;        // 2049
         const int physics_samples = (W % 2 == 0) ? W : (W - 1);  // 2048
-        // Build the physics-only height buffer (a copy вЂ” visual raymarch
+        // Build the physics-only height buffer (a copy — visual raymarch
         // keeps terrain_data_.heights as-is). Inside the castle plateau
         // we depress the floor by kCastleSink so it sits well below the
         // 5 cm castle-floor brush at Y=22.05. Without this, any FBM
@@ -398,12 +398,12 @@ void VulkanEngine::init_world() {
         // 0.6 m drop > kStepDown (0.45) so the heightmap-clamp branches
         // never fire when the player is on the brush floor.
         // Hard-coded to match the hp.* values used at heightmap-gen
-        // time (line ~1363) вЂ” hp itself is out of scope here.
+        // time (line ~1363) — hp itself is out of scope here.
         const float kCastleSink   = 0.6f;
         const float kPlateauH     = 22.0f;
         // 10.5 m so the depressed zone stays strictly UNDER the courtyard
         // brush floor (which extends to cr-wt/2 в‰€ 10.70 m on each axis).
-        // Previously 11.5 m вЂ” wider than the brush вЂ” left a ~50 cm
+        // Previously 11.5 m — wider than the brush — left a ~50 cm
         // ring where the depressed Jolt heightfield was the only collider
         // and the brush didn't cover it. Boxes landing or rolling into
         // that ring dropped to y=21.4 while the visible mesh terrain was

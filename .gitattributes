@@ -1,0 +1,17 @@
+# Normalise text to LF everywhere (MSVC, glslc and CMake all accept LF).
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.wav binary
+*.mp3 binary
+*.ogg binary
+*.bin binary
+*.glb binary
+*.spv binary
+*.exr binary
+*.hdr binary
+*.dds binary
+*.ktx2 binary

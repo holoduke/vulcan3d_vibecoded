@@ -1,7 +1,7 @@
 #version 460
 #extension GL_EXT_ray_query : require
 
-// Procedural FBM heightfield ray-marched terrain вЂ” selectable alternate
+// Procedural FBM heightfield ray-marched terrain — selectable alternate
 // to the chunked rasterised terrain. Implements the technique from
 // MiniMax-AI/skills shader-dev terrain-rendering reference: 2D Value
 // Noise with analytical derivatives, FBM with derivative-erosion
@@ -25,19 +25,19 @@ layout(location = 2) out vec4 outGBuffer0;
 layout(location = 3) out vec4 outGBuffer1;
 
 // Same push-constant layout as cube.frag's PushConstants. We use
-//   mvp           вЂ” view_proj for gl_FragDepth at the hit point
-//   model         вЂ” inverse(view_proj) for world-ray reconstruction
-//   color.xy      вЂ” plateau centre (world XZ)
-//   color.z       вЂ” plateau half-extent (m)
-//   color.w       вЂ” plateau height
-//   emissive.x    вЂ” march step factor (0.4..0.8)
-//   tex_params.x  вЂ” march step count
-//   tex_params.y  вЂ” shadow ray steps
-//   tex_params.z  вЂ” march FBM octaves
-//   tex_params.w  вЂ” normal FBM octaves
-//   grass_params.x вЂ” fog strength multiplier (0 = off)
-//   grass_params.y вЂ” relaxation flag (>0.5 = use relaxation step)
-//   grass_params.z вЂ” fog god-ray flag (>0.5 = self-shadowed fog)
+//   mvp           — view_proj for gl_FragDepth at the hit point
+//   model         — inverse(view_proj) for world-ray reconstruction
+//   color.xy      — plateau centre (world XZ)
+//   color.z       — plateau half-extent (m)
+//   color.w       — plateau height
+//   emissive.x    — march step factor (0.4..0.8)
+//   tex_params.x  — march step count
+//   tex_params.y  — shadow ray steps
+//   tex_params.z  — march FBM octaves
+//   tex_params.w  — normal FBM octaves
+//   grass_params.x — fog strength multiplier (0 = off)
+//   grass_params.y — relaxation flag (>0.5 = use relaxation step)
+//   grass_params.z — fog god-ray flag (>0.5 = self-shadowed fog)
 // The remaining fields are unused by this shader.
 layout(push_constant) uniform PC {
     mat4 mvp;
@@ -53,9 +53,9 @@ layout(push_constant) uniform PC {
 // procedural_baseline_height` per cell, so sculpt edits + plateau
 // noise + disk-loaded overlays appear on top of the shader's GLSL
 // FBM. Uploaded once at level load and re-uploaded after sculpt /
-// noise edits. World XZ в†’ UV maps via the gameplay-plateau push
+// noise edits. World XZ → UV maps via the gameplay-plateau push
 // constants (pc.color.xy = origin, pc.color.z is plateau-extent
-// вЂ” we don't have the heightmap origin/side here, so use the well-
+// — we don't have the heightmap origin/side here, so use the well-
 // known engine layout: terrain centred at origin, side = 2048 m).
 layout(set = 0, binding = 8) uniform sampler2D u_terrain_height;
 // FULL baked terrain height (NOT the delta) — the exact array the
@@ -123,15 +123,15 @@ vec3 meshNormal(vec2 worldXZ) {
 // as casters. Sampled here for water-surface shadow occlusion.
 layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 
-// TLAS вЂ” castle, dyn-props, terrain BLAS, etc. We fire shadow rays
+// TLAS — castle, dyn-props, terrain BLAS, etc. We fire shadow rays
 // against it with cull-mask 0x02 so the terrain BLAS (instance
-// mask 0x01) is excluded вЂ” terrain self-shadow is handled by
+// mask 0x01) is excluded — terrain self-shadow is handled by
 // calcShadow() against the FBM, and the rasterised terrain mesh sits
 // below the BLAS detail anyway. With the mask, each ray only finds
 // real dynamic-occluder hits (castle, boxes).
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 
-// Materials buffer вЂ” same layout cube.frag reads. Path-traced GI on
+// Materials buffer — same layout cube.frag reads. Path-traced GI on
 // the raymarched terrain looks up the BRDF colour at each bounce hit
 // from this buffer using the closest-hit's instance custom index
 // (with the kStaticBlasSentinel branch for the merged static BLAS).
@@ -144,7 +144,7 @@ layout(set = 0, binding = 2, std430) readonly buffer Materials {
     Material materials[];
 };
 // Sentinel matching kStaticBlasInstSentinel in src/engine/vk_engine/rt.cpp
-// вЂ” the merged-static castle BLAS uses this in instanceCustomIndex; the
+// — the merged-static castle BLAS uses this in instanceCustomIndex; the
 // shader recovers the per-brush material via primitive_id / 12.
 const int kStaticBlasSentinel = 0xFFFFFF;
 const int kCubeTrisPerBox     = 12;
@@ -161,7 +161,7 @@ bool any_hit_no_terrain(vec3 origin, vec3 dir, float t_max) {
            gl_RayQueryCommittedIntersectionTriangleEXT;
 }
 
-// Closest-hit variant for the PCSS blocker search вЂ” returns the hit
+// Closest-hit variant for the PCSS blocker search — returns the hit
 // distance so we can size the penumbra cone.
 bool closest_hit_no_terrain(vec3 origin, vec3 dir, float t_max,
                              out float out_t) {
@@ -177,7 +177,7 @@ bool closest_hit_no_terrain(vec3 origin, vec3 dir, float t_max,
     return true;
 }
 
-// Closest-hit + material lookup (mask 0x02 вЂ” terrain BLAS skipped).
+// Closest-hit + material lookup (mask 0x02 — terrain BLAS skipped).
 // Used by the path-traced GI loop to find castle / dyn-prop bounce
 // hits and look up their albedo for the throughput tint.
 bool closest_hit_material_no_terrain(vec3 origin, vec3 dir, float t_max,
@@ -198,11 +198,11 @@ bool closest_hit_material_no_terrain(vec3 origin, vec3 dir, float t_max,
     return true;
 }
 
-// Shadow-caster mask 0x01 вЂ” used FROM the GI bounce hit point on a
+// Shadow-caster mask 0x01 — used FROM the GI bounce hit point on a
 // castle / dyn-prop surface to test sun visibility. Includes the
 // terrain BLAS (which IS marked 0x01) so a bounce hit deep in a
 // valley is correctly shadowed by the surrounding terrain. NOT used
-// for the primary terrain receiver shadow вЂ” that's the no-terrain
+// for the primary terrain receiver shadow — that's the no-terrain
 // mask above to avoid procedural-vs-BLAS LOD self-hits.
 bool any_hit_shadow_caster(vec3 origin, vec3 dir, float t_max) {
     rayQueryEXT rq;
@@ -217,7 +217,7 @@ bool any_hit_shadow_caster(vec3 origin, vec3 dir, float t_max) {
 
 // Build a cosine-weighted sample direction in the hemisphere around
 // `n`. With this distribution the Lambertian estimator simplifies to
-// `albedo * Li` per sample (the cos(Оё) and BRDF/ПЂ factors cancel
+// `albedo * Li` per sample (the cos(θ) and BRDF/π factors cancel
 // against the pdf), which matches cube.frag's GI formulation.
 vec3 cos_hemi(float u1, float u2, vec3 n) {
     float r   = sqrt(u1);
@@ -240,9 +240,9 @@ vec3 cos_hemi_basis(float u1, float u2, vec3 n, vec3 t, vec3 b) {
     return d.x * t + d.y * n + d.z * b;
 }
 
-// Tiny xorshift32 hash вЂ” deterministic per-pixel jitter for the
+// Tiny xorshift32 hash — deterministic per-pixel jitter for the
 // stratified shadow rays.
-// Interleaved Gradient Noise вЂ” same dither pattern cube.frag uses
+// Interleaved Gradient Noise — same dither pattern cube.frag uses
 // for PCSS / RTAO. xorshift hashes (the previous rmRand) produce
 // row-banding correlations that read as moving "lines in shadows"
 // even with TAA. IGN is designed for stochastic rendering: low
@@ -266,7 +266,7 @@ float rmRand(uvec3 seed) {
     return float(rm_pcg3d(seed).x) * (1.0 / 4294967296.0);
 }
 
-// Scene UBO вЂ” same layout as cube.frag's binding 0. Only a handful of
+// Scene UBO — same layout as cube.frag's binding 0. Only a handful of
 // fields are read here (camera, sun, sky); the rest are unused.
 layout(set = 0, binding = 0) uniform Scene {
     vec4 sun_direction;
@@ -441,7 +441,7 @@ float distanceFogAmount(vec3 p_world, vec3 cam) {
     return clamp(fog * strength, 0.0, max_alpha);
 }
 
-// Cheap directional sky model вЂ” horizon -> zenith ramp around the
+// Cheap directional sky model — horizon -> zenith ramp around the
 // scene's sky colour, with a small sun-tinted lift near the horizon.
 // Used as the "no-noise" reference for the GI softener and as the
 // sample value for hemisphere rays that miss any occluder.
@@ -463,7 +463,7 @@ vec3 sample_sky_atmosphere(vec3 dir) {
     return mix(horizon, zenith, sqrt(up));   // pow(up, 0.45) approx
 }
 
-// Sky sample WITH the sun halo вЂ” used for path-traced GI rays that
+// Sky sample WITH the sun halo — used for path-traced GI rays that
 // miss into the open. A bounce ray that points near the sun should
 // pick up the disk's intensity (that's a sun-direct contribution
 // without firing a separate sun ray). The halo is bounded by the
@@ -514,7 +514,7 @@ vec3 noised(in vec2 p) {
 
 float noise2(vec2 p) { return noised(p).x; }
 
-// Per-octave ~37В° rotation breaks axis-aligned banding. Unit
+// Per-octave ~37° rotation breaks axis-aligned banding. Unit
 // determinant = pure rotation, no scaling.
 const mat2 m2 = mat2(0.8, -0.6, 0.6, 0.8);
 
@@ -543,7 +543,7 @@ float terrainDetailNoise(vec2 worldXZ) {
     return a - 0.5;
 }
 
-// Plateau blend factor вЂ” 1 inside the gameplay plateau region, 0
+// Plateau blend factor — 1 inside the gameplay plateau region, 0
 // outside, smooth ramp across `kPlateauBlend` metres so the FBM
 // surroundings ease into the flat castle pad. Mirrors what
 // generate_heightmap() does in the rasterised path so the visible
@@ -592,7 +592,7 @@ float plateauGroundDetail(vec2 wp) {
     return a;
 }
 
-// Medium-detail FBM вЂ” used by the ray march. Derivative-erosion term
+// Medium-detail FBM — used by the ray march. Derivative-erosion term
 // `1/(1+dot(d,d))` suppresses high-frequency layers on steep slopes,
 // producing realistic ridge/valley structure instead of fractal noise.
 // Octave count is the per-frame quality knob (pc.tex_params.z, 4..9):
@@ -738,7 +738,7 @@ float terrainM_lod(vec2 p, float ray_t) {
     return h;
 }
 
-// Normal-detail FBM вЂ” finite-difference normals call this 3Г— per hit
+// Normal-detail FBM — finite-difference normals call this 3Г— per hit
 // pixel, so it's the single biggest cost in calcNormal. Octave count
 // is pc.tex_params.w (4..16). 8 is barely-distinguishable from 16 at
 // gameplay distances.
@@ -994,7 +994,7 @@ vec3 terrainH_grad_lod(vec2 wp, float ray_t) {
     return vec3(h, grad.x * TERRAIN_HEIGHT, grad.y * TERRAIN_HEIGHT);
 }
 
-// Coarse 3-octave heightfield вЂ” strictly for AO + GI occlusion
+// Coarse 3-octave heightfield — strictly for AO + GI occlusion
 // raymarches where sub-meter detail doesn't matter. Cuts the per-step
 // noise cost vs terrainM() (which runs the full march octave count,
 // typically 4-6) while staying conservative-ish for occlusion (the
@@ -1023,7 +1023,7 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
         t = (ro.y - maxH) / (-rd.y);
     }
     float t_limit = (t_max > 0.0) ? min(t_max, 1500.0) : 1500.0;
-    // Phase 5 вЂ” blue-noise jittered start offset. Per-pixel hash-based
+    // Phase 5 — blue-noise jittered start offset. Per-pixel hash-based
     // sub-step shift breaks up the per-fragment march alignment, so
     // contour banding from a too-aggressive step factor disperses into
     // noise (then washes out under TAA). Free; no extra texture taps.
@@ -1087,7 +1087,7 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
         float hit_eps = mix(0.0015, 0.005, smoothstep(150.0, 600.0, t)) * t;
         if (!coarse && abs(h) < hit_eps) break;   // only real-surface steps may hit
         if (t > t_limit) return -1.0;
-        // Phase 6 вЂ” relaxation cone-stepping. Step grows with
+        // Phase 6 — relaxation cone-stepping. Step grows with
         // distance so the same ray covers more ground in fewer
         // iterations. 0.7 attenuation on h prevents penetration
         // when the relaxation factor over-shoots.
@@ -1128,12 +1128,12 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
 }
 
 // Finite-difference normal with distance-scaled epsilon. Eps grows
-// linearly with distance (was quadratic вЂ” that smeared distant
+// linearly with distance (was quadratic — that smeared distant
 // detail far more than required for anti-aliasing) so distant
 // terrain keeps edge crispness while close-up still uses sub-cm
 // epsilon. The earlier "micro-noise on lit normal" path was removed
-// вЂ” its `noise2(p) - noise2(p + 0.5)` cell-boundary derivative
-// produced visible 8вЂ“16 pixel square blocks on the surface past
+// — its `noise2(p) - noise2(p + 0.5)` cell-boundary derivative
+// produced visible 8–16 pixel square blocks on the surface past
 // 80 m. The FBM normal-octave slider (default 18) gives plenty of
 // distance detail without the artefacts.
 vec3 calcNormal(vec3 pos, float t) {
@@ -1176,7 +1176,7 @@ vec3 calcNormal(vec3 pos, float t) {
     float hU = terrainH_lod_pw(pos.xz + vec2(0.0, eps), t, tpl);
     vec3 N = normalize(vec3(hC - hR, eps, hC - hU));
 
-    // Closeup micro-bump вЂ” two-octave high-frequency noise gradient
+    // Closeup micro-bump — two-octave high-frequency noise gradient
     // tilts the surface normal so near-camera ground reads as rocky
     // / pebbly instead of glass-smooth. Falls off past 60 m so it
     // only costs the always-near pixels and never aliases at depth.
@@ -1196,10 +1196,10 @@ vec3 calcNormal(vec3 pos, float t) {
     return N;
 }
 
-// Classic heightfield soft-shadow march вЂ” `min(kВ·h/t)`. k ties to
+// Classic heightfield soft-shadow march — `min(k·h/t)`. k ties to
 // the global Shadow softness slider (rt_params.x) so a single
 // control softens both terrain self-shadow AND PCSS castle/box
-// shadows. Slider 0 в†’ k=64 (razor sharp), slider 0.15 в†’ k=4
+// shadows. Slider 0 → k=64 (razor sharp), slider 0.15 → k=4
 // (very soft). Cubic smoothstep at the end softens the linear
 // penumbra ramp.
 float calcShadow(vec3 pos, vec3 sunDir) {
@@ -1531,14 +1531,14 @@ float calcShadowMesh(vec3 pos, vec3 sunDir) {
     return 1.0;
 }
 
-// Cheap animated ocean normal вЂ” two scrolling sin/cos directions
+// Cheap animated ocean normal — two scrolling sin/cos directions
 // summed at slightly off-axis frequencies. `scale` multiplies the
 // base frequencies (1.0 = ~30 m wavelengths; 2.0 = half-wavelength
 // finer ripples; 0.5 = bigger sweeping waves).
 // Lake-style multi-octave wave normal. Combines a low-frequency
 // directional swell (wind blowing along +X) with three cross-direction
 // chops, then layers two high-frequency ripples for the close-up
-// detail. Each octave is biased toward sharper crests via a sinВІ-ish
+// detail. Each octave is biased toward sharper crests via a sin²-ish
 // shape (we use cos for the analytical derivative, equivalent up to
 // a phase shift). The result reads as proper lake water rather than
 // the previous uniform sinusoidal grid.
@@ -1748,12 +1748,12 @@ vec3 lakeWaterNormal(vec2 worldXZ, float uv_scale, float strength,
 }
 
 vec3 waterNormal(vec2 worldXZ, float t, float strength, float scale) {
-    // Wind axis biased on +X вЂ” most lakes have a dominant direction.
+    // Wind axis biased on +X — most lakes have a dominant direction.
     vec2 wind  = normalize(vec2(1.0, 0.35));
     vec2 cross1 = normalize(vec2(0.7, -0.7));
     vec2 cross2 = normalize(vec2(-0.5, 0.85));
 
-    // Octaves: low (long swell) в†’ high (ripple) wave numbers.
+    // Octaves: low (long swell) → high (ripple) wave numbers.
     // amp[i] decays so high frequencies don't dominate the normal.
     const int kOct = 6;
     float k_base[6]   = float[6](0.06, 0.11, 0.18, 0.27, 0.42, 0.65);
@@ -1770,11 +1770,11 @@ vec3 waterNormal(vec2 worldXZ, float t, float strength, float scale) {
         else if (i < 4)   dir = cross1;
         else              dir = cross2;
         float k = k_base[i] * scale;
-        // Phase: dirВ·worldXZ * k - speed * t.
+        // Phase: dir·worldXZ * k - speed * t.
         float ph = (worldXZ.x * dir.x + worldXZ.y * dir.y) * k -
                    spd_base[i] * t;
         // d/dx of sin(ph) wrt worldXZ = cos(ph) * k * dir.x. Sharpen
-        // by raising to a 1.4 power on the absolute term вЂ” keeps the
+        // by raising to a 1.4 power on the absolute term — keeps the
         // sign while pinching crests.
         float c = cos(ph);
         float abs_c = abs(c);
@@ -1838,7 +1838,7 @@ void main() {
     }
 
     if (t < 0.0 && t_water < 0.0) {
-        // Sky вЂ” let the existing compose-pass sky handle this pixel.
+        // Sky — let the existing compose-pass sky handle this pixel.
         discard;
     }
 
@@ -1847,7 +1847,7 @@ void main() {
         vec3 wpos = ro + rd * t_water;
         float wave_str = scene.water_params.z;
         float wave_t   = scene.water_params.w;
-        // wave-frequency multiplier вЂ” packed in water_color_shallow.w
+        // wave-frequency multiplier — packed in water_color_shallow.w
         // by update_scene_ubo. Defaults to 1.0; the slider lets the
         // user dial finer ripples or bigger sweeping waves.
         float wave_scale = max(0.05, scene.water_color_shallow.w);
@@ -1926,7 +1926,7 @@ void main() {
         }
         vec3 sunDirW = scene.sun_direction.xyz;
 
-        // Schlick fresnel вЂ” F0 = 0.02 for water. Looking grazing-on
+        // Schlick fresnel — F0 = 0.02 for water. Looking grazing-on
         // means full reflection; looking straight down в‰€ 2 % reflection.
         // pow(x, 5) → 3 multiplies (x²·x²·x). Capped at 0.88 so even
         // grazing-angle water keeps a sliver of water colour and
@@ -1940,7 +1940,7 @@ void main() {
         float fres = min(0.88, F0 + (1.0 - F0) * fv5);
 
         vec3 refl = reflect(rd, wnor);
-        // Sky reflection вЂ” horizonв†’zenith gradient + sun halo. Used
+        // Sky reflection — horizon→zenith gradient + sun halo. Used
         // directly when the reflection ray escapes the terrain or
         // when RT reflections are off.
         float skyT = clamp(refl.y * 0.5 + 0.5, 0.0, 1.0);
@@ -1973,7 +1973,7 @@ void main() {
         sky_refl += scene.sun_color.rgb * scene.sun_color.a * sh4 * 0.30;
 
         vec3 reflCol = sky_refl;
-        // RT-style FBM-march reflection вЂ” picks up the actual mountain
+        // RT-style FBM-march reflection — picks up the actual mountain
         // / valley silhouettes in the water surface. Cheap because
         // we use a reduced-quality march; if it misses (refl ray
         // exits past the terrain or goes into the sky) fall back to
@@ -1996,7 +1996,7 @@ void main() {
                 vec3 r_nor = water_only ? meshNormal(r_pos.xz)
                                         : calcNormal(r_pos, t_r);
                 // Lambert + sky ambient. No shadow march in the
-                // reflection вЂ” too expensive for a free-running
+                // reflection — too expensive for a free-running
                 // surface effect, and the missing self-shadow is
                 // visually fine on a wavy reflection.
                 float r_dif = max(dot(r_nor, sunDirW), 0.0);
@@ -2064,10 +2064,10 @@ void main() {
                 r_col = r_col * r_ext + r_fog * (1.0 - r_ext);
                 reflCol = r_col;
             }
-            // miss в†’ keep sky_refl
+            // miss → keep sky_refl
         }
 
-        // TLAS reflection вЂ” ray-query against castle / cubes / dyn
+        // TLAS reflection — ray-query against castle / cubes / dyn
         // props (mask 0x02 skips the terrain BLAS). If the TLAS hit
         // is closer than whatever's in `reflCol` (FBM-march or sky),
         // override with a basic shaded stand-in. We don't do per-
@@ -2146,7 +2146,7 @@ void main() {
         }
 
         // Shore-aware base colour. We compute the actual water depth
-        // at this surface point вЂ” water_level minus the FBM terrain
+        // at this surface point — water_level minus the FBM terrain
         // height directly below. Shallow water = `water_color_shallow`,
         // deep water = `water_color`, transition over `shore_blend`
         // metres. Mild noise on the depth breaks up the perfectly
@@ -2196,7 +2196,7 @@ void main() {
         float sp8 = sp4 * sp4; float sp16 = sp8 * sp8;
         float sp32 = sp16 * sp16; float spec = sp32 * sp32;
 
-        // Sun shadow on the water surface вЂ” bound-checked sample of
+        // Sun shadow on the water surface — bound-checked sample of
         // the sun shadow map (binding 7), already populated from
         // terrain chunks + castle + dyn-props. Dims the specular
         // (no glints in shadow) and slightly darkens the base tint.
@@ -2265,7 +2265,7 @@ void main() {
             }
         }
 
-        // Underwater showthrough вЂ” for shallow water we evaluate the
+        // Underwater showthrough — for shallow water we evaluate the
         // terrain at wpos.xz and pass its surface tint through the
         // water tinted by depth. Beer's-law-style attenuation:
         // T = exp(-depth * absorption) so deep water still hides
@@ -2284,7 +2284,7 @@ void main() {
             // below ~5 % of the surface tint. At 6 m depth Tw drops
             // to 0.05; deep-water pixels read as opaque tint anyway.
             if (Tw * trans_amt > 0.05) {
-                // Underwater surface вЂ” terrain material at the under-
+                // Underwater surface — terrain material at the under-
                 // water point, lambert-shaded by sun (with shadow), no
                 // shore noise so the look is calm.
                 vec3 u_pos = vec3(wpos.x, terrain_y, wpos.z);
@@ -2300,7 +2300,7 @@ void main() {
                 // reads as "looking through water", not "no water".
                 u_col *= mix(vec3(1.0), shallow * 1.5 + vec3(0.05),
                               0.5);
-                // Blend: shallow в†’ underwater visible, deep в†’ opaque
+                // Blend: shallow → underwater visible, deep → opaque
                 // water_color. trans_amt scales the maximum showthrough.
                 baseTint = mix(baseTint, u_col, Tw * trans_amt);
             }
@@ -2337,7 +2337,7 @@ void main() {
         // Subtle darkening of the surface tint when in shadow.
         col_w *= mix(0.7, 1.0, water_lit);
 
-        // Wave-peak foam вЂ” wnor.y drops on steep wave faces; fold in
+        // Wave-peak foam — wnor.y drops on steep wave faces; fold in
         // a 2-octave drifting noise so the foam reads as a stochastic
         // froth rather than a clean steepness mask. Scrolling along
         // the wind direction gives the field motion. Foam intensity
@@ -2369,7 +2369,7 @@ void main() {
         // Write hit depth; rasterised geometry that's actually in
         // front (e.g. a cube on a pier) still occludes us.
         vec4 clipW = pc.mvp * vec4(wpos, 1.0);
-        // See main terrain branch вЂ” cap below the compose sky-cutoff
+        // See main terrain branch — cap below the compose sky-cutoff
         // threshold so far water doesn't get repainted as sky-below-
         // horizon (black). Guard against w<=0 (point behind camera) so
         // the depth divide doesn't produce NaN.
@@ -2443,7 +2443,7 @@ void main() {
     float fre    = fre_in * fre_in;   // pow(x, 2) is just a square
 
     // Terrain self-shadow (FBM march). Bias is small (5 cm along
-    // the surface normal) вЂ” large biases (the previous 50 cm) made
+    // the surface normal) — large biases (the previous 50 cm) made
     // the shadow visibly detach from the contact line under
     // distant FBM normals.
     // calcShadow returns lit fraction; convert to "shadow amount"
@@ -2509,7 +2509,7 @@ void main() {
     }
 
     // RT PCSS for castle / boxes / dyn-props. Mirrors cube.frag's
-    // terrain-receiver shadow path 1:1 вЂ” the cube.frag terrain
+    // terrain-receiver shadow path 1:1 — the cube.frag terrain
     // shadows look clean, so the same algorithm with the same knobs
     // should work here. Origin biased along the sun direction so
     // the per-pixel FBM normal jitter doesn't enter (was the source
@@ -2521,7 +2521,7 @@ void main() {
     //      are in self-shadow we use that clean value (analogue of
     //      cube.frag's `max(shadow, sh_bake)`).
     // Distance-LOD: skip the RT work past 200 m. Far terrain pays
-    // the bake/calcShadow penalty only вЂ” keeps the per-frame ray
+    // the bake/calcShadow penalty only — keeps the per-frame ray
     // budget bounded and prevents Windows TDR on a heavy view.
     float dyn_shadow = 0.0;
     float cam_dist_pos = distance(pos, scene.camera_pos.xyz);
@@ -2560,11 +2560,11 @@ void main() {
                                             : vec3(1.0, 0.0, 0.0);
         vec3 tan_u = normalize(cross(ref_l, sunDir));
         vec3 tan_v = cross(sunDir, tan_u);
-        // Bias along sun direction (NOT surface normal) вЂ” the FBM
+        // Bias along sun direction (NOT surface normal) — the FBM
         // normal varies high-frequency per pixel; using it offsets
         // each pixel's shadow cone slightly and produces dither.
         vec3 origin = pos + sunDir * 0.1;
-        // Per-pixel + per-frame seed вЂ” TAA averages noisy samples.
+        // Per-pixel + per-frame seed — TAA averages noisy samples.
         // World-anchored seed. The per-pixel + per-frame seed relied on
         // TAA to average it, but DLSS keeps it as detail: under tree
         // canopies (wide penumbra, every pixel partly lit) the ground was
@@ -2629,7 +2629,7 @@ void main() {
         }
     }
     // 4. Max-combine: the FBM self-shadow is the analogue of
-    //    cube.frag's heightmap bake вЂ” clean, no noise. Where the
+    //    cube.frag's heightmap bake — clean, no noise. Where the
     //    surface is in self-shadow, we take that value verbatim.
     //    Where it's lit, the RT cone fills in castle / cube
     //    contributions. Result reads identical to the rasterised
@@ -2638,10 +2638,10 @@ void main() {
     float sha = 1.0 - shadow;
 
     // RT ambient occlusion against castle / boxes / dyn-props
-    // (mask 0x02 вЂ” terrain BLAS skipped). Mirrors cube.frag's RTAO
+    // (mask 0x02 — terrain BLAS skipped). Mirrors cube.frag's RTAO
     // path: cosine-hemisphere samples around the surface normal,
     // sqrt-shaped raw occlusion, ao_floor remap. AO darkens the
-    // ambient term вЂ” corners between walls + boxes get visibly
+    // ambient term — corners between walls + boxes get visibly
     // shaded, just like the rasterised path.
     float ao = 1.0;
     int ao_mode = scene.rt_flags2.w;
@@ -2686,7 +2686,7 @@ void main() {
             if (any_hit_no_terrain(origin_ao, d, ao_radius)) occluded += 1.0;
             ++taken;
         }
-        // Linear curve (no sqrt) вЂ” see commit 12f9ebc rationale.
+        // Linear curve (no sqrt) — see commit 12f9ebc rationale.
         float raw = 1.0 - (occluded / float(taken));
         float ao_floor_v = scene.rt_lod.w;
         float ao_local = mix(ao_floor_v, 1.0, raw);
@@ -2703,7 +2703,7 @@ void main() {
     // samples, N_bounces of throughput tracking, sun-shadow rays at
     // bounce hits up to gi_shadow_max_bounce, sky fallback on miss.
     // The terrain BLAS is skipped (mask 0x02) for the bounce closest
-    // hits вЂ” we only want castle/dyn-prop bounce contributions; a
+    // hits — we only want castle/dyn-prop bounce contributions; a
     // procedural-terrain self-bounce would need running getMaterial
     // at the hit point which is much more expensive than the BLAS
     // material lookup. The sun-shadow ray FROM a bounce hit uses
@@ -2711,9 +2711,9 @@ void main() {
     // CAN occlude the sun for a castle wall hit deep in a valley.
     //
     // Energy: cosine-weighted sampling makes each hit's contribution
-    // = albedo * Li (the BRDF/ПЂ and cos/ПЂ factors cancel). We tag
-    // the raw GI with the surface albedo (`mate`) at the end вЂ” same
-    // structure as cube.frag вЂ” and lerp toward a smooth sky-at-N
+    // = albedo * Li (the BRDF/π and cos/π factors cancel). We tag
+    // the raw GI with the surface albedo (`mate`) at the end — same
+    // structure as cube.frag — and lerp toward a smooth sky-at-N
     // estimate by `gi_softener` for low-sample noise control.
     vec3 gi_indirect = vec3(0.0);
     // Terrain GI sample count capped (was scene.rt_flags2.x directly).
@@ -2741,7 +2741,7 @@ void main() {
     if (N_gi > 0 && scene.rt_params2.x > 1e-3) {
         int N_bounces     = max(1, int(scene.terrain_rt_extra.w));
         int gi_shadow_max = int(scene.rt_lod.z);
-        // GI search radius вЂ” driven directly by the user's slider.
+        // GI search radius — driven directly by the user's slider.
         // Earlier we forced a min of 80m so first-bounce rays could
         // reach distant castle walls, but combined with N_gi samples
         // the long-ray BLAS traversal pushed total per-frame work
@@ -2749,7 +2749,7 @@ void main() {
         // 80m+ if you want stronger color bleed.
         float gi_radius   = max(scene.rt_params2.y, 1.0);
         // Soft sky fill for bounce hits that can't see the sun. Same
-        // 5%-of-sky constant as cube.frag вЂ” keeps interior bounces
+        // 5%-of-sky constant as cube.frag — keeps interior bounces
         // believably dark instead of glowing from a too-bright fill.
         vec3 sky_fill = scene.sky_color.rgb * 0.05;
 
@@ -2787,10 +2787,10 @@ void main() {
                     if (!closest_hit_material_no_terrain(ray_origin, ray_dir,
                                                           gi_radius,
                                                           t_hit, inst_id, prim_id)) {
-                        // BLAS miss в†’ sky in this direction. Bound by
+                        // BLAS miss → sky in this direction. Bound by
                         // the halo's pow(8) so no fireflies. Terrain
                         // self-occlusion is intentionally NOT checked
-                        // here вЂ” for short gi_radius (~20 m) on flat
+                        // here — for short gi_radius (~20 m) on flat
                         // terrain the heightfield march false-blocks
                         // sky-bound rays, killing the GI signal. AO
                         // already carries terrain occlusion via the
@@ -2807,7 +2807,7 @@ void main() {
                     vec3 hit_pos = ray_origin + ray_dir * t_hit;
                     // No vertex normal in ray queries; -ray_dir is a
                     // good local approximation for cosine sampling
-                    // and the sun-shadow's nВ·L test (matches cube.frag).
+                    // and the sun-shadow's n·L test (matches cube.frag).
                     vec3 hit_n   = -ray_dir;
 
                     vec3 hit_light = sky_fill;
@@ -2925,14 +2925,14 @@ void main() {
     // transmittance accumulation + Henyey-Greenstein phase-weighted
     // sun in-scattering. The Frostbite-style energy-conserving
     // integration:
-    //   Sint = (S - S * exp(-Пѓe * dt)) / Пѓe    [exact for constant Пѓ
+    //   Sint = (S - S * exp(-σe * dt)) / σe    [exact for constant σ
     //                                            over the segment]
-    //   trans *= exp(-Пѓe * dt)
+    //   trans *= exp(-σe * dt)
     //   col_out += trans_prev * Sint
     // Fog density = exp(-y / scaleHeight) Г— (1 + slow FBM scroll) so
     // the fog has subtle volumetric variation (wisps in the valleys)
     // instead of a uniform sheet. No per-step volumetric shadow ray
-    // вЂ” the HG phase already gives the directional sun glow.
+    // — the HG phase already gives the directional sun glow.
     {
         // Slider-driven strength; skip the entire march when 0.
         float fogStrength = pc.grass_params.x;
@@ -2941,7 +2941,7 @@ void main() {
         // Distance-LOD on the fog march: full 12 steps near the
         // camera, drop to 4 past 150 m. Distant terrain pixels with
         // 16-step fog were the dominant per-pixel cost and the
-        // direct cause of the GPU TDR вЂ” far fog can't visibly
+        // direct cause of the GPU TDR — far fog can't visibly
         // resolve sub-step density anyway.
         // Linear ramp 12→4 across 100..250 m. The previous binary cliff
         // at 150 m caused wave divergence on neighbouring pixels and
@@ -2949,7 +2949,7 @@ void main() {
         float dist_cam = distance(pos, scene.camera_pos.xyz);
         int kVolSteps = max(4, int(mix(12.0, 4.0,
                                         smoothstep(100.0, 250.0, dist_cam))));
-        const float kVolDensityBase   = 0.030;  // Пѓe at full density inside the band
+        const float kVolDensityBase   = 0.030;  // σe at full density inside the band
         const float kVolPhaseG        = 0.65;   // forward-scattering bias
         // Band parameters from settings (fog_band slot in scene UBO).
         float fog_y_start = scene.fog_band.x;
@@ -2960,7 +2960,7 @@ void main() {
         vec3 sunGlow   = scene.sun_color.rgb * scene.sun_color.a;
 
         // Henyey-Greenstein phase: forward-peaked when looking near
-        // the sun. The denominator goes near-zero as cosThв†’1, so
+        // the sun. The denominator goes near-zero as cosTh→1, so
         // phase can spike past 100 and blow up the bloom + auto-
         // exposure (visible flash + sometimes drives a TDR).
         // Clamp the denominator's growth so phase stays bounded.
@@ -2987,9 +2987,9 @@ void main() {
         float t_max = min(t_end, 600.0);   // cap so we don't waste taps in fog-noise pixels far away
         float dt    = t_max / float(kVolSteps);
         // Per-pixel jitter on the start position breaks step banding
-        // вЂ” combined with Phase 5's surface jitter this stays dither-stable.
+        // — combined with Phase 5's surface jitter this stays dither-stable.
         // Stable per-pixel jitter (no frame number) so the volumetric
-        // step pattern is fixed in screen space вЂ” TAA's spatial
+        // step pattern is fixed in screen space — TAA's spatial
         // filter erases it. Per-frame variation made the dither
         // pattern shift between frames and TAA couldn't keep up.
         float jStart = ignBase(gl_FragCoord.xy + vec2(39.1, 9.7));
@@ -3012,14 +3012,14 @@ void main() {
             // large camera moves seamlessly.
             vec2 q = p.xz * 0.020 + vec2(scene.water_params.w * 0.05);
             float w = textureLod(u_fog_wisp, q * (1.0 / 16.0), 0.0).r;
-            // Centred around 0.5 so noise = 1.0 в†’ "no modulation" and
-            // noise = 0 в†’ density Г—0.2 (thin patch). Strength slider
+            // Centred around 0.5 so noise = 1.0 → "no modulation" and
+            // noise = 0 → density Г—0.2 (thin patch). Strength slider
             // controls how much the noise can carve gaps.
             float wisp = mix(1.0, 2.0 * w, fog_noise);
             wisp = clamp(wisp, 0.2, 2.0);
             float sigma_e = kVolDensityBase * profile * wisp * fogStrength;
 
-            // Phase 7 вЂ” fog self-shadow / god-rays. Step a few small
+            // Phase 7 — fog self-shadow / god-rays. Step a few small
             // distances toward the sun and accumulate optical depth
             // through the same density field. Surface (terrain /
             // castle) shadows the fog because the surface RT shadow
@@ -3052,7 +3052,7 @@ void main() {
                 }
             }
 
-            // Single-scattering: Пѓs в‰€ Пѓe (assume cloudy isotropic
+            // Single-scattering: σs в‰€ σe (assume cloudy isotropic
             // scattering, no absorption). Phase function gives the
             // sun-aligned directional component; ambient fogTint
             // keeps back-lit fog from going pitch-black.
@@ -3063,10 +3063,10 @@ void main() {
             const float kLog2e = 1.44269504;   // log2(e) — converts exp() to exp2()
             float seg  = exp2(-sigma_e * dt * kLog2e);
             vec3  Sint = (Lin - Lin * seg) / max(sigma_e, 1e-4);
-            scatter += trans * Sint * sigma_e;   // re-multiply Пѓs because we factored Пѓe out
+            scatter += trans * Sint * sigma_e;   // re-multiply σs because we factored σe out
             trans   *= seg;
             t_v     += dt;
-            if (trans < 0.02) break;             // early-out вЂ” fully foggy
+            if (trans < 0.02) break;             // early-out — fully foggy
         }
         // Apply: surface attenuated by trans, scatter added in front.
         col = col * trans + scatter;
@@ -3093,7 +3093,7 @@ void main() {
 
     // Write the hit-point depth so rasterised geometry that wrote
     // depth earlier in the same pass occludes the terrain correctly.
-    // Cap below 0.9999 вЂ” the compose pass treats depth >= 0.99999 as
+    // Cap below 0.9999 — the compose pass treats depth >= 0.99999 as
     // a sky pixel and paints `sample_sky(dir)`. For terrain hits past
     // ~800 m the projected depth crosses the threshold and compose
     // overwrites our colour with the skybox sampled below the horizon
@@ -3113,7 +3113,7 @@ void main() {
     outGBuffer0 = vec4(clamp(col, vec3(0.0), vec3(1.0)), 8.0 / 255.0);
     outGBuffer1 = vec4(0.5, 0.5, 0.7, 0.0);
     // Screen-space motion vector for TAA. World position is stationary
-    // вЂ” only the camera moves вЂ” so prev_uv comes from prev_view_proj
+    // — only the camera moves — so prev_uv comes from prev_view_proj
     // applied to the same world hit point. Without this, TAA cannot
     // reproject and per-frame PCSS / fog jitter shows up as moving
     // square dither artefacts.

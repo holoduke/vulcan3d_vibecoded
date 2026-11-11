@@ -68,3 +68,9 @@ d*.err
 # NVIDIA Streamline SDK (fetched by scripts/fetch_streamline.ps1, ~280 MB)
 external/streamline/
 external/_dl/
+*.err
+*.out
+/screenshot_*.png
+tools/*.exe
+tools/*.obj
+qlike_settings.cfg.user-backup

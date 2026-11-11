@@ -54,7 +54,7 @@ static float fbm_noise2(float x, float y) {
 namespace {
 inline float fract_f(float v) { return v - std::floor(v); }
 inline float terrain_hash21(float px, float pz) {
-    // Mirrors GLSL hash21(vec2 p) вЂ” dot/fract over the (x,y,x) triple.
+    // Mirrors GLSL hash21(vec2 p) — dot/fract over the (x,y,x) triple.
     float p3x = fract_f(px * 0.1031f);
     float p3y = fract_f(pz * 0.1031f);
     float p3z = fract_f(px * 0.1031f);
@@ -81,7 +81,7 @@ inline NoiseDeriv terrain_noised(float px, float pz) {
     float dvz = duz * ((c - a) + (a - b - c + d) * ux);
     return { value, dvx, dvz };
 }
-// Same FBM as terrain_raymarch.frag::terrainM вЂ” `noised` accumulates
+// Same FBM as terrain_raymarch.frag::terrainM — `noised` accumulates
 // the analytical derivative `d`, and `n.x / (1 + dot(d,d))` damps
 // high-frequency octaves on steep slopes, producing the ridge/valley
 // structure the user sees in the raymarched terrain.
@@ -105,7 +105,7 @@ inline float terrain_fbm_eroded(float wx, float wz, float scale,
         px = npx * 2.0f;
         pz = npz * 2.0f;
     }
-    // Re-centre roughly around 0 вЂ” fbm with `n.v` in [0,1] sums to в‰€
+    // Re-centre roughly around 0 — fbm with `n.v` in [0,1] sums to в‰€
     // half the harmonic series. The bias is approximate and harmless;
     // the brush noise scale only needs symmetric variation around 0.
     return a - 0.5f;
@@ -114,7 +114,7 @@ inline float terrain_fbm_eroded(float wx, float wz, float scale,
 
 // Distance-based LOD selector for terrain chunks. Used by all three
 // terrain draw paths (depth pre-pass, color pass, shadow pass) so LOD
-// stays consistent Р Р†Р вЂљРІР‚Сњ if the pre-pass picked half-LOD and the color
+// stays consistent — if the pre-pass picked half-LOD and the color
 // pass picked full, the depth values would mismatch and the color
 // pass's LESS_OR_EQUAL test would discard fragments. Thresholds are
 // pulled from rt_ so the user can push higher-resolution terrain
@@ -124,10 +124,10 @@ inline float terrain_fbm_eroded(float wx, float wz, float scale,
 
 // Paint the R channel of the grass eligibility mask. Add: push toward
 // 1, Remove: push toward 0. Uses the same world hit + radius the height
-// brush uses, but indexes the 1024ВІ mask over a 2048 m world (matches
+// brush uses, but indexes the 1024² mask over a 2048 m world (matches
 // the bake in init_grass_mask_texture). Marks `grass_mask_dirty_` so
 // the next safe frame re-uploads the mask to the GPU. Does NOT touch
-// heights / chunks / BLAS / Jolt вЂ” pure mask edit.
+// heights / chunks / BLAS / Jolt — pure mask edit.
 static void paint_grass_mask(std::vector<uint8_t>& mask, int dim,
                               const glm::vec3& hit, float radius_m,
                               float strength_per_sec, float dt,
@@ -135,7 +135,7 @@ static void paint_grass_mask(std::vector<uint8_t>& mask, int dim,
     if (mask.empty()) return;
     const float kWorldSide = 2048.0f;   // matches init_grass_mask_texture
     const float cells_per_metre = static_cast<float>(dim) / kWorldSide;
-    // World в†’ mask cell coords. Mask covers [-1024..+1024] m centred at
+    // World → mask cell coords. Mask covers [-1024..+1024] m centred at
     // origin; cell (0,0) = world (-1024, -1024).
     float cx = (hit.x + kWorldSide * 0.5f) * cells_per_metre;
     float cz = (hit.z + kWorldSide * 0.5f) * cells_per_metre;
@@ -229,7 +229,7 @@ bool VulkanEngine::load_grass_mask() {
     int32_t fdim = 0;
     f.read(reinterpret_cast<char*>(&fdim), sizeof(fdim));
     if (fdim != kGrassMaskDim) {
-        log::warnf("[grass] saved mask dim mismatch (saved %d, want %d) вЂ” ignoring",
+        log::warnf("[grass] saved mask dim mismatch (saved %d, want %d) — ignoring",
                    fdim, kGrassMaskDim);
         return false;
     }
@@ -243,9 +243,9 @@ bool VulkanEngine::load_grass_mask() {
 
 void VulkanEngine::apply_terrain_brush(float dt) {
     if (!terrain_brush_has_hit_) return;
-    // Grass-paint modes only touch the eligibility mask вЂ” bail before
+    // Grass-paint modes only touch the eligibility mask — bail before
     // the height-array path so they work even when chunks / heights
-    // happen to be empty (defensive вЂ” Phase 4 always populates both).
+    // happen to be empty (defensive — Phase 4 always populates both).
     if (brush_mode_is_grass(terrain_brush_mode_)) {
         paint_grass_mask(grass_mask_data_, kGrassMaskDim,
                           terrain_brush_world_pos_,
@@ -274,7 +274,7 @@ void VulkanEngine::apply_terrain_brush(float dt) {
     const float strength = terrain_brush_strength_ * dt;
 
     // 3-octave value-noise via cheap hash. Centred around 0 so it
-    // multiplies the sculpt delta as `1 + noiseР’В·strength` РІР‚вЂќ values
+    // multiplies the sculpt delta as `1 + noise·strength` — values
     // > 1 raise more, < 1 raise less. Result: sculpted patches
     // pick up natural-looking surface variation instead of flat
     // squares. Cheap (3 hashes per cell during sculpt only).
@@ -286,12 +286,12 @@ void VulkanEngine::apply_terrain_brush(float dt) {
         if (use_fbm_eroded) {
             // Mesh has 1 m cells. The raymarcher's macro-mountain
             // scale (0.003 в‰€ 333 m base wavelength) means adjacent
-            // cells sample nearly identical noise вЂ” the brush ends up
+            // cells sample nearly identical noise — the brush ends up
             // applying a smooth blob with no per-cell variation, and
             // the surface reads as faceted because the geometry has
             // no high-freq detail to break up the triangles. Higher
-            // base scale (0.05) puts ~20 m at octave 0 and в‰¤ 0.5 m
-            // at 6 octaves вЂ” every 1 m cell gets a distinct sample,
+            // base scale (0.05) puts ~20 m at octave 0 and ≤ 0.5 m
+            // at 6 octaves — every 1 m cell gets a distinct sample,
             // so brushed areas inherit cell-level ridge variation
             // similar to the procedural FBM heights.
             const float kBrushScale = 0.05f;
@@ -316,7 +316,7 @@ void VulkanEngine::apply_terrain_brush(float dt) {
             size_t idx = static_cast<size_t>(iz) * static_cast<size_t>(W) +
                          static_cast<size_t>(ix);
             float& h = terrain_data_.heights[idx];
-            // Per-cell noise multiplier РІР‚вЂќ only kicks in for additive
+            // Per-cell noise multiplier — only kicks in for additive
             // modes (raise / lower), not smooth / flatten.
             float wx = terrain_data_.origin_x + ix * terrain_data_.cell;
             float wz = terrain_data_.origin_z + iz * terrain_data_.cell;
@@ -350,16 +350,16 @@ void VulkanEngine::apply_terrain_brush(float dt) {
                     break;
                 }
                 case TerrainBrushMode::Erode: {
-                    // Add FBM-eroded detail (same n.v/(1+|в€‡d|ВІ) recipe
+                    // Add FBM-eroded detail (same n.v/(1+|в€‡d|²) recipe
                     // as the raymarched terrain), scaled by brush
                     // falloff. The base FBM scale here is much higher
-                    // than the raymarcher's 0.003 вЂ” at typical brush
-                    // radii (в‰¤ 10 m) the raymarcher's macro-mountain
+                    // than the raymarcher's 0.003 — at typical brush
+                    // radii (≤ 10 m) the raymarcher's macro-mountain
                     // wavelength means the WHOLE brush samples nearly
                     // the same noise value, which feels like a smooth
                     // uniform bump (the "smoothing" symptom). Pumping
                     // the base scale to 0.05 gives ~20 m at octave 0
-                    // and ~30 cm at 6 octaves вЂ” actual ridges and
+                    // and ~30 cm at 6 octaves — actual ridges and
                     // valleys appear inside the brush footprint.
                     const float kErodeScale = 0.05f;
                     float n = terrain_fbm_eroded(
@@ -368,9 +368,9 @@ void VulkanEngine::apply_terrain_brush(float dt) {
                     // Erosion amplitude scales with brush radius so a
                     // larger brush makes proportionally taller ridges
                     // (a 1 m brush shouldn't punch a 4 m peak). Per-
-                    // frame accumulation = noiseВ·radiusВ·dt В· falloff;
-                    // a 1-sec hold on a 6 m brush gives ~В±1.5 m peak
-                    // displacement вЂ” visible without obliterating the
+                    // frame accumulation = noise·radius·dt · falloff;
+                    // a 1-sec hold on a 6 m brush gives ~±1.5 m peak
+                    // displacement — visible without obliterating the
                     // surrounding terrain.
                     float amp = terrain_brush_radius_ * 0.6f;
                     h += n * amp * dt * falloff;
@@ -399,13 +399,13 @@ void VulkanEngine::apply_terrain_brush(float dt) {
                 case TerrainBrushMode::GrassAdd:
                 case TerrainBrushMode::GrassRemove:
                     // Grass-paint modes branched out at the top of
-                    // apply_terrain_brush вЂ” the height loop never sees them.
+                    // apply_terrain_brush — the height loop never sees them.
                     break;
             }
         }
     }
 
-    // CLOD raster picks the edit up from the heightmap TEXTURE вЂ” no mesh
+    // CLOD raster picks the edit up from the heightmap TEXTURE — no mesh
     // rebake. Refresh the min/max pyramid for the touched region (culling
     // AABBs) and flag the textures + BLAS + collision for re-upload.
     update_clod_pyramid_region(terrain_clod_pyramid_,
@@ -420,13 +420,13 @@ void VulkanEngine::apply_terrain_brush(float dt) {
 void VulkanEngine::refresh_terrain_collision() {
     if (!terrain_jolt_dirty_) return;
     if (terrain_data_.heights.empty()) return;
-    // Jolt has no incremental update for HeightFieldShape вЂ” we rebuild
+    // Jolt has no incremental update for HeightFieldShape — we rebuild
     // the whole shape. Mirrors the sub-grid trim done at level load:
     // when sample_count would be odd Jolt's block-size requirement
-    // forces us onto a 2048Г—2048 sub-grid taken from the 2049ВІ heightmap.
+    // forces us onto a 2048Г—2048 sub-grid taken from the 2049² heightmap.
     //
     // For each Jolt sample we store max(self, neighbours). Reason:
-    // Jolt's HeightFieldShape is a per-cell triangulation вЂ” the
+    // Jolt's HeightFieldShape is a per-cell triangulation — the
     // collision surface is a piecewise-linear plane between corners,
     // which sits BELOW the visual surface (whether the rasterized
     // mesh's smooth-shaded reading or the raymarched FBM) at sub-cell
@@ -518,7 +518,7 @@ void VulkanEngine::refresh_terrain_blas() {
     // buffer is rebuilt from the current heightmap, then the BLAS is
     // re-built in place. RT shadows/GI will be slightly stale until
     // this fires, which reads as "lighting catches up after you stop
-    // sculpting" Р Р†Р вЂљРІР‚Сњ acceptable.
+    // sculpting" — acceptable.
     if (terrain_mesh_.vertex_buffer && !terrain_data_.heights.empty()) {
         Heightmap hm{};
         hm.dim = terrain_data_.dim;
@@ -564,7 +564,7 @@ namespace {
 // path can rely on the resources existing without duplicating setup.
 // Caller writes binding 6 separately; transitions the image into
 // SHADER_READ_ONLY_OPTIMAL on first creation (so partial uploads can
-// flip TRANSFER_DST Р Р†РІР‚В РІР‚в„ў SHADER_READ_ONLY symmetrically).
+// flip TRANSFER_DST → SHADER_READ_ONLY symmetrically).
 void ensure_shadow_resources(VkDevice device, VmaAllocator alloc,
                              VkQueue queue, uint32_t qfam,
                              int W, int H,
@@ -616,7 +616,7 @@ void ensure_shadow_resources(VkDevice device, VmaAllocator alloc,
              "terrain shadow sampler");
 
     // Initialise to SHADER_READ_ONLY so the very first tick's
-    // tile transition (SHADER_READ_ONLY Р Р†РІР‚В РІР‚в„ў TRANSFER_DST Р Р†РІР‚В РІР‚в„ў SHADER_READ_ONLY)
+    // tile transition (SHADER_READ_ONLY → TRANSFER_DST → SHADER_READ_ONLY)
     // is symmetric. Without this the layout starts UNDEFINED and the
     // first frame would have to special-case the source layout.
     vkinit::one_time_submit(device, queue, qfam, [&](VkCommandBuffer cb) {
@@ -652,9 +652,9 @@ void VulkanEngine::rebuild_terrain_shadow_texture(bool defer_bake) {
     }
 
     // Sync bake stays at SS=1 for fast level load (~150ms). When the
-    // user has supersample > 1 the texture is created at SSР“вЂ”heightmap-dim,
-    // and we replicate each SS=1 texel into an SSР“вЂ”SS block so the
-    // texture is fully populated from frame 1 РІР‚вЂќ the worker then
+    // user has supersample > 1 the texture is created at SS×heightmap-dim,
+    // and we replicate each SS=1 texel into an SS×SS block so the
+    // texture is fully populated from frame 1 — the worker then
     // re-bakes properly at the user's SS in the background.
     const int ss = std::max(1, rt_.terrain_bake_supersample);
     terrain_shadow_active_ss_ = ss;
@@ -775,7 +775,7 @@ void VulkanEngine::init_terrain_height_texture() {
         log::warn("init_terrain_height_texture: heightmap empty, skipping");
         return;
     }
-    // Heightmap is stored as (dim+1) Р“вЂ” (dim+1) РІР‚вЂќ vertices, not cells РІР‚вЂќ
+    // Heightmap is stored as (dim+1) × (dim+1) — vertices, not cells —
     // so the texture must match that or the row-stride doesn't line up
     // and the upload scrambles the data (cells get shifted by 1 column
     // per row). Texture is dim+1 in each axis to match.
@@ -783,7 +783,7 @@ void VulkanEngine::init_terrain_height_texture() {
     const int H = terrain_data_.dim + 1;
 
     // Cache the max for the raymarch's upper-bound clip. Compute once
-    // here РІР‚вЂќ sculpt edits don't update the texture anyway.
+    // here — sculpt edits don't update the texture anyway.
     float max_h = 0.0f;
     for (float h : terrain_data_.heights) if (h > max_h) max_h = h;
     terrain_height_max_ = max_h;
@@ -885,8 +885,8 @@ void VulkanEngine::upload_terrain_height_payload(VkImageLayout src_layout) {
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, stage_alloc, &ai);
     // DELTA from baseline so the raymarch shader can layer sculpt edits on
-    // top of its own GLSL FBM. On first launch baseline == current в†’
-    // delta is all zeros в†’ no change to the procedural look.
+    // top of its own GLSL FBM. On first launch baseline == current →
+    // delta is all zeros → no change to the procedural look.
     const size_t n = static_cast<size_t>(W) * static_cast<size_t>(H);
     if (terrain_baseline_heights_.size() == n) {
         std::vector<float> delta(n);
@@ -1005,7 +1005,7 @@ void VulkanEngine::add_fbm_erosion_to_sculpted(float amplitude_factor,
                                static_cast<size_t>(ix);
             float delta = terrain_data_.heights[idx] -
                           terrain_baseline_heights_[idx];
-            // Only erode cells the user actually raised РІР‚вЂќ preserve
+            // Only erode cells the user actually raised — preserve
             // procedural terrain + lowered areas as-is.
             if (delta <= 0.25f) continue;
             float wx = terrain_data_.origin_x + ix * terrain_data_.cell;
@@ -1281,10 +1281,10 @@ void VulkanEngine::refresh_terrain_height_full_texture() {
 
 // ---------------- Sun shadow map (single-cascade ortho) ----------------
 //
-// Standard depth-only shadow pass: one 2048Р вЂ™Р вЂ  D32 depth target written
+// Standard depth-only shadow pass: one 2048² D32 depth target written
 // from the sun's POV each frame, sampled by grass.vert as a
 // sampler2DShadow at descriptor binding 7. Cube.frag continues to use
-// RT shadow rays Р Р†Р вЂљРІР‚Сњ we don't move the whole engine to CSM yet, this is
+// RT shadow rays — we don't move the whole engine to CSM yet, this is
 // the cheap path that lets dynamic occluders (castle, dyn-props) cast
 // shadow on grass without firing a ray per blade.
 //
@@ -1364,7 +1364,7 @@ void VulkanEngine::enqueue_terrain_shadow_rebake(glm::vec3 target_sun) {
     if (terrain_data_.heights.empty()) return;
     terrain_shadow_target_sun_dir_ = target_sun;
 
-    // Tile coordinates are in TEXTURE space (heightmap_dim+1 Р“вЂ” ss).
+    // Tile coordinates are in TEXTURE space (heightmap_dim+1 × ss).
     const int ss = std::max(1, terrain_shadow_active_ss_);
     const int W = (terrain_data_.dim + 1) * ss;
     const int H = (terrain_data_.dim + 1) * ss;
@@ -1396,7 +1396,7 @@ void VulkanEngine::enqueue_terrain_shadow_rebake(glm::vec3 target_sun) {
                   return a.dist_sq < b.dist_sq;
               });
 
-    // Replace the worker's job queue. Drop any older results too РІР‚вЂќ they
+    // Replace the worker's job queue. Drop any older results too — they
     // were baked against a stale sun direction or a different ss.
     {
         std::lock_guard<std::mutex> lk(terrain_shadow_mutex_);
@@ -1530,9 +1530,9 @@ float VulkanEngine::sample_terrain_height(float x, float z) const {
 
 // ---- Procedural terrain textures (curvature/sky-vis aux, grass mask, fog) ----
 
-// Terrain aux bake (AAA Phases 4/5). RG8 1024ВІ covering the 2048 m
-// world: R = curvature (0.5 flat, <0.5 concave gullies вЂ” sediment +
-// cavity darkening, >0.5 convex ridges вЂ” exposed rock), G = sky
+// Terrain aux bake (AAA Phases 4/5). RG8 1024² covering the 2048 m
+// world: R = curvature (0.5 flat, <0.5 concave gullies — sediment +
+// cavity darkening, >0.5 convex ridges — exposed rock), G = sky
 // visibility from an 8-direction horizon scan (macro AO for valleys).
 // CPU bake, multi-threaded; ~100 ms at load.
 void VulkanEngine::init_terrain_aux_texture() {
@@ -1568,7 +1568,7 @@ void VulkanEngine::init_terrain_aux_texture() {
                     float lap = h_at(wx + curv_r, wz) + h_at(wx - curv_r, wz)
                               + h_at(wx, wz + curv_r) + h_at(wx, wz - curv_r)
                               - 4.0f * h0;
-                    // lap > 0 = concave (valley floor). Map В±~6 m of
+                    // lap > 0 = concave (valley floor). Map ±~6 m of
                     // Laplacian to the full byte range around 0.5.
                     float curv = std::clamp(0.5f - lap * 0.08f, 0.0f, 1.0f);
                     // Sky visibility: per direction take the max horizon
@@ -1690,7 +1690,7 @@ void VulkanEngine::destroy_terrain_aux_texture() {
 void VulkanEngine::init_grass_mask_texture() {
     const int dim = kGrassMaskDim;
     const float kWorldSide = 2048.0f;     // matches kHeightmapSide
-    // RG8 вЂ” 2 bytes per texel. The vector lives on the engine so the
+    // RG8 — 2 bytes per texel. The vector lives on the engine so the
     // GrassAdd/GrassRemove brush can paint into it without rebaking the
     // noise. We populate it here, upload from it once, and reupload via
     // reupload_grass_mask() after every paint stroke.
@@ -1707,15 +1707,15 @@ void VulkanEngine::init_grass_mask_texture() {
                        - kWorldSide * 0.5f;
             float wz = (static_cast<float>(z) + 0.5f) / dim * kWorldSide
                        - kWorldSide * 0.5f;
-            // R: presence вЂ” low-freq FBM, smoothstep gate.
+            // R: presence — low-freq FBM, smoothstep gate.
             float n = fbm_noise2(wx * 0.02f, wz * 0.02f);
             float presence = smoothstep_f(0.40f, 0.55f, n);
             // Castle keep-out. The raymarched grass shader plants
             // blades at terrain Y (= plateau height inside castle), so
             // without this guard blade tips poke through the castle
-            // floor brushes. The mask is 1024ВІ over a 2048 m world
+            // floor brushes. The mask is 1024² over a 2048 m world
             // (в‰€2 m / texel) and the shader samples it with LINEAR
-            // filtering вЂ” bilinear can leak presence ~2-4 m inward
+            // filtering — bilinear can leak presence ~2-4 m inward
             // from a hard boundary, so we use a wider keep-out band
             // (18 m vs the 11 m outer wall) to keep ALL bilinear
             // samples inside the floor's extent at exactly zero.
@@ -1723,7 +1723,7 @@ void VulkanEngine::init_grass_mask_texture() {
             if (std::abs(wx) < kCastleHalf && std::abs(wz) < kCastleHalf) {
                 presence = 0.0f;
             }
-            // G: slope mag вЂ” finite-diff on real terrain heights, so
+            // G: slope mag — finite-diff on real terrain heights, so
             // cliffs/peaks naturally read as steep. Stored normalized
             // [0..1] = raw_slope / 2.0; shader un-normalizes.
             const float kEps = 2.0f;       // metres
@@ -1825,13 +1825,13 @@ void VulkanEngine::destroy_grass_mask_texture() {
     grass_mask_ = {};
 }
 
-// Bake the 3-octave fog wisp pattern into a 256ВІ R8 texture so the
+// Bake the 3-octave fog wisp pattern into a 256² R8 texture so the
 // terrain raymarch's volumetric fog density + godray probe can sample
 // it once instead of running 3Г— noise2 per tap. World-space q is
 // rescaled to UV by 1/16 so the texture tiles every 16 q-units (в‰€800 m
 // of world); the texture sampler uses REPEAT addressing so time
 // scrolling and large camera moves stay seamless. Wave-pattern doesn't
-// need to bit-match the GLSL noise2 вЂ” it just needs to look "wispy".
+// need to bit-match the GLSL noise2 — it just needs to look "wispy".
 void VulkanEngine::init_fog_wisp_texture() {
     const int dim = kFogWispDim;
     std::vector<uint8_t> data(static_cast<size_t>(dim) * dim);

@@ -1,4 +1,4 @@
-﻿#include "engine/terrain.h"
+#include "engine/terrain.h"
 
 #include "engine/log.h"
 
@@ -55,7 +55,7 @@ namespace {
 inline glm::vec3 rm_fract(glm::vec3 v) { return v - glm::floor(v); }
 inline float     rm_fract1(float v)    { return v - std::floor(v); }
 
-// hash21 вЂ” exactly mirrors the shader's hash function.
+// hash21 — exactly mirrors the shader's hash function.
 inline float rm_hash21(glm::vec2 p) {
     glm::vec3 p3 = rm_fract(glm::vec3(p.x, p.y, p.x) * 0.1031f);
     p3 += glm::dot(p3, glm::vec3(p3.y, p3.z, p3.x) + 19.19f);
@@ -65,7 +65,7 @@ inline float rm_hash21(glm::vec2 p) {
 inline float rm_noised(glm::vec2 p, glm::vec2& deriv) {
     glm::vec2 i = glm::floor(p);
     glm::vec2 f = p - i;
-    // Hermite cubic вЂ” MUST stay byte-identical in meaning to
+    // Hermite cubic — MUST stay byte-identical in meaning to
     // terrain_raymarch.frag / grass_raymarch.frag noised(). This is
     // the CPU FBM that bakes the physics heightfield + grass baseline;
     // if it diverges from the shader the collision surface no longer
@@ -147,8 +147,8 @@ Heightmap generate_heightmap_raymarch(const HeightmapParams& p) {
     const int H = hm.height();
     hm.heights.resize(static_cast<size_t>(W) * static_cast<size_t>(H));
 
-    // Multi-thread row-strip generation. 9 octaves Г— 2048ВІ в‰€ 38 M FBM
-    // evals вЂ” single-threaded would be ~10 s, parallel ~2-3 s on 8+
+    // Multi-thread row-strip generation. 9 octaves Г— 2048² в‰€ 38 M FBM
+    // evals — single-threaded would be ~10 s, parallel ~2-3 s on 8+
     // cores.
     const int hw = std::max<int>(1, static_cast<int>(std::thread::hardware_concurrency()));
     std::vector<std::thread> workers;
@@ -188,7 +188,7 @@ Heightmap generate_heightmap(const HeightmapParams& p) {
     n.SetFrequency(p.frequency);
 
     // Ridged secondary noise gives ridges on top of the rolling base
-    // вЂ” gives the terrain something rocky to look at without specific
+    // — gives the terrain something rocky to look at without specific
     // texturing in Phase 1.
     FastNoiseLite ridge;
     ridge.SetSeed(p.seed + 1);
@@ -223,7 +223,7 @@ Heightmap generate_heightmap(const HeightmapParams& p) {
             float base = n.GetNoise(wx, wz);              // [-1, 1]
             float r    = ridge.GetNoise(wx, wz);          // [-1, 1]
             // Mix: base rolling hills + ridge contribution at higher
-            // elevations only. Empirical weights вЂ” pick something
+            // elevations only. Empirical weights — pick something
             // believable.
             float h = base * 0.7f + std::pow(std::max(0.0f, r), 1.5f) * 0.5f;
             h *= p.height_scale;
@@ -255,7 +255,7 @@ namespace {
 // Generate one chunk's vertex grid + smoothed per-vertex normals from
 // `hm` covering [origin_ix, origin_ix + sample_dim) Г— [origin_iz, ...).
 // Per-vertex normals come from the global heightmap gradient (central
-// differences) so adjacent chunks agree on shared-edge normals вЂ” face-
+// differences) so adjacent chunks agree on shared-edge normals — face-
 // average accumulation only saw triangles WITHIN a chunk and produced
 // faint shading seams at chunk boundaries.
 // Skirt depth in metres. Each chunk-edge vertex has a "twin" vertex at the
@@ -284,7 +284,7 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
                    static_cast<size_t>(4) * static_cast<size_t>(sample_dim));
     aabb_min = glm::vec3( 1e9f);
     aabb_max = glm::vec3(-1e9f);
-    // 1-cell normal gradient вЂ” gives per-vertex normals that match the
+    // 1-cell normal gradient — gives per-vertex normals that match the
     // 1m triangle face at LOD 0 for crisp near detail. The earlier
     // 4-cell smoothed setting was a band-aid for LOD-mismatched far
     // chunks producing patchy slope-driven rock blend; that's now
@@ -362,7 +362,7 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
     // kTerrainSkirtDepth. Normal inherits from the corresponding
     // interior vertex (heightmap-gradient normal, mostly upward) so the
     // skirt shades like the terrain above it rather than reading as a
-    // dark vertical wall вЂ” distant chunks at low LOD would otherwise
+    // dark vertical wall — distant chunks at low LOD would otherwise
     // show their outward-facing skirts as visible dark faces against
     // the sky.
     auto add_skirt_edge = [&](int ix0, int iz0, int dx, int dz) {
@@ -541,7 +541,7 @@ std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
     std::vector<uint8_t> out(static_cast<size_t>(W) * static_cast<size_t>(H) * 2, 0);
     glm::vec3 L = glm::normalize(sun_dir);
 
-    // Multi-threaded вЂ” split rows across hardware threads. ~1024ВІ cells
+    // Multi-threaded — split rows across hardware threads. ~1024² cells
     // Г— ~80 marching steps drops from ~1s single-threaded to ~100-150 ms
     // with 8-12 worker threads. Used at level load; sun-change re-bakes
     // go through the progressive tile path instead.

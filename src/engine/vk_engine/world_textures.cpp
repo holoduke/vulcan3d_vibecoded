@@ -32,7 +32,7 @@ extern "C" {
 namespace qlike {
 
 void VulkanEngine::init_skybox() {
-    // EXR first Р Р†Р вЂљРІР‚Сњ keeps real sun radiance so the bloom pass naturally produces
+    // EXR first — keeps real sun radiance so the bloom pass naturally produces
     // a glaring sun disc. Falls back to the LDR JPG if EXR is missing or
     // tinyexr can't decode it. Engine is invoked from build/ on Windows but
     // from the project root in CI, so probe both.
@@ -50,7 +50,7 @@ void VulkanEngine::init_skybox() {
         if (skybox_.image != VK_NULL_HANDLE) break;
     }
     if (skybox_.image == VK_NULL_HANDLE) {
-        log::info("[skybox] no asset loaded Р Р†Р вЂљРІР‚Сњ creating 1x1 placeholder so the "
+        log::info("[skybox] no asset loaded — creating 1x1 placeholder so the "
                   "compose descriptor stays bound");
         // Build a 1x1 black image manually (cheap fallback).
         VkImageCreateInfo ici{};
@@ -101,7 +101,7 @@ void VulkanEngine::init_skybox() {
                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         });
     } else {
-        // Real asset loaded Р Р†Р вЂљРІР‚Сњ sync the directional-light angles to the
+        // Real asset loaded — sync the directional-light angles to the
         // brightest pixel in the panorama so cast shadows match the visible
         // sun.
         glm::vec3 d = glm::normalize(skybox_.sun_direction);
@@ -109,7 +109,7 @@ void VulkanEngine::init_skybox() {
         float yaw_deg = glm::degrees(std::atan2(d.x, d.z));
         rt_.sun_pitch_deg = pitch_deg;
         rt_.sun_yaw_deg = yaw_deg;
-        log::infof("[skybox] sun synced to UI: pitch=%.1fР вЂ™Р’В° yaw=%.1fР вЂ™Р’В°",
+        log::infof("[skybox] sun synced to UI: pitch=%.1f° yaw=%.1f°",
                    pitch_deg, yaw_deg);
     }
 }
@@ -199,7 +199,7 @@ void VulkanEngine::init_textures() {
         si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
         si.anisotropyEnable = VK_FALSE;
         // VK_LOD_CLAMP_NONE lets the sampler pick from the entire mip chain
-        // texture.cpp generates Р Р†Р вЂљРІР‚Сњ eliminates far-distance moirР вЂњР’В© and halves
+        // texture.cpp generates — eliminates far-distance moiré and halves
         // average sample bandwidth on receding floors/walls.
         si.maxLod = VK_LOD_CLAMP_NONE;
         vk_check(vkCreateSampler(device_, &si, nullptr, &texture_sampler_),
@@ -236,7 +236,7 @@ void VulkanEngine::init_textures() {
     // Parallel-decode helper: kicks off N JPG decodes on worker threads,
     // then serialises the GPU uploads on the calling (graphics-queue)
     // thread. Wall-clock for init drops from sum(decode+upload) to
-    // max(decode) + sum(upload) вЂ” ~5Г— on 8K JPGs with 8 CPU cores.
+    // max(decode) + sum(upload) — ~5Г— on 8K JPGs with 8 CPU cores.
     auto probe_parallel = [&](const std::vector<std::pair<std::string, VkFormat>>& items,
                               std::vector<TextureSlot>& out) {
         out.assign(items.size(), {});
@@ -280,7 +280,7 @@ void VulkanEngine::init_textures() {
         const char* color_jpg;
         const char* normal_jpg;
     };
-    // Index Р Р†РІР‚В РІР‚в„ў category. Indices ALSO match what level.cpp / spawn_random_box
+    // Index → category. Indices ALSO match what level.cpp / spawn_random_box
     // pass into Brush::tex_albedo, so reordering here means reordering there.
     const Spec specs[] = {
         { "Ground054",         "Ground054/Ground054_2K-JPG_Color.jpg",
@@ -307,7 +307,7 @@ void VulkanEngine::init_textures() {
     // init_world ran, so they overlapped with the 6-second terrain mesh
     // upload + chunk build. By the time we walk the futures here the
     // decode work is typically already done and only the serial uploads
-    // remain вЂ” saves another ~1s over the pure-batched approach.
+    // remain — saves another ~1s over the pure-batched approach.
     {
         std::vector<TextureCpuPixels> cpu =
             finish_background_decode(world_tex_decode_handle_);
@@ -353,17 +353,17 @@ void VulkanEngine::init_textures() {
     // Slots 7-11: procedurally-baked seamless terrain materials.
     bake_terrain_materials();
 
-    // SPOM displacement maps вЂ” bound to cube.frag as sampler2D u_height[5].
+    // SPOM displacement maps — bound to cube.frag as sampler2D u_height[5].
     // Order MUST match cube.frag's height_idx_for_albedo() switch:
-    //   [0] Bricks078         (albedo idx 1) вЂ” castle outer walls
-    //   [1] PaintedBricks001  (albedo idx 4) вЂ” keep walls
-    //   [2] Tiles130          (albedo idx 5) вЂ” courtyard floor
-    //   [3] Tiles074          (albedo idx 6) вЂ” keep interior floor
+    //   [0] Bricks078         (albedo idx 1) — castle outer walls
+    //   [1] PaintedBricks001  (albedo idx 4) — keep walls
+    //   [2] Tiles130          (albedo idx 5) — courtyard floor
+    //   [3] Tiles074          (albedo idx 6) — keep interior floor
     //   [4] stylized-grass1 (albedo idx kTexGrass / 8) -- terrain grass
     //                       band material (ground under blades); also
     //                       sampled by .tese for vertex displacement
     //                       on the grass band.
-    // Displacement maps вЂ” already decoded during init_world by the
+    // Displacement maps — already decoded during init_world by the
     // early-kickoff handle. Just upload the finished CPU buffers.
     {
         std::vector<TextureCpuPixels> cpu =
@@ -586,7 +586,7 @@ void VulkanEngine::init_textures() {
 // bakes. For each splat layer, assets/terrain_pbr/<Name>/ holds an
 // ambientCG 2K-JPG set; we bake AO into the albedo at load (same trick
 // as the stylized-grass path) and pack Displacement into the normal
-// map's ALPHA вЂ” cube.frag's rock POM reads height from
+// map's ALPHA — cube.frag's rock POM reads height from
 // u_normal[kMatRock].a, so every layer that ships displacement gets
 // parallax-capable normals for free. Missing sets leave the procedural
 // bake in place (probe-and-fallback like every other asset).
@@ -786,7 +786,7 @@ void VulkanEngine::load_terrain_pbr_overrides() {
 // whose period equals the number of cells across the [0,1) tile, so the
 // value at u=1 hashes to the same lattice point as u=0. The normal map
 // is the central-difference gradient of the same periodic height field,
-// so it tiles too вЂ” no visible seams at any tiling rate.
+// so it tiles too — no visible seams at any tiling rate.
 // ----------------------------------------------------------------------
 namespace {
 
@@ -804,7 +804,7 @@ inline float tm_lat(int xi, int yi, int period, uint32_t seed) {
     return static_cast<float>(h & 0xFFFFFFu) / float(0x1000000);
 }
 // Periodic value noise. `cells` lattice cells span the whole tile, and
-// the lattice period equals `cells`, so f(u=0)==f(u=1) в†’ seamless.
+// the lattice period equals `cells`, so f(u=0)==f(u=1) → seamless.
 inline float tm_vnoise(float u, float v, int cells, uint32_t seed) {
     float x = u * cells, y = v * cells;
     int x0 = static_cast<int>(std::floor(x));
@@ -833,11 +833,11 @@ inline float tm_fbm(float u, float v, int base_cells, int octaves,
     return sum / norm;                       // ~0..1
 }
 inline float tm_clamp01(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x); }
-// Ridged multifractal вЂ” the standard "eroded mountain" basis. Each
+// Ridged multifractal — the standard "eroded mountain" basis. Each
 // octave is a sharp ridge (1-|2n-1|), and its amplitude is WEIGHTED by
 // the previous octave's value, so detail accumulates on exposed ridges
 // and valleys stay smooth (mirrors how real erosion distributes relief
-// вЂ” crisp crests, clean gullies). `gain` sharpens, `offset` ~1.
+// — crisp crests, clean gullies). `gain` sharpens, `offset` ~1.
 inline float tm_ridged_mf(float u, float v, int base_cells, int octaves,
                           uint32_t seed) {
     float sum = 0.0f, freqAmp = 0.5f, norm = 0.0f, prev = 1.0f;
@@ -859,7 +859,7 @@ inline float tm_smooth(float a, float b, float x) {
     float t = tm_clamp01((x - a) / (b - a));
     return t * t * (3.0f - 2.0f * t);
 }
-// Linear в†’ sRGB 8-bit. Authored colours are linear (matching the old
+// Linear → sRGB 8-bit. Authored colours are linear (matching the old
 // in-shader palette); the array sampler is sRGB and decodes on read, so
 // we must store the sRGB-encoded byte here.
 inline unsigned char tm_lin2srgb8(float c) {
@@ -889,7 +889,7 @@ void tm_generate(TmKind kind, int W, int H,
 
     // Per-material recipe. n_strength is the bump depth of the detail
     // normal map. The normal is the gradient of a HIGH-frequency relief
-    // field (rf) so adjacent texels actually differ вЂ” the old code took
+    // field (rf) so adjacent texels actually differ — the old code took
     // the gradient of the low-freq albedo field, which barely changed
     // texel-to-texel, so every normal map came out flat (в‰€(0,0,1)) and
     // the strength slider did nothing.
@@ -920,7 +920,7 @@ void tm_generate(TmKind kind, int W, int H,
                 gully = gully * gully;                  // tighten ravines
                 f = tm_clamp01(mf - 0.35f * gully);
             } else if (kind == TM_SAND) {
-                // Isotropic вЂ” no baked directional content (that caused
+                // Isotropic — no baked directional content (that caused
                 // either fixed world stripes or, when rotated per-pixel
                 // in cube.frag, per-triangle UV seams). The shore-
                 // following ripple is added smoothly in cube.frag from
@@ -945,7 +945,7 @@ void tm_generate(TmKind kind, int W, int H,
             if (kind == TM_ROCK) {
                 // Crisp chiselled relief: the eroded height (f, already
                 // ridged-MF) plus a fine high-frequency ridged-MF layer
-                // в†’ sharp ridge/crack normal at close range.
+                // → sharp ridge/crack normal at close range.
                 float fine_mf = tm_ridged_mf(u, v, base_cells * 5, 5,
                                              seed + 701u);
                 relief = 0.40f * f + 0.60f * fine_mf;
@@ -1043,7 +1043,7 @@ void tm_generate(TmKind kind, int W, int H,
             normal[idx + 1] = tm_unorm8(ny * inv * 0.5f + 0.5f);
             normal[idx + 2] = tm_unorm8(nz * inv * 0.5f + 0.5f);
             // Alpha = the relief HEIGHT field itself (0..1). cube.frag's
-            // terrain parallax-occlusion march samples this вЂ” free, no
+            // terrain parallax-occlusion march samples this — free, no
             // extra texture/binding. Rock gets an extra eroded-gully
             // term so the POM carves cracked, weathered rock.
             float reliefH = rf[static_cast<size_t>(y) * W + x];
@@ -1140,7 +1140,7 @@ void VulkanEngine::destroy_textures() {
 // descriptor write so the new sampler is captured by the descriptor.
 // Live toggling rt_.fsr2_enabled mid-game does NOT update the bias
 // (would require waiting on the device + rewriting every descriptor
-// set that captures the sampler вЂ” a follow-up).
+// set that captures the sampler — a follow-up).
 void VulkanEngine::update_texture_sampler_for_fsr2() {
     if (!device_) return;
     float bias = 0.0f;
@@ -1163,7 +1163,7 @@ void VulkanEngine::update_texture_sampler_for_fsr2() {
     si.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     si.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    // Anisotropic filtering вЂ” keeps the terrain ground crisp at grazing
+    // Anisotropic filtering — keeps the terrain ground crisp at grazing
     // angles (the dominant "blurry everywhere" cause for a big flat
     // surface). Clamp to the device's supported max.
     VkPhysicalDeviceProperties props{};
@@ -1186,7 +1186,7 @@ void VulkanEngine::update_texture_sampler_for_fsr2() {
 
 // Bake grass eligibility into an RG8 texture once at level load.
 //   R = presence  (low-freq FBM, smoothed 0..1)
-//   G = slope mag (raw |в€‡h| clamped to [0..2] / 2 в†’ [0..1])
+//   G = slope mag (raw |в€‡h| clamped to [0..2] / 2 → [0..1])
 // Storing them separately lets the shaders apply the slope-cutoff
 // slider (`grass_slope_n_min`) at runtime without re-baking. Both
 // raymarched grass + the terrain green-tint sample this same texture
