@@ -106,6 +106,147 @@ void VulkanEngine::draw(uint32_t img_index) {
     hitch_draw_[0] = dz_mark();
 
     // ---------- Compute queue: per-frame TLAS rebuild ----------
+    submit_tlas_build(frame);
+    hitch_draw_[1] = dz_mark();
+
+    // ---------- Graphics command buffer ----------
+    const uint32_t gpu_query_slot = frame_number_ % kFrameOverlap;
+    begin_frame_commands(frame, gpu_query_slot);   // camera, uploads, culling, CLOD
+    record_shadow_passes(frame);                   // sun shadow, depth pre-pass, half-rate shadow
+    record_terrain_and_world(frame);               // low-res raymarch terrain + world G-buffer
+    record_lighting_and_upscale(frame);            // deferred, SVGF, TAA, sky fill, DLSS/FSR/TAAU
+    record_compose_and_ui(frame, img_index);       // bloom, compose, ImGui -> swapchain
+
+
+    // Two screenshot triggers: the --screenshot CLI one-shot AND F12 in-game.
+    std::string screenshot_path_this_frame;
+    bool screenshot_is_oneshot = false;
+    if (!pending_screenshot_path_.empty()) {
+        screenshot_path_this_frame = pending_screenshot_path_;
+        pending_screenshot_path_.clear();
+    } else if (!opts_.screenshot_path.empty() && !screenshot_taken_ &&
+               static_cast<int>(frame_number_) >= opts_.screenshot_after_frames) {
+        if (opts_.screenshot_burst <= 1) {
+            screenshot_path_this_frame = opts_.screenshot_path;
+            screenshot_is_oneshot = true;
+        } else {
+            // Burst: PATH.NN.ppm for N consecutive frames, exit after the
+            // last one (screenshot_is_oneshot latches screenshot_taken_).
+            int idx = static_cast<int>(frame_number_) -
+                      opts_.screenshot_after_frames;
+            char buf[512];
+            std::snprintf(buf, sizeof(buf), "%s.%02d.ppm",
+                          opts_.screenshot_path.c_str(), idx);
+            screenshot_path_this_frame = buf;
+            screenshot_is_oneshot = (idx + 1 >= opts_.screenshot_burst);
+        }
+    }
+    bool want_screenshot = !screenshot_path_this_frame.empty();
+    if (want_screenshot) {
+        capture_screenshot(frame.command_buffer, swapchain_images_[img_index],
+                           swapchain_extent_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
+
+    vkinit::transition_image(frame.command_buffer, swapchain_images_[img_index],
+                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    // history image was just sampled by compose; leave it in SHADER_READ_ONLY
+    // for next frame's TAA-pass read of this slot.
+
+    if (gpu_query_pool_) {
+        const uint32_t base = gpu_query_slot *
+                              static_cast<uint32_t>(kQueriesPerFrame);
+        vkCmdWriteTimestamp(frame.command_buffer,
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            gpu_query_pool_,
+                            base + static_cast<uint32_t>(kStageScene) * 2u + 1u);
+        gpu_query_recorded_mask_ |= uint64_t{1} << gpu_query_slot;
+    }
+    vk_check(vkEndCommandBuffer(frame.command_buffer), "vkEndCommandBuffer");
+
+    // Snapshot for next frame's reprojection.
+    prev_view_proj_ = last_view_proj_;
+    prev_view_proj_valid_ = true;
+    // Snapshot the jitter we used this frame so the next frame can
+    // compute (cur_jitter − prev_jitter) and emit unjittered motion.
+    prev_jitter_ = current_frame_view_.jitter;
+    history_write_slot_ = 1 - history_write_slot_;
+
+    // Two wait semaphores on the graphics submit:
+    //   1. swapchain image acquired (wait at COLOR_ATTACHMENT_OUTPUT — the
+    //      compose pass writes to the swapchain image).
+    //   2. TLAS build completed on the compute queue (wait at FRAGMENT_SHADER —
+    //      cube.frag's ray queries dereference the TLAS during the world pass).
+    VkSemaphoreSubmitInfo waits[2] = {
+        vkinit::semaphore_submit_info(
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, frame.swapchain_semaphore),
+        vkinit::semaphore_submit_info(
+            // + COMPUTE: the froxel fog pass ray-queries the TLAS from compute.
+            // + AS_BUILD: record_tlas_publish clones the stage TLAS at frame start.
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+            VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, frame.tlas_build_done),
+    };
+    // Signals: present semaphore + the frames-in-flight timeline (next
+    // frame's TLAS rebuild waits for this value).
+    VkSemaphoreSubmitInfo signals[2] = {
+        vkinit::semaphore_submit_info(
+            VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, render_semaphores_[img_index]),
+        VkSemaphoreSubmitInfo{
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .semaphore = gfx_timeline_,
+            .value = gfx_timeline_value_ + 1,
+            .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            .deviceIndex = 0,
+        },
+    };
+    auto cmd_info = vkinit::command_buffer_submit_info(frame.command_buffer);
+    VkSubmitInfo2 submit{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .pNext = nullptr, .flags = 0,
+        .waitSemaphoreInfoCount = 2,
+        .pWaitSemaphoreInfos = waits,
+        .commandBufferInfoCount = 1,
+        .pCommandBufferInfos = &cmd_info,
+        .signalSemaphoreInfoCount = 2,
+        .pSignalSemaphoreInfos = signals,
+    };
+
+    vk_check(vkQueueSubmit2(graphics_queue_, 1, &submit, frame.render_fence),
+             "vkQueueSubmit2");
+    ++gfx_timeline_value_;
+    upload_ring_.in_frame = false;
+
+    if (want_screenshot) {
+        vk_check(vkWaitForFences(device_, 1, &frame.render_fence, VK_TRUE, UINT64_MAX),
+                 "screenshot vkWaitForFences");
+        write_ppm(screenshot_path_this_frame, swapchain_extent_.width, swapchain_extent_.height);
+        if (screenshot_is_oneshot) screenshot_taken_ = true;
+        log::infof("[screenshot] saved %s", screenshot_path_this_frame.c_str());
+    }
+
+    // Session 5 — push the latest HUDLessColor into the FG context's
+    // pacer state right before present. The SDK uses this for the next
+    // pair of (real, generated) frames.
+    update_fsr3_fg_per_frame_config();
+
+    // Route through FSR3 SwapChain proxy fn when active — that path
+    // internally paces real + generated frames into the present chain.
+    VkResult pres = queue_present_image(img_index, render_semaphores_[img_index]);
+    hitch_draw_[2] = dz_mark();
+    if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) {
+        resize_requested_ = true;
+    } else if (pres != VK_SUCCESS) {
+        vk_check(pres, "vkQueuePresentKHR");
+    }
+}
+
+// ---------------------------------------------------------------------
+// draw() stages. Each records one group of passes into frame.command_buffer
+// (submit_tlas_build: the compute-queue TLAS rebuild) in frame order.
+// ---------------------------------------------------------------------
+
+void VulkanEngine::submit_tlas_build(FrameData& frame) {
     // Recorded onto a separate compute command buffer and submitted on the
     // compute queue (or graphics queue if hardware lacks a dedicated compute
     // family). Signals frame.tlas_build_done; the graphics submit below
@@ -150,8 +291,9 @@ void VulkanEngine::draw(uint32_t img_index) {
         vk_check(vkQueueSubmit2(compute_queue_, 1, &csubmit, VK_NULL_HANDLE),
                  "vkQueueSubmit2 compute (TLAS build)");
     }
+}
 
-    hitch_draw_[1] = dz_mark();
+void VulkanEngine::begin_frame_commands(FrameData& frame, uint32_t gpu_query_slot) {
     auto begin = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
     vk_check(vkBeginCommandBuffer(frame.command_buffer, &begin), "vkBeginCommandBuffer");
     // GPU watchdog: reset this slot's queries and write the BEGIN
@@ -160,7 +302,6 @@ void VulkanEngine::draw(uint32_t img_index) {
     // pair brackets the entire frame so total GPU time can be diff'd
     // out post-fence-wait. (Other GpuStage slots stay zero — wire
     // per-stage breakdown later if we need to localise costs.)
-    const uint32_t gpu_query_slot = frame_number_ % kFrameOverlap;
     if (gpu_query_pool_) {
         const uint32_t base = gpu_query_slot *
                               static_cast<uint32_t>(kQueriesPerFrame);
@@ -197,6 +338,9 @@ void VulkanEngine::draw(uint32_t img_index) {
     // colour and shadow all consume the same selection.
     update_terrain_clod_instances();
 
+}
+
+void VulkanEngine::record_shadow_passes(FrameData& frame) {
     // Sun shadow map pass — runs first so its depth target is in
     // SHADER_READ_ONLY_OPTIMAL by the time the scene color pass samples
     // it via grass.vert (binding 7). Skip the entire pass when no
@@ -350,6 +494,13 @@ void VulkanEngine::draw(uint32_t img_index) {
     }
 
     prof_mark(frame.command_buffer, "shadow_lr");
+}
+
+void VulkanEngine::record_terrain_and_world(FrameData& frame) {
+    VkClearValue clear_color{};
+    clear_color.color = { { 0.55f, 0.72f, 0.95f, 1.0f } };  // sky color matches UBO
+    VkClearValue clear_depth{};
+    clear_depth.depthStencil.depth = 1.0f;
     // ---------- Pass 0.5: low-res raymarch terrain (when scale < 1) ----------
     // Renders the FBM raymarch into tr_lr_* attachments at a fraction of
     // the main resolution. Compose pass at the start of the world color
@@ -519,7 +670,9 @@ void VulkanEngine::draw(uint32_t img_index) {
     render_world(frame.command_buffer);
     vkCmdEndRendering(frame.command_buffer);
     prof_mark(frame.command_buffer, "world_tail");
+}
 
+void VulkanEngine::record_lighting_and_upscale(FrameData& frame) {
     // ---------- Pass 2: TAA into history_image_[history_write_slot_] ----------
     // Flip scene_color + depth into shader-read for TAA in one batched
     // barrier (was 2 calls + a dead motion_vec one). The motion_vec
@@ -835,6 +988,9 @@ void VulkanEngine::draw(uint32_t img_index) {
     }
 
     prof_mark(frame.command_buffer, "fsr_taau");
+}
+
+void VulkanEngine::record_compose_and_ui(FrameData& frame, uint32_t img_index) {
     // ---------- Copy denoised history → swapchain ----------
     // ---------- Pass 2.5: Compose history (HDR) into swapchain (LDR) with ACES tonemap ----------
 
@@ -1038,128 +1194,6 @@ void VulkanEngine::draw(uint32_t img_index) {
     }
 
     prof_mark(frame.command_buffer, "imgui");
-
-    // Two screenshot triggers: the --screenshot CLI one-shot AND F12 in-game.
-    std::string screenshot_path_this_frame;
-    bool screenshot_is_oneshot = false;
-    if (!pending_screenshot_path_.empty()) {
-        screenshot_path_this_frame = pending_screenshot_path_;
-        pending_screenshot_path_.clear();
-    } else if (!opts_.screenshot_path.empty() && !screenshot_taken_ &&
-               static_cast<int>(frame_number_) >= opts_.screenshot_after_frames) {
-        if (opts_.screenshot_burst <= 1) {
-            screenshot_path_this_frame = opts_.screenshot_path;
-            screenshot_is_oneshot = true;
-        } else {
-            // Burst: PATH.NN.ppm for N consecutive frames, exit after the
-            // last one (screenshot_is_oneshot latches screenshot_taken_).
-            int idx = static_cast<int>(frame_number_) -
-                      opts_.screenshot_after_frames;
-            char buf[512];
-            std::snprintf(buf, sizeof(buf), "%s.%02d.ppm",
-                          opts_.screenshot_path.c_str(), idx);
-            screenshot_path_this_frame = buf;
-            screenshot_is_oneshot = (idx + 1 >= opts_.screenshot_burst);
-        }
-    }
-    bool want_screenshot = !screenshot_path_this_frame.empty();
-    if (want_screenshot) {
-        capture_screenshot(frame.command_buffer, swapchain_images_[img_index],
-                           swapchain_extent_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    }
-
-    vkinit::transition_image(frame.command_buffer, swapchain_images_[img_index],
-                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    // history image was just sampled by compose; leave it in SHADER_READ_ONLY
-    // for next frame's TAA-pass read of this slot.
-
-    if (gpu_query_pool_) {
-        const uint32_t base = gpu_query_slot *
-                              static_cast<uint32_t>(kQueriesPerFrame);
-        vkCmdWriteTimestamp(frame.command_buffer,
-                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                            gpu_query_pool_,
-                            base + static_cast<uint32_t>(kStageScene) * 2u + 1u);
-        gpu_query_recorded_mask_ |= uint64_t{1} << gpu_query_slot;
-    }
-    vk_check(vkEndCommandBuffer(frame.command_buffer), "vkEndCommandBuffer");
-
-    // Snapshot for next frame's reprojection.
-    prev_view_proj_ = last_view_proj_;
-    prev_view_proj_valid_ = true;
-    // Snapshot the jitter we used this frame so the next frame can
-    // compute (cur_jitter − prev_jitter) and emit unjittered motion.
-    prev_jitter_ = current_frame_view_.jitter;
-    history_write_slot_ = 1 - history_write_slot_;
-
-    // Two wait semaphores on the graphics submit:
-    //   1. swapchain image acquired (wait at COLOR_ATTACHMENT_OUTPUT — the
-    //      compose pass writes to the swapchain image).
-    //   2. TLAS build completed on the compute queue (wait at FRAGMENT_SHADER —
-    //      cube.frag's ray queries dereference the TLAS during the world pass).
-    VkSemaphoreSubmitInfo waits[2] = {
-        vkinit::semaphore_submit_info(
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, frame.swapchain_semaphore),
-        vkinit::semaphore_submit_info(
-            // + COMPUTE: the froxel fog pass ray-queries the TLAS from compute.
-            // + AS_BUILD: record_tlas_publish clones the stage TLAS at frame start.
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-            VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, frame.tlas_build_done),
-    };
-    // Signals: present semaphore + the frames-in-flight timeline (next
-    // frame's TLAS rebuild waits for this value).
-    VkSemaphoreSubmitInfo signals[2] = {
-        vkinit::semaphore_submit_info(
-            VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, render_semaphores_[img_index]),
-        VkSemaphoreSubmitInfo{
-            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-            .pNext = nullptr,
-            .semaphore = gfx_timeline_,
-            .value = gfx_timeline_value_ + 1,
-            .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-            .deviceIndex = 0,
-        },
-    };
-    auto cmd_info = vkinit::command_buffer_submit_info(frame.command_buffer);
-    VkSubmitInfo2 submit{
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-        .pNext = nullptr, .flags = 0,
-        .waitSemaphoreInfoCount = 2,
-        .pWaitSemaphoreInfos = waits,
-        .commandBufferInfoCount = 1,
-        .pCommandBufferInfos = &cmd_info,
-        .signalSemaphoreInfoCount = 2,
-        .pSignalSemaphoreInfos = signals,
-    };
-
-    vk_check(vkQueueSubmit2(graphics_queue_, 1, &submit, frame.render_fence),
-             "vkQueueSubmit2");
-    ++gfx_timeline_value_;
-    upload_ring_.in_frame = false;
-
-    if (want_screenshot) {
-        vk_check(vkWaitForFences(device_, 1, &frame.render_fence, VK_TRUE, UINT64_MAX),
-                 "screenshot vkWaitForFences");
-        write_ppm(screenshot_path_this_frame, swapchain_extent_.width, swapchain_extent_.height);
-        if (screenshot_is_oneshot) screenshot_taken_ = true;
-        log::infof("[screenshot] saved %s", screenshot_path_this_frame.c_str());
-    }
-
-    // Session 5 — push the latest HUDLessColor into the FG context's
-    // pacer state right before present. The SDK uses this for the next
-    // pair of (real, generated) frames.
-    update_fsr3_fg_per_frame_config();
-
-    // Route through FSR3 SwapChain proxy fn when active — that path
-    // internally paces real + generated frames into the present chain.
-    VkResult pres = queue_present_image(img_index, render_semaphores_[img_index]);
-    hitch_draw_[2] = dz_mark();
-    if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) {
-        resize_requested_ = true;
-    } else if (pres != VK_SUCCESS) {
-        vk_check(pres, "vkQueuePresentKHR");
-    }
 }
 
 

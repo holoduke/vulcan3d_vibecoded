@@ -286,6 +286,13 @@ private:
     VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
 
     void draw(uint32_t img_index);
+    // draw() stages (frame.cpp), in frame order.
+    void submit_tlas_build(FrameData& frame);
+    void begin_frame_commands(FrameData& frame, uint32_t gpu_query_slot);
+    void record_shadow_passes(FrameData& frame);
+    void record_terrain_and_world(FrameData& frame);
+    void record_lighting_and_upscale(FrameData& frame);
+    void record_compose_and_ui(FrameData& frame, uint32_t img_index);
     void render_world(VkCommandBuffer cmd);
     void capture_screenshot(VkCommandBuffer cmd, VkImage src,
                             VkExtent2D extent, VkImageLayout pre_layout);
