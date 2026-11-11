@@ -997,7 +997,9 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
         vkCmdBindVertexBuffers(cmd, 0, 1, &cylinder_mesh_.vertex_buffer, &offset);
         vkCmdBindIndexBuffer(cmd, cylinder_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
         for (const auto& b : bombs_) {
-            glm::vec3 d = glm::normalize(b.vel + glm::vec3(1e-4f));
+            // Under a canopy the bomb hangs nose-down along the lines.
+            glm::vec3 d = (b.chute && b.open > 0.05f) ? -bomb_chute_axis(b)
+                                                       : glm::normalize(b.vel + glm::vec3(1e-4f));
             auto push = [&](glm::vec3 c, float r, float hl, glm::vec4 col) {
                 glm::mat4 model = align_local_y_to(c, d) *
                                   glm::scale(glm::mat4(1.0f), glm::vec3(r, hl, r));

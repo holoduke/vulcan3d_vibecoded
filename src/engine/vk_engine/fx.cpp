@@ -95,7 +95,13 @@ void VulkanEngine::play_explosion_audio(glm::vec3 pos, float size) {
 // different offsets and read as a much faster gun, so one recording holds
 // a gate for its shooting part; another gun only starts one meanwhile if
 // it is clearly louder (closer).
-void VulkanEngine::play_aa_burst_audio(glm::vec3 muzzle) {
+void VulkanEngine::play_aa_burst_audio(glm::vec3 muzzle, float start_s) {
+    queue_distant_sound(int(ClipID::AaBurst), muzzle, start_s, 1.0f, true);
+}
+
+// Shared distance model for gunfire-like one-shots (AA bursts, missile
+// launches). `gated`: hold the AA recording gate (see above).
+void VulkanEngine::queue_distant_sound(int clip, glm::vec3 muzzle, float start_s, float gain, bool gated) {
     if (!audio_) return;
     const glm::vec3 ear = player_.eye_position();
     const float d = glm::distance(muzzle, ear);
@@ -106,7 +112,7 @@ void VulkanEngine::play_aa_burst_audio(glm::vec3 muzzle) {
     // Tone: the low-pass cutoff falls much faster than physical air
     // absorption (17 kHz at the gun, ~5 kHz at 200 m, a dull thump past
     // 500 m) - distance is heard mostly as lost treble, not lost level.
-    float level = 22.0f / std::max(d, 22.0f) * std::exp(-d / 700.0f);
+    float level = gain * 22.0f / std::max(d, 22.0f) * std::exp(-d / 700.0f);
     float lpf   = 17000.0f * std::exp(-d / 160.0f);
 
     // Terrain occlusion: walk the sight line over the heightmap. A gun
@@ -127,17 +133,20 @@ void VulkanEngine::play_aa_burst_audio(glm::vec3 muzzle) {
     lpf    = glm::clamp(lpf, 260.0f, 18000.0f);
     if (level < 0.004f) return;
 
-    if (aa_burst_gate_t_ > 0.0f && level < aa_burst_gate_level_ * 1.6f) return;
-    aa_burst_gate_t_ = 0.90f;
-    aa_burst_gate_level_ = level;
+    if (gated) {
+        if (aa_burst_gate_t_ > 0.0f && level < aa_burst_gate_level_ * 1.6f) return;
+        aa_burst_gate_t_ = std::max(0.96f - start_s - 0.06f, 0.05f);
+        aa_burst_gate_level_ = level;
+    }
     AaSound s{};
     s.due = d / 343.0f;
     s.pos = muzzle;
     s.lpf = lpf;
-    s.clip = int(ClipID::AaBurst);
+    s.clip = clip;
     s.vol = level;
     s.pitch = 1.0f;
     s.order = 4;
+    s.start = start_s;
     aa_sounds_.push_back(s);
 
     // Valley echo: a later, duller copy arriving from another direction.
@@ -165,7 +174,7 @@ void VulkanEngine::tick_aa_sounds(float dt) {
         if (s.due > 0.0f) { ++i; continue; }
         // Leave the last voices for explosions.
         if (audio_ && audio_->active_effects() < 48u)
-            audio_->play_effect(ClipID(s.clip), s.pos, s.vol, s.pitch, 0.0f, s.lpf, s.order);
+            audio_->play_effect(ClipID(s.clip), s.pos, s.vol, s.pitch, 0.0f, s.lpf, s.order, s.start);
         aa_sounds_[i] = aa_sounds_.back();
         aa_sounds_.pop_back();
     }
@@ -329,6 +338,16 @@ void VulkanEngine::tick_flags(float dt) {
     }
 }
 
+glm::vec3 VulkanEngine::bomb_chute_axis(const Bomb& b) const {
+    // The canopy trails opposite to the airflow (streams behind while the
+    // bomb is still fast, overhead once it sinks), plus a slow pendulum.
+    glm::vec3 rel = b.vel - glm::vec3(wind_vel_.x, 0.0f, wind_vel_.z);
+    glm::vec3 a = -rel / std::max(glm::length(rel), 1e-3f);
+    const float sw = 0.16f * b.open;
+    a += glm::vec3(std::sin(b.t * 1.25f + b.phase) * sw, 0.0f, std::cos(b.t * 0.95f + b.phase * 1.7f) * sw);
+    return glm::normalize(a);
+}
+
 void VulkanEngine::tick_fx(float dt) {
     if (dt <= 0.0f) {
         for (auto& b : bombs_) b.prev_pos = b.pos;   // frozen: zero motion vectors
@@ -356,6 +375,16 @@ void VulkanEngine::tick_fx(float dt) {
                       explosions_.end());
     cam_shake_ *= std::exp(-dt * 3.2f);
 
+    // Test hook: QLIKE_TEST_CHUTE=1 hangs an opened parachute bomb in front of the camera.
+    static const bool kTestChute = std::getenv("QLIKE_TEST_CHUTE") != nullptr;
+    if (kTestChute && bombs_.empty()) {
+        const FrameView& fv = current_frame_view_;
+        glm::vec3 fwd = -glm::vec3(fv.inv_view[2]);
+        Bomb b{};
+        b.pos = fv.eye_pos + glm::normalize(glm::vec3(fwd.x, 0.0f, fwd.z)) * 26.0f + glm::vec3(0.0f, 22.0f, 0.0f);
+        b.prev_pos = b.pos; b.vel = glm::vec3(20.0f, -3.0f, 0.0f); b.chute = true; b.t = 0.4f;
+        bombs_.push_back(b);
+    }
     // Bombs: ballistic with light quadratic drag; detonate on terrain,
     // water or anything the physics raycast hits (castle, crates).
     for (auto it = bombs_.begin(); it != bombs_.end();) {
@@ -363,8 +392,22 @@ void VulkanEngine::tick_fx(float dt) {
         b.prev_pos = b.pos;
         b.t += dt;
         float v = glm::length(b.vel);
-        glm::vec3 drag = (v > 1e-3f) ? -b.vel * (v * 0.00025f) : glm::vec3(0.0f);
-        b.vel += (glm::vec3(0.0f, -kFxG, 0.0f) + drag) * dt;
+        if (b.chute) {
+            // Retarded bomb: the canopy opens 0.45 s after release; drag is
+            // quadratic in the speed RELATIVE to the wind, so it ends up
+            // sinking at ~8.5 m/s and drifting with the wind. Implicit
+            // drag step (stable at the 130 m/s opening shock).
+            if (b.t > 0.45f) b.open = std::min(1.0f, b.open + dt / 0.7f);
+            const float k = glm::mix(0.00025f, kFxG / (8.5f * 8.5f), b.open * b.open);
+            const glm::vec3 wind(wind_vel_.x, 0.0f, wind_vel_.z);
+            glm::vec3 rel = b.vel - wind;
+            rel.y -= kFxG * dt;
+            rel /= (1.0f + k * glm::length(rel) * dt);
+            b.vel = rel + wind;
+        } else {
+            glm::vec3 drag = (v > 1e-3f) ? -b.vel * (v * 0.00025f) : glm::vec3(0.0f);
+            b.vel += (glm::vec3(0.0f, -kFxG, 0.0f) + drag) * dt;
+        }
         b.pos += b.vel * dt;
         bool boom = false;
         glm::vec3 at = b.pos;
@@ -642,6 +685,7 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
     }
     // Falling bombs: short smoke wisp.
     for (const auto& b : bombs_) {
+        if (b.chute) continue;
         glm::vec3 d = glm::normalize(b.vel + glm::vec3(1e-4f));
         smoke.segment(b.pos - d * 8.0f, b.pos, min_w(b.pos, 0.35f, 0.8f), 0.35f,
                       glm::vec3(0.8f));
@@ -682,11 +726,47 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
                    { 0.15f, 1.4f }, glm::vec3(1.0f, 0.06f, 0.03f));
     }
     for (const auto& v : aa_) {
-        if (v.flash_t <= 0.0f) continue;
+        if (v.flash_t <= 0.0f || v.kind == 1) continue;
         glm::mat4 m[4];
         aa_part_models(v, false, m);
         glm::vec3 mz = glm::vec3(m[2] * glm::vec4(aa_muzzle_[v.flash_barrel], 1.0f));
         flash.billboard(mz, 1.1f, cam_right, cam_up, glm::vec3(1.0f, 0.55f, 0.25f) * 3.0f);
+    }
+    // Missiles: dense white motor smoke that spreads and thins, the motor
+    // flame while it burns, and a bright flash at ignition.
+    for (const auto& s : sam_missiles_) {
+        if (s.trail.size() >= 2) {
+            std::vector<glm::vec3> p; std::vector<float> w, a;
+            p.reserve(s.trail.size() + 1);
+            for (const auto& tp : s.trail) {
+                float age = s.t - tp.w;
+                float burn = 1.0f - glm::smoothstep(7.0f - 0.8f, 7.0f, tp.w);   // thinner after burnout
+                p.push_back(glm::vec3(tp) + wind_vel_ * (0.25f * age) + glm::vec3(0.0f, 0.35f * age, 0.0f));
+                w.push_back(min_w(glm::vec3(tp), 0.45f + 2.4f * std::sqrt(age), 1.2f));
+                float life = glm::clamp(1.0f - age / 8.0f, 0.0f, 1.0f);
+                a.push_back(life * life * (0.25f + 0.65f * burn));
+            }
+            if (!s.dead) { p.push_back(s.pos); w.push_back(min_w(s.pos, 0.35f, 1.2f)); a.push_back(0.9f); }
+            smoke.strip(p, w, a, glm::vec3(0.86f, 0.85f, 0.83f));
+        }
+        if (!s.dead && s.t < 7.0f) {
+            float flick = 0.8f + 0.2f * std::sin(now * 53.0f + s.t * 11.0f);
+            glm::vec3 tail = s.pos - s.dir * (5.5f * flick);
+            glow.strip({ tail, s.pos }, { min_w(tail, 0.15f, 1.2f), min_w(s.pos, 0.42f, 2.2f) },
+                       { 0.0f, 2.6f * flick }, glm::vec3(1.0f, 0.62f, 0.22f));
+            flash.billboard(s.pos, (s.t < 0.3f ? 4.5f : 1.6f) * flick, cam_right, cam_up,
+                            glm::vec3(1.0f, 0.7f, 0.35f) * (s.t < 0.3f ? 5.0f : 2.2f));
+        }
+    }
+    // Decoy flares: blinding magnesium points with a short smoke tail.
+    for (const auto& fl : flares_) {
+        float k = glm::clamp(1.0f - fl.t / fl.life, 0.0f, 1.0f);
+        float flick = 0.75f + 0.25f * std::sin(now * 61.0f + float(fl.id) * 2.3f);
+        flash.billboard(fl.pos, min_w(fl.pos, 2.2f, 5.0f) * (0.6f + 0.4f * k) * flick, cam_right, cam_up,
+                        glm::vec3(1.0f, 0.86f, 0.62f) * (7.0f * std::sqrt(k)));
+        glm::vec3 d = glm::normalize(fl.vel + glm::vec3(1e-4f));
+        smoke.segment(fl.pos - d * (6.0f + 10.0f * fl.t), fl.pos, min_w(fl.pos, 0.5f, 1.0f), 0.3f * k,
+                      glm::vec3(0.9f));
     }
     for (const auto& t : tracer_segs_) {
         float fade = 1.0f - t.age / kTracerFade;
@@ -708,6 +788,46 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
                 Vertex q0 = V(i, j), q1 = V(i + 1, j), q2 = V(i + 1, j + 1), q3 = V(i, j + 1);
                 cloth.v.insert(cloth.v.end(), { q0, q1, q2, q0, q2, q3 });
             }
+    }
+    // Parachute bombs: ribbed canopy (design 2) + suspension lines (design 3).
+    for (const auto& b : bombs_) {
+        if (!b.chute || b.open <= 0.01f) continue;
+        const glm::vec3 A = bomb_chute_axis(b);
+        glm::vec3 T1 = glm::normalize(glm::cross(A, std::abs(A.x) < 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 0, 1)));
+        glm::vec3 T2 = glm::cross(A, T1);
+        const float o = b.open;
+        const float breathe = 1.0f + 0.035f * std::sin(b.t * 3.1f + b.phase);
+        const float Rc = 3.4f * (0.18f + 0.82f * o * o) * breathe;        // skirt radius
+        const float Hc = 2.3f * (1.6f - 0.6f * o);                          // crown height (streamer -> dome)
+        const glm::vec3 base = b.pos + A * (1.2f + 6.6f * std::min(1.0f, o * 1.6f));
+        const int NG = 16, NR = 5;
+        auto P = [&](int g, int r) {
+            float ang = 6.2831853f * float(g) / float(NG);
+            float ph = 1.5707963f * float(r) / float(NR);                    // 0 crown .. pi/2 skirt
+            // Scalloped skirt: the hem is pulled in at each line.
+            float sc = (r == NR) ? 0.94f : 1.0f;
+            return base + A * (Hc * std::cos(ph)) +
+                   (T1 * std::cos(ang) + T2 * std::sin(ang)) * (Rc * std::sin(ph) * sc);
+        };
+        for (int g = 0; g < NG; ++g)
+            for (int r = 0; r < NR; ++r) {
+                auto V = [&](int gg, int rr) {
+                    return Vertex{ P(gg, rr), glm::vec3(2.0f, 0.0f, 0.0f),
+                                   { float(gg) / float(NG), float(rr) / float(NR) } };
+                };
+                Vertex q0 = V(g, r), q1 = V(g + 1, r), q2 = V(g + 1, r + 1), q3 = V(g, r + 1);
+                cloth.v.insert(cloth.v.end(), { q0, q1, q2, q0, q2, q3 });
+            }
+        const glm::vec3 conf = b.pos + A * 1.0f;                             // confluence point above the bomb
+        for (int g = 0; g < NG; g += 2) {
+            glm::vec3 hem = P(g, NR);
+            glm::vec3 side = glm::normalize(glm::cross(hem - conf, eye - hem)) * min_w(hem, 0.012f, 0.6f);
+            Vertex l0{ conf - side, glm::vec3(3.0f, 0.0f, 0.0f), {0.0f, 0.0f} };
+            Vertex l1{ conf + side, glm::vec3(3.0f, 0.0f, 0.0f), {1.0f, 0.0f} };
+            Vertex l2{ hem + side,  glm::vec3(3.0f, 0.0f, 0.0f), {1.0f, 1.0f} };
+            Vertex l3{ hem - side,  glm::vec3(3.0f, 0.0f, 0.0f), {0.0f, 1.0f} };
+            cloth.v.insert(cloth.v.end(), { l0, l1, l2, l0, l2, l3 });
+        }
     }
     // Explosion flashes.
     for (const auto& e : explosions_) {

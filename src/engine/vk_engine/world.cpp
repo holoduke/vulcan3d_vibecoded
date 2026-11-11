@@ -328,6 +328,42 @@ void VulkanEngine::init_world() {
             m.bmin.y += hp.plateau_height;
             m.bmax.y += hp.plateau_height;
         }
+        // Outpost towers on prominent spots in the foothills toward the
+        // mountains (world-space meshes, appended after the castle lift).
+        {
+            uint32_t rng = 0x70E125u;
+            struct Cand { glm::vec3 p; float score; };
+            std::vector<Cand> cands;
+            for (int i = 0; i < 9000; ++i) {
+                float a = frand_range(rng, 0.0f, 6.2831853f), d = frand_range(rng, 210.0f, 560.0f);
+                float x = std::cos(a) * d, z = std::sin(a) * d;
+                float h = hm.sample_world(x, z);
+                if (h < rt_.water_level + 5.0f || h > 84.0f) continue;
+                if (!castle_road_.empty() && castle_road_.distance(x, z) < 16.0f) continue;
+                float lo = h, hi = h, ring = 0.0f;
+                for (int k = 0; k < 8; ++k) {
+                    float aa = float(k) * 0.785f;
+                    float hh = hm.sample_world(x + std::cos(aa) * 5.0f, z + std::sin(aa) * 5.0f);
+                    lo = std::min(lo, hh); hi = std::max(hi, hh);
+                    ring += hm.sample_world(x + std::cos(aa) * 40.0f, z + std::sin(aa) * 40.0f);
+                }
+                if (hi - lo > 3.0f) continue;
+                // Prominence over the surroundings + a preference for high ground.
+                cands.push_back({ glm::vec3(x, lo, z), (h - ring / 8.0f) + (h - 30.0f) * 0.12f });
+            }
+            std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
+            const int styles[7] = { 0, 3, 1, 2, 0, 1, 2 };
+            for (const auto& cd : cands) {
+                if (outposts_.size() >= 7) break;
+                bool clash = false;
+                for (const auto& o : outposts_) if (glm::distance(glm::vec2(o.x, o.z), glm::vec2(cd.p.x, cd.p.z)) < 150.0f) clash = true;
+                if (clash) continue;
+                const int st = styles[outposts_.size()];
+                game::append_outpost_tower(world_, cd.p, st, 0xBEEF00u + uint32_t(outposts_.size()) * 977u);
+                outposts_.push_back(cd.p);
+                log::infof("[outpost] tower style %d at (%.0f, %.1f, %.0f)", st, cd.p.x, cd.p.y, cd.p.z);
+            }
+        }
         // Procedural trees, bushes, rock formations: GPU-instanced with LOD
         // over the whole map (vegetation.cpp). Adds trunk / rock colliders.
         place_aa_vehicles(hm);           // before vegetation (keep-out)

@@ -172,6 +172,13 @@ void VulkanEngine::apply_quality_preset(int level) {
 // the new resolution. Don't touch the swapchain itself; only the targets
 // that depend on render_extent_.
 void VulkanEngine::apply_render_scale() {
+    // DLSS accepts inputs from 50 % to 100 % of the output size (measured:
+    // 0.49 and below fail every evaluate with NGX InvalidParameter, for
+    // super resolution and Ray Reconstruction alike, leaving a stale image).
+    if (rt_.fsr2_enabled && rt_.fsr_backend == 2 && dlss_supported_ && rt_.render_scale < 0.5f) {
+        log::infof("render_scale %.2f is below the DLSS minimum - using 0.50", rt_.render_scale);
+        rt_.render_scale = 0.5f;
+    }
     log::infof("render_scale → %.2f, re-allocating targets", rt_.render_scale);
     recreate_swapchain();
 }
@@ -504,7 +511,7 @@ void VulkanEngine::save_settings() const {
     // them overwrite the player's saved cfg (pose, toggles).
     static const bool test_run = [this] {
         for (const char* e : { "QLIKE_TEST_HOLD", "QLIKE_TEST_PAN", "QLIKE_TEST_SHOOTDOWN",
-                               "QLIKE_TEST_BOOM", "QLIKE_TEST_BLAST", "QLIKE_TEST_FIRE" })
+                               "QLIKE_TEST_BOOM", "QLIKE_TEST_BLAST", "QLIKE_TEST_FIRE", "QLIKE_TEST_CHUTE", "QLIKE_TEST_SAM" })
             if (std::getenv(e)) return true;
         return opts_.max_frames > 0 || !opts_.screenshot_path.empty() ||
                opts_.autodemo_seconds > 0.0f || opts_.scene != 0;

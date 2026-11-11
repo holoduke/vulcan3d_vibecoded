@@ -559,6 +559,8 @@ void VulkanEngine::tick_spacejet(float dt) {
                     b.pos = f.pos - f.up * 1.5f;
                     b.vel = f.fwd * f.speed;
                     b.prev_pos = b.pos;
+                    b.chute = ((lead->id * 7u + uint32_t(lead->sorties)) % 5u) < 3u;
+                    b.phase = float(f.id) * 1.7f;
                     bombs_.push_back(b);
                 }
                 if (!lead->bomb_dropped) f.bomb_dropped = false;
@@ -594,6 +596,12 @@ void VulkanEngine::tick_spacejet(float dt) {
                     float vy = v0.y;
                     float t_fall = (vy + std::sqrt(vy * vy + 2.0f * kG * h)) / kG;
                     glm::vec3 impact = f.pos + glm::vec3(v0.x, 0.0f, v0.z) * (t_fall * 0.96f);
+                    // Parachute bombs (3 runs in 5): short forward carry until the
+                    // canopy bites, then a slow descent drifting with the wind.
+                    const bool chute = ((f.id * 7u + uint32_t(f.sorties)) % 5u) < 3u;
+                    if (chute)
+                        impact = f.pos + glm::vec3(v0.x, 0.0f, v0.z) * 0.74f +
+                                 glm::vec3(wind_vel_.x, 0.0f, wind_vel_.z) * (h / 8.5f);
                     glm::vec3 hf = glm::normalize(glm::vec3(f.fwd.x, 0, f.fwd.z) + glm::vec3(1e-4f));
                     glm::vec3 miss = f.target - impact; miss.y = 0.0f;
                     float along = glm::dot(miss, hf);                 // >0: impact short
@@ -605,6 +613,8 @@ void VulkanEngine::tick_spacejet(float dt) {
                         b.pos = f.pos - f.up * 1.5f;
                         b.vel = f.fwd * f.speed;
                         b.prev_pos = b.pos;
+                        b.chute = chute;
+                        b.phase = float(f.id) * 1.7f;
                         bombs_.push_back(b);
                         log::infof("[jets] bomb away -> (%.0f, %.0f)", f.target.x, f.target.z);
                         // Pull up and reverse.

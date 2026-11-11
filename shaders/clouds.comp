@@ -7,7 +7,7 @@
 // physical atmosphere (transmittance LUT) and ambient from the sky-view LUT.
 //
 // pc.mode: 0 = generate shape noise (128^3), 1 = detail noise (32^3),
-//          2 = render the cloud layer for sky pixels (960x540).
+//          2 = render the cloud layer for sky pixels (1920x1080).
 #include "atmosphere.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -79,8 +79,8 @@ void gen_shape(ivec3 c) {
     imageStore(o_shape, c, vec4(clamp(pw, 0.0, 1.0)));
 }
 void gen_detail(ivec3 c) {
-    vec3 p = (vec3(c) + 0.5) / 32.0;
-    float w = worley(p, 2.0) * 0.625 + worley(p, 4.0) * 0.25 + worley(p, 8.0) * 0.125;
+    vec3 p = (vec3(c) + 0.5) / vec3(imageSize(o_detail));
+    float w = worley(p, 2.0) * 0.50 + worley(p, 4.0) * 0.25 + worley(p, 8.0) * 0.15 + worley(p, 16.0) * 0.10;
     imageStore(o_detail, c, vec4(w));
 }
 
@@ -114,6 +114,10 @@ float cloud_density(vec3 p, bool detail) {
     if (shape <= 0.0) return 0.0;
     if (detail) {
         float d = textureLod(u_detail, (q + wind * 0.5) / 520.0, 0.0).r;
+        // Second, finer erosion octave (~20 m features): crisp wisps and
+        // cauliflower edges instead of a soft blob outline.
+        float d2 = textureLod(u_detail, (q + wind * 0.8).zxy / 137.0, 0.0).r;
+        d = d * 0.68 + d2 * 0.32;
         // erode more at the bottom (wispy), less at the top
         float de = mix(d, 1.0 - d, clamp(h * 4.0, 0.0, 1.0));
         shape = remap(shape, de * 0.42, 1.0, 0.0, 1.0);
@@ -136,7 +140,7 @@ void render(ivec2 px) {
     float t0 = (kCloudBottom - pc.eye.y) / rd.y;
     float t1 = (kCloudTop - pc.eye.y) / rd.y;
     t1 = min(t1, t0 + 30000.0);
-    const int N = 56;
+    const int N = 80;
     float dt = (t1 - t0) / float(N);
     // Per-pixel jitter (interleaved gradient noise, frame-varying).
     float jit = fract(52.9829189 * fract(dot(vec2(px) + pc.params2.x * 5.588, vec2(0.06711056, 0.00583715))));

@@ -490,7 +490,9 @@ void VulkanEngine::build_menu_ui() {
         // Drag changes only the value; you have to click Apply (or change
         // window size) for it to take effect, because resizing live render
         // targets requires a wait-idle.
-        ImGui::SliderFloat("render scale", &rt_.render_scale, 0.4f, 2.0f, "%.2fx");
+        ImGui::SliderFloat("render scale", &rt_.render_scale,
+                           (rt_.fsr_backend == 2 && rt_.fsr2_enabled && dlss_supported_) ? 0.5f : 0.4f, 2.0f, "%.2fx",
+                           ImGuiSliderFlags_AlwaysClamp);
         ImGui::SameLine();
         if (ImGui::Button("Apply")) {
             apply_render_scale();
@@ -723,6 +725,8 @@ void VulkanEngine::build_menu_ui() {
         const char* fsr_backends[] = { "FSR2 (legacy static)", "FSR3 (ffx-api DLL)", "DLSS (NVIDIA Streamline)" };
         ImGui::Combo("Upscaler backend", &rt_.fsr_backend, fsr_backends,
                      IM_ARRAYSIZE(fsr_backends));
+        // DLSS needs a render scale of at least 0.50 (apply_render_scale clamps).
+        if (rt_.fsr_backend == 2 && rt_.fsr2_enabled && dlss_supported_ && rt_.render_scale < 0.5f) apply_render_scale();
         if (rt_.fsr_backend == 2) {
             ImGui::BeginDisabled(!dlss_rr_supported_);
             ImGui::Checkbox("Ray Reconstruction (DLSS-RR)", &rt_.dlss_rr);

@@ -77,7 +77,18 @@ void main() {
         if (design == 0) { base = vec3(0.42, 0.03, 0.03); accent = vec3(0.85, 0.62, 0.12); }
         else             { base = vec3(0.04, 0.10, 0.36); accent = vec3(0.86, 0.84, 0.78); }
         vec3 alb = base;
-        if (design == 0) {
+        if (design == 2) {
+            // Parachute canopy: alternating orange / off-white gores, darker
+            // seams along the radial tapes and the hem (uv.x = gore, uv.y = crown->skirt).
+            float gore = fract(uv.x * 8.0);
+            alb = mix(vec3(0.80, 0.78, 0.72), vec3(0.85, 0.30, 0.05), step(0.5, gore));
+            float seam = 1.0 - smoothstep(0.0, 0.035, min(fract(uv.x * 16.0), 1.0 - fract(uv.x * 16.0)));
+            alb *= 1.0 - 0.35 * seam;
+            alb *= 1.0 - 0.3 * smoothstep(0.94, 1.0, uv.y);
+            base = alb;
+        } else if (design == 3) {
+            alb = vec3(0.10, 0.09, 0.08);          // suspension line
+        } else if (design == 0) {
             // Gold cross (Nordic offset) + fly-end swallowtail fringe.
             float cx = step(abs(uv.x - 0.36), 0.07), cy = step(abs(uv.y - 0.5), 0.09);
             alb = mix(alb, accent, max(cx, cy));
@@ -89,7 +100,7 @@ void main() {
         }
         // Woven-fabric grain + soft dirt toward the fly end.
         float weave = 0.9 + 0.1 * sin(uv.x * 420.0) * sin(uv.y * 260.0);
-        alb *= weave * mix(1.0, 0.8, uv.x * uv.x);
+        alb *= weave * (design >= 2 ? 1.0 : mix(1.0, 0.8, uv.x * uv.x));
         vec3 lit = alb * (sun * max(ndl, 0.0) * 1.05 +
                           sun * max(-ndl, 0.0) * 0.45 * (0.6 + 0.4 * base) +   // translucency
                           scene.sky_color.rgb * 0.45 + 0.03);

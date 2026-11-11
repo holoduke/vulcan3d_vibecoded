@@ -58,6 +58,7 @@ void VulkanEngine::init_vegetation_data(const Heightmap& hm) {
     wp.water_level  = rt_.water_level;
     wp.rock_band_lo = rt_.terrain_h_dirt_rock_start;
     for (const auto& a : aa_) wp.keep_out.push_back(glm::vec3(a.pos.x, a.pos.z, 9.0f));
+    for (const auto& o : outposts_) wp.keep_out.push_back(glm::vec3(o.x, o.z, 10.0f));
     const auto tv0 = std::chrono::steady_clock::now();
     veg_arch_ = build_veg_archetypes(0xF0E57);
     const auto tv1 = std::chrono::steady_clock::now();

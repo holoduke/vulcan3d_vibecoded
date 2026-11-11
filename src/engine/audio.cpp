@@ -261,7 +261,7 @@ void AudioEngine::set_voice(uint32_t h, glm::vec3 pos, float volume) {
 }
 
 void AudioEngine::play_effect(ClipID id, glm::vec3 pos, float volume, float pitch,
-                              float delay_s, float lpf_hz, int lpf_order) {
+                              float delay_s, float lpf_hz, int lpf_order, float start_s) {
     if (!impl_->ok) return;
     auto idx = static_cast<size_t>(id);
     if (idx >= static_cast<size_t>(ClipID::Count)) return;
@@ -289,6 +289,11 @@ void AudioEngine::play_effect(ClipID id, glm::vec3 pos, float volume, float pitc
     ma_sound_set_doppler_factor(&e.sound, 0.0f);
     ma_sound_set_position(&e.sound, pos.x, pos.y, pos.z);
     ma_sound_set_volume(&e.sound, volume);
+    if (start_s > 0.0f) {
+        ma_uint32 sr = 0;
+        if (ma_sound_get_data_format(&e.sound, nullptr, nullptr, &sr, nullptr, 0) == MA_SUCCESS && sr > 0)
+            ma_sound_seek_to_pcm_frame(&e.sound, ma_uint64(double(start_s) * double(sr)));
+    }
     ma_sound_set_pitch(&e.sound, pitch);
     if (delay_s > 0.0f)
         ma_sound_set_start_time_in_milliseconds(

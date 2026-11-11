@@ -71,4 +71,9 @@ struct Level {
 // Built-in starter level: floor + four walls + a few obstacle cubes.
 Level make_arena(float radius = 30.0f, float wall_height = 8.0f);
 
+// Appends a free-standing stone tower in WORLD space (base = ground point):
+// style 0 watchtower, 1 beacon, 2 ruin, 3 two-storey keep. Adds its mesh
+// parts and player colliders to the level.
+void append_outpost_tower(Level& lv, glm::vec3 base, int style, uint32_t seed);
+
 } // namespace qlike::game

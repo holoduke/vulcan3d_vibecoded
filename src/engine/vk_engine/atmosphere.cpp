@@ -172,8 +172,8 @@ void VulkanEngine::init_atmosphere() {
 // Volumetric clouds (shaders/clouds.comp)
 // ---------------------------------------------------------------------
 namespace {
-constexpr uint32_t kCloudW = 960, kCloudH = 540;
-constexpr uint32_t kShapeN = 128, kDetailN = 32;
+constexpr uint32_t kCloudW = 1920, kCloudH = 1080;
+constexpr uint32_t kShapeN = 128, kDetailN = 64;
 struct CloudPC {
     glm::mat4 inv_vp;
     glm::vec4 eye;      // xyz camera (m), w time (s)
@@ -303,7 +303,7 @@ void VulkanEngine::init_clouds() {
         vkDestroyShaderModule(device_, m, nullptr);
     }
     cloud_noise_ready_ = false;
-    log::info("[clouds] volumetric cloud layer ready (960x540, 128^3 + 32^3 noise)");
+    log::info("[clouds] volumetric cloud layer ready (1920x1080, 128^3 + 64^3 noise)");
     init_fog();
 }
 

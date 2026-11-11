@@ -26,8 +26,13 @@ struct AaModel {
     glm::vec3 turret_pivot{0.0f}, gun_pivot{0.0f}, radar_pivot{0.0f};
     glm::vec3 muzzle[2]{};          // in gun space
     glm::vec3 half_extent{1.7f, 1.4f, 3.6f};   // hull collision (centre y = half)
+    // Missile launcher only: one missile (tail at origin, nose +Z) and the
+    // four rail positions in launch-frame ("guns") space.
+    std::vector<game::LevelMesh> missile;
+    glm::vec3 rail[4]{};
 };
 
 AaModel build_aa_model();
+AaModel build_sam_model();
 
 } // namespace qlike

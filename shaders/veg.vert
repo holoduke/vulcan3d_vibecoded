@@ -66,6 +66,7 @@ void main() {
         imp_uv = vec2(inNormal.x, inNormal.y);      // (u, v) packed in the normal
     }
 
+    const vec3 rest_wp = wp;   // pre-sway position: anchors the leaf cut-out pattern
     // Wind: trunk base still, crown sways; per-instance phase. The previous
     // frame's pose (time - 0.016, the CPU step) feeds the motion vector so
     // swaying crowns reproject correctly in TAA.
@@ -104,7 +105,7 @@ void main() {
     vPrevClip   = pc.prev_mvp * vec4(wp_prev, 1.0);
     vWorldPos   = wp;
     vShellBase  = wp;
-    vObjectPos  = wp;
+    vObjectPos  = rest_wp;
     vObjectNormal = N;
     vNormal     = N;
     vColor      = col;

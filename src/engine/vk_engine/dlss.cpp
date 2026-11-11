@@ -55,12 +55,25 @@ sl::Resource vk_res(VkImage img, VkImageView view, VkImageLayout layout, uint32_
     r.usage = usage;
     return r;
 }
+// Quality mode for a render scale (super resolution; tolerant of inputs a
+// little under a mode's nominal size).
 sl::DLSSMode dlss_mode_for_scale(float s) {
     if (s >= 0.99f) return sl::DLSSMode::eDLAA;
     if (s >= 0.64f) return sl::DLSSMode::eMaxQuality;
     if (s >= 0.56f) return sl::DLSSMode::eBalanced;
     if (s >= 0.45f) return sl::DLSSMode::eMaxPerformance;
     return sl::DLSSMode::eUltraPerformance;
+}
+// Ray Reconstruction is strict: the input may be LARGER than a mode's
+// nominal size (dynamic resolution) but never smaller, or every evaluate
+// fails with NGX InvalidParameter. So each mode starts exactly at its
+// nominal ratio. Ultra performance has no dynamic range at all, which
+// leaves no valid mode below 0.5 (see dlss_rr_active).
+sl::DLSSMode dlss_rr_mode_for_scale(float s) {
+    if (s >= 0.99f)  return sl::DLSSMode::eDLAA;
+    if (s >= 0.667f) return sl::DLSSMode::eMaxQuality;
+    if (s >= 0.58f)  return sl::DLSSMode::eBalanced;
+    return sl::DLSSMode::eMaxPerformance;
 }
 }  // namespace
 #endif
@@ -70,7 +83,10 @@ bool VulkanEngine::dlss_active() const {
 }
 
 bool VulkanEngine::dlss_rr_active() const {
-    return dlss_active() && dlss_rr_supported_ && rt_.dlss_rr && deferred_lighting_active_;
+    // Under a 0.5 render scale there is no valid RR mode (see
+    // dlss_rr_mode_for_scale): fall back to plain super resolution.
+    return dlss_active() && dlss_rr_supported_ && rt_.dlss_rr && deferred_lighting_active_ &&
+           rt_.render_scale >= 0.5f;
 }
 
 void VulkanEngine::sl_init_early() {
@@ -313,7 +329,7 @@ void VulkanEngine::dispatch_dlss(VkCommandBuffer cmd) {
     if (dlss_rr_supported_) {
         // RR tracks the DLSS options and adds its own; mode eOff parks it.
         sl::DLSSDOptions d{};
-        d.mode = use_rr ? o.mode : sl::DLSSMode::eOff;
+        d.mode = use_rr ? dlss_rr_mode_for_scale(rt_.render_scale) : sl::DLSSMode::eOff;
         d.outputWidth = o.outputWidth;
         d.outputHeight = o.outputHeight;
         d.colorBuffersHDR = sl::Boolean::eTrue;

@@ -362,9 +362,255 @@ struct OakParams  { float H; int branches; float seed; float spread; glm::vec3 t
                     int clumps = 0; };                  // extra small crown clumps (LOD0 lumpiness)
 struct BushParams { int blobs; float seed; float sx = 1.0f, sy = 1.0f; };
 
+
+// ---------------------------------------------------------------------
+// Close-range trees (LOD 0 / 1). The far LODs keep the cheap cone / blob
+// silhouettes above; these give the near trees real structure:
+//   * broadleaf - branch skeleton grown by SPACE COLONIZATION (Runions,
+//     Lane & Prusinkiewicz 2007): attraction points fill the crown
+//     envelope, branches grow toward the points they are closest to and
+//     consume them, which yields the forking, space-filling habit of a
+//     real crown. Branch radii follow the pipe model (da Vinci's rule,
+//     r_parent^n = sum r_child^n); foliage is many small leaf clumps on
+//     the twig ends, so the crown has depth and gaps instead of being a
+//     few big balls.
+//   * conifer  - a curved trunk carrying whorls of drooping needle
+//     fronds (longer and sagging low down, short and upswept at the
+//     top), the habit of a spruce / fir, instead of stacked cones.
+// ---------------------------------------------------------------------
+
+// Two-sided triangle (the vegetation pipelines cull back faces). `bias`
+// bends both shading normals so the underside is not pitch black.
+void tri2(LevelMesh& m, glm::vec3 a, glm::vec3 b, glm::vec3 c, float wa, float wb, float wc,
+          float mat, glm::vec3 bias) {
+    glm::vec3 n = glm::cross(b - a, c - a);
+    float l = glm::length(n);
+    if (l < 1e-9f) return;
+    n /= l;
+    if (n.y < 0.0f) { std::swap(b, c); std::swap(wb, wc); n = -n; }
+    const glm::vec3 nt = glm::normalize(n + bias);
+    const glm::vec3 nb = glm::normalize(-n * 0.55f + bias);
+    const uint32_t k = uint32_t(m.verts.size());
+    push_v(m, { a, nt, wa, mat }); push_v(m, { b, nt, wb, mat }); push_v(m, { c, nt, wc, mat });
+    push_v(m, { a, nb, wa, mat }); push_v(m, { b, nb, wb, mat }); push_v(m, { c, nb, wc, mat });
+    m.idx.insert(m.idx.end(), { k, k + 1, k + 2, k + 3, k + 5, k + 4 });
+}
+
+void build_conifer(LevelMesh& m, const PineParams& p, int lod) {
+    std::mt19937 r(uint32_t(p.seed * 1000.0f) + 17u);
+    std::uniform_real_distribution<float> U(0.0f, 1.0f);
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    auto axis = [&](float y) { return glm::vec3(p.lean * y / p.H, y, 0.0f); };
+    auto trunk_r = [&](float y) { return glm::mix(0.30f, 0.03f, std::pow(glm::clamp(y / p.H, 0.0f, 1.0f), 0.8f)); };
+    // Trunk.
+    const int tsegs = lod == 0 ? 10 : 6, tparts = lod == 0 ? 4 : 2;
+    if (lod == 0)
+        add_limb(m, glm::vec3(0, -0.3f, 0), glm::vec3(p.lean * 0.05f, 0.7f, 0), 0.52f, 0.31f, tsegs, 0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < tparts; ++i) {
+        float ya = glm::mix(-0.3f, p.H * 0.97f, float(i) / float(tparts));
+        float yb = glm::mix(-0.3f, p.H * 0.97f, float(i + 1) / float(tparts));
+        add_limb(m, axis(ya), axis(yb), trunk_r(ya), trunk_r(yb), tsegs,
+                 0.35f * glm::max(ya, 0.0f) / p.H, 0.35f * yb / p.H, 0.0f);
+    }
+    // Whorls of fronds.
+    const int whorls = lod == 0 ? glm::clamp(int(p.H * 1.15f), 10, 17) : glm::clamp(int(p.H * 0.62f), 6, 9);
+    const int nb = lod == 0 ? 6 : 5;
+    const int N  = lod == 0 ? 3 : 2;
+    const float y_lo = p.H * 0.17f, y_hi = p.H * 0.95f;
+    for (int w = 0; w < whorls; ++w) {
+        const float f = (float(w) + 0.6f * U(r)) / float(whorls);          // 0 bottom .. 1 top
+        const float y = glm::mix(y_lo, y_hi, f);
+        float L = p.r0 * 1.15f * std::pow(1.0f - f, 0.8f) + 0.22f;
+        if (f < 0.14f) L *= 0.7f + 2.1f * f;                                  // shaded-out lowest branches
+        const float elev = glm::mix(-0.30f, 0.60f, f * f);                   // sag below, upswept above
+        const float sag  = glm::mix(0.50f, 0.06f, f);
+        const float a0 = U(r) * 6.2831853f;
+        const int cnt = nb + ((lod == 0 && U(r) < 0.35f) ? 1 : 0);
+        for (int b = 0; b < cnt; ++b) {
+            const float ang = a0 + 6.2831853f * float(b) / float(cnt) + (U(r) - 0.5f) * 0.55f;
+            const float Lb = L * (0.78f + 0.44f * U(r));
+            const glm::vec3 out(std::cos(ang), 0.0f, std::sin(ang));
+            const glm::vec3 side(-out.z, 0.0f, out.x);
+            const glm::vec3 base = axis(y + (U(r) - 0.5f) * 0.3f);
+            const float Wmax = (0.24f * Lb + 0.15f) * (lod == 0 ? 1.0f : 1.3f);
+            const float te = std::tan(elev);
+            glm::vec3 rib[4], lf[4], rg[4];
+            float wt[4];
+            for (int k = 0; k <= N; ++k) {
+                const float s = float(k) / float(N);
+                rib[k] = base + out * (Lb * s) + up * (te * Lb * s - sag * Lb * s * s);
+                float wk = Wmax * std::pow(1.0f - s, 0.55f) * (0.45f + 0.55f * glm::min(1.0f, s * 3.0f));
+                wk *= 0.85f + 0.3f * U(r);
+                lf[k] = rib[k] + side * wk - up * (0.42f * wk);
+                rg[k] = rib[k] - side * wk - up * (0.42f * wk);
+                wt[k] = 0.12f + 0.45f * f + 0.4f * s;
+            }
+            const glm::vec3 bias = up * 0.35f + out * 0.35f;
+            for (int k = 0; k < N; ++k) {
+                tri2(m, rib[k], rib[k + 1], lf[k], wt[k], wt[k + 1], wt[k], 1.0f, bias);
+                tri2(m, rib[k], rg[k], rib[k + 1], wt[k], wt[k], wt[k + 1], 1.0f, bias);
+                if (k + 1 < N) {
+                    tri2(m, lf[k], rib[k + 1], lf[k + 1], wt[k], wt[k + 1], wt[k + 1], 1.0f, bias);
+                    tri2(m, rg[k], rg[k + 1], rib[k + 1], wt[k], wt[k + 1], wt[k + 1], 1.0f, bias);
+                }
+            }
+            // Bare branch under the inner part of the frond (near LOD only).
+            if (lod == 0 && Lb > 1.0f)
+                add_limb(m, base - up * 0.03f, glm::mix(rib[1], rib[2], 0.3f) - up * 0.04f,
+                         0.05f + 0.012f * Lb, 0.015f, 3, wt[0], wt[1], 0.0f);
+        }
+    }
+    // Leader tuft at the very top.
+    add_cone(m, axis(p.H * 0.88f), 0.34f, p.H * 0.14f + 0.5f, lod == 0 ? 6 : 5, p.seed, 0.6f, 1.0f, 1.0f);
+}
+
+struct SkNode { glm::vec3 p; int parent; float r; int kids; };
+
+// Space colonization inside an ellipsoidal crown envelope. `nodes` holds
+// the trunk on entry (root first); grown branch nodes are appended.
+void colonize(std::vector<SkNode>& nodes, std::mt19937& rng, glm::vec3 centre, glm::vec3 radii,
+              int n_attr, float step) {
+    std::uniform_real_distribution<float> U(0.0f, 1.0f);
+    std::vector<glm::vec3> attr;
+    attr.reserve(size_t(n_attr));
+    while (int(attr.size()) < n_attr) {
+        glm::vec3 d(U(rng) * 2.0f - 1.0f, U(rng) * 2.0f - 1.0f, U(rng) * 2.0f - 1.0f);
+        float l2 = glm::dot(d, d);
+        if (l2 > 1.0f || l2 < 0.04f) continue;
+        if (d.y < -0.55f) continue;                           // flat-bottomed crown
+        // Push points toward the shell: foliage lives where the light is.
+        d *= std::pow(l2, -0.18f);
+        if (glm::dot(d, d) > 1.0f) d = glm::normalize(d);
+        attr.push_back(centre + d * radii);
+    }
+    const float infl = glm::max(radii.x, radii.y) * 1.35f, kill = step * 0.95f;
+    std::vector<glm::vec3> acc;
+    std::vector<int> cnt;
+    for (int iter = 0; iter < 90 && !attr.empty() && nodes.size() < 520; ++iter) {
+        acc.assign(nodes.size(), glm::vec3(0.0f));
+        cnt.assign(nodes.size(), 0);
+        bool any = false;
+        for (const auto& a : attr) {
+            int best = -1; float bd = infl * infl;
+            for (size_t j = 0; j < nodes.size(); ++j) {
+                glm::vec3 d = a - nodes[j].p;
+                float d2 = glm::dot(d, d);
+                if (d2 < bd) { bd = d2; best = int(j); }
+            }
+            if (best < 0) continue;
+            acc[size_t(best)] += glm::normalize(a - nodes[size_t(best)].p);
+            ++cnt[size_t(best)];
+            any = true;
+        }
+        if (!any) break;
+        const size_t n0 = nodes.size();
+        for (size_t j = 0; j < n0; ++j) {
+            if (cnt[j] == 0) continue;
+            glm::vec3 dir = acc[j] / float(cnt[j]);
+            dir += glm::vec3(0.0f, 0.10f, 0.0f);              // phototropism
+            dir += glm::vec3(U(rng) - 0.5f, U(rng) - 0.5f, U(rng) - 0.5f) * 0.25f;
+            float dl = glm::length(dir);
+            if (dl < 1e-4f) continue;
+            glm::vec3 np = nodes[j].p + dir / dl * step;
+            // Do not grow a duplicate twig from the same node.
+            bool dup = false;
+            for (size_t q = n0; q < nodes.size(); ++q)
+                if (nodes[q].parent == int(j) && glm::distance(nodes[q].p, np) < step * 0.5f) dup = true;
+            for (size_t q = 0; q < n0 && !dup; ++q)
+                if (nodes[q].parent == int(j) && glm::distance(nodes[q].p, np) < step * 0.35f) dup = true;
+            if (dup) continue;
+            nodes.push_back({ np, int(j), 0.0f, 0 });
+            ++nodes[j].kids;
+        }
+        if (nodes.size() == n0) break;
+        attr.erase(std::remove_if(attr.begin(), attr.end(), [&](const glm::vec3& a) {
+            for (size_t q = n0; q < nodes.size(); ++q)
+                if (glm::distance(a, nodes[q].p) < kill) return true;
+            return false;
+        }), attr.end());
+    }
+}
+
+void build_broadleaf(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, const Ico& tiny) {
+    (void)tiny;
+    std::mt19937 r(uint32_t(p.seed * 1000.0f) + 91u);         // same skeleton for every LOD
+    std::uniform_real_distribution<float> U(0.0f, 1.0f);
+    const glm::vec3 cs(p.crown.x, p.crown.y, p.crown.x);
+    const glm::vec3 top = p.top_off + glm::vec3(0.0f, p.H * 0.62f, 0.0f);
+    const glm::vec3 centre = top + glm::vec3(0.0f, 2.4f * cs.y + 0.3f, 0.0f);
+    const glm::vec3 radii = glm::vec3(3.0f + p.spread * 0.6f, 2.8f, 3.0f + p.spread * 0.6f) * cs * 0.95f;
+
+    // Trunk nodes: slight S-bend from the root to the crown base.
+    std::vector<SkNode> nodes;
+    const int tn = 5;
+    const float bend = (U(r) - 0.5f) * 0.9f, bend_a = U(r) * 6.2831853f;
+    for (int i = 0; i <= tn; ++i) {
+        float t = float(i) / float(tn);
+        glm::vec3 q = glm::mix(glm::vec3(0.0f, -0.3f, 0.0f), top, t);
+        float sb = std::sin(t * 3.14159265f) * bend * 0.35f;
+        q += glm::vec3(std::cos(bend_a), 0.0f, std::sin(bend_a)) * sb;
+        nodes.push_back({ q, i - 1, 0.0f, i < tn ? 1 : 0 });
+    }
+    const float step = 0.52f;
+    colonize(nodes, r, centre, radii, 420, step);
+
+    // Pipe-model radii, tips first (children always follow their parent).
+    const float n_exp = 2.35f, r_tip = 0.022f;
+    std::vector<float> acc(nodes.size(), 0.0f);
+    for (size_t i = nodes.size(); i-- > 0;) {
+        float ri = nodes[i].kids == 0 ? r_tip : std::pow(acc[i], 1.0f / n_exp);
+        nodes[i].r = ri;
+        if (nodes[i].parent >= 0) acc[size_t(nodes[i].parent)] += std::pow(ri, n_exp);
+    }
+    // Scale so the trunk has a believable girth; twigs keep a visible minimum.
+    const float want_top = 0.25f + 0.02f * p.H;
+    const float sc = want_top / glm::max(nodes[size_t(tn)].r, 1e-3f);
+    for (auto& nd : nodes) nd.r = glm::max(nd.r * sc, 0.016f);
+    for (int i = 0; i <= tn; ++i)      // taper + root flare down the trunk
+        nodes[size_t(i)].r = glm::max(nodes[size_t(i)].r, want_top * (1.0f + 0.75f * (1.0f - float(i) / float(tn))));
+
+    const float y_base = top.y, y_span = glm::max(centre.y + radii.y - y_base, 1.0f);
+    auto sway = [&](glm::vec3 q) { return glm::clamp(0.25f + 0.75f * (q.y - y_base) / y_span, 0.0f, 1.0f) * (q.y > y_base ? 1.0f : 0.0f) + (q.y <= y_base ? 0.25f * glm::max(q.y, 0.0f) / glm::max(y_base, 1.0f) : 0.0f); };
+    if (lod == 0)
+        add_limb(m, glm::vec3(0.0f, -0.3f, 0.0f), glm::vec3(0.0f, 0.8f, 0.0f), nodes[0].r * 1.55f, nodes[0].r * 1.02f, 12, 0.0f, 0.0f, 0.0f);
+    const float r_min = lod == 0 ? 0.0f : 0.045f;
+    for (size_t i = 1; i < nodes.size(); ++i) {
+        const SkNode& nd = nodes[i];
+        const SkNode& pa = nodes[size_t(nd.parent)];
+        if (nd.r < r_min) continue;
+        const float r0 = glm::min(pa.r, nd.r * 1.3f);
+        const int segs = nd.r > 0.14f ? (lod == 0 ? 10 : 6) : nd.r > 0.05f ? (lod == 0 ? 6 : 4) : 3;
+        add_limb(m, pa.p, nd.p, r0, nd.r, segs, sway(pa.p), sway(nd.p), 0.0f);
+    }
+
+    // Foliage: leaf clumps on the twig ends (and along thin twigs).
+    std::vector<glm::vec3> spots;
+    for (size_t i = size_t(tn) + 1; i < nodes.size(); ++i)
+        if (nodes[i].kids == 0 || (nodes[i].r < 0.03f && (i % 3) == 0)) spots.push_back(nodes[i].p);
+    const size_t want = lod == 0 ? 90 : 24;
+    const size_t stride = std::max<size_t>(1, (spots.size() + want - 1) / want);
+    // Fewer clumps -> each must cover more of the envelope.
+    const float cover = std::sqrt(float(stride)) * (lod == 0 ? 1.0f : 1.25f);
+    int ci = 0;
+    for (size_t i = 0; i < spots.size(); i += stride, ++ci) {
+        float s = (0.50f + 0.34f * U(r)) * cover;
+        glm::vec3 c = spots[i] + glm::vec3(0.0f, 0.12f * s, 0.0f);
+        // Flattened, tilted outward from the crown centre like a leafy spray.
+        add_blob(m, lo, c, glm::vec3(s, s * (0.72f + 0.2f * U(r)), s), U(r) * 6.28f,
+                 p.seed * 3.0f + float(ci) * 1.37f, lod == 0 ? 0.34f : 0.22f, 2.6f, 0.0f, -1e9f,
+                 glm::vec2(sway(c) * 0.9f, 2.0f), glm::min(1.0f, sway(c) + 0.15f));
+    }
+    if (lod == 1) {
+        // Mid range: an inner volume closes the see-through gaps cheaply.
+        add_blob(m, lo, centre, radii * 0.62f, 0.0f, p.seed * 7.0f, 0.2f, 2.2f, 0.0f, -1e9f,
+                 glm::vec2(0.5f, 2.0f), 0.9f);
+    }
+}
+
 // LOD tables: LOD0 full detail .. LOD3 ~10-30 tris (far silhouette).
 void build_pine(LevelMesh& m, const PineParams& p, int lod, const Ico& lo, const Ico& hi) {
     (void)lo; (void)hi;
+    if (lod <= 1) { build_conifer(m, p, lod); return; }
     const int   trunk_segs[4] = { 12, 6, 4, 3 };
     const int   cone_segs[4]  = { 18, 10, 6, 5 };
     // LOD0: ~1.5x more, thinner tiers (layered branches); far LODs unchanged.
@@ -395,6 +641,7 @@ void build_pine(LevelMesh& m, const PineParams& p, int lod, const Ico& lo, const
 
 void build_oak(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, const Ico& hi, const Ico& tiny,
                const Ico& ultra) {
+    if (lod <= 1) { build_broadleaf(m, p, lod, lo, tiny); return; }
     glm::vec3 b(0.0f);
     glm::vec3 top = b + p.top_off + glm::vec3(0, p.H * 0.62f, 0);
     const int limb_segs[4] = { 12, 6, 4, 3 };

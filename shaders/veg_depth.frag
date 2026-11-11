@@ -1,9 +1,15 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 // Depth-prepass fragment for GPU vegetation: same LOD-fade dither and
 // impostor silhouette cut as cube.frag so the prepass depth matches the
 // colour pass exactly (LESS_OR_EQUAL).
+layout(location = 0) in vec3 vNormal;
+layout(location = 2) in vec3 vWorldPos;
 layout(location = 4) in vec2 vUv;
+layout(location = 6) in vec3 vObjectPos;
 layout(location = 10) flat in vec4 vVegInfo;
+#include "scene_ubo.glsl"
+#include "veg_leaf.glsl"
 void main() {
     if (vVegInfo.x > 0.0) {
         float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
@@ -23,5 +29,8 @@ void main() {
             inside = length(q) < rr || (v < 0.4 && abs(u) < 0.07);
         }
         if (!inside) discard;
+    } else {
+        int vm = int(vUv.y + 0.5);
+        if ((vm == 2 || vm == 3) && veg_leaf_cut(vObjectPos, vWorldPos, vNormal, scene.camera_pos.xyz)) discard;
     }
 }

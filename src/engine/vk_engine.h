@@ -1052,8 +1052,15 @@ private:
         glm::vec3 vel{};
         glm::vec3 prev_pos{};
         float     t = 0.0f;
+        // Retarded (parachute) bomb: canopy opens shortly after release,
+        // then it sinks at ~8 m/s and drifts with the wind.
+        bool      chute = false;
+        float     open = 0.0f;      // canopy inflation 0..1
+        float     phase = 0.0f;     // pendulum phase
     };
     std::vector<Bomb> bombs_;
+    // Unit vector from a parachute bomb toward its canopy.
+    glm::vec3 bomb_chute_axis(const Bomb& b) const;
     // Explosion instance (fx.cpp). Rendered as layered effects: flash
     // billboard, raymarched fireball + smoke + ground dust volumes, spark
     // debris (spawn_hit_particles), point light, camera shake, scorch.
@@ -1171,12 +1178,13 @@ private:
     void tick_spacejet(float dt);                 // move + spawn + despawn
     void tick_jet_audio(float dt);                // predictive flyby sounds
     void play_explosion_audio(glm::vec3 pos, float size);   // distance-modelled boom
-    void play_aa_burst_audio(glm::vec3 muzzle);   // distance-modelled AA burst recording
+    void play_aa_burst_audio(glm::vec3 muzzle, float start_s = 0.0f);   // distance-modelled AA burst recording
+    void queue_distant_sound(int clip, glm::vec3 pos, float start_s, float gain, bool gated);
     float aa_burst_gate_t_ = 0.0f;     // s until another gun may start a recording
     float aa_burst_gate_level_ = 0.0f; // loudness of the recording holding the gate
     // AA reports waiting out their speed-of-sound delay (started only when
     // due, so a scheduled shot does not hold an audio voice).
-    struct AaSound { float due; glm::vec3 pos; int clip; float vol, pitch, lpf; int order = 2; };
+    struct AaSound { float due; glm::vec3 pos; int clip; float vol, pitch, lpf; int order = 2; float start = 0.0f; };
     std::vector<AaSound> aa_sounds_;
     void tick_aa_sounds(float dt);
 
@@ -1397,15 +1405,46 @@ private:
         glm::vec3 pos{0.0f};
         float body_yaw = 0.0f, turret_yaw = 0.0f, gun_pitch = 0.0f, radar_spin = 0.0f;
         float prev_turret_yaw = 0.0f, prev_gun_pitch = 0.0f, prev_radar_spin = 0.0f;
-        float cooldown = 0.0f, burst = 0.0f, fire_acc = 0.0f, flash_t = 0.0f;
+        float cooldown = 0.0f, fire_acc = 0.0f, flash_t = 0.0f, snd_next = 0.0f;
+        int   rounds_left = 0;
         int   barrel = 0, flash_barrel = 0;
+        // kind 1 = missile launcher: lock-on timer, rails still loaded (bit
+        // per rail), reload countdown once empty.
+        int   kind = 0;
+        float lock_t = 0.0f, reload_t = 0.0f;
+        uint32_t rails = 0xFu;
+        uint32_t lock_id = 0xFFFFFFFFu;
     };
+    // Surface-to-air missile in flight (aa.cpp): boost, lead-pursuit homing
+    // with a turn-rate limit, proximity fuse, smoke trail.
+    struct SamMissile {
+        glm::vec3 pos{0.0f}, prev_pos{0.0f};
+        glm::vec3 dir{0.0f, 1.0f, 0.0f}, prev_dir{0.0f, 1.0f, 0.0f};
+        float speed = 0.0f, t = 0.0f, lost_t = 0.0f, trail_acc = 0.0f;
+        uint32_t target_id = 0xFFFFFFFFu;
+        bool dead = false;
+        bool will_decoy = false;        // this seeker falls for the flares
+        bool flared = false;            // target already reacted
+        uint32_t flare_id = 0;          // flare being chased (0 = none)
+        std::vector<glm::vec4> trail;   // xyz + birth time
+    };
+    // Decoy flares dropped by a jet with a missile closing in.
+    struct Flare { glm::vec3 pos{0.0f}, vel{0.0f}; float t = 0.0f, life = 3.5f; uint32_t id = 0; };
+    std::vector<Flare> flares_;
+    uint32_t flare_next_id_ = 1;
+    std::vector<SamMissile> sam_missiles_;
+    std::vector<CastleMeshGpu> sam_missile_parts_;
+    glm::vec3 sam_rail_[4]{};
+    std::vector<int> aa_part_vtype_;     // 0 gun vehicle, 1 missile launcher (per aa_parts_ entry)
+    void tick_sam(float dt);
+    glm::mat4 sam_missile_model(glm::vec3 pos, glm::vec3 dir) const;
     struct AaRound { glm::vec3 pos{0.0f}, prev{0.0f}, vel{0.0f}; float t = 0.0f; bool dead = false; };
+    std::vector<glm::vec3> outposts_;    // outpost tower base points (world.cpp)
     std::vector<AaVehicle> aa_;
     std::vector<AaRound>   aa_rounds_;
     std::vector<CastleMeshGpu> aa_parts_;
     std::vector<int>       aa_part_kind_;
-    glm::vec3 aa_model_pivots_[3]{};
+    glm::vec3 aa_model_pivots_[2][3]{};
     glm::vec3 aa_muzzle_[2]{};
     uint32_t  aa_rng_ = 0xF1A7u;
     void place_aa_vehicles(const Heightmap& hm);

@@ -158,11 +158,8 @@ LevelMesh mat_rubber() {
     return m;
 }
 
-}  // namespace
-
-AaModel build_aa_model() {
-    AaModel M;
-    // ================= HULL =================
+// Tracked hull shared by the gun and missile vehicles.
+void build_hull(AaModel& M) {
     LevelMesh hm = mat_metal(), hd = mat_dark(), hr = mat_rubber();
     const glm::mat4 I(1.0f);
     {   // lower hull with sloped front / rear
@@ -236,6 +233,14 @@ AaModel build_aa_model() {
         }
     }
     M.meshes[AaModel::kHull] = { hm, hd, hr };
+}
+
+}  // namespace
+
+AaModel build_aa_model() {
+    AaModel M;
+    build_hull(M);
+    const glm::mat4 I(1.0f);
 
     // ================= TURRET =================
     M.turret_pivot = { 0.0f, 1.62f, -0.30f };
@@ -298,6 +303,124 @@ AaModel build_aa_model() {
     bbox(rd, T({0.0f, -0.05f, 0.08f}), {0.12f, 0.08f, 0.1f}, 0.02f);             // feed
     cyl(rd, RX(-kPi * 0.5f) * T({0.0f, 0.0f, -0.12f}), 0.08f, 0.0f, 0.12f, 10);  // rotor
     M.meshes[AaModel::kRadar] = { rm, rd };
+    return M;
+}
+
+namespace {
+
+// Lathe along local +Z: rings (z, radius), smooth sides.
+void lathe_z(LevelMesh& m, const glm::mat4& xf, std::initializer_list<glm::vec2> prof, int segs) {
+    std::vector<glm::vec2> p(prof);
+    for (size_t i = 0; i + 1 < p.size(); ++i) {
+        const float z0 = p[i].x, r0 = p[i].y, z1 = p[i + 1].x, r1 = p[i + 1].y;
+        const float dz = z1 - z0, dr = r1 - r0;
+        // Outward normal of the cone segment: (dz, -dr) in (radial, z).
+        glm::vec2 nrz = glm::normalize(glm::vec2(dz, -dr) + glm::vec2(1e-6f, 0.0f));
+        const glm::mat3 R(xf);
+        uint32_t b = uint32_t(m.verts.size());
+        for (int s = 0; s <= segs; ++s) {
+            float a = 2.0f * kPi * float(s) / float(segs);
+            glm::vec3 d(std::cos(a), std::sin(a), 0.0f);
+            glm::vec3 n = glm::normalize(R * (d * nrz.x + glm::vec3(0, 0, nrz.y)));
+            push(m, { glm::vec3(xf * glm::vec4(d * r0 + glm::vec3(0, 0, z0), 1)), n, a * 0.2f, z0 });
+            push(m, { glm::vec3(xf * glm::vec4(d * r1 + glm::vec3(0, 0, z1), 1)), n, a * 0.2f, z1 });
+        }
+        for (int s = 0; s < segs; ++s) {
+            uint32_t k = b + uint32_t(s) * 2;
+            glm::vec3 p0 = m.verts[k].p, p1 = m.verts[k + 1].p, p2 = m.verts[k + 2].p, p3 = m.verts[k + 3].p;
+            glm::vec3 g = glm::cross(p1 - p0, p2 - p0);
+            if (glm::dot(g, g) < 1e-14f) g = glm::cross(p3 - p1, p2 - p1);
+            if (glm::dot(g, m.verts[k].n) >= 0.0f) m.idx.insert(m.idx.end(), { k, k + 1, k + 2, k + 1, k + 3, k + 2 });
+            else                                   m.idx.insert(m.idx.end(), { k, k + 2, k + 1, k + 1, k + 2, k + 3 });
+        }
+    }
+}
+
+LevelMesh mat_missile() {
+    LevelMesh m; m.tint = glm::vec3(0.62f, 0.64f, 0.60f); m.fallback = m.tint;
+    return m;
+}
+
+}  // namespace
+
+// Medium-range SAM launcher in the style of a tracked TELAR: the same
+// hull, a turntable with a nose radome (fire-control radar), and an
+// elevating launch frame carrying four missiles side by side.
+//   turret = turntable + radome (yaw)
+//   guns   = launch frame (pitch about the rear trunnion)
+//   radar  = small rotating antenna
+AaModel build_sam_model() {
+    AaModel M;
+    build_hull(M);
+    const glm::mat4 I(1.0f);
+
+    // ---- Turntable ----
+    M.turret_pivot = { 0.0f, 1.62f, -0.35f };
+    LevelMesh tm = mat_metal(), td = mat_dark();
+    cyl(tm, T({0.0f, -0.05f, 0.0f}) * RX(-kPi * 0.5f), 1.38f, 0.0f, 0.16f, 36);     // ring
+    {   // platform deck, tapered toward the front
+        glm::vec3 c[8] = { {-1.42f, 0.11f, -2.55f}, {1.42f, 0.11f, -2.55f}, {1.05f, 0.11f, 2.35f}, {-1.05f, 0.11f, 2.35f},
+                           {-1.36f, 0.42f, -2.50f}, {1.36f, 0.42f, -2.50f}, {0.98f, 0.42f, 2.25f}, {-0.98f, 0.42f, 2.25f} };
+        hexa(tm, I, c);
+    }
+    // Radome: drum with a domed face, on a short neck at the front.
+    bbox(tm, T({0.0f, 0.62f, 1.55f}), {0.55f, 0.22f, 0.45f}, 0.06f);
+    lathe_z(tm, T({0.0f, 1.05f, 1.30f}),
+            { {0.0f, 0.0f}, {0.0f, 0.74f}, {0.95f, 0.74f}, {1.20f, 0.66f}, {1.38f, 0.48f}, {1.48f, 0.24f}, {1.52f, 0.0f} }, 32);
+    // Equipment cabinets beside / behind the radome.
+    for (float s : { -1.0f, 1.0f }) {
+        bbox(tm, T({s * 1.02f, 0.72f, -0.20f}), {0.30f, 0.30f, 1.20f}, 0.05f);
+        bbox(td, T({s * 1.33f, 0.74f, -0.20f}), {0.012f, 0.22f, 0.50f}, 0.006f);    // louvre panel
+        bbox(tm, T({s * 1.02f, 0.60f, -1.95f}), {0.30f, 0.18f, 0.45f}, 0.04f);
+        cyl(td, T({s * 0.95f, 1.02f, 0.60f}) * RX(-kPi * 0.5f), 0.012f, 0.0f, 1.9f, 6, false);   // whip antennas
+    }
+    // Trunnion towers for the launch frame (rear).
+    for (float s : { -1.0f, 1.0f })
+        bbox(tm, T({s * 0.62f, 0.78f, -1.55f}), {0.11f, 0.36f, 0.30f}, 0.03f);
+    cyl(td, T({0.0f, 1.02f, -1.55f}) * ZtoX(), 0.09f, -0.78f, 0.78f, 14);             // trunnion axle
+    M.meshes[AaModel::kTurret] = { tm, td };
+
+    // ---- Launch frame (pitch) ----
+    M.gun_pivot = { 0.0f, 1.02f, -1.55f };
+    LevelMesh gm = mat_metal(), gd = mat_dark();
+    const float rail_x[4] = { -1.02f, -0.34f, 0.34f, 1.02f };
+    // Spine box + cross beams; each missile sits on its own launch rail.
+    bbox(gm, T({0.0f, 0.02f, 0.95f}), {0.36f, 0.14f, 1.75f}, 0.04f);
+    for (float z : { -0.35f, 0.9f, 2.3f })
+        bbox(gm, T({0.0f, 0.08f, z}), {1.18f, 0.06f, 0.09f}, 0.02f);
+    for (int k = 0; k < 4; ++k) {
+        bbox(gd, T({rail_x[k], 0.20f, 1.35f}), {0.05f, 0.05f, 2.55f}, 0.012f);       // rail
+        bbox(gd, T({rail_x[k], 0.14f, -0.95f}), {0.09f, 0.10f, 0.12f}, 0.02f);       // rear latch
+        bbox(gd, T({rail_x[k], 0.14f, 2.60f}), {0.07f, 0.08f, 0.10f}, 0.02f);        // front shoe
+        M.rail[k] = { rail_x[k], 0.47f, -1.05f };                                       // missile tail centre
+    }
+    M.meshes[AaModel::kGuns] = { gm, gd };
+
+    // ---- Small rotating antenna on the cabinet roof ----
+    M.radar_pivot = { -1.02f, 1.10f, -0.9f };
+    LevelMesh rm = mat_metal(), rd = mat_dark();
+    bbox(rm, RX(-0.15f) * T({0.0f, 0.12f, 0.0f}), {0.32f, 0.10f, 0.03f}, 0.015f);
+    cyl(rd, RX(-kPi * 0.5f) * T({0.0f, 0.0f, -0.08f}), 0.05f, 0.0f, 0.12f, 10);
+    M.meshes[AaModel::kRadar] = { rm, rd };
+
+    // ---- Missile (tail at origin, nose toward +Z; 5.5 m) ----
+    LevelMesh mm = mat_missile(), md = mat_dark();
+    lathe_z(mm, I, { {0.0f, 0.0f}, {0.0f, 0.15f}, {0.25f, 0.20f}, {3.9f, 0.20f}, {4.1f, 0.17f}, {4.75f, 0.17f},
+                     {5.15f, 0.12f}, {5.40f, 0.055f}, {5.50f, 0.0f} }, 16);
+    for (int k = 0; k < 4; ++k) {
+        glm::mat4 r = glm::rotate(I, kPi * 0.25f + kPi * 0.5f * float(k), glm::vec3(0, 0, 1));
+        {   // long-chord wing
+            glm::vec3 c[8] = { {0.19f, -0.012f, 1.25f}, {0.19f, 0.012f, 1.25f}, {0.19f, 0.012f, 3.35f}, {0.19f, -0.012f, 3.35f},
+                               {0.36f, -0.008f, 1.25f}, {0.36f, 0.008f, 1.25f}, {0.36f, 0.008f, 2.75f}, {0.36f, -0.008f, 2.75f} };
+            hexa(mm, r, c);
+        }
+        {   // tail control fin
+            glm::vec3 c[8] = { {0.19f, -0.012f, 0.08f}, {0.19f, 0.012f, 0.08f}, {0.19f, 0.012f, 0.62f}, {0.19f, -0.012f, 0.62f},
+                               {0.43f, -0.008f, 0.08f}, {0.43f, 0.008f, 0.08f}, {0.43f, 0.008f, 0.42f}, {0.43f, -0.008f, 0.42f} };
+            hexa(md, r, c);
+        }
+    }
+    M.missile = { mm, md };
     return M;
 }
 

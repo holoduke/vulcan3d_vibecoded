@@ -2599,8 +2599,12 @@ void main() {
         // metres deep; multiplying fres by water_blend means deep
         // water keeps its full reflection while shore water shows
         // its actual tint.
-        float fres_eff = fres * water_blend;
-        vec3 col_w = mix(baseTint, reflCol, fres_eff);
+        // (Was fres * water_blend: the whole light shore band then had NO
+        // reflection and read as paint. Keep a good part of it - wet sand
+        // under a film of water mirrors the sky too - and let the foam
+        // below take over where there is surf.)
+        float fres_eff = fres * mix(0.5, 1.0, water_blend);
+        float foam_cover = 0.0;   // how much opaque foam sits on the surface here
         // Shore-foam band: a thin lighter highlight at the very edge
         // of the water/land boundary that fades out within
         // `water_foam_params.x` metres of noise-free depth. Reads as
@@ -2622,6 +2626,18 @@ void main() {
 #endif /* QLIKE_WATER */
             float foam_w = max(0.05, scene.water_foam_params.x);
             float band   = exp(-depth_clean * (4.0 / foam_w));
+            // Lapping wavelets instead of a solid stripe: thin foam lines
+            // that run in toward the waterline (phase = depth), wobbling
+            // along the shore and breaking up into patches, plus a narrow
+            // solid line right at the edge.
+            {
+                float lap_n  = noise2(wpos.xz * 0.35 + vec2(wave_t * 0.05, 0.0));
+                float lap_ph = depth_clean * (9.0 / foam_w) + wave_t * 1.1 + lap_n * 5.0;
+                float lap    = pow(0.5 + 0.5 * sin(lap_ph), 3.0);
+                float patchy = smoothstep(0.25, 0.7, noise2(wpos.xz * 1.7 - vec2(0.0, wave_t * 0.12)));
+                float edge   = exp(-depth_clean * (22.0 / foam_w));
+                band *= max(edge, lap * mix(0.35, 1.0, patchy));
+            }
             // River style: blend in the flow-driven foam pattern on top
             // of the shore band. pm_foam_tex was set in the river branch
             // above (1.0 when river style is off, so no effect).
@@ -2630,13 +2646,16 @@ void main() {
 #ifdef QLIKE_WATER
             foam_amt = foam_mix;
 #endif /* QLIKE_WATER */
-            col_w = mix(col_w, scene.water_foam_color.rgb,
 #ifndef QLIKE_WATER
-                        foam_mix * scene.water_foam_color.a);
+            foam_cover = foam_mix * scene.water_foam_color.a;
 #else /* QLIKE_WATER */
-                        foam_mix * scene.water_foam_color.a * foam_op);
+            foam_cover = foam_mix * scene.water_foam_color.a * foam_op;
 #endif /* QLIKE_WATER */
+            baseTint = mix(baseTint, scene.water_foam_color.rgb, foam_cover);
         }
+        // Reflection goes over the tinted water; foam is matte, so it
+        // suppresses most (not all - it is wet) of the mirror.
+        vec3 col_w = mix(baseTint, reflCol, fres_eff * (1.0 - 0.7 * foam_cover));
         col_w += scene.sun_color.rgb * scene.sun_color.a * spec *
                   0.8 * water_lit;
         // Subtle darkening of the surface tint when in shadow.
@@ -2785,6 +2804,21 @@ void main() {
         float water_a = shore_alpha * (1.0 - 0.92 * see) *
                         mix(1.0, foam_op, foam_amt);
         float a       = mix(water_a, 1.0, foam_amt);
+        // The see-through part of the surface (1 - a) used to lose its
+        // reflection and sun glints together with its tint, so the clear
+        // shallow band looked like dry sand. A water surface reflects
+        // whatever is under it: put the Fresnel reflection (a little
+        // boosted - a rippled film mirrors more than flat water seen
+        // from above) and the glints back on that part, fading out over
+        // the last centimetres at the waterline.
+        {
+            float film = smoothstep(0.0, 0.12, depth_clean);
+            float F2   = clamp(fres_eff + 0.07, 0.0, 1.0) * film;
+            vec3  glint = scene.sun_color.rgb * scene.sun_color.a * spec * 0.8 * water_lit * film;
+            float a2   = a + (1.0 - a) * F2;
+            col_w = (col_w * a + (reflCol * F2 + glint) * (1.0 - a)) / max(a2, 1e-3);
+            a = a2;
+        }
         outColor = vec4(col_w, a);
         outGBuffer0 = vec4(clamp(col_w, vec3(0.0), vec3(1.0)), 7.0 / 255.0);
         outGBuffer1 = vec4(0.5, 0.5, 0.2, 0.0);

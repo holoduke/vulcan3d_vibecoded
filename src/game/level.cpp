@@ -567,5 +567,90 @@ Level make_arena(float r, float wh) {
     return lv;
 }
 
+// Free-standing outpost towers scattered over the foothills (world space,
+// `base` = ground point under the centre). Styles:
+//   0 watchtower  - tall round tower, machicolated parapet, conical roof
+//   1 beacon      - slender, open crenellated top with a raised fire basket
+//   2 ruin        - broken shell: wall segments of uneven height, no roof
+//   3 keep        - squat drum with a second, narrower storey and a roof
+void append_outpost_tower(Level& lv, glm::vec3 base, int style, uint32_t seed) {
+    constexpr int kBrick = 1, kRoof = 13;
+    const float stone_tile = 1.0f / 0.22f, roof_tile = 1.7f;
+    LevelMesh stone; stone.tex_albedo = kBrick; stone.tex_normal = kBrick;
+    stone.tint = glm::vec3(0.86f, 0.84f, 0.80f); stone.fallback = glm::vec3(0.55f, 0.50f, 0.42f);
+    LevelMesh roof; roof.tex_albedo = kRoof; roof.tex_normal = kRoof;
+    roof.tint = glm::vec3(0.92f, 0.86f, 0.82f); roof.fallback = glm::vec3(0.55f, 0.25f, 0.18f);
+    auto rnd = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return float((seed >> 8) & 0xFFFFu) / 65535.0f;
+    };
+    std::vector<collision::AABB> cols;
+    const glm::vec3 c = base;
+    if (style == 0) {
+        const float r = 3.0f + rnd() * 0.6f, top = 15.0f + rnd() * 4.0f;
+        lathe(stone, c, {
+            { r + 0.9f, -6.0f }, { r + 0.9f, 0.0f }, { r, 3.4f },             // footing + batter
+            { r, top * 0.5f }, { r + 0.14f, top * 0.5f }, { r + 0.14f, top * 0.5f + 0.3f },
+            { r, top * 0.5f + 0.3f }, { r, top - 0.7f },
+            { r + 0.5f, top }, { r + 0.5f, top + 0.55f }, { r - 0.4f, top + 0.55f },
+            { r - 0.4f, top + 0.2f }, { 0.0f, top + 0.2f },
+        }, 48, stone_tile);
+        corbel_ring(stone, c, r - 0.05f, r + 0.46f, top - 1.2f, top - 0.45f, 22, stone_tile);
+        merlon_ring(stone, c, r - 0.4f, r + 0.5f, top + 0.55f, top + 1.6f, 10, 0.55f, stone_tile);
+        lathe(roof, c, { { r - 0.3f, top + 0.4f }, { r + 0.05f, top + 1.7f }, { 0.0f, top + 8.0f } }, 48, roof_tile);
+        tower_colliders(cols, c, r + 0.2f, -1.0f, top + 1.6f);
+    } else if (style == 1) {
+        const float r = 2.1f + rnd() * 0.3f, top = 20.0f + rnd() * 5.0f;
+        lathe(stone, c, {
+            { r + 1.1f, -6.0f }, { r + 1.1f, 0.0f }, { r + 0.25f, 4.5f }, { r, top - 0.9f },
+            { r + 0.65f, top }, { r + 0.65f, top + 0.5f }, { r + 0.25f, top + 0.5f },
+            { r + 0.25f, top + 0.15f }, { 0.0f, top + 0.15f },
+        }, 40, stone_tile);
+        corbel_ring(stone, c, r - 0.05f, r + 0.6f, top - 1.3f, top - 0.5f, 16, stone_tile);
+        merlon_ring(stone, c, r + 0.25f, r + 0.65f, top + 0.5f, top + 1.5f, 8, 0.5f, stone_tile);
+        // Fire basket on a short pillar.
+        lathe(stone, c, { { 0.35f, top + 0.15f }, { 0.35f, top + 1.3f }, { 0.75f, top + 1.6f },
+                          { 0.75f, top + 1.95f }, { 0.55f, top + 1.95f }, { 0.0f, top + 1.75f } }, 16, stone_tile);
+        tower_colliders(cols, c, r + 0.4f, -1.0f, top + 1.5f);
+    } else if (style == 2) {
+        const float r = 3.6f + rnd() * 0.8f, top = 7.0f + rnd() * 3.0f;
+        // Solid plinth, then a hollow broken shell above it.
+        lathe(stone, c, { { r + 0.8f, -6.0f }, { r + 0.8f, 0.0f }, { r, 2.2f }, { r, 2.6f }, { 0.0f, 2.6f } },
+              40, stone_tile);
+        const int segs = 14;
+        float h = top;
+        for (int k = 0; k < segs; ++k) {
+            // Random-walk the wall height; one side collapsed almost to the plinth.
+            h = glm::clamp(h + (rnd() - 0.5f) * 4.0f, 3.0f, top + 2.5f);
+            float hk = (k >= segs - 4) ? 2.9f + rnd() * 1.4f : h;
+            float a0 = 2.0f * kPi * float(k) / float(segs), a1 = 2.0f * kPi * float(k + 1) / float(segs);
+            ring_sector(stone, c, r - 1.0f, r, a0, a1 + 0.002f, 2.55f, hk, 3, stone_tile);
+        }
+        // Fallen blocks around the foot.
+        for (int k = 0; k < 7; ++k) {
+            float a = rnd() * 2.0f * kPi, d = r + 1.0f + rnd() * 3.5f;
+            glm::vec3 bc = c + glm::vec3(std::cos(a) * d, -0.2f, std::sin(a) * d);
+            float s = 0.45f + rnd() * 0.5f;
+            lathe(stone, bc, { { 0.0f, 0.0f }, { s, 0.0f }, { s * 0.9f, s * 0.9f }, { 0.0f, s * 0.9f } }, 5, stone_tile);
+        }
+        tower_colliders(cols, c, r + 0.1f, -1.0f, 2.6f);   // the solid plinth only: the shell is open
+    } else {
+        const float r = 4.6f + rnd() * 0.6f, mid = 8.0f + rnd() * 1.5f, r2 = r - 1.6f, top = mid + 6.5f + rnd() * 2.0f;
+        lathe(stone, c, {
+            { r + 1.0f, -6.0f }, { r + 1.0f, 0.0f }, { r, 2.8f }, { r, mid - 0.6f },
+            { r + 0.45f, mid }, { r + 0.45f, mid + 0.5f }, { r - 0.35f, mid + 0.5f },
+            { r - 0.35f, mid + 0.15f }, { r2, mid + 0.15f },                       // wall-walk
+            { r2, top - 0.5f }, { r2 + 0.35f, top }, { r2 + 0.35f, top + 0.2f }, { 0.0f, top + 0.2f },
+        }, 56, stone_tile);
+        corbel_ring(stone, c, r - 0.05f, r + 0.42f, mid - 1.2f, mid - 0.45f, 30, stone_tile);
+        merlon_ring(stone, c, r - 0.35f, r + 0.45f, mid + 0.5f, mid + 1.5f, 14, 0.55f, stone_tile);
+        lathe(roof, c, { { r2 + 0.35f, top + 0.1f }, { r2 + 0.8f, top + 0.1f }, { 0.0f, top + 5.5f } }, 48, roof_tile);
+        tower_colliders(cols, c, r + 0.2f, -1.0f, mid + 1.5f);
+    }
+    lv.meshes.push_back(std::move(stone));
+    if (!roof.idx.empty()) lv.meshes.push_back(std::move(roof));
+    for (const auto& a : cols) lv.aabbs.push_back(a);
+}
+
 } // namespace qlike::game
 

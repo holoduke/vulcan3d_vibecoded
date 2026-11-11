@@ -83,6 +83,7 @@ vec2 octa_encode(vec3 n) {
 }
 
 #include "scene_ubo.glsl"
+#include "veg_leaf.glsl"
 
 // Half-rate shadow producer output, sampled when terrain_local_info.z
 // is on. linear_sampler_ → bilinear interpolation across the 4 nearest
@@ -1357,6 +1358,10 @@ void main() {
             inside = length(q) < rr || (v < 0.4 && abs(u) < 0.07);
         }
         if (!inside) discard;
+    } else if (pc.grass_params.w < -0.5 && pc.grass_params.x > 0.5) {
+        // GPU vegetation canopy / bush: leafy cut-out silhouette (veg_leaf.glsl).
+        int vm = int(vUv.y + 0.5);
+        if ((vm == 2 || vm == 3) && veg_leaf_cut(vObjectPos, vWorldPos, vNormal, scene.camera_pos.xyz)) discard;
     }
     vec3 N = normalize(vNormal);
     if (veg_imp) {
@@ -3015,6 +3020,18 @@ void main() {
         albedo *= mix(vec3(0.85, 1.05, 0.80), vec3(1.15, 0.95, 1.10), big);
         albedo *= 0.65 + 0.7 * fine;
         albedo *= mix(0.55, 1.0, clamp(N.y * 0.5 + 0.6, 0.0, 1.0));
+        // Leaf-scale facets (GPU vegetation, near): every ~8 cm cell is one
+        // "leaf" with its own tilt and tone, so a canopy catches the sun
+        // as a mass of leaves rather than as one smooth surface.
+        if (pc.grass_params.x > 0.5) {
+            float lk = 1.0 - smoothstep(25.0, 55.0, distance(vWorldPos, scene.camera_pos.xyz));
+            if (lk > 0.01) {
+                vec3 lc = floor(vObjectPos * 12.0);
+                vec3 lh = vec3(veg_leaf_h(lc), veg_leaf_h(lc + 17.3), veg_leaf_h(lc + 41.7));
+                N = normalize(N + (lh - 0.5) * (0.9 * lk));
+                albedo *= mix(1.0, 0.72 + 0.56 * lh.x, lk);
+            }
+        }
     }
 
     // Corner softening for axis-aligned brushes. Cube meshes have one
