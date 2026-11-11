@@ -1160,6 +1160,33 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
 // produced visible 8–16 pixel square blocks on the surface past
 // 80 m. The FBM normal-octave slider (default 18) gives plenty of
 // distance detail without the artefacts.
+// Scales the close-up micro-bump (1 = full). The road sets it to 0 so the
+// cobble normal map is not layered over pebbly terrain noise.
+float g_rm_detail_mul = 1.0;
+// Terrain cavity occlusion from the baked heightmap: horizon scan in 6
+// directions x 4 radii (0.8 .. 12 m), measured against the local tangent
+// plane so an even slope reads as open and only gullies, ditches, bank
+// feet and other narrow places darken. Texture taps only - no FBM, no rays.
+float terrainCavityAO(vec2 p) {
+    float h0 = meshHeight(p);
+    const float ge = 0.75;
+    vec2 g = vec2(meshHeight(p + vec2(ge, 0.0)) - meshHeight(p - vec2(ge, 0.0)),
+                  meshHeight(p + vec2(0.0, ge)) - meshHeight(p - vec2(0.0, ge))) / (2.0 * ge);
+    const float kR[4] = float[4](0.8, 2.0, 5.0, 12.0);
+    float occ = 0.0;
+    for (int i = 0; i < 6; ++i) {
+        float a = 0.35 + float(i) * 1.04719755;
+        vec2 d = vec2(cos(a), sin(a));
+        float e = 0.0;
+        for (int k = 0; k < 4; ++k) {
+            float r = kR[k];
+            e = max(e, (meshHeight(p + d * r) - h0) / r - dot(g, d));
+        }
+        occ += e * inversesqrt(1.0 + e * e);   // sin of the horizon angle
+    }
+    return clamp(1.0 - 1.5 * occ / 6.0, 0.12, 1.0);
+}
+
 vec3 calcNormal(vec3 pos, float t) {
     // Far-distance fast path: derive the normal from screen-space
     // derivatives of the hit position itself (`dFdx(pos)` and
@@ -1208,7 +1235,7 @@ vec3 calcNormal(vec3 pos, float t) {
     // Tightened from 0.001 → 0.05: pixels in the 50–60 m band were
     // paying full noised() cost for sub-1 % blend weight. The lost
     // detail is invisible at the cutoff distance.
-    float detail_w = 1.0 - smoothstep(15.0, 60.0, t);
+    float detail_w = (1.0 - smoothstep(15.0, 60.0, t)) * g_rm_detail_mul;
     if (detail_w > 0.05) {
         vec3 d1 = noised(pos.xz * 4.0);
         vec3 d2 = noised(pos.xz * 13.0);
@@ -2798,10 +2825,33 @@ void main() {
             discard;
         }
     }
-    vec3 nor = calcNormal(pos, t);
     // Castle road: cobble normal map in road space, before any lighting.
     vec2 rm_road_uv, rm_road_dir;
     vec2 rm_road = roadWeights(pos.xz, rm_road_uv, rm_road_dir);
+    if (rm_road.x + rm_road.y > 0.001 && rd.y < -0.02) {
+        // The march hit the procedural surface, which keeps decimetre FBM
+        // lumps on top of the carved road. Slide the hit along the ray onto
+        // the smooth baked heightmap so the paving lies flat.
+        float t_s = t;
+        for (int i = 0; i < 4; ++i) {
+            vec3 ps = ro + t_s * rd;
+            t_s += clamp((ps.y - meshHeight(ps.xz)) / -rd.y, -1.5, 1.5) * 0.85;
+        }
+        t = mix(t, t_s, clamp(rm_road.x + rm_road.y * 0.5, 0.0, 1.0));
+        pos = ro + t * rd;
+        rm_road = roadWeights(pos.xz, rm_road_uv, rm_road_dir);
+    }
+    g_rm_detail_mul = 1.0 - max(rm_road.x, rm_road.y * 0.6);
+    vec3 nor = calcNormal(pos, t);
+    g_rm_detail_mul = 1.0;
+    if (rm_road.x > 0.001) {
+        // The paved surface is the smooth carved heightmap; the procedural
+        // FBM lumps left over on top of it only read as noise on cobbles.
+        const float e = 0.6;
+        vec3 rn_s = normalize(vec3(meshHeight(pos.xz - vec2(e, 0.0)) - meshHeight(pos.xz + vec2(e, 0.0)), 2.0 * e,
+                                   meshHeight(pos.xz - vec2(0.0, e)) - meshHeight(pos.xz + vec2(0.0, e))));
+        nor = normalize(mix(nor, rn_s, rm_road.x));
+    }
     float rm_road_lod = 0.0;
     if (rm_road.x > 0.001) {
         // Mip from the pixel footprint (no screen derivatives: road_uv is
@@ -3101,6 +3151,11 @@ void main() {
         // cutoff so distant terrain seamlessly drops back to the
         // analytical-only path.
         ao = mix(1.0, ao_local, rt_lod_t);
+    }
+    // Terrain's own cavities (the RT rays above skip the terrain).
+    {
+        float cav_w = 1.0 - smoothstep(180.0, 260.0, cam_dist_pos);
+        if (cav_w > 0.01) ao *= mix(1.0, terrainCavityAO(pos.xz), cav_w);
     }
 
     vec3 mate = getMaterial(pos, nor);
