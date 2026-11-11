@@ -482,6 +482,18 @@ add_custom_command(
     VERBATIM)
 list(APPEND COMPILED_SHADERS ${SKY_FILL_SPV})
 
+# Water surface pass: same source as the ray-marched terrain, water branch.
+set(WATER_SPV "${SHADER_OUTPUT_DIR}/water.frag.spv")
+add_custom_command(
+    OUTPUT ${WATER_SPV}
+    COMMAND ${Vulkan_GLSLC_EXECUTABLE} --target-env=vulkan1.3 -O
+            -DQLIKE_WATER=1 -fshader-stage=frag
+            ${CMAKE_SOURCE_DIR}/shaders/terrain_raymarch.frag -o ${WATER_SPV}
+    DEPENDS ${CMAKE_SOURCE_DIR}/shaders/terrain_raymarch.frag ${SHADER_INCLUDES}
+    COMMENT "Compiling shader water.frag (terrain_raymarch water variant)"
+    VERBATIM)
+list(APPEND COMPILED_SHADERS ${WATER_SPV})
+
 if(COMPILED_SHADERS)
     add_custom_target(shaders ALL DEPENDS ${COMPILED_SHADERS})
     add_dependencies(quake_like shaders)
