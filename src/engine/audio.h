@@ -81,7 +81,7 @@ public:
     // runs through its own low-pass at `lpf_hz` (air absorption; <= 0 or
     // >= 18 kHz = no filter).
     void     play_effect(ClipID id, glm::vec3 pos, float volume, float pitch,
-                         float delay_s, float lpf_hz);
+                         float delay_s, float lpf_hz, int lpf_order = 2);
     size_t   active_effects() const;          // scheduled + playing play_effect voices
     void     set_voice(uint32_t h, glm::vec3 pos, float volume);
     void     set_voice_rate(uint32_t h, float rate);

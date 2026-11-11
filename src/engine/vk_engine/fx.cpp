@@ -97,20 +97,64 @@ void VulkanEngine::play_explosion_audio(glm::vec3 pos, float size) {
 // it is clearly louder (closer).
 void VulkanEngine::play_aa_burst_audio(glm::vec3 muzzle) {
     if (!audio_) return;
-    const float d = glm::distance(muzzle, player_.eye_position());
+    const glm::vec3 ear = player_.eye_position();
+    const float d = glm::distance(muzzle, ear);
     if (d > 1800.0f || aa_sounds_.size() > 32) return;
-    const float level = glm::clamp(35.0f / std::max(d, 12.0f), 0.04f, 1.0f);
+
+    // Distance model. Loudness: inverse distance from a 22 m reference
+    // times an air-absorption term, so far guns really are faint.
+    // Tone: the low-pass cutoff falls much faster than physical air
+    // absorption (17 kHz at the gun, ~5 kHz at 200 m, a dull thump past
+    // 500 m) - distance is heard mostly as lost treble, not lost level.
+    float level = 22.0f / std::max(d, 22.0f) * std::exp(-d / 700.0f);
+    float lpf   = 17000.0f * std::exp(-d / 160.0f);
+
+    // Terrain occlusion: walk the sight line over the heightmap. A gun
+    // behind a ridge is quieter and loses most of its crack (only the
+    // low end diffracts over the hill).
+    float blocked = 0.0f;
+    {
+        const glm::vec3 a = ear, b = muzzle + glm::vec3(0.0f, 1.5f, 0.0f);
+        const int n = 14;
+        for (int i = 1; i < n; ++i) {
+            const glm::vec3 p = glm::mix(a, b, float(i) / float(n));
+            blocked = std::max(blocked, sample_terrain_height(p.x, p.z) - p.y);
+        }
+        blocked = glm::clamp(blocked / 6.0f, 0.0f, 1.0f);   // 6 m of hill = fully occluded
+    }
+    level *= glm::mix(1.0f, 0.45f, blocked);
+    lpf   *= glm::mix(1.0f, 0.22f, blocked);
+    lpf    = glm::clamp(lpf, 260.0f, 18000.0f);
+    if (level < 0.004f) return;
+
     if (aa_burst_gate_t_ > 0.0f && level < aa_burst_gate_level_ * 1.6f) return;
     aa_burst_gate_t_ = 0.90f;
     aa_burst_gate_level_ = level;
     AaSound s{};
     s.due = d / 343.0f;
     s.pos = muzzle;
-    s.lpf = glm::clamp(18000.0f * std::exp(-d / 380.0f), 500.0f, 18000.0f);
+    s.lpf = lpf;
     s.clip = int(ClipID::AaBurst);
     s.vol = level;
     s.pitch = 1.0f;
+    s.order = 4;
     aa_sounds_.push_back(s);
+
+    // Valley echo: a later, duller copy arriving from another direction.
+    // Its share of the total grows with distance (near guns are almost all
+    // direct sound, far guns mostly reflected) - the wet / dry ratio is the
+    // ear's other main distance cue.
+    const float wet = 0.07f + 0.55f * glm::smoothstep(50.0f, 500.0f, d);
+    const float hsh = glm::fract(std::sin(muzzle.x * 12.9898f + muzzle.z * 78.233f) * 43758.5453f);
+    AaSound e = s;
+    e.due += 0.32f + 0.38f * hsh;
+    e.vol  = level * wet;
+    e.lpf  = glm::clamp(lpf * 0.45f, 240.0f, 2200.0f);
+    const glm::vec3 dir = muzzle - ear;
+    const float ang = (hsh > 0.5f ? 1.0f : -1.0f) * (1.4f + hsh);
+    e.pos = ear + glm::vec3(dir.x * std::cos(ang) - dir.z * std::sin(ang), dir.y + 0.15f * d,
+                            dir.x * std::sin(ang) + dir.z * std::cos(ang));
+    if (e.vol >= 0.003f) aa_sounds_.push_back(e);
 }
 
 void VulkanEngine::tick_aa_sounds(float dt) {
@@ -121,7 +165,7 @@ void VulkanEngine::tick_aa_sounds(float dt) {
         if (s.due > 0.0f) { ++i; continue; }
         // Leave the last voices for explosions.
         if (audio_ && audio_->active_effects() < 48u)
-            audio_->play_effect(ClipID(s.clip), s.pos, s.vol, s.pitch, 0.0f, s.lpf);
+            audio_->play_effect(ClipID(s.clip), s.pos, s.vol, s.pitch, 0.0f, s.lpf, s.order);
         aa_sounds_[i] = aa_sounds_.back();
         aa_sounds_.pop_back();
     }

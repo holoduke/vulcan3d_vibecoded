@@ -1176,7 +1176,7 @@ private:
     float aa_burst_gate_level_ = 0.0f; // loudness of the recording holding the gate
     // AA reports waiting out their speed-of-sound delay (started only when
     // due, so a scheduled shot does not hold an audio voice).
-    struct AaSound { float due; glm::vec3 pos; int clip; float vol, pitch, lpf; };
+    struct AaSound { float due; glm::vec3 pos; int clip; float vol, pitch, lpf; int order = 2; };
     std::vector<AaSound> aa_sounds_;
     void tick_aa_sounds(float dt);
 

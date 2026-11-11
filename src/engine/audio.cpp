@@ -261,7 +261,7 @@ void AudioEngine::set_voice(uint32_t h, glm::vec3 pos, float volume) {
 }
 
 void AudioEngine::play_effect(ClipID id, glm::vec3 pos, float volume, float pitch,
-                              float delay_s, float lpf_hz) {
+                              float delay_s, float lpf_hz, int lpf_order) {
     if (!impl_->ok) return;
     auto idx = static_cast<size_t>(id);
     if (idx >= static_cast<size_t>(ClipID::Count)) return;
@@ -278,7 +278,7 @@ void AudioEngine::play_effect(ClipID id, glm::vec3 pos, float volume, float pitc
     if (lpf_hz > 0.0f && lpf_hz < 18000.0f) {
         ma_lpf_node_config lc = ma_lpf_node_config_init(
             ma_engine_get_channels(&impl_->engine), ma_engine_get_sample_rate(&impl_->engine),
-            lpf_hz, 2);
+            lpf_hz, ma_uint32(lpf_order < 1 ? 1 : (lpf_order > 8 ? 8 : lpf_order)));
         if (ma_lpf_node_init(ma_engine_get_node_graph(&impl_->engine), &lc, nullptr, &e.lpf) == MA_SUCCESS) {
             e.has_lpf = true;
             ma_node_attach_output_bus(&e.lpf, 0, ma_engine_get_endpoint(&impl_->engine), 0);
