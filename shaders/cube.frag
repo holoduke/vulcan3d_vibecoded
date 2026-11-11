@@ -1395,7 +1395,11 @@ void main() {
     // self-shadowing inside SPOM bricks at almost no cost.
     vec3 shading_pos = vWorldPos;
 
+#ifdef QLIKE_TERRAIN_ONLY
+    const bool is_terrain_pre = true;    // cube_gbuf_terrain variant (mesh terrain pipeline)
+#else
     bool is_terrain_pre = vTexParams.w > 1.5;
+#endif
     // Static castle mesh (round towers, roofs, arch): pc.grass_params.w = -1.
     // Vertex-UV texturing; skips every axis-aligned-box-only path.
     bool is_mesh_draw = !is_terrain_pre && pc.grass_params.w < -0.5;
@@ -1554,7 +1558,11 @@ void main() {
     //   2 = terrain shading: sand→grass→dirt→rock→snow blended by
     //       world height + slope, with optional triplanar Ground054
     //       detail multiplied on top.
+#ifdef QLIKE_TERRAIN_ONLY
+    const bool is_terrain = true;
+#else
     bool  is_terrain     = vTexParams.w > 1.5;
+#endif
     bool  obj_space      = !is_terrain && vTexParams.w > 0.5;
     // Terrain uses world-space triplanar like the static brushes — the
     // mesh model is identity so vObjectPos == vWorldPos already, but we

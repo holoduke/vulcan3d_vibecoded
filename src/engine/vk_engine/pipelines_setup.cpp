@@ -173,8 +173,12 @@ void VulkanEngine::init_terrain_pipelines() {
         cfg.vattrs = vattrs;
         terrain_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
         if (frag_gbuf_module_) {
+            // Terrain-only G-buffer variant (falls back to the generic one).
+            if (!frag_gbuf_terrain_module_)
+                frag_gbuf_terrain_module_ = vkpipe::load_shader_module(
+                    device_, std::string(QLIKE_SHADER_DIR) + "/cube_gbuf_terrain.frag.spv");
             vkpipe::GraphicsPipelineConfig gcfg = cfg;
-            gcfg.frag = frag_gbuf_module_;
+            gcfg.frag = frag_gbuf_terrain_module_ ? frag_gbuf_terrain_module_ : frag_gbuf_module_;
             terrain_gbuf_pipeline_ = vkpipe::build_graphics_pipeline(device_, gcfg);
         }
         // Wireframe variant (debug mesh-density view).
@@ -1367,6 +1371,8 @@ void VulkanEngine::destroy_pipeline() {
     if (pipeline_)         vkDestroyPipeline(device_, pipeline_, nullptr);
     if (pipeline_gbuf_)    vkDestroyPipeline(device_, pipeline_gbuf_, nullptr);
     if (frag_gbuf_module_) vkDestroyShaderModule(device_, frag_gbuf_module_, nullptr);
+    if (frag_gbuf_terrain_module_) vkDestroyShaderModule(device_, frag_gbuf_terrain_module_, nullptr);
+    frag_gbuf_terrain_module_ = VK_NULL_HANDLE;
     pipeline_gbuf_ = VK_NULL_HANDLE;
     frag_gbuf_module_ = VK_NULL_HANDLE;
     if (depth_pipeline_)   vkDestroyPipeline(device_, depth_pipeline_, nullptr);

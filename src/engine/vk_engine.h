@@ -413,6 +413,7 @@ private:
     // terrain pipelines built from it. Bound instead of pipeline_ /
     // terrain_pipeline_ while deferred_owns_lighting() is true.
     VkShaderModule frag_gbuf_module_ = VK_NULL_HANDLE;
+    VkShaderModule frag_gbuf_terrain_module_ = VK_NULL_HANDLE;   // cube_gbuf_terrain (QLIKE_TERRAIN_ONLY)
     VkPipeline pipeline_gbuf_ = VK_NULL_HANDLE;
     VkPipeline terrain_gbuf_pipeline_ = VK_NULL_HANDLE;
     bool deferred_owns_lighting() const {

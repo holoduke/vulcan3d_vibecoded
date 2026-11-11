@@ -469,6 +469,20 @@ add_custom_command(
     VERBATIM)
 list(APPEND COMPILED_SHADERS ${CUBE_GBUF_SPV})
 
+# Terrain-only G-buffer variant of cube.frag: is_terrain is a compile-time
+# constant, so the brush / prop / castle-mesh paths are compiled out of the
+# mesh-terrain pipeline (lower register pressure on the biggest raster pass).
+set(CUBE_GBUF_TERRAIN_SPV "${SHADER_OUTPUT_DIR}/cube_gbuf_terrain.frag.spv")
+add_custom_command(
+    OUTPUT ${CUBE_GBUF_TERRAIN_SPV}
+    COMMAND ${Vulkan_GLSLC_EXECUTABLE} --target-env=vulkan1.3 -O
+            -DQLIKE_GBUFFER_ONLY=1 -DQLIKE_TERRAIN_ONLY=1 -fshader-stage=frag
+            ${CMAKE_SOURCE_DIR}/shaders/cube.frag -o ${CUBE_GBUF_TERRAIN_SPV}
+    DEPENDS ${CMAKE_SOURCE_DIR}/shaders/cube.frag ${SHADER_INCLUDES}
+    COMMENT "Compiling shader cube_gbuf_terrain.frag (terrain-only G-buffer variant)"
+    VERBATIM)
+list(APPEND COMPILED_SHADERS ${CUBE_GBUF_TERRAIN_SPV})
+
 # Sky-fill variant of compose.frag: writes the real sky into the render-res
 # scene colour BEFORE DLSS (exact colour/alpha alignment), so DLSS upscales
 # a finished sky instead of compose rebuilding it at silhouettes afterwards.
