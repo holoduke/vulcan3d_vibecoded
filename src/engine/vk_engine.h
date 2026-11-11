@@ -1422,6 +1422,12 @@ private:
     std::vector<uint32_t> veg_rt_list_;
     int  veg_rt_cell_x_ = 0, veg_rt_cell_z_ = 0;
     bool veg_rt_valid_ = false;
+    // Cached TLAS records for veg_rt_list_ (rebuild_tlas): rebuilt only when
+    // the list, the material base slot or the texture toggle changes.
+    std::vector<uint32_t> veg_tlas_cache_list_;
+    std::vector<VkAccelerationStructureInstanceKHR> veg_tlas_inst_;
+    uint32_t veg_tlas_cache_base_ = UINT32_MAX;
+    bool     veg_tlas_cache_tex_ = false;
     size_t veg_col_begin_ = SIZE_MAX;   // world_.aabbs index where veg colliders start
     static constexpr int kVegDrawLods = 5;   // 4 mesh LODs + impostor card
     static constexpr int kVegHizMaxMips = 14;

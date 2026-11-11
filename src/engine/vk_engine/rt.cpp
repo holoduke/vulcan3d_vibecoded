@@ -1041,6 +1041,67 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
 
     constexpr glm::vec4 kNoTex(-1.0f, -1.0f, 1.0f, 0.0f);
 
+    // Vegetation / rocks near the camera (per-archetype LOD1 BLAS) - the
+    // first dynamic block, so their material slots [static_mats,
+    // static_mats + veg) are stable. The ~7000 instances only change when
+    // the set is re-picked (12 m camera cell, blasts) or textures toggle:
+    // their TLAS records are cached and their materials uploaded once per
+    // change instead of every build (~0.8 MB of upload + 7000 matrix builds).
+    {
+        if (veg_tlas_cache_list_ != veg_rt_list_ || veg_tlas_cache_base_ != static_mats ||
+            veg_tlas_cache_tex_ != tex_on) {
+            veg_tlas_cache_list_ = veg_rt_list_;
+            veg_tlas_cache_base_ = static_mats;
+            veg_tlas_cache_tex_ = tex_on;
+            veg_tlas_inst_.clear();
+            std::vector<glm::vec4> vmats;
+            std::vector<glm::mat4> vprevs;
+            // Leave room for jets, crates, projectiles and particles.
+            const uint32_t veg_cap = tlas_max_instances_ > static_n + 1024u
+                                   ? tlas_max_instances_ - static_n - 1024u : 0u;
+            for (uint32_t ve : veg_rt_list_) {
+                if (veg_tlas_inst_.size() >= veg_cap) break;
+                const uint32_t vi = ve & 0x3FFFFFFFu, lvl = ve >> 30;
+                const VegInstance& I = veg_inst_cpu_[vi];
+                int a = int(I.rot_arch_phase.y + 0.5f);
+                const size_t bq = size_t(a) * kVegRtLevels + lvl;
+                if (a < 0 || bq >= veg_blas_.size() || !veg_blas_[bq].addr) continue;
+                float s = I.pos_scale.w, ysq = I.rot_arch_phase.w > 0.0f ? I.rot_arch_phase.w : 1.0f;
+                glm::mat4 m = glm::translate(glm::mat4(1.0f), glm::vec3(I.pos_scale)) *
+                              glm::rotate(glm::mat4(1.0f), -I.rot_arch_phase.x, glm::vec3(0, 1, 0)) *
+                              glm::scale(glm::mat4(1.0f), glm::vec3(s, s * ysq, s));
+                int sp = veg_arch_[size_t(a)].species;
+                glm::vec4 col = sp == 3 ? glm::vec4(0.40f, 0.38f, 0.35f, 1.0f)
+                              : sp == 0 ? glm::vec4(0.08f, 0.17f, 0.08f, 1.0f)
+                                        : glm::vec4(0.15f, 0.27f, 0.07f, 1.0f);
+                glm::vec4 tex = (tex_on && sp == 3) ? glm::vec4(7.0f, 7.0f, 0.22f, 0.0f) : kNoTex;
+                VkAccelerationStructureInstanceKHR inst{};
+                for (int row = 0; row < 3; ++row)
+                    for (int col4 = 0; col4 < 4; ++col4) inst.transform.matrix[row][col4] = m[col4][row];
+                inst.instanceCustomIndex = static_mats + uint32_t(veg_tlas_inst_.size());
+                inst.mask = 0xFF;
+                inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+                inst.accelerationStructureReference = veg_blas_[bq].addr;
+                veg_tlas_inst_.push_back(inst);
+                vmats.push_back(col);
+                vmats.push_back(glm::vec4(0.0f));
+                vmats.push_back(tex);
+                vprevs.push_back(m);
+            }
+            if (!veg_tlas_inst_.empty()) {
+                upload(materials_buffer_, sizeof(glm::vec4) * 3 * static_mats, vmats.data(),
+                       sizeof(glm::vec4) * vmats.size(), materials_mapped_);
+                upload(prev_transforms_buffer_, sizeof(glm::mat4) * static_mats, vprevs.data(),
+                       sizeof(glm::mat4) * vprevs.size(), prev_transforms_mapped_);
+            }
+        }
+        const uint32_t nv = uint32_t(veg_tlas_inst_.size());
+        if (nv > 0) std::memcpy(dst + n, veg_tlas_inst_.data(), sizeof(VkAccelerationStructureInstanceKHR) * nv);
+        n += nv;
+        mat_idx += nv;
+    }
+    const uint32_t dyn_mat_base = mat_idx;   // first per-build dynamic material slot
+
     // Angular-size TLAS culling (Khronos hybrid-RT best practice; Wolfenstein
     // uses the same heuristic). A dyn-prop whose AABB subtends less than this
     // angle from the camera is small enough that its shadow / GI contribution
@@ -1111,24 +1172,6 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
             write_instance(m[p], pm[p], glm::vec4(tex_on ? g.tint : g.fallback, 1.0f),
                            glm::vec3(0.0f), false, g.blas_addr, tex);
         }
-    }
-    // Vegetation / rocks near the camera (per-archetype LOD1 BLAS).
-    for (uint32_t ve : veg_rt_list_) {
-        const uint32_t vi = ve & 0x3FFFFFFFu, lvl = ve >> 30;
-        const VegInstance& I = veg_inst_cpu_[vi];
-        int a = int(I.rot_arch_phase.y + 0.5f);
-        const size_t bq = size_t(a) * kVegRtLevels + lvl;
-        if (a < 0 || bq >= veg_blas_.size() || !veg_blas_[bq].addr) continue;
-        float s = I.pos_scale.w, ysq = I.rot_arch_phase.w > 0.0f ? I.rot_arch_phase.w : 1.0f;
-        glm::mat4 m = glm::translate(glm::mat4(1.0f), glm::vec3(I.pos_scale)) *
-                      glm::rotate(glm::mat4(1.0f), -I.rot_arch_phase.x, glm::vec3(0, 1, 0)) *
-                      glm::scale(glm::mat4(1.0f), glm::vec3(s, s * ysq, s));
-        int sp = veg_arch_[size_t(a)].species;
-        glm::vec4 col = sp == 3 ? glm::vec4(0.40f, 0.38f, 0.35f, 1.0f)
-                      : sp == 0 ? glm::vec4(0.08f, 0.17f, 0.08f, 1.0f)
-                                : glm::vec4(0.15f, 0.27f, 0.07f, 1.0f);
-        glm::vec4 tex = (tex_on && sp == 3) ? glm::vec4(7.0f, 7.0f, 0.22f, 0.0f) : kNoTex;
-        write_instance(m, m, col, glm::vec3(0.0f), false, veg_blas_[bq].addr, tex);
     }
 
     // Castle mesh parts (round towers, roofs, gate arch): static, world-
@@ -1217,11 +1260,11 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
 
     vmaFlushAllocation(allocator_, instances_alloc_[inst_slot], 0,
                        sizeof(VkAccelerationStructureInstanceKHR) * n);
-    // Dynamic materials / prev transforms: slots [static_mats, mat_idx).
-    if (mat_idx > static_mats) {
-        upload(materials_buffer_, sizeof(glm::vec4) * 3 * static_mats, tlas_dyn_mats_.data(),
+    // Per-build dynamic materials / prev transforms: slots [dyn_mat_base, mat_idx).
+    if (mat_idx > dyn_mat_base) {
+        upload(materials_buffer_, sizeof(glm::vec4) * 3 * dyn_mat_base, tlas_dyn_mats_.data(),
                sizeof(glm::vec4) * tlas_dyn_mats_.size(), materials_mapped_);
-        upload(prev_transforms_buffer_, sizeof(glm::mat4) * static_mats, tlas_dyn_prevs_.data(),
+        upload(prev_transforms_buffer_, sizeof(glm::mat4) * dyn_mat_base, tlas_dyn_prevs_.data(),
                sizeof(glm::mat4) * tlas_dyn_prevs_.size(), prev_transforms_mapped_);
     }
 
