@@ -350,6 +350,8 @@ void VulkanEngine::visit_settings(Self& s, F&& f) {
     f("taau_enabled", s.rt_.taau_enabled);
     f("fsr2_enabled", s.rt_.fsr2_enabled);
     f("fsr_backend", s.rt_.fsr_backend);
+    f("dlss_rr", s.rt_.dlss_rr);
+    f("dlss_rr_low_samples", s.rt_.dlss_rr_low_samples);
     f("fg_enabled", s.rt_.fg_enabled);
     f("terrain_raymarch_step_factor", s.rt_.terrain_raymarch_step_factor);
     f("terrain_raymarch_lod_near_m", s.rt_.terrain_raymarch_lod_near_m);

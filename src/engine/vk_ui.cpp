@@ -723,6 +723,15 @@ void VulkanEngine::build_menu_ui() {
         const char* fsr_backends[] = { "FSR2 (legacy static)", "FSR3 (ffx-api DLL)", "DLSS (NVIDIA Streamline)" };
         ImGui::Combo("Upscaler backend", &rt_.fsr_backend, fsr_backends,
                      IM_ARRAYSIZE(fsr_backends));
+        if (rt_.fsr_backend == 2) {
+            ImGui::BeginDisabled(!dlss_rr_supported_);
+            ImGui::Checkbox("Ray Reconstruction (DLSS-RR)", &rt_.dlss_rr);
+            ImGui::Checkbox("RR: 1-sample ray tracing", &rt_.dlss_rr_low_samples);
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("%s", dlss_rr_supported_
+                ? "AI denoiser + upscaler for the ray-traced lighting.\nReplaces DLSS Super Resolution while on."
+                : "DLSS Ray Reconstruction is not available on this GPU / driver.");
+        }
         if (fsr3_fatal_) {
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
                 "FSR3 unavailable on this device (CreateContext AVed in SDK DLL "

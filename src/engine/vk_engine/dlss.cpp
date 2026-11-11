@@ -25,6 +25,7 @@
 #include <sl.h>
 #include <sl_consts.h>
 #include <sl_dlss.h>
+#include <sl_dlss_d.h>
 #include <sl_helpers_vk.h>
 #endif
 
@@ -68,6 +69,10 @@ bool VulkanEngine::dlss_active() const {
     return dlss_supported_ && rt_.fsr2_enabled && rt_.fsr_backend == 2 && dlss_output_view_ != VK_NULL_HANDLE;
 }
 
+bool VulkanEngine::dlss_rr_active() const {
+    return dlss_active() && dlss_rr_supported_ && rt_.dlss_rr && deferred_lighting_active_;
+}
+
 void VulkanEngine::sl_init_early() {
 #ifdef QLIKE_HAVE_STREAMLINE
     sl::Preferences pref{};
@@ -79,9 +84,9 @@ void VulkanEngine::sl_init_early() {
     pref.engine = sl::EngineType::eCustom;
     pref.engineVersion = "1.0";
     pref.projectId = "5b0d6a1e-6c39-4c50-9a1e-7f3f0a6e2b41";
-    static const sl::Feature kFeatures[] = { sl::kFeatureDLSS };
+    static const sl::Feature kFeatures[] = { sl::kFeatureDLSS, sl::kFeatureDLSS_RR };
     pref.featuresToLoad = kFeatures;
-    pref.numFeaturesToLoad = 1;
+    pref.numFeaturesToLoad = 2;
     sl::Result r = slInit(pref);
     if (r != sl::Result::eOk) {
         log::warnf("[dlss] slInit failed (%d) - DLSS unavailable", int(r));
@@ -105,6 +110,17 @@ void VulkanEngine::sl_init_early() {
     } else {
         log::warn("[dlss] slGetFeatureRequirements(DLSS) failed");
     }
+    // Ray Reconstruction: merge whatever it needs on top (usually the same).
+    sl::FeatureRequirements rr_reqs{};
+    if (slGetFeatureRequirements(sl::kFeatureDLSS_RR, rr_reqs) == sl::Result::eOk) {
+        auto add_unique = [](std::vector<std::string>& v, const char* s) {
+            if (std::find(v.begin(), v.end(), std::string(s)) == v.end()) v.emplace_back(s);
+        };
+        for (uint32_t i = 0; i < rr_reqs.vkNumInstanceExtensions; ++i)
+            add_unique(sl_instance_exts_, rr_reqs.vkInstanceExtensions[i]);
+        for (uint32_t i = 0; i < rr_reqs.vkNumDeviceExtensions; ++i)
+            add_unique(sl_device_exts_, rr_reqs.vkDeviceExtensions[i]);
+    }
 #endif
 }
 
@@ -119,6 +135,8 @@ void VulkanEngine::sl_set_vulkan_info() {
         sl::AdapterInfo ai0{};
         ai0.vkPhysicalDevice = physical_device_;
         dlss_supported_ = slIsFeatureSupported(sl::kFeatureDLSS, ai0) == sl::Result::eOk;
+        dlss_rr_supported_ = dlss_supported_ && slIsFeatureSupported(sl::kFeatureDLSS_RR, ai0) == sl::Result::eOk;
+        log::infof("[dlss] Ray Reconstruction %s", dlss_rr_supported_ ? "supported" : "NOT supported");
         log::infof("[dlss] DLSS %s on this GPU (SL proxies)", dlss_supported_ ? "supported" : "NOT supported");
         return;
     }
@@ -139,6 +157,8 @@ void VulkanEngine::sl_set_vulkan_info() {
     sl::AdapterInfo ai{};
     ai.vkPhysicalDevice = physical_device_;
     dlss_supported_ = slIsFeatureSupported(sl::kFeatureDLSS, ai) == sl::Result::eOk;
+    dlss_rr_supported_ = dlss_supported_ && slIsFeatureSupported(sl::kFeatureDLSS_RR, ai) == sl::Result::eOk;
+    log::infof("[dlss] Ray Reconstruction %s", dlss_rr_supported_ ? "supported" : "NOT supported");
     log::infof("[dlss] DLSS %s on this GPU", dlss_supported_ ? "supported" : "NOT supported");
 #endif
 }
@@ -213,6 +233,21 @@ void VulkanEngine::ensure_dlss_bindings() {
         dlss_reset_ = true;
         log::infof("compose source switched to %s", compose_uses_dlss_ ? "DLSS" : "TAA/FSR");
     }
+    if (dlss_rr_active()) {
+        const bool stale = !rr_pipeline_ || rr_extent_.width != render_extent_.width ||
+                           rr_extent_.height != render_extent_.height ||
+                           rr_src_views_[0] != gbuffer0_view_ || rr_src_views_[1] != gbuffer1_view_ ||
+                           rr_src_views_[2] != depth_view_ || rr_src_views_[3] != scene_color_view_;
+        if (stale) {
+            vkDeviceWaitIdle(device_);
+            ensure_rr_guides();
+        }
+    }
+    if (dlss_rr_active() != dlss_rr_was_active_) {
+        dlss_rr_was_active_ = dlss_rr_active();
+        dlss_reset_ = true;   // SR and RR keep separate histories
+        log::infof("[dlss] %s", dlss_rr_was_active_ ? "Ray Reconstruction ON" : "Super Resolution");
+    }
 }
 
 void VulkanEngine::dispatch_dlss(VkCommandBuffer cmd) {
@@ -222,6 +257,8 @@ void VulkanEngine::dispatch_dlss(VkCommandBuffer cmd) {
     const uint32_t frame_idx = static_cast<uint32_t>(frame_number_);
     if (slGetNewFrameToken(token, &frame_idx) != sl::Result::eOk || !token) return;
     const sl::ViewportHandle viewport{ 0 };
+    const bool use_rr = dlss_rr_active() && rr_image_[0] != VK_NULL_HANDLE;
+    if (use_rr) dispatch_rr_guides(cmd);
 
     // Constants: unjittered matrices, jitter in pixels, motion vectors.
     const FrameView& fv = current_frame_view_;
@@ -273,6 +310,19 @@ void VulkanEngine::dispatch_dlss(VkCommandBuffer cmd) {
     // Alpha carries the sky transmittance compose needs to rebuild the sky.
     o.alphaUpscalingEnabled = sl::Boolean::eTrue;
     slDLSSSetOptions(viewport, o);
+    if (dlss_rr_supported_) {
+        // RR tracks the DLSS options and adds its own; mode eOff parks it.
+        sl::DLSSDOptions d{};
+        d.mode = use_rr ? o.mode : sl::DLSSMode::eOff;
+        d.outputWidth = o.outputWidth;
+        d.outputHeight = o.outputHeight;
+        d.colorBuffersHDR = sl::Boolean::eTrue;
+        d.normalRoughnessMode = sl::DLSSDNormalRoughnessMode::ePacked;
+        d.worldToCameraView = to_sl(fv.view);
+        d.cameraViewToWorld = to_sl(fv.inv_view);
+        d.alphaUpscalingEnabled = sl::Boolean::eTrue;   // sky transmittance, as for SR
+        slDLSSDSetOptions(viewport, d);
+    }
 
     // Resource tags (manual hooking: layouts as they are when DLSS runs).
     vkinit::transition_image(cmd, dlss_output_image_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -299,9 +349,25 @@ void VulkanEngine::dispatch_dlss(VkCommandBuffer cmd) {
         sl::ResourceTag{ &out, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent, &out_ext },
     };
     slSetTagForFrame(*token, viewport, tags, 4, reinterpret_cast<sl::CommandBuffer*>(cmd));
+    if (use_rr) {
+        const VkImageUsageFlags gu = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        sl::Resource alb = vk_res(rr_image_[0], rr_view_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  rw, rh, rr_guide_format(0), gu);
+        sl::Resource spc = vk_res(rr_image_[1], rr_view_[1], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  rw, rh, rr_guide_format(1), gu);
+        sl::Resource nrm = vk_res(rr_image_[2], rr_view_[2], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  rw, rh, rr_guide_format(2), gu);
+        sl::ResourceTag gtags[3] = {
+            sl::ResourceTag{ &alb, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eValidUntilPresent, &in_ext },
+            sl::ResourceTag{ &spc, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eValidUntilPresent, &in_ext },
+            sl::ResourceTag{ &nrm, sl::kBufferTypeNormalRoughness, sl::ResourceLifecycle::eValidUntilPresent, &in_ext },
+        };
+        slSetTagForFrame(*token, viewport, gtags, 3, reinterpret_cast<sl::CommandBuffer*>(cmd));
+    }
 
     const sl::BaseStructure* inputs[] = { &viewport };
-    sl::Result r = slEvaluateFeature(sl::kFeatureDLSS, *token, inputs, 1, reinterpret_cast<sl::CommandBuffer*>(cmd));
+    sl::Result r = slEvaluateFeature(use_rr ? sl::kFeatureDLSS_RR : sl::kFeatureDLSS, *token, inputs, 1,
+                                     reinterpret_cast<sl::CommandBuffer*>(cmd));
     static bool logged = false;
     if (r != sl::Result::eOk && !logged) {
         log::warnf("[dlss] slEvaluateFeature failed (%d)", int(r));

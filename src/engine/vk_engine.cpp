@@ -1171,6 +1171,7 @@ void VulkanEngine::shutdown() {
     // racing with the SDK's internal allocator.
     guarded("destroy_fsr2",   [&]{ destroy_fsr2(); });
     guarded("destroy_dlss",   [&]{ destroy_dlss(); });   // while the allocator still exists
+    guarded("destroy_rr_guides", [&]{ destroy_rr_guides(); });
     // Destroy SwapChain proxy first — it holds Vulkan resources tied
     // to the FG context's pacing state.
     guarded("destroy_fsr3_sc",[&]{ destroy_fsr3_swapchain(); });

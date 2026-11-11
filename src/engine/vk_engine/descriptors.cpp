@@ -391,9 +391,15 @@ void VulkanEngine::update_scene_ubo() {
     last_sky_rgb_ = sky_rgb;
     data.ambient       = glm::vec4(rt_.ground_ambient, rt_.terrain_ao_punch);
     data.sky_color     = glm::vec4(sky_rgb, 1.0f);
+    // DLSS Ray Reconstruction resolves the noise itself, so with it active
+    // the ray-traced terms are traced at a low sample count: brute-force
+    // multi-sampling there only pre-blurs what RR would reconstruct sharper.
+    const bool rr_low = dlss_rr_active() && rt_.dlss_rr_low_samples;
+    const int shadow_samples_eff = rr_low ? std::min(rt_.shadow_samples, 2) : rt_.shadow_samples;
+    const int ao_samples_eff     = rr_low ? std::min(rt_.ao_samples, 1) : rt_.ao_samples;
     data.rt_flags = glm::ivec4(rt_.shadow_enabled ? 1 : 0,
-                               rt_.shadow_samples,
-                               rt_.ao_samples,
+                               shadow_samples_eff,
+                               ao_samples_eff,
                                static_cast<int>(frame_number_));
     data.rt_params = glm::vec4(rt_.shadow_softness,
                                rt_.ao_radius,
@@ -407,6 +413,7 @@ void VulkanEngine::update_scene_ubo() {
     if (rt_.gi_restir_enabled && gi_samples_eff > 0) {
         gi_samples_eff = std::max(1, gi_samples_eff / 4);
     }
+    if (rr_low) gi_samples_eff = std::min(gi_samples_eff, 2);
     data.rt_flags2 = glm::ivec4(gi_samples_eff,
                                 rt_.reflections_enabled ? 1 : 0,
                                 rt_.gi_bounces,

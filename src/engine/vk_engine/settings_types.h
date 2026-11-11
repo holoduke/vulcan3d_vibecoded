@@ -634,6 +634,14 @@ struct RtSettings {
         // fsr2_enabled is on. See docs/fsr3_plan.md for the multi-
         // session arc.
         int   fsr_backend        = 0;
+        // DLSS Ray Reconstruction (fsr_backend == 2 only): the AI model
+        // denoises AND upscales the ray-traced frame from material guide
+        // buffers, replacing DLSS Super Resolution. Lets the RT effects
+        // run at low sample counts (dlss_rr_low_samples).
+        bool  dlss_rr            = false;
+        // With RR active, trace shadows / AO / GI at ~1 sample per pixel
+        // and let RR resolve the noise (the speed side of RR).
+        bool  dlss_rr_low_samples = true;
         // FSR3 Frame Generation. Only meaningful when fsr_backend == 1.
         // Session 3 dispatches FG to a private output image without
         // presenting it — sessions 4-6 wire it into the swapchain

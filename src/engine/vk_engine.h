@@ -245,6 +245,12 @@ private:
     void init_dlss();
     void destroy_dlss();
     void dispatch_dlss(VkCommandBuffer cmd);
+    bool dlss_rr_active() const;                  // DLSS Ray Reconstruction replaces SR this frame
+    void ensure_rr_guides();
+    void dispatch_rr_guides(VkCommandBuffer cmd);
+    void destroy_rr_guides();
+    void destroy_rr_guide_images();
+    VkFormat rr_guide_format(int i) const;
     void sl_shutdown();
     bool dlss_active() const;
     void ensure_dlss_bindings();
@@ -2159,6 +2165,20 @@ private:
     VkExtent2D             dlss_output_extent_{0, 0};
     bool                   dlss_reset_ = true;
     bool                   compose_uses_dlss_ = false;
+    // DLSS Ray Reconstruction (dlss.cpp + rr_guides.cpp).
+    bool                   dlss_rr_supported_ = false;
+    bool                   dlss_rr_was_active_ = false;
+    VkImage                rr_image_[3]{};          // diffuse albedo, specular albedo, normal+roughness
+    VmaAllocation          rr_alloc_[3]{};
+    VkImageView            rr_view_[3]{};
+    VkImageView            rr_src_views_[4]{};      // G-buffer / depth / scene colour views the set was written with
+    VkExtent2D             rr_extent_{0, 0};
+    VkSampler              rr_sampler_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout  rr_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool       rr_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet        rr_set_ = VK_NULL_HANDLE;
+    VkPipelineLayout       rr_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline             rr_pipeline_ = VK_NULL_HANDLE;
     // Streamline proxies (sl.interposer.dll): vk-bootstrap creates the
     // instance / device / swapchain through sl_gipa_, acquire + present go
     // through the proxies so SL's per-frame bookkeeping (presentCommon) runs.
