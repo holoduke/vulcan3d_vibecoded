@@ -123,11 +123,18 @@ void VulkanEngine::aa_part_models(const AaVehicle& v, bool prev, glm::mat4 out[4
 }
 
 void VulkanEngine::tick_aa(float dt) {
-    if (aa_.empty() || dt <= 0.0f) return;
+    if (aa_.empty()) return;
+    if (dt <= 0.0f) {
+        for (auto& v : aa_) {   // frozen: zero motion vectors
+            v.prev_turret_yaw = v.turret_yaw;
+            v.prev_gun_pitch = v.gun_pitch;
+            v.prev_radar_spin = v.radar_spin;
+        }
+        return;
+    }
     tick_aa_sounds(dt);
     dt = std::min(dt, 0.05f);
     uint32_t& R = aa_rng_;
-    int shots_this_tick = 0;
 
     for (auto& v : aa_) {
         v.prev_turret_yaw = v.turret_yaw;
@@ -172,14 +179,21 @@ void VulkanEngine::tick_aa(float dt) {
         // Fire control: bursts when on target.
         v.cooldown -= dt;
         const bool on_target = tgt && std::abs(dy) < 0.035f && std::abs(dp) < 0.035f;
+        // A burst is one or two plays of the recorded burst (12 rounds over
+        // kAaClipShots s), so the gun stops when the recording's shots do.
+        const float kAaClipShots = 0.96f;
         if (on_target && v.cooldown <= 0.0f && v.burst <= 0.0f) {
-            v.burst = frand_range(R, 0.9f, 1.6f);
+            v.burst = kAaClipShots * (frand(R) < 0.45f ? 2.0f : 1.0f);
+            if (audio_) play_aa_burst_audio(glm::vec3(v.pos) + glm::vec3(0.0f, 2.0f, 0.0f));
         }
         if (v.burst > 0.0f) {
+            const float burst_before = v.burst;
             v.burst -= dt;
+            if (audio_ && burst_before > kAaClipShots && v.burst <= kAaClipShots)
+                play_aa_burst_audio(glm::vec3(v.pos) + glm::vec3(0.0f, 2.0f, 0.0f));
             v.fire_acc += dt;
-            // 12.5 rds/s (alternating barrels) = the cadence of the recorded
-            // cannon (80 ms between reports), so sound and tracers match.
+            // 12.5 rds/s (alternating barrels). The sound is the recording
+            // itself (play_aa_burst_audio), not triggered per round.
             const float interval = 0.080f;
             aa_part_models(v, false, m);
             while (v.fire_acc >= interval) {
@@ -197,12 +211,9 @@ void VulkanEngine::tick_aa(float dt) {
                 aa_rounds_.push_back(r);
                 v.flash_t = 0.05f;
                 v.flash_barrel = b;
-                if (audio_ && ++shots_this_tick <= 2)
-                    play_aa_shot_audio(mz, false);
             }
             if (v.burst <= 0.0f) {
                 v.cooldown = frand_range(R, 0.8f, 2.2f); v.fire_acc = 0.0f;
-                if (audio_) play_aa_shot_audio(glm::vec3(m[2] * glm::vec4(aa_muzzle_[0], 1.0f)), true);
             }
         }
     }

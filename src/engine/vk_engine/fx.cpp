@@ -86,37 +86,35 @@ void VulkanEngine::play_explosion_audio(glm::vec3 pos, float size) {
     }
 }
 
-// AA cannon report: same propagation model as explosions (speed-of-sound
-// delay, distance low-pass, our own 1/d curve - miniaudio's default
-// inverse model made the guns inaudible beyond ~50 m). Rounds rotate
-// through four recorded shots; a burst ends with the last shot's echo.
-// Guns fire at the recording's own cadence (80 ms), and pitch jitter is
-// kept small so the clips are not audibly sped up.
-// The d/343 s delay is held here (aa_sounds_) rather than as a scheduled
-// miniaudio voice, so 12.5 rds/s from several far guns needs only the
-// ~90 ms of each clip in voices and never starves the explosions.
-void VulkanEngine::play_aa_shot_audio(glm::vec3 muzzle, bool burst_end) {
+// AA cannon burst: the recording is played as recorded (pitch 1, never
+// re-triggered per round), with the explosions' propagation model: a
+// speed-of-sound delay, a distance low-pass and our own 1/d level curve
+// (miniaudio's default inverse model made the guns inaudible beyond
+// ~50 m).
+// Several guns firing at once would layer the same 80 ms pattern at
+// different offsets and read as a much faster gun, so one recording holds
+// a gate for its shooting part; another gun only starts one meanwhile if
+// it is clearly louder (closer).
+void VulkanEngine::play_aa_burst_audio(glm::vec3 muzzle) {
     if (!audio_) return;
     const float d = glm::distance(muzzle, player_.eye_position());
-    if (d > 1800.0f || aa_sounds_.size() > 256) return;
+    if (d > 1800.0f || aa_sounds_.size() > 32) return;
+    const float level = glm::clamp(35.0f / std::max(d, 12.0f), 0.04f, 1.0f);
+    if (aa_burst_gate_t_ > 0.0f && level < aa_burst_gate_level_ * 1.6f) return;
+    aa_burst_gate_t_ = 0.90f;
+    aa_burst_gate_level_ = level;
     AaSound s{};
     s.due = d / 343.0f;
     s.pos = muzzle;
     s.lpf = glm::clamp(18000.0f * std::exp(-d / 380.0f), 500.0f, 18000.0f);
-    const float level = glm::clamp(35.0f / std::max(d, 12.0f), 0.04f, 1.0f);
-    s.pitch = frand_range(spacejet_rng_state_, 0.97f, 1.03f);
-    if (burst_end) {
-        s.clip = int(ClipID::AaTail);
-        s.vol = level * 0.9f;
-    } else {
-        aa_shot_variant_ = (aa_shot_variant_ + 1 + int(frand(spacejet_rng_state_) * 2.99f)) & 3;
-        s.clip = int(ClipID::AaShot1) + aa_shot_variant_;
-        s.vol = level * frand_range(spacejet_rng_state_, 0.85f, 1.0f);
-    }
+    s.clip = int(ClipID::AaBurst);
+    s.vol = level;
+    s.pitch = 1.0f;
     aa_sounds_.push_back(s);
 }
 
 void VulkanEngine::tick_aa_sounds(float dt) {
+    aa_burst_gate_t_ = std::max(0.0f, aa_burst_gate_t_ - dt);
     for (size_t i = 0; i < aa_sounds_.size();) {
         AaSound& s = aa_sounds_[i];
         s.due -= dt;
@@ -288,7 +286,10 @@ void VulkanEngine::tick_flags(float dt) {
 }
 
 void VulkanEngine::tick_fx(float dt) {
-    if (dt <= 0.0f) return;
+    if (dt <= 0.0f) {
+        for (auto& b : bombs_) b.prev_pos = b.pos;   // frozen: zero motion vectors
+        return;
+    }
     dt = std::min(dt, 0.05f);
     tick_flags(dt);
     for (auto& e : explosions_) {

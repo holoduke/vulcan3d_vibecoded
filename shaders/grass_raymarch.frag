@@ -146,12 +146,13 @@ float terrainH(vec2 wp) {
 // so grass blades sit on the same surface the terrain raymarch draws
 // even at distance. Params come from pc.emissive.{y,z,w} (mirrors the
 // terrain shader's push-constant layout).
-// Absolute heightmap (1 m cells, centred on the origin) - the surface the
+// Absolute heightmap (dim+1 texels over kHeightmapSide, any cell size,
+// centred on the origin) - the surface the
 // MESH terrain is built from, including sculpts, the road and craters.
 layout(set = 0, binding = 17) uniform sampler2D u_heightmap_full;
 float terrainH_mesh(vec2 wp) {
     float W = float(textureSize(u_heightmap_full, 0).x);
-    vec2 uv = (wp + 0.5 * (W - 1.0) + 0.5) / W;
+    vec2 uv = ((wp / kHeightmapSide + 0.5) * (W - 1.0) + 0.5) / W;
     return textureLod(u_heightmap_full, uv, 0.0).r;
 }
 

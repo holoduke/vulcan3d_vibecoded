@@ -16,8 +16,7 @@ enum class ClipID : uint8_t {
     Impact,
     Jump,
     Laser,      // player laser gun (assets/sounds/laser_shot.wav)
-    AaShot1, AaShot2, AaShot3, AaShot4,   // anti-aircraft rounds (assets/sounds/aa_shot_N.wav)
-    AaTail,     // end-of-burst report + echo (assets/sounds/aa_tail.wav)
+    AaBurst,    // anti-aircraft burst, the unmodified recording (assets/sounds/aa_burst.wav)
     JetFlyby1,  // jet flybys (15 s recordings, one pass each)
     JetFlyby2,
     JetFlyby3,
@@ -92,6 +91,10 @@ public:
 
     // Master volume (0..1). Persisted via settings.cpp.
     void set_master_volume(float v);
+
+    // Freeze / resume every voice (pause menu). Scheduled starts keep their
+    // remaining delay because the engine clock stops with the device.
+    void set_paused(bool paused);
 
 private:
     struct Impl;

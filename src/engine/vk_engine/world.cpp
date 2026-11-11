@@ -40,6 +40,7 @@ void VulkanEngine::init_world() {
             if (k == "water_level") rt_.water_level = v;
             else if (k == "terrain_h_dirt_rock_start") rt_.terrain_h_dirt_rock_start = v;
             else if (k == "terrain_h_rock_snow_start") rt_.terrain_h_rock_snow_start = v;
+            else if (k == "terrain_heightmap_scale") rt_.terrain_heightmap_scale = int(v);
         }
     }
     cube_mesh_ = create_cube_mesh(device_, allocator_, graphics_queue_, graphics_queue_family_);
@@ -137,6 +138,54 @@ void VulkanEngine::init_world() {
                             n * sizeof(float));
                     log::infof("[terrain] loaded sculpted heightmap "
                                "(%zu cells)", n);
+                } else if (fdim > 0 && fcell > 0.0f &&
+                           std::abs(float(fdim) * fcell - float(hm.dim) * hm.cell) < 1e-2f &&
+                           std::abs(fox - hm.origin_x) < 1e-2f &&
+                           std::abs(foz - hm.origin_z) < 1e-2f &&
+                           (fdim % hm.dim == 0 || hm.dim % fdim == 0)) {
+                    // Same world square, different heightmap scale. Keep
+                    // the sculpt as an EDIT: delta = saved - procedural
+                    // baseline at the saved grid, resampled onto the
+                    // current grid and added to this grid's baseline. The
+                    // FBM is evaluated at world positions, so the coarse
+                    // grid's samples coincide with every r-th fine sample
+                    // and the fine procedural detail survives an upscale.
+                    const int SW = fdim + 1, DW = hm.dim + 1;
+                    std::vector<float> saved(size_t(SW) * SW);
+                    hf.read(reinterpret_cast<char*>(saved.data()), saved.size() * sizeof(float));
+                    if (hf) {
+                        if (fdim < hm.dim) {
+                            const int r = hm.dim / fdim;
+                            std::vector<float> delta(saved.size());
+                            for (int z = 0; z < SW; ++z)
+                                for (int x = 0; x < SW; ++x)
+                                    delta[size_t(z) * SW + x] = saved[size_t(z) * SW + x] -
+                                        hm.heights[size_t(z * r) * DW + size_t(x * r)];
+                            const float inv = 1.0f / float(r);
+                            for (int z = 0; z < DW; ++z) {
+                                const int z0 = std::min(z / r, fdim - 1);
+                                const float tz = float(z - z0 * r) * inv;
+                                for (int x = 0; x < DW; ++x) {
+                                    const int x0 = std::min(x / r, fdim - 1);
+                                    const float tx = float(x - x0 * r) * inv;
+                                    const float* d0 = &delta[size_t(z0) * SW + x0];
+                                    const float* d1 = d0 + SW;
+                                    const float a = d0[0] + (d0[1] - d0[0]) * tx;
+                                    const float b = d1[0] + (d1[1] - d1[0]) * tx;
+                                    hm.heights[size_t(z) * DW + x] += a + (b - a) * tz;
+                                }
+                            }
+                        } else {
+                            const int r = fdim / hm.dim;
+                            for (int z = 0; z < DW; ++z)
+                                for (int x = 0; x < DW; ++x)
+                                    hm.heights[size_t(z) * DW + x] = saved[size_t(z * r) * SW + size_t(x * r)];
+                        }
+                        log::infof("[terrain] loaded sculpted heightmap %dx -> %dx (resampled)",
+                                   fdim, hm.dim);
+                    } else {
+                        log::warnf("[terrain] saved heightmap truncated - ignoring");
+                    }
                 } else {
                     log::warnf("[terrain] saved heightmap dim/cell mismatch "
                                "— ignoring (saved %dx %.3fm, want %dx %.3fm)",

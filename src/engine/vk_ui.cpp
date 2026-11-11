@@ -1038,9 +1038,9 @@ void VulkanEngine::build_menu_ui() {
 
         ImGui::SeparatorText("Heightmap resolution");
         const char* hres_labels[] = {
-            "1x (2048 cells, ~17 MB)",
-            "2x (4096 cells, ~270 MB *)",
-            "4x (8192 cells, NOT RECOMMENDED — multi-GB)"
+            "1x (2048 cells, 1 m)",
+            "2x (4096 cells, 0.5 m, +1.6 s load, 4x terrain memory)",
+            "4x (8192 cells, 0.25 m, NOT RECOMMENDED - multi-GB)"
         };
         const int hres_values[] = { 1, 2, 4 };
         int hres_idx = 0;

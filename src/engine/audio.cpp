@@ -41,6 +41,7 @@ float frand_pm(std::default_random_engine& rng, float amt) {
 
 struct AudioEngine::Impl {
     ma_engine engine{};
+    bool paused = false;
     bool ok = false;
 
     // Clips indexed by ClipID — was unordered_map<string,Clip>, but
@@ -329,6 +330,17 @@ bool AudioEngine::voice_playing(uint32_t h) const {
 void AudioEngine::set_master_volume(float v) {
     if (!impl_->ok) return;
     ma_engine_set_volume(&impl_->engine, v);
+}
+
+} // namespace qlike
+
+namespace qlike {
+
+void AudioEngine::set_paused(bool paused) {
+    if (!impl_ || !impl_->ok || impl_->paused == paused) return;
+    impl_->paused = paused;
+    if (paused) ma_engine_stop(&impl_->engine);
+    else        ma_engine_start(&impl_->engine);
 }
 
 } // namespace qlike

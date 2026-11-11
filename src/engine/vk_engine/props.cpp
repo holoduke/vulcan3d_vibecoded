@@ -281,7 +281,13 @@ void VulkanEngine::tick_spacejet(float dt) {
     }
     if (last_target_hud_ttl_ > 0.0f) last_target_hud_ttl_ -= dt;
     if (kill_flash_t_       > 0.0f) kill_flash_t_       -= dt;
-    if (dt <= 0.0f) return;
+    if (dt <= 0.0f) {
+        // Frozen (pause menu): previous = current, so the stationary jets
+        // and debris write zero motion vectors instead of last frame's.
+        for (auto& f : spacejet_flights_) { f.prev_pos = f.pos; f.prev_fwd = f.fwd; f.prev_up = f.up; }
+        for (auto& d : jet_debris_) { d.prev_pos = d.pos; d.prev_rot = d.rot; }
+        return;
+    }
     dt = std::min(dt, 0.05f);
     // Tree splinters from any ground blast live in jet_debris_ too: keep
     // them moving even when the jet asset is missing.
@@ -690,7 +696,7 @@ void VulkanEngine::tick_spacejet(float dt) {
                 // ---- Flight core: g-limited turn + coordinated bank ----
                 float max_rate = max_g * kG / std::max(f.speed, 30.0f);
                 glm::vec3 nf = rotate_toward(f.fwd, desired, max_rate * dt);
-                glm::vec3 acc = (nf - f.fwd) / dt * f.speed;          // lateral accel
+                glm::vec3 acc = (nf - f.fwd) / std::max(dt, 1e-5f) * f.speed;          // lateral accel
                 f.turn_g = glm::length(acc) / kG;
                 glm::vec3 up_t = acc + glm::vec3(0.0f, kG, 0.0f);     // lift vector
                 f.fwd = nf;
