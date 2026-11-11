@@ -685,8 +685,9 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
         add_rock(x, z, s, 0.6f + 0.3f * u());
         ++st.boulders;
     }
-    // Trees.
-    for (int a = 0; a < P.tree_attempts && int(out.size()) < P.max_trees; ++a) {
+    // Trees. max_trees counts trees only (out already holds the rocks).
+    const size_t rocks_placed = out.size();
+    for (int a = 0; a < P.tree_attempts && int(out.size() - rocks_placed) < P.max_trees; ++a) {
         float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
         if (std::sqrt(x * x + z * z) < P.castle_clear) continue;
         if (excluded(x, z) || road_d(x, z) < road_clear + 4.5f) continue;

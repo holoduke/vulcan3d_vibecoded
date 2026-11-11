@@ -810,6 +810,11 @@ PhysicsWorld::BodyHandle PhysicsWorld::handle_of(uint32_t id) const {
 bool PhysicsWorld::get_body_world_matrix_h(BodyHandle h, glm::mat4& out) const {
     if (h == 0) return false;
     JPH::BodyID bid(h);
+    // A removed body (evicted crate, expired spark) must report false:
+    // GetWorldTransform returns identity for it, which callers drew at the
+    // world origin (decals) instead of reaping. IsAdded also rejects a
+    // stale handle whose slot was reused (sequence number mismatch).
+    if (!impl_->system.GetBodyInterfaceNoLock().IsAdded(bid)) return false;
     JPH::RMat44 m = impl_->system.GetBodyInterfaceNoLock().GetWorldTransform(bid);
     out = glm::mat4(
         m(0,0), m(1,0), m(2,0), m(3,0),

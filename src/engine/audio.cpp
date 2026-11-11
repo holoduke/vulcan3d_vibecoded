@@ -47,6 +47,11 @@ struct AudioEngine::Impl {
     // every play call allocated a std::string for the lookup. Now O(1)
     // array indexed by enum + zero allocations on the hot path.
     std::string clip_paths[static_cast<size_t>(ClipID::Count)];
+    // One resident (never played) decoded instance per clip: miniaudio's
+    // resource manager ref-counts decoded data by path, so while this holds
+    // a reference every play call reuses the PCM instead of decoding the
+    // file again on the main thread (15 s MP3 explosions / flybys).
+    ma_sound* resident[static_cast<size_t>(ClipID::Count)]{};
 
     // Active one-shot voices. We can't free a ma_sound until it's
     // finished playing, so we keep them in a list and reap drained ones
@@ -87,6 +92,7 @@ AudioEngine::~AudioEngine() {
     if (!impl_->ok) return;
     for (auto& s : impl_->oneshots) ma_sound_uninit(&s);
     for (auto& kv : impl_->tracked) { ma_sound_uninit(kv.second); delete kv.second; }
+    for (auto*& s : impl_->resident) if (s) { ma_sound_uninit(s); delete s; s = nullptr; }
     for (auto& e : impl_->effects) {
         ma_sound_uninit(&e.sound);
         if (e.has_lpf) ma_lpf_node_uninit(&e.lpf, nullptr);
@@ -102,8 +108,9 @@ void AudioEngine::set_listener(glm::vec3 pos, glm::vec3 forward) {
     ma_engine_listener_set_position(&impl_->engine, 0, pos.x, pos.y, pos.z);
     ma_engine_listener_set_direction(&impl_->engine, 0,
                                        forward.x, forward.y, forward.z);
-    // Reap finished effects (scheduled-but-not-started ones report
-    // playing, so delayed explosions survive until they have sounded).
+    // Reap finished effects. A scheduled (delayed) sound reports NOT
+    // playing until its start time, so the at_end test is what keeps
+    // delayed explosions alive - do not drop it.
     for (auto it = impl_->effects.begin(); it != impl_->effects.end();) {
         if (ma_sound_is_playing(&it->sound) == MA_FALSE && ma_sound_at_end(&it->sound)) {
             ma_sound_uninit(&it->sound);
@@ -139,6 +146,15 @@ void AudioEngine::load_clip(ClipID id, std::string_view path) {
     auto idx = static_cast<size_t>(id);
     if (idx >= static_cast<size_t>(ClipID::Count)) return;
     impl_->clip_paths[idx].assign(path);
+    if (impl_->resident[idx]) { ma_sound_uninit(impl_->resident[idx]); delete impl_->resident[idx]; impl_->resident[idx] = nullptr; }
+    auto* s = new ma_sound{};
+    if (ma_sound_init_from_file(&impl_->engine, impl_->clip_paths[idx].c_str(), MA_SOUND_FLAG_DECODE,
+                                nullptr, nullptr, s) == MA_SUCCESS) {
+        impl_->resident[idx] = s;
+    } else {
+        delete s;
+        log::warnf("[audio] could not load %s", impl_->clip_paths[idx].c_str());
+    }
 }
 
 // Reap drained one-shots so the list stays bounded even if

@@ -317,6 +317,8 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
     vmaGetAllocationInfo(alloc, g.instance_alloc, &ai);
     if (ai.pMappedData == nullptr) {
         log::error("[grass] instance buffer not mapped");
+        vmaDestroyBuffer(alloc, g.instance_buffer, g.instance_alloc);
+        g.instance_buffer = VK_NULL_HANDLE; g.instance_alloc = nullptr;
         return g;
     }
     std::memcpy(ai.pMappedData, blades.data(), static_cast<size_t>(size));

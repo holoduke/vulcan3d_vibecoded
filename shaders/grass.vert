@@ -227,7 +227,10 @@ void main() {
     // per-vertex velocity small enough that TAA reprojection stays
     // stable instead of flickering.
     {
-        float dlod = smoothstep(80.0, pc.grass_params.x * 0.95, view_dist_base);
+        // Edges ordered even when grass_distance < 84 m (inverted edges are
+        // undefined and shrank every blade to the far-LOD size).
+        float lod_far = pc.grass_params.x * 0.95;
+        float dlod = smoothstep(min(80.0, 0.5 * lod_far), lod_far, view_dist_base);
         lp.x *= mix(1.0, 0.65, dlod);
         lp.y *= mix(1.0, 0.90, dlod);
     }

@@ -740,6 +740,7 @@ private:
     // the next frame.
     std::vector<uint8_t> grass_mask_data_;
     bool grass_mask_dirty_ = false;
+    bool grass_raster_attempted_ = false;   // ensure_grass_raster_built ran (even if 0 blades)
     void reupload_grass_mask();
     bool save_grass_mask();
     bool load_grass_mask();

@@ -323,7 +323,10 @@ void VulkanEngine::begin_frame_commands(FrameData& frame, uint32_t gpu_query_slo
     // pass reads them (frames in flight - see frame_upload.cpp).
     // Ground clutter follows the active terrain surface (raymarch FBM is
     // finer than the CPU heightmap) - no-op unless the mode was toggled.
-    scatter_set_raymarch_surface(scatter_, rt_.terrain_raymarch_enabled);
+    if (scatter_.rm_surface != rt_.terrain_raymarch_enabled) {
+        wait_gpu_frames_idle();   // rewrites the live (single-buffered) clutter instances
+        scatter_set_raymarch_surface(scatter_, rt_.terrain_raymarch_enabled);
+    }
     update_scene_ubo();
     write_pass_ubos();
     flush_frame_uploads(frame.command_buffer);

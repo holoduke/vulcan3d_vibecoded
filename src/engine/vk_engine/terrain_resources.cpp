@@ -490,7 +490,11 @@ void VulkanEngine::ensure_terrain_raster_built() {
 }
 
 void VulkanEngine::ensure_grass_raster_built() {
-    if (grass_.instance_count > 0) return;              // already built
+    // Attempted once: a build that places 0 blades (empty altitude band)
+    // used to repeat every frame - device wait + 800k-candidate placement
+    // + a leaked blade mesh per frame.
+    if (grass_raster_attempted_ || grass_.instance_count > 0) return;
+    grass_raster_attempted_ = true;
     if (terrain_data_.heights.empty()) return;
     log::info("[grass] lazy-building rasterised blade placement");
     vkDeviceWaitIdle(device_);
@@ -506,6 +510,7 @@ void VulkanEngine::ensure_grass_raster_built() {
     gp.half_extent = 200.0f;
     gp.keep_out_xz = glm::vec2(12.0f, 12.0f);  // full castle footprint
     gp.max_blades  = 800000;
+    destroy_grass(allocator_, grass_);   // a previous empty build still owns its blade mesh
     grass_ = build_grass(device_, allocator_,
                          graphics_queue_, graphics_queue_family_,
                          hm, gp);
@@ -534,8 +539,34 @@ void VulkanEngine::refresh_terrain_blas() {
         fake.origin_ix = 0;
         fake.origin_iz = 0;
         fake.sample_dim = terrain_data_.dim + 1;
+        // Frames in flight: the previous frame may still read the vertex
+        // buffer / BLAS. Mouse-up only, so a full drain is fine.
+        vkDeviceWaitIdle(device_);
         rebuild_chunk_vertices(device_, allocator_, graphics_queue_,
                                graphics_queue_family_, hm, fake);
+        // Refit the terrain BLAS to the new vertices (it was never updated:
+        // RT shadows / AO / GI kept tracing the pre-sculpt surface).
+        VkBuffer scratch = VK_NULL_HANDLE; VmaAllocation scratch_alloc = nullptr;
+        vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_, [&](VkCommandBuffer cb) {
+            VkMemoryBarrier2 mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+            mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            mb.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+            mb.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+            mb.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            VkDependencyInfo di{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+            di.memoryBarrierCount = 1; di.pMemoryBarriers = &mb;
+            vkCmdPipelineBarrier2(cb, &di);
+            record_terrain_blas_refit(cb, &scratch, &scratch_alloc);
+            mb.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+            mb.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+            mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            mb.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            vkCmdPipelineBarrier2(cb, &di);
+        });
+        if (scratch) vmaDestroyBuffer(allocator_, scratch, scratch_alloc);
+        // The TLAS caches BLAS bounds at build time: force a full rebuild.
+        prev_dyn_signature_ = 0;
+        prev_tlas_n_ = UINT32_MAX;
     }
     terrain_blas_dirty_ = false;
 }
@@ -656,7 +687,19 @@ void VulkanEngine::rebuild_terrain_shadow_texture(bool defer_bake) {
     // and we replicate each SS=1 texel into an SS×SS block so the
     // texture is fully populated from frame 1 — the worker then
     // re-bakes properly at the user's SS in the background.
-    const int ss = std::max(1, rt_.terrain_bake_supersample);
+    int ss = std::max(1, rt_.terrain_bake_supersample);
+    {   // The texture is (dim+1)*ss per side: stay within the GPU limit
+        // (4097 * 4 = 16388 already exceeds 16384 on many GPUs).
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(physical_device_, &props);
+        const uint32_t lim = props.limits.maxImageDimension2D;
+        while (ss > 1 && uint32_t(std::max(hm.width(), hm.height()) * ss) > lim) ss /= 2;
+        if (ss != rt_.terrain_bake_supersample) {
+            log::warnf("[terrain] shadow bake supersample %d -> %d (max image dimension %u)",
+                       rt_.terrain_bake_supersample, ss, lim);
+            rt_.terrain_bake_supersample = ss;   // else the per-frame change check fires forever
+        }
+    }
     terrain_shadow_active_ss_ = ss;
     std::vector<uint8_t> base;
     if (defer_bake) {
@@ -975,6 +1018,15 @@ void VulkanEngine::add_plateau_noise(float amplitude_m, float frequency) {
     log::infof("[terrain] plateau noise applied (amp=%.2f m, freq=%.3f)",
                amplitude_m, frequency);
     terrain_height_dirty_ = true;
+    // Physics, RT and culling must follow the new surface too (only the
+    // height textures did: walk-through bumps, stale RT shadows).
+    terrain_clod_pyramid_ = build_clod_pyramid(terrain_data_.heights.data(),
+                                               terrain_data_.dim,
+                                               terrain_data_.cell, 16.0f);
+    terrain_blas_dirty_ = true;
+    terrain_jolt_dirty_ = true;
+    refresh_terrain_blas();
+    refresh_terrain_collision();
 }
 
 void VulkanEngine::add_fbm_erosion_to_sculpted(float amplitude_factor,
@@ -1022,6 +1074,10 @@ void VulkanEngine::add_fbm_erosion_to_sculpted(float amplitude_factor,
     terrain_clod_pyramid_ = build_clod_pyramid(terrain_data_.heights.data(),
                                                terrain_data_.dim,
                                                terrain_data_.cell, 16.0f);
+    terrain_blas_dirty_ = true;     // physics + RT follow the eroded surface
+    terrain_jolt_dirty_ = true;
+    refresh_terrain_blas();
+    refresh_terrain_collision();
 }
 
 void VulkanEngine::destroy_terrain_height_texture() {

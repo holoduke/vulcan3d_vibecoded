@@ -367,6 +367,11 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     out_axis = axis;
     out_T = T; out_B = Bb; out_face_n = face_n;
     out_uv0 = uv0;
+    // Derivatives of the UN-shifted uv, taken before any early return: the
+    // march below exits at data-dependent iterations per pixel, so implicit-
+    // LOD texture() inside it had undefined derivatives (mip sparkle along
+    // the parallax layer steps). Same approach as pom_march.
+    const vec2 spom_gdx = dFdx(uv0), spom_gdy = dFdy(uv0);
 
     vec3 V_w = normalize(scene.camera_pos.xyz - vWorldPos);
     vec3 V_t = vec3(dot(V_w, T), dot(V_w, Bb), dot(V_w, face_n));
@@ -409,13 +414,13 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     vec2  uv_step    = -P * layer_step;
     float current_layer = 0.0;
     vec2  cur_uv = uv0;
-    float cur_h  = 1.0 - texture(u_height[height_idx], cur_uv).r;
+    float cur_h  = 1.0 - textureGrad(u_height[height_idx], cur_uv, spom_gdx, spom_gdy).r;
     for (int i = 0; i < 12; ++i) {
         if (i >= kSteps) break;
         if (current_layer >= cur_h) break;
         cur_uv += uv_step;
         current_layer += layer_step;
-        cur_h = 1.0 - texture(u_height[height_idx], cur_uv).r;
+        cur_h = 1.0 - textureGrad(u_height[height_idx], cur_uv, spom_gdx, spom_gdy).r;
     }
     // Refine in two stages so the height steps don't read as visible
     // "stair lines" on the surface:
@@ -426,7 +431,7 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
     //      fine after TAA averaging; costs 2 extra texture taps per
     //      SPOM-active pixel (was 4 — castle-interior perf tighten).
     vec2  prev_uv = cur_uv - uv_step;
-    float prev_h  = 1.0 - texture(u_height[height_idx], prev_uv).r;
+    float prev_h  = 1.0 - textureGrad(u_height[height_idx], prev_uv, spom_gdx, spom_gdy).r;
     float prev_layer = current_layer - layer_step;
     float a = cur_h  - current_layer;
     float b = prev_h - prev_layer - a;
@@ -441,7 +446,7 @@ vec2 spom_uv(vec3 wp_scaled, vec3 N, vec3 face_size_world, float uv_scale,
         for (int j = 0; j < 2; ++j) {
             vec2  m_uv = (lo_uv + hi_uv) * 0.5;
             float m_l  = (lo_l  + hi_l)  * 0.5;
-            float m_h  = 1.0 - texture(u_height[height_idx], m_uv).r;
+            float m_h  = 1.0 - textureGrad(u_height[height_idx], m_uv, spom_gdx, spom_gdy).r;
             if (m_l < m_h) {       // still above the surface
                 lo_uv = m_uv; lo_l = m_l;
             } else {                // below — bracket the upper half
@@ -1358,7 +1363,8 @@ void main() {
         // Fake a rounded canopy: bend the camera-facing normal outward by
         // the billboard uv so impostors shade like the 3D crowns.
         vec3 Vc = normalize(scene.camera_pos.xyz - vWorldPos);
-        vec3 Rt = normalize(cross(vec3(0.0, 1.0, 0.0), Vc));
+        vec3 Rc = cross(vec3(0.0, 1.0, 0.0), Vc);   // zero when viewed from straight above
+        vec3 Rt = dot(Rc, Rc) > 1e-8 ? normalize(Rc) : vec3(1.0, 0.0, 0.0);
         N = normalize(Vc * 0.6 + Rt * vUv.x * 0.7 + vec3(0.0, 1.0, 0.0) * (vUv.y - 0.35) * 0.9);
     }
 
@@ -2912,10 +2918,13 @@ void main() {
             }
             if (axis != 1) shading_pos = spom_world;
             int  a_idx = clamp(albedo_idx_raw, 0, kTextureCount - 1);
-            vec3 tex_albedo = texture(u_albedo[a_idx], spom_uv_off).rgb;
+            // The shifted uv is discontinuous across a quad (per-pixel march
+            // result): sample with the smooth un-shifted uv's gradients.
+            vec2 sgdx = dFdx(spom_uv0), sgdy = dFdy(spom_uv0);
+            vec3 tex_albedo = textureGrad(u_albedo[a_idx], spom_uv_off, sgdx, sgdy).rgb;
             albedo = tex_albedo * vColor * mesh_pom_shade;
             if (use_normal) {
-                vec3 n_t = texture(u_normal[a_idx], spom_uv_off).rgb * 2.0 - 1.0;
+                vec3 n_t = textureGrad(u_normal[a_idx], spom_uv_off, sgdx, sgdy).rgb * 2.0 - 1.0;
                 N = normalize(spom_T  * n_t.x +
                               spom_B  * n_t.y +
                               spom_face_n * n_t.z);
@@ -3334,16 +3343,17 @@ void main() {
             if (closest_hit_m(origin, dir, kBlockerTMax, blocker_mask, t)) { sum_t += t; ++hits; }
         }
 
-        if (hits == 0) {
-            // No occluder anywhere in the wide cone → fully lit.
-            shadow = 0.0;
-        } else {
+        // Always trace the shadow rays: 2 blocker taps that thread a doorway
+        // or gap reported "no occluder" and left shadowed interiors fully lit
+        // (deferred_lighting.frag has the same fix). hits == 0 -> default
+        // penumbra (avg blocker distance 50 m).
+        {
             // 2. Penumbra estimate. Distance is normalised against a 10m
             //    reference, then raised to a power between 1 (linear, the
             //    classic PCSS) and 3 (cubic — very contact-sharp close-up,
             //    very soft far away). The exponent comes from the
             //    shadow_curve slider in the menu.
-            float avg_t = sum_t / float(hits);
+            float avg_t = (hits > 0) ? (sum_t / float(hits)) : 50.0;
             // P9: shadow rays only need to reach occluders that could
             // contribute to the penumbra estimate — anything past 4×
             // the average blocker hit can't possibly close the cone
@@ -4223,7 +4233,7 @@ void main() {
             // is aligned with the sun (anisotropic forward scattering).
             // Henyey-Greenstein approximation with g=0.76.
             vec3  Lf = scene.sun_direction.xyz;
-            float mu  = clamp(dot(view_dir, -Lf), -1.0, 1.0);
+            float mu  = clamp(dot(view_dir, Lf), -1.0, 1.0);
             const float g  = 0.76;
             const float g2 = g * g;
             // pow(x, 1.5) = x * sqrt(x) — one mul + one sqrt is much cheaper
@@ -4248,7 +4258,7 @@ void main() {
             // toward the sun, distant haze warms to the sun colour
             // (small Henyey-Greenstein lobe, g = 0.6).
             {
-                float mu2 = clamp(dot(view_dir, -scene.sun_direction.xyz),
+                float mu2 = clamp(dot(view_dir, scene.sun_direction.xyz),   // +1 = looking at the sun
                                   -1.0, 1.0);
                 float hd = max(0.0001, 1.36 - 1.2 * mu2);
                 float hg2 = 0.64 / (12.566 * hd * sqrt(hd));

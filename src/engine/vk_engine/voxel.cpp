@@ -897,6 +897,14 @@ void VulkanEngine::render_voxels(VkCommandBuffer cmd) {
         // empty.
         if (s.dim_bricks[0] <= 0 || s.dim_bricks[1] <= 0 || s.dim_bricks[2] <= 0)
             return;
+        // Capacity guard: the brick pool / directory never compact, so a
+        // long session can create shapes past the GPU atlas / directory
+        // capacity (upload_voxel_growth_ clamps and drops them). voxel.frag
+        // has no bounds checks - drawing such a shape would read past both
+        // buffers. Skip any shape not fully resident.
+        if (size_t(s.dir_base) + s.directory.size() > size_t(voxel_dir_uploaded_)) return;
+        for (uint32_t bp : s.directory)
+            if (bp != voxel::kEmptyBrick && bp >= voxel_atlas_uploaded_) return;
         // World-space AABB frustum cull. Even with rotation, the shape's
         // axis-aligned box around its CURRENT transform is a conservative
         // bound — rotate the 8 local corners and take min/max. Off-screen

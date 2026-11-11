@@ -31,6 +31,11 @@ namespace qlike {
 void VulkanEngine::make_crater(glm::vec3 pos, float size) {
     TerrainData& td = terrain_data_;
     if (td.heights.empty() || size < 0.6f) return;
+    // The ray-marched terrain is procedural (FBM in the shader): a heightmap
+    // crater would only sink the physics ground with no visible hole.
+    if (rt_.terrain_raymarch_enabled) return;
+    // Only at the surface (callers pass ground blasts, but stay defensive).
+    if (pos.y > sample_terrain_height(pos.x, pos.z) + 4.0f) return;
     if (std::max(std::abs(pos.x), std::abs(pos.z)) < 26.0f) return;      // castle plateau
     const float h0 = sample_terrain_height(pos.x, pos.z);
     if (h0 < rt_.water_level + 0.4f) return;                              // water / shoreline
@@ -173,6 +178,10 @@ void VulkanEngine::make_crater(glm::vec3 pos, float size) {
     });
     if (scratch) vmaDestroyBuffer(allocator_, scratch, scratch_alloc);
     vmaDestroyBuffer(allocator_, stage, stage_alloc);
+    // The TLAS caches the terrain BLAS bounds at build time (a crater can
+    // dig below them): force a full rebuild next frame.
+    prev_dyn_signature_ = 0;
+    prev_tlas_n_ = UINT32_MAX;
 
     // ---- Physics: heightfield region in place ----
     if (physics_) physics_->update_heightfield_region(td.heights.data(), W, x0, z0, x1, z1);

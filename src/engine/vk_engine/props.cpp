@@ -281,8 +281,11 @@ void VulkanEngine::tick_spacejet(float dt) {
     }
     if (last_target_hud_ttl_ > 0.0f) last_target_hud_ttl_ -= dt;
     if (kill_flash_t_       > 0.0f) kill_flash_t_       -= dt;
-    if (spacejet_meshes_.empty() || dt <= 0.0f) return;
+    if (dt <= 0.0f) return;
     dt = std::min(dt, 0.05f);
+    // Tree splinters from any ground blast live in jet_debris_ too: keep
+    // them moving even when the jet asset is missing.
+    if (spacejet_meshes_.empty()) { tick_jet_debris(dt); return; }
 
     auto& R = spacejet_rng_state_;
     auto ground_h = [&](float x, float z) {

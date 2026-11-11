@@ -135,7 +135,10 @@ void update_player(Player& p, const PlayerInput& in,
     // Refill air jumps the moment we touch ground (rising edge of
     // on_ground). Reset on the immediate jump above doesn't catch
     // landings between jumps.
-    if (p.on_ground && !was_grounded) p.air_jumps_left = game::Player::kAirJumps;
+    // was_grounded also covers terrain: the engine's heightfield snap sets
+    // on_ground AFTER this function, so move.grounded alone never saw a
+    // terrain landing (air jumps stayed spent after walking off a slope).
+    if (p.on_ground || was_grounded) p.air_jumps_left = game::Player::kAirJumps;
 
     // Step-up smoothing — the renderer subtracts step_smooth_offset from the
     // eye y, so an instant physics jump up a stair reads as a smooth ramp.

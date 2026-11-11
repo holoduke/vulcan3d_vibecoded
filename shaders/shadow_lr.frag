@@ -38,7 +38,7 @@ bool any_hit_shadow(vec3 origin, vec3 dir, float t_max) {
     rayQueryInitializeEXT(rq, topLevelAS,
                           gl_RayFlagsOpaqueEXT |
                           gl_RayFlagsTerminateOnFirstHitEXT,
-                          0xFFu, origin, 0.001, dir, t_max);
+                          0x01u, origin, 0.001, dir, t_max);
     while (rayQueryProceedEXT(rq)) {}
     return rayQueryGetIntersectionTypeEXT(rq, true) ==
            gl_RayQueryCommittedIntersectionTriangleEXT;

@@ -130,6 +130,11 @@ void VulkanEngine::tick_aa_sounds(float dt) {
 }
 
 void VulkanEngine::spawn_explosion(glm::vec3 pos, float size, bool ground) {
+    // A "ground" blast well above the surface (a bomb whose raycast clipped a
+    // spark, a projectile or the voxel tower; the 30 s timeout) is an air
+    // burst: no crater, scorch decal or dust ring hanging in the air.
+    if (ground && pos.y > std::max(sample_terrain_height(pos.x, pos.z), rt_.water_level) + 4.0f)
+        ground = false;
     Explosion e{};
     e.pos = pos;
     e.size = size;

@@ -1438,7 +1438,7 @@ void main() {
             }
             fog_t = clamp(fog * dfog_col.a, 0.0, max_a);
             vec3  Lf  = scene.sun_direction.xyz;
-            float mu  = clamp(dot(view_dir, -Lf), -1.0, 1.0);
+            float mu  = clamp(dot(view_dir, Lf), -1.0, 1.0);
             const float g  = 0.76;
             const float g2 = g * g;
             float hg_d = max(0.0001, 1.0 + g2 - 2.0 * g * mu);
