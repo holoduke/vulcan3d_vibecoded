@@ -121,6 +121,7 @@ void VulkanEngine::init() {
     init_swapchain();
     init_depth_image();
     init_commands();
+    init_upload_ring();     // frames-in-flight staging + gfx timeline semaphore
     init_sync();
     init_gpu_query_pool();
     // FSR2 needs the swapchain (displaySize) before its context can be
@@ -426,12 +427,18 @@ void VulkanEngine::run(const RunOptions& opts) {
         {
             // Rolling average of the draw() split (every ~5 s): how long the
             // CPU waits on the GPU vs builds / records while the GPU idles.
-            static double acc[4] = {}; static int acc_n = 0;
+            static double acc[8] = {}; static int acc_n = 0;
             acc[0] += hitch_draw_[0]; acc[1] += hitch_draw_[1]; acc[2] += hitch_draw_[2]; acc[3] += hz_frame_ms;
+            acc[4] += hitch_prev_[0]; acc[7] += hitch_prev_[1] + hitch_prev_[2];   // update / jets+fx+ui
+            acc[5] += hitch_prev_[3];                                      // slot fence (frame N-2)
+            acc[6] += hitch_prev_[4];                                      // acquire
             if (++acc_n >= 300) {
-                log::infof("[cpu] avg frame %.2f ms | prev-fence wait %.2f, cpu-build %.2f, record+submit %.2f",
-                           acc[3] / acc_n, acc[0] / acc_n, acc[1] / acc_n, acc[2] / acc_n);
-                acc[0] = acc[1] = acc[2] = acc[3] = 0.0; acc_n = 0;
+                log::infof("[cpu] avg frame %.2f ms | update %.2f, jets+fx+ui %.2f, slot-fence wait %.2f, acquire %.2f, "
+                           "draw: pre-wait %.2f, cpu-build %.2f, record+submit %.2f",
+                           acc[3] / acc_n, acc[4] / acc_n, acc[7] / acc_n, acc[5] / acc_n, acc[6] / acc_n,
+                           acc[0] / acc_n, acc[1] / acc_n, acc[2] / acc_n);
+                for (double& a : acc) a = 0.0;
+                acc_n = 0;
             }
         }
         last = now;
@@ -1189,6 +1196,7 @@ void VulkanEngine::shutdown() {
     guarded("destroy_rt",     [&]{ destroy_rt(); });
     guarded("physics_.reset", [&]{ physics_.reset(); });
     guarded("destroy_descriptors", [&]{ destroy_descriptors(); });
+    guarded("destroy_upload_ring", [&]{ destroy_upload_ring(); });
     guarded("destroy_meshes", [&]{
         destroy_mesh(allocator_, cube_mesh_);
         destroy_mesh(allocator_, cylinder_mesh_);

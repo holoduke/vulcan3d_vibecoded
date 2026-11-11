@@ -326,7 +326,9 @@ void VulkanEngine::destroy_clouds() {
 
 void VulkanEngine::dispatch_clouds(VkCommandBuffer cmd) {
     if (!cloud_pipeline_ || !depth_view_) return;
-    {
+    if (cloud_depth_bound_ != depth_view_) {   // depth view changes only on resize
+        wait_gpu_frames_idle();
+        cloud_depth_bound_ = depth_view_;
         VkDescriptorImageInfo di{ atmo_sampler_, depth_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkWriteDescriptorSet w{};
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -568,6 +570,7 @@ void VulkanEngine::destroy_fog() {
 void VulkanEngine::dispatch_fog(VkCommandBuffer cmd) {
     if (!fog_pipeline_ || tlas_ == VK_NULL_HANDLE) return;
     if (fog_tlas_bound_ != tlas_) {   // the TLAS handle changes when it is reallocated
+        wait_gpu_frames_idle();
         VkWriteDescriptorSetAccelerationStructureKHR as{};
         as.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
         as.accelerationStructureCount = 1;

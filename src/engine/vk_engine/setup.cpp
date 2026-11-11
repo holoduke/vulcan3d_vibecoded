@@ -73,6 +73,7 @@ void VulkanEngine::init_vulkan() {
     f12.bufferDeviceAddress = VK_TRUE;
     f12.descriptorIndexing = VK_TRUE;
     f12.shaderFloat16 = VK_TRUE;   // some shaders declare Float16
+    f12.timelineSemaphore = VK_TRUE;   // frames in flight: gfx -> next TLAS build
 
     VkPhysicalDeviceAccelerationStructureFeaturesKHR as_features{};
     as_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
@@ -331,7 +332,11 @@ void VulkanEngine::init_swapchain() {
     vkb::SwapchainBuilder sb{ physical_device_, device_, surface_ };
     auto sc_ret = sb
         .set_desired_format(want)
-        .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
+        // QLIKE_PRESENT_IMMEDIATE=1: no vsync (benchmarking the GPU/CPU
+        // frame cost without the refresh-rate cap). Falls back to FIFO.
+        .set_desired_present_mode(std::getenv("QLIKE_PRESENT_IMMEDIATE") ? VK_PRESENT_MODE_IMMEDIATE_KHR
+                                                                         : VK_PRESENT_MODE_FIFO_KHR)
+        .add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR)
         .set_desired_extent(w, h)
         .add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT |

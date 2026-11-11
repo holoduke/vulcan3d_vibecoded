@@ -109,6 +109,7 @@ void VulkanEngine::init_compose() {
 }
 
 void VulkanEngine::rewrite_compose_image_bindings() {
+    wait_gpu_frames_idle();   // compose set may be in use by the in-flight frame
     if (!compose_desc_set_layout_) return;
     // Four sources for compose's history binding, in priority order:
     //   FSR3  — HR upscaled output via ffx-api (FidelityFX SDK 1.1.4)

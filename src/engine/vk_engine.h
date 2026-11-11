@@ -293,6 +293,48 @@ private:
 
     FrameData& current_frame() { return frames_[frame_number_ % kFrameOverlap]; }
 
+    // ---- Frames in flight (frame_upload.cpp) ------------------------------
+    // Two frames overlap on the GPU: while frame N-1 still executes, the CPU
+    // records frame N. Anything the CPU writes per frame must therefore not
+    // be memory the in-flight frame reads:
+    //   * small per-frame buffers (scene / TAA / TAAU / SVGF / voxel UBOs,
+    //     TLAS materials + prev transforms) go through upload_ring_: the
+    //     CPU writes a per-slot host staging copy, and flush_frame_uploads()
+    //     copies everything into the real buffers at the start of the
+    //     graphics command buffer (queue order + one barrier each side
+    //     protect the previous frame's reads);
+    //   * the TLAS instance input is double-buffered (instances_buffer_[]);
+    //   * the TLAS itself is rebuilt on the compute queue only after the
+    //     previous frame's graphics work finished (gfx_timeline_).
+    struct UploadRing {
+        VkBuffer      buf[kFrameOverlap]{};
+        VmaAllocation alloc[kFrameOverlap]{};
+        uint8_t*      map[kFrameOverlap]{};
+        VkDeviceSize  capacity = 0;
+        VkDeviceSize  used = 0;
+        bool          open = false;     // between begin_frame_uploads and flush
+        bool          in_frame = false; // begin_frame_uploads .. graphics submit
+        struct Copy { VkBuffer dst; VkBufferCopy region; };
+        std::vector<Copy> copies;
+    } upload_ring_;
+    void init_upload_ring();
+    void destroy_upload_ring();
+    void begin_frame_uploads();
+    // Returns where to write `bytes` destined for dst[dst_offset..]. While
+    // the ring is open that is staging memory (copied at flush); otherwise
+    // (init, GPU idle) it is `dst_mapped + dst_offset` directly.
+    void* upload_alloc(VkBuffer dst, VkDeviceSize dst_offset, VkDeviceSize bytes, void* dst_mapped);
+    void  upload(VkBuffer dst, VkDeviceSize dst_offset, const void* src, VkDeviceSize bytes,
+                 void* dst_mapped);
+    void flush_frame_uploads(VkCommandBuffer cmd);
+    // Per-pass UBOs whose contents are known at frame start (written before
+    // the flush so no copy lands mid-frame).
+    void write_pass_ubos();
+    void write_svgf_ubos();
+    void wait_gpu_frames_idle();   // all submitted graphics frames finished
+    VkSemaphore gfx_timeline_ = VK_NULL_HANDLE;   // signaled by every graphics frame submit
+    uint64_t    gfx_timeline_value_ = 0;          // last value signaled
+
     std::unique_ptr<Window> window_;
 
     VkInstance instance_ = VK_NULL_HANDLE;
@@ -1663,16 +1705,31 @@ private:
     VmaAllocation tlas_alloc_ = nullptr;
     VkAccelerationStructureKHR tlas_ = VK_NULL_HANDLE;
     VkDeviceSize tlas_buffer_size_ = 0;
+    // Frames in flight: each frame builds its TLAS into tlas_stage_[slot] on
+    // the compute queue (overlapping the previous frame), and the graphics
+    // queue clones it into the bound tlas_ at frame start (record_tlas_publish).
+    VkBuffer                   tlas_stage_buffer_[kFrameOverlap]{};
+    VmaAllocation              tlas_stage_alloc_[kFrameOverlap]{};
+    VkAccelerationStructureKHR tlas_stage_[kFrameOverlap]{};
+    int                        tlas_last_built_slot_ = -1;   // newest valid stage (UPDATE source)
+    bool                       tlas_publish_pending_ = false; // built this frame, clone before use
+    void record_tlas_publish(VkCommandBuffer cmd);
     uint32_t tlas_max_instances_ = 0;
 
     VkBuffer tlas_scratch_buffer_ = VK_NULL_HANDLE;
     VmaAllocation tlas_scratch_alloc_ = nullptr;
     VkDeviceAddress tlas_scratch_address_ = 0;
 
-    VkBuffer instances_buffer_ = VK_NULL_HANDLE;
-    VmaAllocation instances_alloc_ = nullptr;
-    void* instances_mapped_ = nullptr;
-    VkDeviceAddress instances_buffer_address_ = 0;
+    // TLAS instance input, one per frame slot: the CPU fills slot N while
+    // the compute queue may still be building from slot N-1.
+    VkBuffer instances_buffer_[kFrameOverlap]{};
+    VmaAllocation instances_alloc_[kFrameOverlap]{};
+    void* instances_mapped_[kFrameOverlap]{};
+    VkDeviceAddress instances_buffer_address_[kFrameOverlap]{};
+    // Dynamic part of materials / prev_transforms for this build (uploaded
+    // through the frame upload ring; slots [static_mats, mat_idx)).
+    std::vector<glm::vec4> tlas_dyn_mats_;
+    std::vector<glm::mat4> tlas_dyn_prevs_;
 
     // Per-instance material data (color, emissive). Indexed in the shader by
     // the TLAS instance's custom index. Used by the GI bounce to pick up
@@ -2061,6 +2118,7 @@ private:
     VkDescriptorSetLayout  cloud_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool       cloud_pool_ = VK_NULL_HANDLE;
     VkDescriptorSet        cloud_set_ = VK_NULL_HANDLE;
+    VkImageView            cloud_depth_bound_ = VK_NULL_HANDLE;   // rewrite binding 2 only on change
     VkPipelineLayout       cloud_pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline             cloud_pipeline_ = VK_NULL_HANDLE;
     bool                   cloud_noise_ready_ = false;

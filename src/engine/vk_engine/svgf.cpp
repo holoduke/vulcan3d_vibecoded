@@ -97,7 +97,7 @@ void VulkanEngine::init_svgf_passes() {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
             .size = sizeof(SvgfMomentsUBO),
-            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,   // dst of the frame upload ring
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
@@ -214,7 +214,7 @@ void VulkanEngine::init_svgf_passes() {
             // minUniformBufferOffsetAlignment (typically 256 B on
             // NVIDIA, 64 on AMD).
             .size = kSvgfAtrousUBOStride * 6u,
-            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,   // dst of the frame upload ring
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
@@ -506,65 +506,7 @@ void VulkanEngine::render_svgf(VkCommandBuffer cmd, uint32_t frame_parity) {
     const float w = static_cast<float>(render_extent_.width);
     const float h = static_cast<float>(render_extent_.height);
 
-    // ---- write UBOs ------------------------------------------------------
-    {
-        SvgfMomentsUBO m{};
-        m.viewport = glm::vec4(w, h, 1.0f / w, 1.0f / h);
-        // alpha_min: lower bound on the EMA blend (alpha = 1 means take
-        // ONLY the current sample; alpha = 0.1 keeps 90% history). 0.1
-        // is the SVGF reference value -- gives ~10-frame temporal
-        // window, which lines up with how long ReSTIR holds a
-        // reservoir before disocclusion-reset.
-        // alpha_disocclusion: alpha to fall back to when motion-vec
-        // reprojection lands off-screen or the depth mismatch flags a
-        // new surface. 1.0 (take the fresh sample only) so the moments
-        // instantly track the new geometry.
-        // history_valid: gate; first frame at engine start has
-        // prev_view_proj_valid_ == false, then it pins to true.
-        m.params = glm::vec4(0.1f, 1.0f,
-                              prev_view_proj_valid_ ? 1.0f : 0.0f, 0.0f);
-        VmaAllocationInfo ai{};
-        vmaGetAllocationInfo(allocator_, svgf_moments_ubo_alloc_, &ai);
-        if (ai.pMappedData) std::memcpy(ai.pMappedData, &m, sizeof(m));
-    }
-    {
-        // sigma_l: luminance edge-stop width, scaled INSIDE the shader
-        // by sqrt(variance) so noisy pixels get a softer luma weight
-        // while stable surfaces clamp tight. 4.0 is the SVGF default.
-        // sigma_z: depth edge-stop width (in clip-Z units). 1.0 means
-        // ~1% depth difference at unity z-gradient is the falloff
-        // point; the shader scales by max(0.01, |dz/dxy| * stride)
-        // so distant pixels (large dz) tolerate larger absolute z
-        // differences. The 0.01 floor stops planar surfaces (dz~=0)
-        // from rejecting all neighbours.
-        // sigma_n: normal edge-stop sharpness. Larger = tighter
-        // tolerance for normal misalignment. 128 is the SVGF default
-        // (max(0, dot(N_p, N_q))^128 -- already 0 at ~7 degrees).
-        const float kSigmaL = 4.0f;
-        const float kSigmaZ = 1.0f;
-        const float kSigmaN = 128.0f;
-        const int strides[3] = { 1, 2, 4 };
-        VmaAllocationInfo ai{};
-        vmaGetAllocationInfo(allocator_, svgf_atrous_ubo_alloc_, &ai);
-        if (ai.pMappedData) {
-            // Write each slice at its aligned offset (per-slice stride
-            // = kSvgfAtrousUBOStride, sized for the worst-case
-            // minUniformBufferOffsetAlignment so the matching
-            // VkDescriptorBufferInfo::offset stays legal).
-            for (int p = 0; p < 2; ++p) {
-                for (int s = 0; s < 3; ++s) {
-                    SvgfAtrousUBO u{};
-                    u.viewport = glm::vec4(w, h, 1.0f / w, 1.0f / h);
-                    u.params = glm::vec4(static_cast<float>(strides[s]),
-                                         kSigmaL, kSigmaZ, kSigmaN);
-                    char* dst = static_cast<char*>(ai.pMappedData) +
-                                static_cast<size_t>(p * 3 + s) *
-                                    kSvgfAtrousUBOStride;
-                    std::memcpy(dst, &u, sizeof(u));
-                }
-            }
-        }
-    }
+    // (UBOs: staged in write_svgf_ubos() before the frame upload flush.)
 
     // ---- moments pass: 1 fullscreen tri ----------------------------------
     //
@@ -730,4 +672,67 @@ void VulkanEngine::render_svgf(VkCommandBuffer cmd, uint32_t frame_parity) {
     run_pass(2);
 }
 
+
+void VulkanEngine::write_svgf_ubos() {
+    if (!rt_.svgf_enabled || !svgf_moments_pipeline_ || !svgf_atrous_pipeline_) return;
+    const float w = static_cast<float>(render_extent_.width);
+    const float h = static_cast<float>(render_extent_.height);
+    {
+        SvgfMomentsUBO m{};
+        m.viewport = glm::vec4(w, h, 1.0f / w, 1.0f / h);
+        // alpha_min: lower bound on the EMA blend (alpha = 1 means take
+        // ONLY the current sample; alpha = 0.1 keeps 90% history). 0.1
+        // is the SVGF reference value -- gives ~10-frame temporal
+        // window, which lines up with how long ReSTIR holds a
+        // reservoir before disocclusion-reset.
+        // alpha_disocclusion: alpha to fall back to when motion-vec
+        // reprojection lands off-screen or the depth mismatch flags a
+        // new surface. 1.0 (take the fresh sample only) so the moments
+        // instantly track the new geometry.
+        // history_valid: gate; first frame at engine start has
+        // prev_view_proj_valid_ == false, then it pins to true.
+        m.params = glm::vec4(0.1f, 1.0f,
+                              prev_view_proj_valid_ ? 1.0f : 0.0f, 0.0f);
+        VmaAllocationInfo ai{};
+        vmaGetAllocationInfo(allocator_, svgf_moments_ubo_alloc_, &ai);
+        upload(svgf_moments_ubo_buffer_, 0, &m, sizeof(m), ai.pMappedData);
+    }
+    {
+        // sigma_l: luminance edge-stop width, scaled INSIDE the shader
+        // by sqrt(variance) so noisy pixels get a softer luma weight
+        // while stable surfaces clamp tight. 4.0 is the SVGF default.
+        // sigma_z: depth edge-stop width (in clip-Z units). 1.0 means
+        // ~1% depth difference at unity z-gradient is the falloff
+        // point; the shader scales by max(0.01, |dz/dxy| * stride)
+        // so distant pixels (large dz) tolerate larger absolute z
+        // differences. The 0.01 floor stops planar surfaces (dz~=0)
+        // from rejecting all neighbours.
+        // sigma_n: normal edge-stop sharpness. Larger = tighter
+        // tolerance for normal misalignment. 128 is the SVGF default
+        // (max(0, dot(N_p, N_q))^128 -- already 0 at ~7 degrees).
+        const float kSigmaL = 4.0f;
+        const float kSigmaZ = 1.0f;
+        const float kSigmaN = 128.0f;
+        const int strides[3] = { 1, 2, 4 };
+        VmaAllocationInfo ai{};
+        vmaGetAllocationInfo(allocator_, svgf_atrous_ubo_alloc_, &ai);
+        {
+            // Write each slice at its aligned offset (per-slice stride
+            // = kSvgfAtrousUBOStride, sized for the worst-case
+            // minUniformBufferOffsetAlignment so the matching
+            // VkDescriptorBufferInfo::offset stays legal).
+            for (int p = 0; p < 2; ++p) {
+                for (int s = 0; s < 3; ++s) {
+                    SvgfAtrousUBO u{};
+                    u.viewport = glm::vec4(w, h, 1.0f / w, 1.0f / h);
+                    u.params = glm::vec4(static_cast<float>(strides[s]),
+                                         kSigmaL, kSigmaZ, kSigmaN);
+                    upload(svgf_atrous_ubo_buffer_,
+                           VkDeviceSize(p * 3 + s) * kSvgfAtrousUBOStride,
+                           &u, sizeof(u), ai.pMappedData);
+                }
+            }
+        }
+    }
+}
 } // namespace qlike

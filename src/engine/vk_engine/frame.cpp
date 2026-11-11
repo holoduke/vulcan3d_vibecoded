@@ -92,30 +92,18 @@ void VulkanEngine::draw(uint32_t img_index) {
     // from this cache, so we avoid repeating O(n) Jolt queries.
     rebuild_dyn_render_cache();
 
-    // CROSS-QUEUE TLAS HAZARD FIX. tlas_ / tlas_buffer_ are SINGLE-
-    // buffered, rebuilt every frame on the async compute queue with NO
-    // wait. The top-of-frame fence only gates the SAME slot (frame
-    // N-2); frame N-1's graphics (other slot) may still be executing
-    // cube.frag's rayQueryEXT against the shared TLAS when this frame's
-    // compute starts overwriting it → intermittent GPU shader fault
-    // (device-fault type=4 INSTRUCTION_POINTER, frame-rate-independent,
-    // correlated with dyn-prop/TLAS churn). Wait for the PREVIOUS
-    // frame's graphics to finish before rebuilding the TLAS. Do NOT
-    // reset this fence — its own slot resets it on reuse. Fences are
-    // created SIGNALED so frame 0 returns immediately.
-    {
-        VkFence prev = frames_[(frame_number_ + kFrameOverlap - 1) %
-                               kFrameOverlap].render_fence;
-        dz_mark();
-        vk_check(vkWaitForFences(device_, 1, &prev, VK_TRUE, UINT64_MAX),
-                 "prev-frame fence (TLAS hazard)");
-    }
+    // Two frames in flight: no CPU wait for the previous frame here. Its
+    // GPU work may still be running, so everything written below goes to
+    // per-slot memory (upload ring, TLAS instance slot, CLOD / FX rings)
+    // and the TLAS rebuild waits on the GPU for the previous graphics
+    // submit (gfx_timeline_). See UploadRing in vk_engine.h.
+    dz_mark();
+    // QLIKE_SERIAL_FRAMES=1: old behaviour (CPU waits for the previous frame)
+    // - A/B switch for the frames-in-flight path.
+    static const bool serial_frames = std::getenv("QLIKE_SERIAL_FRAMES") != nullptr;
+    if (serial_frames) wait_gpu_frames_idle();
+    begin_frame_uploads();
     hitch_draw_[0] = dz_mark();
-    // Scene UBO is a single host-visible buffer read by both frame slots.
-    // Only now (both slots' GPU work finished) is it safe to overwrite;
-    // writing it earlier in the main loop changed camera/sun data under
-    // the previous frame while it was still being shaded.
-    // (update_scene_ubo() runs right after compute_frame_view below.)
 
     // ---------- Compute queue: per-frame TLAS rebuild ----------
     // Recorded onto a separate compute command buffer and submitted on the
@@ -153,6 +141,8 @@ void VulkanEngine::draw(uint32_t img_index) {
         VkSubmitInfo2 csubmit{
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
             .pNext = nullptr, .flags = 0,
+            // No wait: the build targets tlas_stage_[slot], which only frame
+            // N-2 (fence already waited) touched - it overlaps frame N-1.
             .waitSemaphoreInfoCount = 0, .pWaitSemaphoreInfos = nullptr,
             .commandBufferInfoCount = 1, .pCommandBufferInfos = &cb_info,
             .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &signal_info,
@@ -187,12 +177,16 @@ void VulkanEngine::draw(uint32_t img_index) {
     // identical aspect/lerp/view/proj/Halton-jitter rebuilds per frame.
     prof_begin_frame(frame.command_buffer, gpu_query_slot);
     current_frame_view_ = compute_frame_view();
-    // Scene UBO: written only after the prev-frame fence (both slots idle)
-    // and after this frame's camera so camera_pos / jitter are current.
+    // Scene UBO + per-pass UBOs: staged after this frame's camera so
+    // camera_pos / jitter are current, then copied in one batch before any
+    // pass reads them (frames in flight - see frame_upload.cpp).
     // Ground clutter follows the active terrain surface (raymarch FBM is
     // finer than the CPU heightmap) - no-op unless the mode was toggled.
     scatter_set_raymarch_surface(scatter_, rt_.terrain_raymarch_enabled);
     update_scene_ubo();
+    write_pass_ubos();
+    flush_frame_uploads(frame.command_buffer);
+    record_tlas_publish(frame.command_buffer);   // this frame's TLAS -> tlas_
     // GPU vegetation: cull + LOD-select every instance, fill indirect draws.
     cull_vegetation(frame.command_buffer);
 
@@ -623,42 +617,7 @@ void VulkanEngine::draw(uint32_t img_index) {
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-    // Update TAA UBO. inv_vp/prev_vp dropped after svgf-tao-rewrite —
-    // the motion-vec image (binding 4) provides the reprojection now,
-    // so TAA only needs viewport metrics + the history-blend params.
-    {
-        struct TaaUBO {
-            glm::vec4 viewport;
-            glm::vec4 params;
-            glm::mat4 inv_vp;    // current frame
-            glm::mat4 prev_vp;   // previous frame (sky reprojection)
-            glm::vec4 eye;
-        } u{};
-        u.inv_vp  = current_frame_view_.inv_vp;
-        u.prev_vp = prev_view_proj_valid_ ? prev_view_proj_ : current_frame_view_.vp;
-        u.eye     = glm::vec4(current_frame_view_.eye_pos, 1.0f);
-        // TAA reads + writes at render_extent_, so the viewport vec it uses
-        // for `gl_FragCoord → uv` conversion must reflect that.
-        float w = static_cast<float>(render_extent_.width);
-        float h = static_cast<float>(render_extent_.height);
-        u.viewport = glm::vec4(w, h, 1.0f / w, 1.0f / h);
-        // When SVGF is on, its 3-pass a-trous already filtered the
-        // scene_color we're about to TAA-blend; running TAA's own
-        // single-pass a-trous on top of that is just double-blurring.
-        // Zero out the spatial strength so TAA degrades to temporal-
-        // only (history blend + variance clip). When SVGF is off,
-        // taa_spatial_strength keeps its slider value -- the existing
-        // single-pass a-trous covers the spatial reconstruction.
-        const float spatial = rt_.svgf_enabled ? 0.0f
-                                               : rt_.taa_spatial_strength;
-        u.params = glm::vec4(rt_.taa_history_blend,
-                             0.05f,
-                             prev_view_proj_valid_ ? 1.0f : 0.0f,
-                             spatial);
-        VmaAllocationInfo ai{};
-        vmaGetAllocationInfo(allocator_, taa_ubo_alloc_, &ai);
-        if (ai.pMappedData) std::memcpy(ai.pMappedData, &u, sizeof(u));
-    }
+    // (TAA UBO: staged in write_pass_ubos() before the frame upload flush.)
 
     // Render TAA pass to the chosen history slot.
     {
@@ -831,23 +790,6 @@ void VulkanEngine::draw(uint32_t img_index) {
     // samples taau_view_ instead of history_view_ (set by
     // rewrite_compose_image_bindings via the toggle handler).
     if (rt_.taau_enabled && taau_pipeline_ != VK_NULL_HANDLE) {
-        // Update UBO each frame — LR + native viewport sizes, params.
-        struct TaauUBO { glm::vec4 lr_vp; glm::vec4 full_vp; glm::vec4 params; };
-        TaauUBO u{};
-        u.lr_vp = glm::vec4(static_cast<float>(render_extent_.width),
-                            static_cast<float>(render_extent_.height),
-                            1.0f / render_extent_.width,
-                            1.0f / render_extent_.height);
-        u.full_vp = glm::vec4(static_cast<float>(swapchain_extent_.width),
-                              static_cast<float>(swapchain_extent_.height),
-                              1.0f / swapchain_extent_.width,
-                              1.0f / swapchain_extent_.height);
-        u.params = glm::vec4(rt_.taa_history_blend,
-                             taau_history_valid_ ? 1.0f : 0.0f,
-                             0.0f, 0.0f);
-        VmaAllocationInfo ai{};
-        vmaGetAllocationInfo(allocator_, taau_ubo_alloc_, &ai);
-        std::memcpy(ai.pMappedData, &u, sizeof(u));
 
         vkinit::transition_image(frame.command_buffer,
                                   taau_image_[history_write_slot_],
@@ -1161,10 +1103,24 @@ void VulkanEngine::draw(uint32_t img_index) {
             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, frame.swapchain_semaphore),
         vkinit::semaphore_submit_info(
             // + COMPUTE: the froxel fog pass ray-queries the TLAS from compute.
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, frame.tlas_build_done),
+            // + AS_BUILD: record_tlas_publish clones the stage TLAS at frame start.
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+            VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, frame.tlas_build_done),
     };
-    auto signal = vkinit::semaphore_submit_info(
-        VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, render_semaphores_[img_index]);
+    // Signals: present semaphore + the frames-in-flight timeline (next
+    // frame's TLAS rebuild waits for this value).
+    VkSemaphoreSubmitInfo signals[2] = {
+        vkinit::semaphore_submit_info(
+            VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, render_semaphores_[img_index]),
+        VkSemaphoreSubmitInfo{
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .semaphore = gfx_timeline_,
+            .value = gfx_timeline_value_ + 1,
+            .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            .deviceIndex = 0,
+        },
+    };
     auto cmd_info = vkinit::command_buffer_submit_info(frame.command_buffer);
     VkSubmitInfo2 submit{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
@@ -1173,12 +1129,14 @@ void VulkanEngine::draw(uint32_t img_index) {
         .pWaitSemaphoreInfos = waits,
         .commandBufferInfoCount = 1,
         .pCommandBufferInfos = &cmd_info,
-        .signalSemaphoreInfoCount = 1,
-        .pSignalSemaphoreInfos = &signal,
+        .signalSemaphoreInfoCount = 2,
+        .pSignalSemaphoreInfos = signals,
     };
 
     vk_check(vkQueueSubmit2(graphics_queue_, 1, &submit, frame.render_fence),
              "vkQueueSubmit2");
+    ++gfx_timeline_value_;
+    upload_ring_.in_frame = false;
 
     if (want_screenshot) {
         vk_check(vkWaitForFences(device_, 1, &frame.render_fence, VK_TRUE, UINT64_MAX),
@@ -1204,4 +1162,66 @@ void VulkanEngine::draw(uint32_t img_index) {
     }
 }
 
+
+// Per-pass UBOs (TAA, TAAU, SVGF, voxel camera): their inputs are all known
+// at frame start, so they are staged here, before flush_frame_uploads().
+void VulkanEngine::write_pass_ubos() {
+    // Update TAA UBO. inv_vp/prev_vp dropped after svgf-tao-rewrite —
+    // the motion-vec image (binding 4) provides the reprojection now,
+    // so TAA only needs viewport metrics + the history-blend params.
+    {
+        struct TaaUBO {
+            glm::vec4 viewport;
+            glm::vec4 params;
+            glm::mat4 inv_vp;    // current frame
+            glm::mat4 prev_vp;   // previous frame (sky reprojection)
+            glm::vec4 eye;
+        } u{};
+        u.inv_vp  = current_frame_view_.inv_vp;
+        u.prev_vp = prev_view_proj_valid_ ? prev_view_proj_ : current_frame_view_.vp;
+        u.eye     = glm::vec4(current_frame_view_.eye_pos, 1.0f);
+        // TAA reads + writes at render_extent_, so the viewport vec it uses
+        // for `gl_FragCoord → uv` conversion must reflect that.
+        float w = static_cast<float>(render_extent_.width);
+        float h = static_cast<float>(render_extent_.height);
+        u.viewport = glm::vec4(w, h, 1.0f / w, 1.0f / h);
+        // When SVGF is on, its 3-pass a-trous already filtered the
+        // scene_color we're about to TAA-blend; running TAA's own
+        // single-pass a-trous on top of that is just double-blurring.
+        // Zero out the spatial strength so TAA degrades to temporal-
+        // only (history blend + variance clip). When SVGF is off,
+        // taa_spatial_strength keeps its slider value -- the existing
+        // single-pass a-trous covers the spatial reconstruction.
+        const float spatial = rt_.svgf_enabled ? 0.0f
+                                               : rt_.taa_spatial_strength;
+        u.params = glm::vec4(rt_.taa_history_blend,
+                             0.05f,
+                             prev_view_proj_valid_ ? 1.0f : 0.0f,
+                             spatial);
+        VmaAllocationInfo ai{};
+        vmaGetAllocationInfo(allocator_, taa_ubo_alloc_, &ai);
+        upload(taa_ubo_buffer_, 0, &u, sizeof(u), ai.pMappedData);
+    }
+    if (rt_.taau_enabled && taau_pipeline_ != VK_NULL_HANDLE) {
+        // Update UBO each frame — LR + native viewport sizes, params.
+        struct TaauUBO { glm::vec4 lr_vp; glm::vec4 full_vp; glm::vec4 params; };
+        TaauUBO u{};
+        u.lr_vp = glm::vec4(static_cast<float>(render_extent_.width),
+                            static_cast<float>(render_extent_.height),
+                            1.0f / render_extent_.width,
+                            1.0f / render_extent_.height);
+        u.full_vp = glm::vec4(static_cast<float>(swapchain_extent_.width),
+                              static_cast<float>(swapchain_extent_.height),
+                              1.0f / swapchain_extent_.width,
+                              1.0f / swapchain_extent_.height);
+        u.params = glm::vec4(rt_.taa_history_blend,
+                             taau_history_valid_ ? 1.0f : 0.0f,
+                             0.0f, 0.0f);
+        VmaAllocationInfo ai{};
+        vmaGetAllocationInfo(allocator_, taau_ubo_alloc_, &ai);
+        upload(taau_ubo_buffer_, 0, &u, sizeof(u), ai.pMappedData);
+    }
+    write_svgf_ubos();
+    update_voxel_camera_ubo();
+}
 } // namespace qlike

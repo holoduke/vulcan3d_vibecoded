@@ -974,6 +974,7 @@ void VulkanEngine::dispatch_fsr3_fg(VkCommandBuffer cmd) {
 }
 
 void VulkanEngine::rewrite_compose_for_fsr3() {
+    wait_gpu_frames_idle();   // compose set may be in use by the in-flight frame
 #ifdef QLIKE_HAVE_FSR3
     // CRITICAL: must also check rt_.fsr2_enabled — that's the master
     // toggle for ANY FSR upscale. Without it, when the user turns FSR

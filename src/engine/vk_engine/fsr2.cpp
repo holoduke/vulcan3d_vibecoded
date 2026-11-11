@@ -259,6 +259,7 @@ void VulkanEngine::dispatch_fsr2(VkCommandBuffer cmd) {
 // at fsr2_output_view_ vs the TAA history. wait_idle is only paid on
 // the actual switch, not every frame.
 void VulkanEngine::rewrite_compose_for_fsr2() {
+    wait_gpu_frames_idle();   // compose set may be in use by the in-flight frame
 #ifdef QLIKE_HAVE_FSR2
     const bool want_fsr2 = rt_.fsr2_enabled && rt_.fsr_backend != 2 && !dlss_active() &&
                            fsr2_output_view_ != VK_NULL_HANDLE;   // backend 2 = DLSS

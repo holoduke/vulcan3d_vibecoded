@@ -358,6 +358,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
             sig = (sig ^ h) * 1099511628211ull;
         }
         if (sig != deferred_desc_sig_) {
+            wait_gpu_frames_idle();   // the in-flight frame may still use the set
             vkUpdateDescriptorSets(device_, 19, w, 0, nullptr);
             deferred_desc_sig_ = sig;
         }

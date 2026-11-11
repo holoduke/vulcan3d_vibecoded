@@ -42,7 +42,7 @@ void VulkanEngine::init_taa() {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
             .size = sizeof(TaaUBO),
-            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,   // dst of the frame upload ring
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
@@ -433,7 +433,7 @@ void VulkanEngine::init_taau() {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr, .flags = 0,
         .size = sizeof(TaauUBO),
-        .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,   // dst of the frame upload ring
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
     VmaAllocationCreateInfo bac{};
@@ -629,6 +629,7 @@ void VulkanEngine::destroy_taau() {
 // history sampler to either history_view_ (TAAU off) or taau_view_ (on).
 // Idempotent — does nothing when bound state already matches.
 void VulkanEngine::rewrite_compose_for_taau() {
+    wait_gpu_frames_idle();   // compose set may be in use by the in-flight frame
     // Same predicate as rewrite_compose_image_bindings(): with FSR on, TAAU
     // never becomes the compose source, so comparing against the raw
     // toggle used to trigger vkDeviceWaitIdle + a rebind EVERY frame.

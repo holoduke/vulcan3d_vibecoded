@@ -20,7 +20,7 @@ void VulkanEngine::init_descriptors() {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
             .size = sizeof(SceneUBO),
-            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,   // dst of the frame upload ring
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
@@ -793,7 +793,7 @@ void VulkanEngine::update_scene_ubo() {
 
     VmaAllocationInfo ai{};
     vmaGetAllocationInfo(allocator_, scene_ubo_alloc_, &ai);
-    if (ai.pMappedData) std::memcpy(ai.pMappedData, &data, sizeof(data));
+    upload(scene_ubo_buffer_, 0, &data, sizeof(data), ai.pMappedData);   // staged while a frame is in flight
     // Defensive flush — no-op on coherent host memory but required by spec
     // for non-coherent allocations (e.g. some non-NVIDIA drivers).
     vmaFlushAllocation(allocator_, scene_ubo_alloc_, 0, sizeof(data));

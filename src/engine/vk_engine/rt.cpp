@@ -186,13 +186,15 @@ void VulkanEngine::init_rt() {
         aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                     VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
-                                 &instances_buffer_, &instances_alloc_, nullptr),
-                 "tlas instance buffer");
-        VmaAllocationInfo ai{};
-        vmaGetAllocationInfo(allocator_, instances_alloc_, &ai);
-        instances_mapped_ = ai.pMappedData;
-        instances_buffer_address_ = buffer_device_address(device_, instances_buffer_);
+        for (uint32_t s = 0; s < kFrameOverlap; ++s) {   // one per frame slot
+            vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
+                                     &instances_buffer_[s], &instances_alloc_[s], nullptr),
+                     "tlas instance buffer");
+            VmaAllocationInfo ai{};
+            vmaGetAllocationInfo(allocator_, instances_alloc_[s], &ai);
+            instances_mapped_[s] = ai.pMappedData;
+            instances_buffer_address_[s] = buffer_device_address(device_, instances_buffer_[s]);
+        }
     }
 
     // Per-instance material buffer. Read by every cube.frag fragment as
@@ -218,7 +220,7 @@ void VulkanEngine::init_rt() {
         VkBufferCreateInfo bci{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .pNext = nullptr, .flags = 0, .size = size,
-            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
@@ -248,7 +250,7 @@ void VulkanEngine::init_rt() {
         VkBufferCreateInfo bci{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .pNext = nullptr, .flags = 0, .size = size,
-            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
@@ -271,7 +273,7 @@ void VulkanEngine::init_rt() {
     VkAccelerationStructureGeometryInstancesDataKHR inst_data{};
     inst_data.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
     inst_data.arrayOfPointers = VK_FALSE;
-    inst_data.data.deviceAddress = instances_buffer_address_;
+    inst_data.data.deviceAddress = instances_buffer_address_[frame_number_ % kFrameOverlap];
 
     VkAccelerationStructureGeometryKHR tlas_geom{};
     tlas_geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -322,6 +324,31 @@ void VulkanEngine::init_rt() {
     aci_tlas.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
     vk_check(g_rt.create_as(device_, &aci_tlas, nullptr, &tlas_),
              "vkCreateAccelerationStructureKHR tlas");
+    // Per-slot build targets (frames in flight). Same size as tlas_ so a
+    // CLONE copy into tlas_ is always legal.
+    for (uint32_t s = 0; s < kFrameOverlap; ++s) {
+        VkBufferCreateInfo bci{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr, .flags = 0,
+            .size = tlas_buffer_size_,
+            .usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            .sharingMode = rt_sharing,
+            .queueFamilyIndexCount = rt_share_count,
+            .pQueueFamilyIndices = rt_share_indices,
+        };
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        vk_check(vmaCreateBuffer(allocator_, &bci, &aci,
+                                 &tlas_stage_buffer_[s], &tlas_stage_alloc_[s], nullptr),
+                 "tlas stage buffer");
+        VkAccelerationStructureCreateInfoKHR ci = aci_tlas;
+        ci.buffer = tlas_stage_buffer_[s];
+        vk_check(g_rt.create_as(device_, &ci, nullptr, &tlas_stage_[s]),
+                 "vkCreateAccelerationStructureKHR tlas stage");
+    }
+    tlas_last_built_slot_ = -1;
+    tlas_publish_pending_ = false;
 
     {
         // Scratch must hold whichever of {build, update} is bigger — the same
@@ -415,7 +442,14 @@ void VulkanEngine::destroy_rt() {
     if (merged_static_blas_) g_rt.destroy_as(device_, merged_static_blas_, nullptr);
     if (terrain_blas_)       g_rt.destroy_as(device_, terrain_blas_, nullptr);
     if (tlas_scratch_buffer_) vmaDestroyBuffer(allocator_, tlas_scratch_buffer_, tlas_scratch_alloc_);
-    if (instances_buffer_)    vmaDestroyBuffer(allocator_, instances_buffer_, instances_alloc_);
+    for (uint32_t s = 0; s < kFrameOverlap; ++s) {
+        if (tlas_stage_[s]) g_rt.destroy_as(device_, tlas_stage_[s], nullptr);
+        if (tlas_stage_buffer_[s]) vmaDestroyBuffer(allocator_, tlas_stage_buffer_[s], tlas_stage_alloc_[s]);
+        tlas_stage_[s] = VK_NULL_HANDLE; tlas_stage_buffer_[s] = VK_NULL_HANDLE; tlas_stage_alloc_[s] = nullptr;
+        if (instances_buffer_[s]) vmaDestroyBuffer(allocator_, instances_buffer_[s], instances_alloc_[s]);
+        instances_buffer_[s] = VK_NULL_HANDLE; instances_alloc_[s] = nullptr;
+        instances_mapped_[s] = nullptr; instances_buffer_address_[s] = 0;
+    }
     if (materials_buffer_)    vmaDestroyBuffer(allocator_, materials_buffer_, materials_alloc_);
     if (prev_transforms_buffer_) vmaDestroyBuffer(allocator_, prev_transforms_buffer_, prev_transforms_alloc_);
     if (tlas_buffer_)         vmaDestroyBuffer(allocator_, tlas_buffer_, tlas_alloc_);
@@ -429,11 +463,11 @@ void VulkanEngine::destroy_rt() {
     tlas_ = blas_ = cylinder_blas_ = merged_static_blas_ = terrain_blas_ = VK_NULL_HANDLE;
     tlas_buffer_ = blas_buffer_ = cylinder_blas_buffer_ = merged_static_blas_buffer_ =
         terrain_blas_buffer_ =
-        tlas_scratch_buffer_ = instances_buffer_ = materials_buffer_ =
+        tlas_scratch_buffer_ = materials_buffer_ =
         prev_transforms_buffer_ = VK_NULL_HANDLE;
     tlas_alloc_ = blas_alloc_ = cylinder_blas_alloc_ = merged_static_blas_alloc_ =
         terrain_blas_alloc_ =
-        tlas_scratch_alloc_ = instances_alloc_ = materials_alloc_ =
+        tlas_scratch_alloc_ = materials_alloc_ =
         prev_transforms_alloc_ = nullptr;
     cylinder_blas_device_address_ = 0;
     merged_static_blas_device_address_ = 0;
@@ -929,9 +963,13 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         static_brush_uploaded_ = false;
     }
 
-    auto* dst = static_cast<VkAccelerationStructureInstanceKHR*>(instances_mapped_);
-    auto* mats = static_cast<glm::vec4*>(materials_mapped_);  // 3 vec4 per material
-    auto* prevs = static_cast<glm::mat4*>(prev_transforms_mapped_);
+    const uint32_t inst_slot = uint32_t(frame_number_ % kFrameOverlap);
+    auto* dst = static_cast<VkAccelerationStructureInstanceKHR*>(instances_mapped_[inst_slot]);
+    // Materials / prev transforms are read by the in-flight frame's
+    // shaders, so they go through the frame upload ring (static block only
+    // when it changed, dynamic block every build) - see frame_upload.cpp.
+    tlas_dyn_mats_.clear();
+    tlas_dyn_prevs_.clear();
 
     // Materials/prev_transforms layout:
     //   slots [0..M-1]   per-brush data for the castle (always populated)
@@ -941,17 +979,14 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     const uint32_t T = tlas_includes_terrain_blas() ? 1u : 0u;
     const uint32_t static_mats = M + T;
     // Static brush materials + worlds change rarely (texture toggle,
-    // merged-vs-per-brush swap, brush count change). Gate the per-frame
-    // memcpy of ~200 KB on the dirty flag — saves PCIe traffic when the
-    // static set is stable.
+    // merged-vs-per-brush swap, brush count change). Gate the ~200 KB
+    // upload on the dirty flag.
     if (!static_brush_uploaded_) {
-        if (mats && static_mats > 0) {
-            std::memcpy(mats, static_brush_materials_.data(),
-                        sizeof(glm::vec4) * 3 * static_mats);
-        }
-        if (prevs && static_mats > 0) {
-            std::memcpy(prevs, static_brush_worlds_.data(),
-                        sizeof(glm::mat4) * static_mats);
+        if (static_mats > 0) {
+            upload(materials_buffer_, 0, static_brush_materials_.data(),
+                   sizeof(glm::vec4) * 3 * static_mats, materials_mapped_);
+            upload(prev_transforms_buffer_, 0, static_brush_worlds_.data(),
+                   sizeof(glm::mat4) * static_mats, prev_transforms_mapped_);
         }
         static_brush_uploaded_ = true;
     }
@@ -996,14 +1031,10 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
         inst.accelerationStructureReference = blas_ref;
         dst[n] = inst;
 
-        if (mats) {
-            mats[mat_idx * 3 + 0] = glm::vec4(glm::vec3(color), full_emissive ? 1.0f : 0.0f);
-            mats[mat_idx * 3 + 1] = glm::vec4(emissive, 0.0f);
-            mats[mat_idx * 3 + 2] = tex_params;
-        }
-        if (prevs) {
-            prevs[mat_idx] = prev_m;
-        }
+        tlas_dyn_mats_.push_back(glm::vec4(glm::vec3(color), full_emissive ? 1.0f : 0.0f));
+        tlas_dyn_mats_.push_back(glm::vec4(emissive, 0.0f));
+        tlas_dyn_mats_.push_back(tex_params);
+        tlas_dyn_prevs_.push_back(prev_m);
         ++n;
         ++mat_idx;
     };
@@ -1152,7 +1183,7 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     VkAccelerationStructureGeometryInstancesDataKHR inst_data{};
     inst_data.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
     inst_data.arrayOfPointers = VK_FALSE;
-    inst_data.data.deviceAddress = instances_buffer_address_;
+    inst_data.data.deviceAddress = instances_buffer_address_[frame_number_ % kFrameOverlap];
 
     VkAccelerationStructureGeometryKHR geom{};
     geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -1163,7 +1194,8 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
     // UPDATE mode if instance count is unchanged; BUILD mode otherwise.
     // Refits degrade as dynamic instances (jets, crates) drift; rebuild
     // from scratch every 30 updates to keep traversal fast.
-    const bool can_update = (n == prev_tlas_n_) && rt_initialized_ && (++tlas_refits_ % 30u) != 0u;
+    const bool can_update = (n == prev_tlas_n_) && rt_initialized_ && tlas_last_built_slot_ >= 0 &&
+                            (++tlas_refits_ % 30u) != 0u;
     VkAccelerationStructureBuildGeometryInfoKHR bgi{};
     bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
@@ -1171,22 +1203,26 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
                 VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
     bgi.mode = can_update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
                           : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    bgi.srcAccelerationStructure = can_update ? tlas_ : VK_NULL_HANDLE;
-    bgi.dstAccelerationStructure = tlas_;
+    // Build into this slot's stage TLAS (the graphics queue may still be
+    // tracing tlas_ for the previous frame); UPDATE refits from the newest
+    // built stage. record_tlas_publish() clones it into tlas_.
+    bgi.srcAccelerationStructure = can_update ? tlas_stage_[tlas_last_built_slot_] : VK_NULL_HANDLE;
+    bgi.dstAccelerationStructure = tlas_stage_[inst_slot];
+    tlas_last_built_slot_ = int(inst_slot);
+    tlas_publish_pending_ = true;
     bgi.geometryCount = 1;
     bgi.pGeometries = &geom;
     bgi.scratchData.deviceAddress = tlas_scratch_address_;
     prev_tlas_n_ = n;
 
-    vmaFlushAllocation(allocator_, instances_alloc_,  0,
+    vmaFlushAllocation(allocator_, instances_alloc_[inst_slot], 0,
                        sizeof(VkAccelerationStructureInstanceKHR) * n);
-    // Materials/prev_transforms layout: [0..M-1] static brushes,
-    // [M..mat_idx-1] dynamic. Flush the full populated prefix.
-    if (mat_idx > 0) {
-        vmaFlushAllocation(allocator_, materials_alloc_, 0,
-                           sizeof(glm::vec4) * 3 * mat_idx);
-        vmaFlushAllocation(allocator_, prev_transforms_alloc_, 0,
-                           sizeof(glm::mat4) * mat_idx);
+    // Dynamic materials / prev transforms: slots [static_mats, mat_idx).
+    if (mat_idx > static_mats) {
+        upload(materials_buffer_, sizeof(glm::vec4) * 3 * static_mats, tlas_dyn_mats_.data(),
+               sizeof(glm::vec4) * tlas_dyn_mats_.size(), materials_mapped_);
+        upload(prev_transforms_buffer_, sizeof(glm::mat4) * static_mats, tlas_dyn_prevs_.data(),
+               sizeof(glm::mat4) * tlas_dyn_prevs_.size(), prev_transforms_mapped_);
     }
 
     VkAccelerationStructureBuildRangeInfoKHR range{};

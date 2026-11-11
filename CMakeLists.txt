@@ -276,6 +276,7 @@ add_library(qlike_engine STATIC
     src/engine/vk_initializers.cpp
     src/engine/vk_engine.cpp
     src/engine/vk_engine/frame.cpp
+    src/engine/vk_engine/frame_upload.cpp
     src/engine/vk_engine/loader_screen.cpp
     src/engine/vk_engine/pipelines_setup.cpp
     src/engine/vk_engine/helpers.cpp

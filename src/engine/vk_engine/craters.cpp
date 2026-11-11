@@ -35,6 +35,10 @@ void VulkanEngine::make_crater(glm::vec3 pos, float size) {
     const float h0 = sample_terrain_height(pos.x, pos.z);
     if (h0 < rt_.water_level + 0.4f) return;                              // water / shoreline
     const auto t0 = std::chrono::steady_clock::now();
+    // Frames in flight: the previous frame may still read the heightmap
+    // images, terrain vertices / BLAS and the clutter instances this edits
+    // in place. A crater is a one-off event - drain the GPU first.
+    vkDeviceWaitIdle(device_);
 
     auto& R = spacejet_rng_state_;
     const float Rc   = 2.4f + 2.4f * size;          // bowl radius (m): bomb ~4.8, crash ~7.9

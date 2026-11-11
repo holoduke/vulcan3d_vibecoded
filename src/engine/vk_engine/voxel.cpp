@@ -238,7 +238,7 @@ void VulkanEngine::init_voxel() {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
             .size = sizeof(VoxelCameraUboData),
-            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,   // dst of the frame upload ring
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0, .pQueueFamilyIndices = nullptr,
         };
@@ -878,13 +878,12 @@ void VulkanEngine::update_voxel_camera_ubo() {
         data.pal[i] = glm::vec4(col, 1.0f);
     }
 
-    std::memcpy(voxel_camera_mapped_, &data, sizeof(data));
+    upload(voxel_camera_ubo_, 0, &data, sizeof(data), voxel_camera_mapped_);
 }
 
 void VulkanEngine::render_voxels(VkCommandBuffer cmd) {
     if (!voxel_pipeline_ || !voxel_world_ || voxel_world_->shapes().empty()) return;
-
-    update_voxel_camera_ubo();
+    // (camera UBO: staged in write_pass_ubos().)
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, voxel_pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
