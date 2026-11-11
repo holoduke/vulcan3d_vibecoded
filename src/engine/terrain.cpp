@@ -2,9 +2,6 @@
 
 #include "engine/log.h"
 
-#define FASTNOISE_LITE_IMPLEMENTATION
-#include <FastNoiseLite.h>
-
 #include <glm/glm.hpp>
 #include <glm/geometric.hpp>
 
@@ -147,7 +144,7 @@ Heightmap generate_heightmap_raymarch(const HeightmapParams& p) {
     const int H = hm.height();
     hm.heights.resize(static_cast<size_t>(W) * static_cast<size_t>(H));
 
-    // Multi-thread row-strip generation. 9 octaves Г— 2048² в‰€ 38 M FBM
+    // Multi-thread row-strip generation. 9 octaves × 2048² в‰€ 38 M FBM
     // evals — single-threaded would be ~10 s, parallel ~2-3 s on 8+
     // cores.
     const int hw = std::max<int>(1, static_cast<int>(std::thread::hardware_concurrency()));
@@ -177,83 +174,10 @@ Heightmap generate_heightmap_raymarch(const HeightmapParams& p) {
     return hm;
 }
 
-Heightmap generate_heightmap(const HeightmapParams& p) {
-    FastNoiseLite n;
-    n.SetSeed(p.seed);
-    n.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    n.SetFractalType(FastNoiseLite::FractalType_FBm);
-    n.SetFractalOctaves(p.octaves);
-    n.SetFractalLacunarity(p.lacunarity);
-    n.SetFractalGain(p.gain);
-    n.SetFrequency(p.frequency);
-
-    // Ridged secondary noise gives ridges on top of the rolling base
-    // — gives the terrain something rocky to look at without specific
-    // texturing in Phase 1.
-    FastNoiseLite ridge;
-    ridge.SetSeed(p.seed + 1);
-    ridge.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    ridge.SetFractalType(FastNoiseLite::FractalType_Ridged);
-    ridge.SetFractalOctaves(4);
-    ridge.SetFractalLacunarity(2.1f);
-    ridge.SetFractalGain(0.5f);
-    ridge.SetFrequency(p.frequency * 1.7f);
-
-    Heightmap hm;
-    hm.dim  = p.dim;
-    hm.cell = p.cell_size;
-    hm.origin_x = -0.5f * static_cast<float>(p.dim) * p.cell_size;
-    hm.origin_z = -0.5f * static_cast<float>(p.dim) * p.cell_size;
-    hm.heights.resize(static_cast<size_t>(hm.width()) * static_cast<size_t>(hm.height()));
-
-    auto smoothstep = [](float a, float b, float t) {
-        if (a == b) return t < a ? 0.0f : 1.0f;
-        float u = std::clamp((t - a) / (b - a), 0.0f, 1.0f);
-        return u * u * (3.0f - 2.0f * u);
-    };
-
-    const float plat_outer_x = p.plateau_extent.x + p.plateau_blend;
-    const float plat_outer_z = p.plateau_extent.y + p.plateau_blend;
-
-    for (int iz = 0; iz < hm.height(); ++iz) {
-        for (int ix = 0; ix < hm.width(); ++ix) {
-            float wx = hm.origin_x + static_cast<float>(ix) * hm.cell;
-            float wz = hm.origin_z + static_cast<float>(iz) * hm.cell;
-
-            float base = n.GetNoise(wx, wz);              // [-1, 1]
-            float r    = ridge.GetNoise(wx, wz);          // [-1, 1]
-            // Mix: base rolling hills + ridge contribution at higher
-            // elevations only. Empirical weights — pick something
-            // believable.
-            float h = base * 0.7f + std::pow(std::max(0.0f, r), 1.5f) * 0.5f;
-            h *= p.height_scale;
-
-            // Plateau blend: inside the inner extent we hard-set to
-            // plateau_height. In the blend ring we ease from terrain
-            // into plateau via smoothstep on the *outer* distance.
-            float dx = std::abs(wx - p.plateau_center.x);
-            float dz = std::abs(wz - p.plateau_center.y);
-            float d_in_x  = std::max(0.0f, dx - p.plateau_extent.x);
-            float d_in_z  = std::max(0.0f, dz - p.plateau_extent.y);
-            float d = std::max(d_in_x, d_in_z);
-            // d=0 inside plateau, d>0 outside. Blend over [0, plateau_blend].
-            float t = 1.0f - smoothstep(0.0f, p.plateau_blend, d);
-            float final_h = h * (1.0f - t) + p.plateau_height * t;
-            (void)plat_outer_x; (void)plat_outer_z;
-
-            hm.heights[static_cast<size_t>(iz) * static_cast<size_t>(hm.width()) +
-                       static_cast<size_t>(ix)] = final_h;
-        }
-    }
-    log::infof("[terrain] heightmap %dx%d cells, %.0fm side, plateau h=%.1f",
-               p.dim, p.dim, hm.side(), p.plateau_height);
-    return hm;
-}
-
 namespace {
 
 // Generate one chunk's vertex grid + smoothed per-vertex normals from
-// `hm` covering [origin_ix, origin_ix + sample_dim) Г— [origin_iz, ...).
+// `hm` covering [origin_ix, origin_ix + sample_dim) × [origin_iz, ...).
 // Per-vertex normals come from the global heightmap gradient (central
 // differences) so adjacent chunks agree on shared-edge normals — face-
 // average accumulation only saw triangles WITHIN a chunk and produced
@@ -341,7 +265,7 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
         gz = std::clamp(static_cast<int>(std::floor(fz + 0.5f)),
                          0, hm.height() - 1);
     };
-    // Interior (sample_dim Г— sample_dim) at densified resolution.
+    // Interior (sample_dim × sample_dim) at densified resolution.
     for (int iz = 0; iz < sample_dim; ++iz) {
         for (int ix = 0; ix < sample_dim; ++ix) {
             float wx = hm.origin_x + (static_cast<float>(origin_ix) +
@@ -357,7 +281,7 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
             aabb_max = glm::max(aabb_max, p);
         }
     }
-    // Skirt twins: 4 edges Г— sample_dim verts (the densified perimeter).
+    // Skirt twins: 4 edges × sample_dim verts (the densified perimeter).
     // Each one is the interior edge vertex with Y dropped by
     // kTerrainSkirtDepth. Normal inherits from the corresponding
     // interior vertex (heightmap-gradient normal, mostly upward) so the
@@ -406,7 +330,7 @@ void gen_chunk_verts(const Heightmap& hm, int origin_ix, int origin_iz,
 
 
 
-// Full-LOD index buffer for a chunk of `sample_dim` Г— `sample_dim` verts.
+// Full-LOD index buffer for a chunk of `sample_dim` × `sample_dim` verts.
 void gen_full_indices(int sample_dim, std::vector<uint32_t>& out) {
     const int cells = sample_dim - 1;
     out.clear();
@@ -428,7 +352,7 @@ void gen_full_indices(int sample_dim, std::vector<uint32_t>& out) {
 
 namespace {
 // Inner ray-march for a single rectangular region. `out` points to the
-// top-left of a wГ—h sub-image with the given row stride (in bytes).
+// top-left of a w×h sub-image with the given row stride (in bytes).
 // RG8 interleaved, 2 bytes per texel:
 //   R: 0 = lit, 255 = in shadow
 //   G: blocker distance along the sun ray, t / 400 m normalised to 0-255
@@ -542,7 +466,7 @@ std::vector<uint8_t> bake_heightmap_shadow(const Heightmap& hm,
     glm::vec3 L = glm::normalize(sun_dir);
 
     // Multi-threaded — split rows across hardware threads. ~1024² cells
-    // Г— ~80 marching steps drops from ~1s single-threaded to ~100-150 ms
+    // × ~80 marching steps drops from ~1s single-threaded to ~100-150 ms
     // with 8-12 worker threads. Used at level load; sun-change re-bakes
     // go through the progressive tile path instead.
     unsigned n_threads = std::max(1u, std::thread::hardware_concurrency());

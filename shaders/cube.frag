@@ -35,7 +35,7 @@ layout(location = 5) flat in vec4 vTexParams;  // x: albedo idx, y: normal idx,
                                                //    1 = object-space triplanar
 layout(location = 6) in vec3 vObjectPos;
 layout(location = 7) in vec3 vObjectNormal;
-layout(location = 8) in vec4 vPrevClip;  // prev_view_proj Г— prev_model Г— local_pos
+layout(location = 8) in vec4 vPrevClip;  // prev_view_proj × prev_model × local_pos
 // Pre-extrusion shell base. For SPOM wall brushes cube.vert pushes the
 // rasterised vertex out by kShellThickness along the per-face normal;
 // vShellBase carries the original (un-extruded) world position. The
@@ -104,7 +104,7 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     //   terrain_params.x = fog_strength (atmospheric perspective)
     //   terrain_params.y = wrap_strength (half-Lambert)
     //   terrain_params.z = detail_strength (texture brightness)
-    //   terrain_params.w = shadow_softness_scale (PCSS cone Г— this)
+    //   terrain_params.w = shadow_softness_scale (PCSS cone × this)
     vec4  terrain_params;
     // Per-layer height-blend smoothstep edges:
     //   terrain_h_low.xy  = sand→grass start..end
@@ -3248,7 +3248,7 @@ void main() {
     // --- Sun shadow (RT, contact-hardening / PCSS-style) ---
     // 1. BLOCKER SEARCH: a handful of cheap closest-hit rays in a wide cone
     //    around L; record the average distance to the occluder.
-    // 2. PENUMBRA ESTIMATE: cone half-angle в€ќ avg_blocker_distance Г— softness.
+    // 2. PENUMBRA ESTIMATE: cone half-angle в€ќ avg_blocker_distance × softness.
     //    Close-by occluders give a small cone (sharp shadow); far ones give
     //    a wide cone (soft shadow). Real-world effect: shadow under a pole
     //    is razor-sharp, the same shadow stretched across the floor is fuzzy.
@@ -3362,7 +3362,7 @@ void main() {
         }
         vec3 origin = shading_pos + bias_n * bias;
 
-        // 1. Blocker search — 2 rays in a wider cone (4Г— base softness) so we
+        // 1. Blocker search — 2 rays in a wider cone (4× base softness) so we
         //    catch occluders even when the surface is close to lit. Was 4
         //    rays before; halving cuts ~25% of the per-pixel shadow ray
         //    budget (blocker:shadow ≈ 4:N_s_eff was 4:8 worst case, now
@@ -3873,12 +3873,12 @@ void main() {
 
     // --- Path-traced GI (1..N bounces) ---
     // Each sample follows a path of up to N_bounces ray segments.
-    //   - On a surface hit: accumulate emissive + albedoГ—scene_light (a cheap
+    //   - On a surface hit: accumulate emissive + albedo×scene_light (a cheap
     //     local-light approximation), tint the throughput by surface albedo,
     //     bounce in a cosine-weighted hemisphere oriented around the
     //     approximate hit normal (-ray_dir).
-    //   - On a miss (sky): accumulate throughput Г— procedural sky and stop.
-    // Samples are stratified on a sqrt(N)Г—sqrt(N) grid for clean low-N look.
+    //   - On a miss (sky): accumulate throughput × procedural sky and stop.
+    // Samples are stratified on a sqrt(N)×sqrt(N) grid for clean low-N look.
     vec3 gi_indirect = vec3(0.0);
     // Sky visibility — fraction of first-bounce GI rays that escape the
     // scene. Used after the GI loop to attenuate the (sky-derived) ambient

@@ -423,7 +423,7 @@ void VulkanEngine::refresh_terrain_collision() {
     // Jolt has no incremental update for HeightFieldShape — we rebuild
     // the whole shape. Mirrors the sub-grid trim done at level load:
     // when sample_count would be odd Jolt's block-size requirement
-    // forces us onto a 2048Г—2048 sub-grid taken from the 2049² heightmap.
+    // forces us onto a 2048×2048 sub-grid taken from the 2049² heightmap.
     //
     // For each Jolt sample we store max(self, neighbours). Reason:
     // Jolt's HeightFieldShape is a per-cell triangulation — the
@@ -1116,8 +1116,8 @@ void VulkanEngine::init_terrain_clod() {
                                                terrain_data_.dim,
                                                terrain_data_.cell, 16.0f);
 
-    // Host-visible per-frame instance ring: kFrameOverlap slots Г— two
-    // lists (camera, shadow) Г— kClodMaxInstances.
+    // Host-visible per-frame instance ring: kFrameOverlap slots × two
+    // lists (camera, shadow) × kClodMaxInstances.
     const VkDeviceSize bytes = VkDeviceSize(kFrameOverlap) * 2 *
                                kClodMaxInstances * sizeof(ClodInstance);
     VkBufferCreateInfo bci{};
@@ -1827,7 +1827,7 @@ void VulkanEngine::destroy_grass_mask_texture() {
 
 // Bake the 3-octave fog wisp pattern into a 256² R8 texture so the
 // terrain raymarch's volumetric fog density + godray probe can sample
-// it once instead of running 3Г— noise2 per tap. World-space q is
+// it once instead of running 3× noise2 per tap. World-space q is
 // rescaled to UV by 1/16 so the texture tiles every 16 q-units (в‰€800 m
 // of world); the texture sampler uses REPEAT addressing so time
 // scrolling and large camera moves stay seamless. Wave-pattern doesn't

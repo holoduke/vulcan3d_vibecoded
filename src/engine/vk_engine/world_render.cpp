@@ -957,19 +957,6 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     }
 
     prof_mark(cmd, "w_brushes_dyn");
-    // SPOM silhouette shell pass DISABLED. Iterations explored:
-    //   1. cube.vert per-face extrusion (offset bug on walls)
-    //   2. Paper SSDM screen-space remap (paper assumes outward bumps;
-    //      our inward-recessed bricks give barely-visible extension)
-    //   3. Shell mesh, normal-push only (corner gaps show sky)
-    //   4. Shell mesh + lateral push (corners fill but shell overdraws
-    //      walls with simpler N·L lighting → "weird shadows")
-    // Real dramatic silhouette extension requires either stencil-based
-    // masking (touches every depth-aware pipeline) or re-authored
-    // outward-bump height maps. Leaving render_shell_pass / shell
-    // pipeline in the codebase so re-enabling is one-line.
-    // render_shell_pass(cmd);
-
     // Bullet-impact decals — drawn AFTER static + dyn brushes so they sit
     // on top of the wall textures, BEFORE sparks so the spark glow
     // overlaps the scorch mark visually. Uses the still-bound cube mesh.

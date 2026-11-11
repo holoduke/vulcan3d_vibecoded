@@ -255,13 +255,6 @@ void VulkanEngine::init() {
     // live when compose's descriptor set is written.
     init_taa();
     init_taau();
-    // SSDM Phase 1: dedicated displacement-vector pass. Must run after
-    // init_taa() so render_extent_ is finalised (the disp image sizes to it)
-    // and before init_compose() in case future phases hook into compose.
-    // init_ssdm(): disabled - its passes are commented out (frame.cpp /
-    // world_render.cpp) but it still allocated 3 screen-size images +
-    // pipelines and rebuilt them on every resize. Code kept for reference.
-    if (std::getenv("QLIKE_SSDM_LEGACY")) init_ssdm();
     init_bloom();
     init_compose();
     // SVGF moments + 3-pass a-trous pipelines (4a-deep). Must run
@@ -1179,12 +1172,6 @@ void VulkanEngine::shutdown() {
     guarded("destroy_compose", [&]{ destroy_compose(); });
     guarded("destroy_bloom",   [&]{ destroy_bloom(); });
     guarded("destroy_taau",    [&]{ destroy_taau(); });
-    // SSDM owns its own pipeline + image; tear down before destroy_taa
-    // which removes the cube vert_module_/pipeline_layout_ it borrows.
-    // Actually those live on init_pipeline (destroyed in destroy_pipeline),
-    // not destroy_taa, but the ordering doesn't matter for SSDM's own
-    // resources — they're self-contained.
-    guarded("destroy_ssdm",    [&]{ destroy_ssdm(); });
     // SVGF passes own pipelines + descriptors that reference
     // linear_sampler_ (owned by TAA) and the SVGF storage image views
     // (owned by init_svgf_targets). Tear them down BEFORE destroy_taa

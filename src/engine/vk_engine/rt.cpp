@@ -452,7 +452,7 @@ void VulkanEngine::bake_merged_static_blas() {
     // intersections). We still pack the full Vertex struct because that's
     // the only path our `create_mesh_from_data` upload helper takes.
     //
-    // 24 verts Г— N brushes; 36 indices Г— N brushes (12 tris Г— N brushes).
+    // 24 verts × N brushes; 36 indices × N brushes (12 tris × N brushes).
     // For a 200-brush castle that's 4800 verts / 7200 indices — trivial.
     const uint32_t M = static_cast<uint32_t>(world_.brushes.size());
     if (M == 0) {

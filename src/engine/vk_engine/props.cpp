@@ -1139,7 +1139,7 @@ void VulkanEngine::init_doors() {
     const float plateau_y       = 22.0f;
     const float ent_half        = 1.6f;
     const float gate_z          = 11.0f;
-    const float panel_w_half    = 0.78f;   // 0.78 Г— 2 = 1.56 m; sub-2 cm gap
+    const float panel_w_half    = 0.78f;   // 0.78 × 2 = 1.56 m; sub-2 cm gap
                                             // at meet line so the closed
                                             // panels don't z-fight in the
                                             // middle
@@ -1197,7 +1197,7 @@ void VulkanEngine::draw_doors(VkCommandBuffer cmd, const glm::mat4& vp,
         // Hinge-relative rotation: translate the local cube origin to the
         // panel centre via closed_offset, rotate around the hinge, then
         // place the whole thing in world. cube mesh is unit-cube
-        // (-0.5..+0.5), so scale by full panel dimensions (2 Г— half).
+        // (-0.5..+0.5), so scale by full panel dimensions (2 × half).
         const glm::mat4 model =
             glm::translate(glm::mat4(1.0f), d.hinge_world) *
             glm::rotate(glm::mat4(1.0f), d.angle, glm::vec3(0, 1, 0)) *

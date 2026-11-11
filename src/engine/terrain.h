@@ -56,8 +56,6 @@ struct Heightmap {
     float sample_world(float x, float z) const;
 };
 
-Heightmap generate_heightmap(const HeightmapParams& p);
-
 // FBM heightmap that mirrors the shader's terrain_raymarch.frag exactly:
 // 9-octave value-noise FBM with derivative-erosion, ~37° per-octave
 // rotation, plateau blend toward p.plateau_height inside the gameplay

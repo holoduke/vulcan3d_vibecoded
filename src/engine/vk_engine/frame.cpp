@@ -526,21 +526,6 @@ void VulkanEngine::draw(uint32_t img_index) {
     vkCmdEndRendering(frame.command_buffer);
     prof_mark(frame.command_buffer, "world_tail");
 
-    // ---------- Pass 1b: SSDM displacement vector ----------
-    // Runs BEFORE the post-world transition batch flips depth to
-    // SHADER_READ_ONLY -- SSDM needs depth still as a DEPTH_ATTACHMENT for
-    // its LESS_OR_EQUAL test against the main pass's rasterised walls.
-    // Self-managed image transitions on ssdm_disp_image_: SHADER_READ ->
-    // COLOR_ATTACHMENT for the pass, then back to SHADER_READ for Phase 2
-    // consumers. No effect downstream yet (Phase 1 only populates the
-    // image; the mip-pyramid + remap passes that consume it are Phases
-    // 2-4 still to land).
-    // DISABLED: nothing consumes the SSDM images (compose_ssdm and the
-    // shell pass are both commented out) and it cost ~7% of the frame:
-    // a re-draw of every SPOM brush plus two pyramid passes. The image
-    // stays in SHADER_READ_ONLY from init, so re-enabling is one line.
-    // render_world_ssdm_disp(frame.command_buffer);
-
     // ---------- Pass 2: TAA into history_image_[history_write_slot_] ----------
     // Flip scene_color + depth into shader-read for TAA in one batched
     // barrier (was 2 calls + a dead motion_vec one). The motion_vec
@@ -548,16 +533,6 @@ void VulkanEngine::draw(uint32_t img_index) {
     // saves a real cross-pass cache flush on the 16 MB RG16F surface.
     // Perf P1+P2.
     {
-        // Shell silhouette pass DISABLED — 7 iterations all produced
-        // different artifacts. With wide shell (12cm + lateral push),
-        // adjacent SPOM brushes fill gaps between them with dimly-lit
-        // shell bricks ("giant square shadow"). With narrow shell (4cm
-        // outward-only), extension is invisible at typical view distance.
-        // Fundamental incompatibility: inward-recessed bricks + don't
-        // change geometry + match cube.frag lighting + extend past
-        // corners are mutually exclusive without re-authored height maps
-        // or stencil masking. Dormant code in shaders/shell.{vert,frag}
-        // + ssdm.cpp::render_shell_pass.
         const vkinit::ImageTransition kPostWorld[] = {
             { scene_color_image_, VK_IMAGE_ASPECT_COLOR_BIT,
               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -589,16 +564,6 @@ void VulkanEngine::draw(uint32_t img_index) {
             vkCmdPipelineBarrier2(frame.command_buffer, &di);
         }
     }
-
-    // ---------- Pass 1c: SSDM compose remap (Phase 4) ----------
-    // DISABLED: Paper SSDM works for OUTWARD bumps; our SPOM bricks are
-    // INWARD-recessed so the screen-space barycenter at sky-adjacent
-    // pixels converges to ~0 and silhouette extension is not visible.
-    // Replaced with the dedicated shell-mesh pass (render_shell_pass)
-    // which actually draws extruded geometry past the brush edge and
-    // discards via parallax march. Shell pass runs INSIDE the main
-    // rendering scope (see render_world).
-    // compose_ssdm(frame.command_buffer);
 
     // ---------- Pass 1d: Deferred lighting (Phase 3 of migration) ----------
     // Reads gbuffer0/1 + depth + sun_shadow and writes lit colour to

@@ -236,7 +236,7 @@ void VulkanEngine::init_textures() {
     // Parallel-decode helper: kicks off N JPG decodes on worker threads,
     // then serialises the GPU uploads on the calling (graphics-queue)
     // thread. Wall-clock for init drops from sum(decode+upload) to
-    // max(decode) + sum(upload) — ~5Г— on 8K JPGs with 8 CPU cores.
+    // max(decode) + sum(upload) — ~5× on 8K JPGs with 8 CPU cores.
     auto probe_parallel = [&](const std::vector<std::pair<std::string, VkFormat>>& items,
                               std::vector<TextureSlot>& out) {
         out.assign(items.size(), {});

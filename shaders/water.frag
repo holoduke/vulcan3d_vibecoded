@@ -823,7 +823,7 @@ float terrainM_lod(vec2 p, float ray_t) {
     return h;
 }
 
-// Normal-detail FBM — finite-difference normals call this 3Г— per hit
+// Normal-detail FBM — finite-difference normals call this 3× per hit
 // pixel, so it's the single biggest cost in calcNormal. Octave count
 // is pc.tex_params.w (4..16). 8 is barely-distinguishable from 16 at
 // gameplay distances.
@@ -1267,7 +1267,7 @@ vec3 calcNormal(vec3 pos, float t) {
 // (very soft). Cubic smoothstep at the end softens the linear
 // penumbra ramp.
 float calcShadow(vec3 pos, vec3 sunDir) {
-    // Driven by global Shadow softness slider Г— per-terrain
+    // Driven by global Shadow softness slider × per-terrain
     // softness scale. Same combination the PCSS below uses so both
     // shadow types respond to the same UI controls in lock-step.
     float soft_g = scene.rt_params.x;
@@ -2588,7 +2588,7 @@ void main() {
         if (scene.terrain_params.w > 0.0) {
             base_softness *= max(0.05, scene.terrain_params.w);
         }
-        // Sample count from global Shadow samples slider Г— near
+        // Sample count from global Shadow samples slider × near
         // multiplier, but capped to 6 for the terrain shader. PCSS
         // on terrain at the user's full slider (13+) was the dominant
         // per-frame RT shadow cost and pushed total per-frame work
@@ -2610,7 +2610,7 @@ void main() {
         // Per-pixel + per-frame seed — TAA averages noisy samples.
         uvec3 seed_base = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
 
-        // 1. Blocker search (4 rays, 4Г— softness cone).
+        // 1. Blocker search (4 rays, 4× softness cone).
         const int kBlocker = 4;
         float sum_t = 0.0;
         int   hits  = 0;
@@ -2939,7 +2939,7 @@ void main() {
     }
 
     // Wavelength-dependent atmospheric extinction (blue attenuates
-    // ~4Г— faster than red), with a sun-tinted fog colour near the sun
+    // ~4× faster than red), with a sun-tinted fog colour near the sun
     // direction so the horizon glows warm where the sun touches it.
     vec3 extinction = exp(-t * 0.00025 * vec3(1.0, 1.5, 4.0));
     float sundot = clamp(dot(rd, sunDir), 0.0, 1.0);
@@ -2961,7 +2961,7 @@ void main() {
     //                                            over the segment]
     //   trans *= exp(-σe * dt)
     //   col_out += trans_prev * Sint
-    // Fog density = exp(-y / scaleHeight) Г— (1 + slow FBM scroll) so
+    // Fog density = exp(-y / scaleHeight) × (1 + slow FBM scroll) so
     // the fog has subtle volumetric variation (wisps in the valleys)
     // instead of a uniform sheet. No per-step volumetric shadow ray
     // — the HG phase already gives the directional sun glow.
@@ -3045,7 +3045,7 @@ void main() {
             vec2 q = p.xz * 0.020 + vec2(scene.water_params.w * 0.05);
             float w = textureLod(u_fog_wisp, q * (1.0 / 16.0), 0.0).r;
             // Centred around 0.5 so noise = 1.0 → "no modulation" and
-            // noise = 0 → density Г—0.2 (thin patch). Strength slider
+            // noise = 0 → density ×0.2 (thin patch). Strength slider
             // controls how much the noise can carve gaps.
             float wisp = mix(1.0, 2.0 * w, fog_noise);
             wisp = clamp(wisp, 0.2, 2.0);

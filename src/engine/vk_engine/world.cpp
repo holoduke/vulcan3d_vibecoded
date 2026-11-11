@@ -103,7 +103,7 @@ void VulkanEngine::init_world() {
         //     so toggling modes is seamless and the world is
         //     consistent — and the planned near-distance displacement-
         //     LOD work needs the mesh to be this same FBM anyway.
-        // generate_heightmap() (FastNoiseLite) is now legacy/unused.
+        // (The FastNoiseLite generator was removed.)
         Heightmap hm = generate_heightmap_raymarch(hp);
         // Capture procedural baseline NOW (before any disk-overlay
         // load). The raymarch shader's heightmap-delta texture is
@@ -179,9 +179,9 @@ void VulkanEngine::init_world() {
         terrain_data_.origin_x = hm.origin_x;
         terrain_data_.origin_z = hm.origin_z;
         terrain_data_.heights = hm.heights;
-        // Bake the 32Г—32 hi-Z max-cell grid from the (post sculpt-
+        // Bake the 32×32 hi-Z max-cell grid from the (post sculpt-
         // overlay) heightmap. Each grid cell holds the MAX terrain
-        // height over its 64 m Г— 64 m footprint + a 15 m safety
+        // height over its 64 m × 64 m footprint + a 15 m safety
         // margin. The margin covers (a) the stride-free exact max so
         // no real peak is under-reported, and (b) moderate runtime
         // sculpt brush raises before a rebake. The marcher only uses
@@ -281,7 +281,7 @@ void VulkanEngine::init_world() {
         // Now that brushes are at their final positions, pre-bake the
         // static model matrices used every frame by the depth pre-pass,
         // color pass and sun-shadow pass. Static brushes don't move
-        // after this; rebuilding (translate*scale) ~190 Г— 3 passes per
+        // after this; rebuilding (translate*scale) ~190 × 3 passes per
         // frame was ~25 µs/frame and a perfect cache target. (Perf P3.)
         static_brush_models_.resize(world_.brushes.size());
         for (size_t i = 0; i < world_.brushes.size(); ++i) {
