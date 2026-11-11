@@ -163,7 +163,10 @@ void VulkanEngine::init() {
     // until something forces a recreate. If the saved scale differs from
     // 1.0, apply it now so the user's preferred scale survives a restart
     // without a manual Apply click.
-    if (std::abs(rt_.render_scale - 1.0f) > 1e-3f) {
+    // Same for hdr_output: init_swapchain picked the colour space from the
+    // DEFAULT before the cfg was read.
+    const bool hdr_mismatch = (rt_.hdr_output != 0) != hdr_active_;
+    if (std::abs(rt_.render_scale - 1.0f) > 1e-3f || hdr_mismatch) {
         apply_render_scale();
     }
     // FSR2 mip-bias depends on the loaded fsr2_enabled flag + the actual
@@ -1055,6 +1058,16 @@ void VulkanEngine::run(const RunOptions& opts) {
                     render_semaphores_.clear();
                     init_swapchain();
                     continue;   // re-enter loop with fresh swapchain
+                }
+                // Deferred from draw(): create the FG SwapChain proxy between
+                // frames (it replaces the swapchain the frame would use).
+                if (fsr3_swapchain_init_pending_) {
+                    fsr3_swapchain_init_pending_ = false;
+                    if (fg_should_run && !fsr3_swapchain_active_ && !fsr3_swapchain_fatal_) {
+                        vkDeviceWaitIdle(device_);
+                        init_fsr3_swapchain();
+                        continue;
+                    }
                 }
             }
             hz_ms[2] = hz_mark(hz_t);

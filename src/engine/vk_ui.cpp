@@ -782,7 +782,13 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("aberration",       &rt_.lens_flare_aberration, 0.0f, 0.02f, "%.4f");
 
         if (ImGui::Button("Reset to defaults")) {
+            const float old_scale = rt_.render_scale;
+            const float old_tr_scale = rt_.terrain_raymarch_scale;
             rt_ = RtSettings{};
+            // Rebuild what the defaults resize (same as the Apply / preset paths).
+            if (std::abs(rt_.render_scale - old_scale) > 1e-3f) apply_render_scale();
+            if (std::abs(rt_.terrain_raymarch_scale - old_tr_scale) > 1e-3f)
+                recreate_terrain_raymarch_lowres();
         }
         ImGui::SameLine();
         if (ImGui::Button("Low")) {

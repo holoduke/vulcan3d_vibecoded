@@ -102,24 +102,28 @@ void VulkanEngine::upload(VkBuffer dst, VkDeviceSize dst_offset, const void* src
 void VulkanEngine::flush_frame_uploads(VkCommandBuffer cmd) {
     UploadRing& r = upload_ring_;
     r.open = false;
-    if (r.copies.empty()) return;
     const uint32_t slot = uint32_t(frame_number_ % kFrameOverlap);
-    vmaFlushAllocation(allocator_, r.alloc[slot], 0, r.used);
 
-    // WAR/WAW: the previous frame's reads (any stage) and copies finish
-    // before this frame's copies overwrite the buffers.
+    // Frame-start barrier, ALWAYS emitted (not only when there are copies):
+    // besides ordering the upload copies after the previous frame's reads
+    // (WAR/WAW), it is what orders this frame's UNDEFINED -> attachment
+    // discards of the shared render targets (scene colour, G-buffer,
+    // depth, ...; recorded with TOP_OF_PIPE sources) after the previous,
+    // possibly still running, frame finished sampling them.
     VkMemoryBarrier2 pre{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
     pre.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     pre.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
-    pre.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-    pre.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    pre.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;   // full: chains to TOP_OF_PIPE barriers too
+    pre.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
     VkDependencyInfo di{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
     di.memoryBarrierCount = 1;
     di.pMemoryBarriers = &pre;
     vkCmdPipelineBarrier2(cmd, &di);
+    if (r.copies.empty()) return;
+    vmaFlushAllocation(allocator_, r.alloc[slot], 0, r.used);
 
     // One vkCmdCopyBuffer per destination (regions are in staging order).
-    std::vector<VkBufferCopy> regions;
+    static std::vector<VkBufferCopy> regions;   // reused (render thread only)
     for (size_t i = 0; i < r.copies.size();) {
         const VkBuffer dst = r.copies[i].dst;
         regions.clear();

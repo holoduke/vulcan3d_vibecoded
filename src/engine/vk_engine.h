@@ -2041,6 +2041,7 @@ private:
     // false. SEH-guarded init falls back to plain swapchain on AV.
     void* fsr3_swapchain_context_ = nullptr;  // ffxContext (opaque)
     bool  fsr3_swapchain_active_  = false;
+    bool  fsr3_swapchain_init_pending_ = false;   // draw() asks; run() creates between frames
     bool  fsr3_swapchain_fatal_   = false;
     // Extra graphics-family queues for the SDK's distinct-queue check.
     // Pulled at device-create when we requested 4 queues; null on

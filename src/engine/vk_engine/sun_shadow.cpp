@@ -185,6 +185,7 @@ void VulkanEngine::init_sun_shadow_resources() {
 }
 
 void VulkanEngine::destroy_sun_shadow_resources() {
+    deferred_desc_sig_ = 0;   // deferred lighting samples sun_shadow_view_ (binding 5): rebind
     if (sun_shadow_view_) {
         vkDestroyImageView(device_, sun_shadow_view_, nullptr);
         sun_shadow_view_ = VK_NULL_HANDLE;

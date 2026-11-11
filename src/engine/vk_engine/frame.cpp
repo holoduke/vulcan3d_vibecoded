@@ -881,7 +881,7 @@ void VulkanEngine::record_lighting_and_upscale(FrameData& frame) {
     // frame cost is negligible vs the world pass and avoids a one-frame
     // black flash on toggle.
     if (rt_.fsr2_enabled) {
-        if (rt_.fsr_backend == 2) {
+        if (rt_.fsr_backend == 2 && dlss_active()) {   // else: FSR2 fallback below
             dispatch_dlss(frame.command_buffer);   // NVIDIA DLSS (Streamline)
         } else
         if (rt_.fsr_backend == 1 && !fsr3_fatal_) {
@@ -920,8 +920,11 @@ void VulkanEngine::record_lighting_and_upscale(FrameData& frame) {
                     if (fsr3_fg_context_valid_) {
                         // Lazy-init the SwapChain proxy so generated frames
                         // actually reach the display via the SDK's pacer.
+                        // NOT here: replacing the swapchain mid-draw left this
+                        // frame recording into / presenting an image of the old
+                        // one. run() does it before the next acquire.
                         if (!fsr3_swapchain_active_ && !fsr3_swapchain_fatal_) {
-                            init_fsr3_swapchain();
+                            fsr3_swapchain_init_pending_ = true;
                         }
                     }
                 }

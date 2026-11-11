@@ -462,10 +462,15 @@ template <class T> void write_value(std::ostream& o, const T& v) {
 template <class T> bool parse_value(const std::string& s, T& out) {
     if constexpr (std::is_same_v<T, bool>)      { out = std::stoi(s) != 0; }
     else if constexpr (std::is_same_v<T, int>)  { out = std::stoi(s); }
-    else if constexpr (std::is_same_v<T, float>) { out = std::stof(s); }
+    else if constexpr (std::is_same_v<T, float>) {
+        const float f = std::stof(s);
+        if (!std::isfinite(f)) return false;   // NaN would also break the autosave change check
+        out = f;
+    }
     else if constexpr (std::is_same_v<T, glm::vec3>) {
         glm::vec3 v;
         if (std::sscanf(s.c_str(), "%f %f %f", &v.x, &v.y, &v.z) != 3) return false;
+        if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) return false;
         out = v;
     } else if constexpr (std::is_enum_v<T>) {
         const int m = std::stoi(s);   // only enum: TerrainBrushMode (0..ErodeSmooth = 7)
@@ -479,6 +484,17 @@ template <class T> bool parse_value(const std::string& s, T& out) {
 } // namespace
 
 void VulkanEngine::save_settings() const {
+    // Test / capture runs (--frames, --screenshot, --autodemo, --scene,
+    // QLIKE_TEST_* hooks) pin or move the camera and tweak modes - never let
+    // them overwrite the player's saved cfg (pose, toggles).
+    static const bool test_run = [this] {
+        for (const char* e : { "QLIKE_TEST_HOLD", "QLIKE_TEST_PAN", "QLIKE_TEST_SHOOTDOWN",
+                               "QLIKE_TEST_BOOM", "QLIKE_TEST_BLAST", "QLIKE_TEST_FIRE" })
+            if (std::getenv(e)) return true;
+        return opts_.max_frames > 0 || !opts_.screenshot_path.empty() ||
+               opts_.autodemo_seconds > 0.0f || opts_.scene != 0;
+    }();
+    if (test_run) return;
     std::ofstream f(kSettingsPath);
     if (!f) {
         log::warnf("could not open %s for write", kSettingsPath);
@@ -572,7 +588,13 @@ void VulkanEngine::load_settings() {
     clampf(rt_.render_scale,     0.4f,    2.5f);
     clampi(rt_.quality_preset,  -1,         3);  // -1 = custom
     clampi(rt_.ao_mode,          0,         3);  // 0=off,1=fast,2=RTAO,3=HBAO
-    clampi(rt_.spom_mode,        0,         2);
+    clampi(rt_.spom_mode,        0,         3);  // 0 flat, 1 SPOM, 2 SSDM, 3 POM
+    clampi(rt_.grass_shadow_samples, 0,      8);  // shader loop count
+    clampi(terrain_brush_fbm_octaves_, 2,    9);
+    clampf(terrain_brush_radius_,  0.5f,  50.0f);
+    // Shadow-bake supersample: only 1 / 2 / 4 exist (anything else made the
+    // per-frame "changed?" check fire forever, or a huge texture).
+    rt_.terrain_bake_supersample = rt_.terrain_bake_supersample >= 4 ? 4 : (rt_.terrain_bake_supersample >= 2 ? 2 : 1);
     clampf(game_.gravity,        0.0f, 1500.0f);
     clampi(game_.cubes_per_minute, 0,    1000);
     clampf(game_.bullet_mass,    0.5f,  200.0f);

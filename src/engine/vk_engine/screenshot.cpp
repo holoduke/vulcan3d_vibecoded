@@ -33,9 +33,19 @@ void VulkanEngine::capture_screenshot(VkCommandBuffer cmd, VkImage src,
                            readback_buffer_, 1, &region);
 
     vkinit::transition_image(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pre_layout);
+    // Make the copy visible to the host read in write_ppm (after the fence).
+    VkMemoryBarrier2 hb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+    hb.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    hb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    hb.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+    hb.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+    VkDependencyInfo hdi{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    hdi.memoryBarrierCount = 1; hdi.pMemoryBarriers = &hb;
+    vkCmdPipelineBarrier2(cmd, &hdi);
 }
 
 void VulkanEngine::write_ppm(const std::string& path, uint32_t w, uint32_t h) {
+    vmaInvalidateAllocation(allocator_, readback_alloc_, 0, VK_WHOLE_SIZE);   // non-coherent memory
     VmaAllocationInfo info{};
     vmaGetAllocationInfo(allocator_, readback_alloc_, &info);
     void* mapped = info.pMappedData;

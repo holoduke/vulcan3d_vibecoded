@@ -629,7 +629,6 @@ void VulkanEngine::destroy_taau() {
 // history sampler to either history_view_ (TAAU off) or taau_view_ (on).
 // Idempotent — does nothing when bound state already matches.
 void VulkanEngine::rewrite_compose_for_taau() {
-    wait_gpu_frames_idle();   // compose set may be in use by the in-flight frame
     // Same predicate as rewrite_compose_image_bindings(): with FSR on, TAAU
     // never becomes the compose source, so comparing against the raw
     // toggle used to trigger vkDeviceWaitIdle + a rebind EVERY frame.
