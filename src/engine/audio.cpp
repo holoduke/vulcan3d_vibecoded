@@ -95,6 +95,7 @@ AudioEngine::~AudioEngine() {
 }
 
 bool AudioEngine::ok() const { return impl_ && impl_->ok; }
+size_t AudioEngine::active_effects() const { return impl_ ? impl_->effects.size() : 0; }
 
 void AudioEngine::set_listener(glm::vec3 pos, glm::vec3 forward) {
     if (!impl_->ok) return;
@@ -249,7 +250,7 @@ void AudioEngine::play_effect(ClipID id, glm::vec3 pos, float volume, float pitc
     if (idx >= static_cast<size_t>(ClipID::Count)) return;
     const std::string& path = impl_->clip_paths[idx];
     if (path.empty()) return;
-    if (impl_->effects.size() > 24) return;        // runaway guard (bomb carpets)
+    if (impl_->effects.size() > 64) return;        // runaway guard (bomb carpets)
     impl_->effects.emplace_back();
     Impl::Effect& e = impl_->effects.back();
     if (ma_sound_init_from_file(&impl_->engine, path.c_str(), MA_SOUND_FLAG_DECODE,

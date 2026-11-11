@@ -86,6 +86,49 @@ void VulkanEngine::play_explosion_audio(glm::vec3 pos, float size) {
     }
 }
 
+// AA cannon report: same propagation model as explosions (speed-of-sound
+// delay, distance low-pass, our own 1/d curve - miniaudio's default
+// inverse model made the guns inaudible beyond ~50 m). Rounds rotate
+// through four recorded shots; a burst ends with the last shot's echo.
+// Guns fire at the recording's own cadence (80 ms), and pitch jitter is
+// kept small so the clips are not audibly sped up.
+// The d/343 s delay is held here (aa_sounds_) rather than as a scheduled
+// miniaudio voice, so 12.5 rds/s from several far guns needs only the
+// ~90 ms of each clip in voices and never starves the explosions.
+void VulkanEngine::play_aa_shot_audio(glm::vec3 muzzle, bool burst_end) {
+    if (!audio_) return;
+    const float d = glm::distance(muzzle, player_.eye_position());
+    if (d > 1800.0f || aa_sounds_.size() > 256) return;
+    AaSound s{};
+    s.due = d / 343.0f;
+    s.pos = muzzle;
+    s.lpf = glm::clamp(18000.0f * std::exp(-d / 380.0f), 500.0f, 18000.0f);
+    const float level = glm::clamp(35.0f / std::max(d, 12.0f), 0.04f, 1.0f);
+    s.pitch = frand_range(spacejet_rng_state_, 0.97f, 1.03f);
+    if (burst_end) {
+        s.clip = int(ClipID::AaTail);
+        s.vol = level * 0.9f;
+    } else {
+        aa_shot_variant_ = (aa_shot_variant_ + 1 + int(frand(spacejet_rng_state_) * 2.99f)) & 3;
+        s.clip = int(ClipID::AaShot1) + aa_shot_variant_;
+        s.vol = level * frand_range(spacejet_rng_state_, 0.85f, 1.0f);
+    }
+    aa_sounds_.push_back(s);
+}
+
+void VulkanEngine::tick_aa_sounds(float dt) {
+    for (size_t i = 0; i < aa_sounds_.size();) {
+        AaSound& s = aa_sounds_[i];
+        s.due -= dt;
+        if (s.due > 0.0f) { ++i; continue; }
+        // Leave the last voices for explosions.
+        if (audio_ && audio_->active_effects() < 48u)
+            audio_->play_effect(ClipID(s.clip), s.pos, s.vol, s.pitch, 0.0f, s.lpf);
+        aa_sounds_[i] = aa_sounds_.back();
+        aa_sounds_.pop_back();
+    }
+}
+
 void VulkanEngine::spawn_explosion(glm::vec3 pos, float size, bool ground) {
     Explosion e{};
     e.pos = pos;

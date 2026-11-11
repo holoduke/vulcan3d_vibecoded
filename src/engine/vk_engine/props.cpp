@@ -813,6 +813,10 @@ void VulkanEngine::spawn_jet_breakup(const SpacejetFlight& f) {
 void VulkanEngine::tick_jet_debris(float dt) {
     if (jet_debris_.empty()) return;
     auto& R = spacejet_rng_state_;
+    // Impacts are deferred: spawn_explosion -> blast_vegetation appends
+    // (and trims) jet_debris_, which would invalidate this loop.
+    struct Impact { glm::vec3 pos; float size; };
+    std::vector<Impact> impacts;
     for (auto& d : jet_debris_) {
         if (d.dead) continue;
         d.t += dt;
@@ -831,13 +835,14 @@ void VulkanEngine::tick_jet_debris(float dt) {
         const float gh = std::max(sample_terrain_height(d.pos.x, d.pos.z), rt_.water_level);
         if (d.pos.y <= gh + 0.3f || d.t > 25.0f) {
             d.pos.y = std::max(d.pos.y, gh);
-            if (d.chunk >= 0) spawn_explosion(d.pos, d.chunk == 4 ? 1.2f : frand_range(R, 0.45f, 0.75f), true);
+            if (d.chunk >= 0) impacts.push_back({ d.pos, d.chunk == 4 ? 1.2f : frand_range(R, 0.45f, 0.75f) });
             d.dead = true;
         }
     }
     jet_debris_.erase(std::remove_if(jet_debris_.begin(), jet_debris_.end(),
                                      [](const JetDebris& d) { return d.dead; }),
                       jet_debris_.end());
+    for (const Impact& i : impacts) spawn_explosion(i.pos, i.size, true);
 }
 
 void VulkanEngine::tick_jet_audio(float dt) {

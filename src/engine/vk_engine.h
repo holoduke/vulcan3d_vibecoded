@@ -1135,6 +1135,13 @@ private:
     void tick_spacejet(float dt);                 // move + spawn + despawn
     void tick_jet_audio(float dt);                // predictive flyby sounds
     void play_explosion_audio(glm::vec3 pos, float size);   // distance-modelled boom
+    void play_aa_shot_audio(glm::vec3 muzzle, bool burst_end); // distance-modelled AA report
+    int  aa_shot_variant_ = 0;
+    // AA reports waiting out their speed-of-sound delay (started only when
+    // due, so a scheduled shot does not hold an audio voice).
+    struct AaSound { float due; glm::vec3 pos; int clip; float vol, pitch, lpf; };
+    std::vector<AaSound> aa_sounds_;
+    void tick_aa_sounds(float dt);
 
     // 60 dynamic crates: 100 still let the autodemo TDR (~2.4s on a 4080
     // even with the merged-static BLAS), so we drop further. The bottleneck

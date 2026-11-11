@@ -124,9 +124,9 @@ void VulkanEngine::aa_part_models(const AaVehicle& v, bool prev, glm::mat4 out[4
 
 void VulkanEngine::tick_aa(float dt) {
     if (aa_.empty() || dt <= 0.0f) return;
+    tick_aa_sounds(dt);
     dt = std::min(dt, 0.05f);
     uint32_t& R = aa_rng_;
-    const glm::vec3 eye = player_.eye_position();
     int shots_this_tick = 0;
 
     for (auto& v : aa_) {
@@ -178,7 +178,9 @@ void VulkanEngine::tick_aa(float dt) {
         if (v.burst > 0.0f) {
             v.burst -= dt;
             v.fire_acc += dt;
-            const float interval = 1.0f / 18.0f;               // 2 x 9 rds/s
+            // 12.5 rds/s (alternating barrels) = the cadence of the recorded
+            // cannon (80 ms between reports), so sound and tracers match.
+            const float interval = 0.080f;
             aa_part_models(v, false, m);
             while (v.fire_acc >= interval) {
                 v.fire_acc -= interval;
@@ -195,10 +197,13 @@ void VulkanEngine::tick_aa(float dt) {
                 aa_rounds_.push_back(r);
                 v.flash_t = 0.05f;
                 v.flash_barrel = b;
-                if (audio_ && ++shots_this_tick <= 2 && glm::distance(eye, mz) < 400.0f)
-                    audio_->play_at(ClipID::AaShot, mz, 0.55f, 0.12f, 0.10f);
+                if (audio_ && ++shots_this_tick <= 2)
+                    play_aa_shot_audio(mz, false);
             }
-            if (v.burst <= 0.0f) { v.cooldown = frand_range(R, 0.8f, 2.2f); v.fire_acc = 0.0f; }
+            if (v.burst <= 0.0f) {
+                v.cooldown = frand_range(R, 0.8f, 2.2f); v.fire_acc = 0.0f;
+                if (audio_) play_aa_shot_audio(glm::vec3(m[2] * glm::vec4(aa_muzzle_[0], 1.0f)), true);
+            }
         }
     }
 
@@ -222,7 +227,7 @@ void VulkanEngine::tick_aa(float dt) {
             r.dead = true;
             f.hit_flash_t = 0.12f;
             if (++f.aa_hits % 8 == 0) spawn_hit_particles(q, -glm::normalize(seg), glm::normalize(seg));
-            if (f.aa_hits >= 45) {
+            if (f.aa_hits >= 32) {          // ~same time-to-kill at 12.5 rds/s
                 f.hp = 0;
                 f.destroying = true;
                 f.destroy_t = 0.0f;

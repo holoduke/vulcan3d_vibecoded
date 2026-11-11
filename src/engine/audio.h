@@ -16,7 +16,8 @@ enum class ClipID : uint8_t {
     Impact,
     Jump,
     Laser,      // player laser gun (assets/sounds/laser_shot.wav)
-    AaShot,     // anti-aircraft gun round (assets/sounds/aa_shot.wav)
+    AaShot1, AaShot2, AaShot3, AaShot4,   // anti-aircraft rounds (assets/sounds/aa_shot_N.wav)
+    AaTail,     // end-of-burst report + echo (assets/sounds/aa_tail.wav)
     JetFlyby1,  // jet flybys (15 s recordings, one pass each)
     JetFlyby2,
     JetFlyby3,
@@ -82,6 +83,7 @@ public:
     // >= 18 kHz = no filter).
     void     play_effect(ClipID id, glm::vec3 pos, float volume, float pitch,
                          float delay_s, float lpf_hz);
+    size_t   active_effects() const;          // scheduled + playing play_effect voices
     void     set_voice(uint32_t h, glm::vec3 pos, float volume);
     void     set_voice_rate(uint32_t h, float rate);
     float    voice_time(uint32_t h) const;   // playback position in the clip (s)
