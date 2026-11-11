@@ -2853,17 +2853,61 @@ void main() {
         nor = normalize(mix(nor, rn_s, rm_road.x));
     }
     float rm_road_lod = 0.0;
+    float rm_road_vis = 1.0;   // cobble relief self-shadow (sun visibility)
     if (rm_road.x > 0.001) {
         // Mip from the pixel footprint (no screen derivatives: road_uv is
         // discontinuous at the road edge and across the march).
         float fp = t * 2.0 / max(scene.viewport.y, 1.0);
         float g_tile = max(scene.spom_params.z, 0.25);
         rm_road_lod = log2(max(fp / g_tile * float(textureSize(u_albedo[kRmMatRoad], 0).x), 1.0));
-        vec3 rn = textureLod(u_normal[kRmMatRoad], rm_road_uv, rm_road_lod).xyz * 2.0 - 1.0;
         vec3 dirw  = vec3(rm_road_dir.x, 0.0, rm_road_dir.y);
         vec3 sidew = vec3(-rm_road_dir.y, 0.0, rm_road_dir.x);
         vec3 rT = normalize(sidew - nor * dot(sidew, nor));
         vec3 rB = normalize(dirw  - nor * dot(dirw,  nor));
+        // Parallax occlusion on the cobbles - the same march as the mesh
+        // terrain's road (cube.frag): height in the normal map's alpha,
+        // layered march + bisection, then a short self-shadow march
+        // toward the sun so the joints between stones go dark.
+        float pom_D = 0.035 * (1.0 - smoothstep(35.0, 70.0, t)) * smoothstep(0.3, 0.9, rm_road.x);
+        if (pom_D > 0.002) {
+            vec3 Vt = vec3(dot(-rd, rT), dot(-rd, rB), dot(-rd, nor));
+            Vt.z = max(Vt.z, 0.22);
+            int   steps = int(mix(24.0, 8.0, Vt.z));
+            float layer = 1.0 / float(steps);
+            vec2  dtex  = (Vt.xy / Vt.z) * pom_D * layer;
+            vec2  uvc   = rm_road_uv;
+            float curD  = 0.0;
+            float hh    = textureLod(u_normal[kRmMatRoad], uvc, rm_road_lod).a;
+            for (int i = 0; i < 24; ++i) {
+                if (i >= steps || curD >= 1.0 - hh) break;
+                uvc -= dtex;
+                curD += layer;
+                hh = textureLod(u_normal[kRmMatRoad], uvc, rm_road_lod).a;
+            }
+            vec2  lo = uvc + dtex;   float dLo = max(curD - layer, 0.0);
+            vec2  hi = uvc;          float dHi = curD;
+            for (int b = 0; b < 4; ++b) {
+                vec2  mid  = (lo + hi) * 0.5;
+                float dMid = (dLo + dHi) * 0.5;
+                if (dMid < 1.0 - textureLod(u_normal[kRmMatRoad], mid, rm_road_lod).a) { lo = mid; dLo = dMid; }
+                else                                                                    { hi = mid; dHi = dMid; }
+            }
+            rm_road_uv = (lo + hi) * 0.5;
+            float h0 = 1.0 - 0.5 * (dLo + dHi);
+            vec3  sd = scene.sun_direction.xyz;
+            vec3  Lt = vec3(dot(sd, rT), dot(sd, rB), dot(sd, nor));
+            if (Lt.z > 0.02 && h0 < 0.999) {
+                vec2  span = (Lt.xy / max(Lt.z, 0.15)) * pom_D * (1.0 - h0);
+                float occ = 0.0;
+                for (int i = 1; i <= 6; ++i) {
+                    float ts = float(i) / 6.0;
+                    float sh = textureLod(u_normal[kRmMatRoad], rm_road_uv + span * ts, rm_road_lod).a;
+                    occ = max(occ, (sh - (h0 + (1.0 - h0) * ts)) * (1.0 - ts));
+                }
+                rm_road_vis = mix(1.0, 1.0 - smoothstep(0.0, 0.16, occ), clamp(pom_D / 0.035 * 1.5, 0.0, 1.0));
+            }
+        }
+        vec3 rn = textureLod(u_normal[kRmMatRoad], rm_road_uv, rm_road_lod).xyz * 2.0 - 1.0;
         nor = normalize(mix(nor, rT * rn.x + rB * rn.y + nor * rn.z, rm_road.x));
     }
     vec3 sunDir = scene.sun_direction.xyz;
@@ -3092,7 +3136,7 @@ void main() {
     //    contributions. Result reads identical to the rasterised
     //    terrain shadow path.
     float shadow = max(dyn_shadow, self_shadow);
-    float sha = 1.0 - shadow;
+    float sha = (1.0 - shadow) * rm_road_vis;
 
     // RT ambient occlusion against castle / boxes / dyn-props
     // (mask 0x02 — terrain BLAS skipped). Mirrors cube.frag's RTAO
