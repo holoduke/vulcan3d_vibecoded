@@ -397,7 +397,10 @@ void VulkanEngine::update_scene_ubo() {
     const bool rr_low = dlss_rr_active() && rt_.dlss_rr_low_samples;
     const int shadow_samples_eff = rr_low ? std::min(rt_.shadow_samples, 2) : rt_.shadow_samples;
     const int ao_samples_eff     = rr_low ? std::min(rt_.ao_samples, 1) : rt_.ao_samples;
-    data.rt_flags = glm::ivec4(rt_.shadow_enabled ? 1 : 0,
+    // .x: 0 = RT shadows off, 1 = on, 3 = on + Ray Reconstruction quality
+    // mode (deferred_lighting.frag: longer / rougher reflections, a second
+    // GI bounce on every ray). Shaders test != 0 for "shadows on".
+    data.rt_flags = glm::ivec4(rt_.shadow_enabled ? (rr_low ? 3 : 1) : 0,
                                shadow_samples_eff,
                                ao_samples_eff,
                                static_cast<int>(frame_number_));

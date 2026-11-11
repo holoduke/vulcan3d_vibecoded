@@ -938,10 +938,10 @@ private:
     };
     std::vector<Decal> decals_;
     static constexpr int   kMaxDecals = 64;
-    static constexpr float kDecalTtl  = 25.0f;
+    static constexpr float kDecalTtl  = 45.0f;
     void spawn_impact_decal(glm::vec3 hit_pos, glm::vec3 incoming_dir);
     void update_decals(float dt);
-    void draw_decals(VkCommandBuffer cmd, const glm::mat4& vp);
+    void draw_decals(VkCommandBuffer cmd, const glm::mat4& vp, const glm::mat4& inv_vp);
     // Speed range / count are scaled by GameSettings::spark_scale at spawn.
 
     // Viewmodel: a "gun" rendered at a fixed offset from the camera. Two
@@ -1096,6 +1096,8 @@ private:
     VkPipeline     fx_ribbon_pipeline_   = VK_NULL_HANDLE;
     VkPipeline     fx_volume_pipeline_   = VK_NULL_HANDLE;
     VkPipeline     fx_volume_inside_pipeline_ = VK_NULL_HANDLE;
+    VkPipeline     fx_decal_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule fx_decal_frag_module_ = VK_NULL_HANDLE;
     static constexpr uint32_t kFxMaxVerts = 65536;
     VkBuffer       fx_vbuf_[2]{};        // per frame-slot host-visible ribbon verts
     VmaAllocation  fx_valloc_[2]{};

@@ -7,7 +7,7 @@
 //   * fireball     - raymarched noise volume with blackbody emission that
 //                    cools into soot (fx_volume.frag), ~3 s;
 //   * smoke        - 5-7 billowing puffs (own velocity, drag, buoyancy,
-//                    wind drift), churning noise, fray out over ~15 s;
+//                    wind drift), churning noise, fray out over ~7 s;
 //   * dust ring    - flattened ground-hugging volume racing outward, ~9 s;
 //   * debris       - physics sparks (spawn_hit_particles) in an upward
 //                    45-degree cone (ground bursts reflect upward), plus
@@ -308,7 +308,7 @@ void VulkanEngine::tick_fx(float dt) {
         } else ++i;
     }
     explosions_.erase(std::remove_if(explosions_.begin(), explosions_.end(),
-                                     [](const Explosion& e) { return e.t > 20.0f; }),
+                                     [](const Explosion& e) { return e.t > 10.0f; }),
                       explosions_.end());
     cam_shake_ *= std::exp(-dt * 3.2f);
 
@@ -350,6 +350,7 @@ void VulkanEngine::init_fx() {
     fx_vert_module_        = vkpipe::load_shader_module(device_, sd + "/fx.vert.spv");
     fx_ribbon_frag_module_ = vkpipe::load_shader_module(device_, sd + "/fx_ribbon.frag.spv");
     fx_volume_frag_module_ = vkpipe::load_shader_module(device_, sd + "/fx_volume.frag.spv");
+    fx_decal_frag_module_  = vkpipe::load_shader_module(device_, sd + "/fx_decal.frag.spv");
 
     vkpipe::GraphicsPipelineConfig cfg{};
     cfg.vert = fx_vert_module_;
@@ -381,6 +382,10 @@ void VulkanEngine::init_fx() {
     cfg.cull = VK_CULL_MODE_FRONT_BIT;
     cfg.depth_test = false;
     fx_volume_inside_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    // Decals: back faces of the projection box, no depth test (works with
+    // the camera inside the box); the shader bounds the mark itself.
+    cfg.frag = fx_decal_frag_module_;
+    fx_decal_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
 
     for (int i = 0; i < 2; ++i) {
         VkBufferCreateInfo bci{};
@@ -400,11 +405,13 @@ void VulkanEngine::init_fx() {
 }
 
 void VulkanEngine::destroy_fx() {
-    for (VkPipeline* p : { &fx_ribbon_pipeline_, &fx_volume_pipeline_, &fx_volume_inside_pipeline_ }) {
+    for (VkPipeline* p : { &fx_ribbon_pipeline_, &fx_volume_pipeline_, &fx_volume_inside_pipeline_,
+                           &fx_decal_pipeline_ }) {
         if (*p) vkDestroyPipeline(device_, *p, nullptr);
         *p = VK_NULL_HANDLE;
     }
-    for (VkShaderModule* m : { &fx_vert_module_, &fx_ribbon_frag_module_, &fx_volume_frag_module_ }) {
+    for (VkShaderModule* m : { &fx_vert_module_, &fx_ribbon_frag_module_, &fx_volume_frag_module_,
+                               &fx_decal_frag_module_ }) {
         if (*m) vkDestroyShaderModule(device_, *m, nullptr);
         *m = VK_NULL_HANDLE;
     }
@@ -690,7 +697,7 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
         // slowed by drag, lifted by buoyancy that decays as it cools,
         // carried by the wind, grows ~sqrt(age) and thins / frays out.
         // Positions are closed-form in age (no per-frame state).
-        if (t > 0.15f && t < 16.0f) {
+        if (t > 0.15f && t < 7.5f) {
             const int kPuffs = e.ground ? 7 : 5;
             for (int k = 0; k < kPuffs; ++k) {
                 float hk  = std::fmod(e.seed * 7.31f + float(k) * 3.77f, 6.2831853f);
@@ -699,26 +706,26 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
                 float tt = t - start;
                 if (tt <= 0.0f) continue;
                 // Initial outward + upward velocity (m/s), drag 1/s.
-                float out_v = (k == 0 ? 2.0f : 9.0f + 6.0f * hk2) * s;
-                float up_v  = (k == 0 ? 16.0f : 7.0f + 8.0f * hk2) * s;
+                float out_v = (k == 0 ? 1.5f : 5.0f + 4.0f * hk2) * s;
+                float up_v  = (k == 0 ? 9.0f : 4.0f + 5.0f * hk2) * s;
                 float drag  = 1.2f;
                 float e1 = (1.0f - std::exp(-drag * tt)) / drag;     // integrated decay
                 glm::vec3 dir(std::cos(hk), 0.0f, std::sin(hk));
                 glm::vec3 p = e.pos + dir * (out_v * e1);
                 // Buoyant rise: initial up velocity + slow, decaying lift.
-                p.y += up_v * e1 + 2.2f * s * std::min(tt, 8.0f) * (1.0f - std::exp(-tt * 0.4f));
+                p.y += up_v * e1 + 1.2f * s * std::min(tt, 8.0f) * (1.0f - std::exp(-tt * 0.4f));
                 if (e.ground) p.y += 3.0f * s;
                 // Wind drift ramps in as the puff loses its own momentum.
                 p += e.drift * glm::smoothstep(0.0f, 1.2f, tt);
                 Vol v{};
-                v.r = s * (2.2f + 1.8f * std::sqrt(tt)) * (k == 0 ? 1.1f : 0.8f + 0.3f * hk2);
-                v.r = std::min(v.r, 8.5f * s);
+                v.r = s * (1.6f + 1.1f * std::sqrt(tt)) * (k == 0 ? 1.1f : 0.8f + 0.3f * hk2);
+                v.r = std::min(v.r, 4.6f * s);
                 v.c = p;
                 v.squash = 0.85f + 0.2f * hk2;
                 v.age = tt; v.kind = 1.0f; v.seed = e.seed + 31.0f + float(k) * 17.0f;
-                v.dens = 1.0f * (1.0f - glm::smoothstep(1.5f, 12.0f, tt) * 0.7f);
+                v.dens = 1.0f * (1.0f - glm::smoothstep(1.0f, 6.0f, tt) * 0.75f);
                 v.heat = 0.55f * std::exp(-tt * 1.6f);               // embers glow early on
-                v.fade = glm::smoothstep(0.0f, 0.5f, tt) * (1.0f - glm::smoothstep(8.0f, 15.5f - start, tt));
+                v.fade = glm::smoothstep(0.0f, 0.5f, tt) * (1.0f - glm::smoothstep(2.4f, 6.6f - start, tt));
                 v.scroll = tt * 0.45f;                                // shader: slow boiling time
                 vols.push_back(v);
             }
@@ -738,7 +745,7 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
     std::sort(vols.begin(), vols.end(), [](const Vol& a, const Vol& b) { return a.dist > b.dist; });
 
     const size_t n_smoke = smoke.v.size(), n_glow = glow.v.size(), n_flash = flash.v.size();
-    if (vols.empty() && n_smoke + n_glow + n_flash + cloth.v.size() == 0) return;
+    if (vols.empty() && decals_.empty() && n_smoke + n_glow + n_flash + cloth.v.size() == 0) return;
 
     // Upload ribbon vertices.
     const uint32_t slot = static_cast<uint32_t>(frame_number_ & 1);
@@ -791,6 +798,10 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
     vkCmdSetScissor(cmd, 0, 1, &sc);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
                             0, 1, &scene_desc_set_, 0, nullptr);
+
+    // Burn decals first: they are part of the surface, so smoke, fire and
+    // ribbons composite over them.
+    draw_decals(cmd, fv.vp, fv.inv_vp);
 
     // Opaque cloth FIRST: drawn after the volumes it overwrote smoke that
     // is in front of a flag (no depth write in this pass).

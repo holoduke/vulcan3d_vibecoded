@@ -844,7 +844,10 @@ void main() {
                     // fills corners with soft bounced light instead of
                     // flat ambient. Near-camera only - distant pixels
                     // can't resolve the difference.
-                    if ((i & 1) == 0 && cam_dist < 40.0) {
+                    // RR quality mode: the bounce on EVERY ray at half weight
+                    // (same energy, half the variance) and out to 80 m.
+                    bool rr_gi = (scene.rt_flags.x & 2) != 0;
+                    if ((rr_gi || (i & 1) == 0) && cam_dist < (rr_gi ? 80.0 : 40.0)) {
                         float b1 = hash12(gl_FragCoord.xy + fseed +
                                           vec2(i * 13.0, 119.0));
                         float b2 = hash12(gl_FragCoord.xy + fseed +
@@ -877,7 +880,7 @@ void main() {
                             b_rad = scene.sky_color.rgb *
                                     (0.4 + 0.6 * bw);
                         }
-                        hit_light += b_rad;
+                        hit_light += b_rad * (rr_gi ? 0.5 : 1.0);
                     }
                     gi_indirect += hit_alb * hit_light;
                 }
@@ -1247,8 +1250,14 @@ void main() {
         // Ray-traced glossy reflections (roughness < 0.6, < 60 m): one
         // GGX-sampled ray per pixel (frame-varying; TAA / DLSS integrate it).
         // Hit = the GI's sun-visibility-lit surface estimate, miss = sky.
-        float rt_w = (1.0 - smoothstep(0.35, 0.6, roughness)) *
-                     (1.0 - smoothstep(40.0, 60.0, cam_dist));
+        // Ray Reconstruction quality mode (rt_flags.x bit 1): RR resolves a
+        // 1-ray lobe cleanly, so rougher surfaces and far ones are traced
+        // too (roughness < 0.85, < 150 m, 300 m rays) instead of falling
+        // back to the sky / ground gradient.
+        bool  rr_q = (scene.rt_flags.x & 2) != 0;
+        float rt_w = rr_q
+            ? (1.0 - smoothstep(0.55, 0.85, roughness)) * (1.0 - smoothstep(110.0, 150.0, cam_dist))
+            : (1.0 - smoothstep(0.35, 0.6, roughness)) * (1.0 - smoothstep(40.0, 60.0, cam_dist));
         if (rt_w > 0.01 && scene.rt_flags.x != 0 && !foliage) {
             vec2 fs = vec2(float(scene.rt_flags.w & 63)) * vec2(0.618, 0.382);
             float u1 = hash12(gl_FragCoord.xy + fs * 37.0);
@@ -1266,7 +1275,7 @@ void main() {
                 vec3 ro = wp_safe + N * 0.03;
                 float th;
                 vec3 refl;
-                if (closest_hit_m(ro, rd, 120.0, 0x01u, th)) {
+                if (closest_hit_m(ro, rd, rr_q ? 300.0 : 120.0, 0x01u, th)) {
                     vec3 hp = ro + rd * th;
                     vec3 hn = -rd;
                     vec3 halb = (rd.y < -0.3 && hp.y < 23.5) ? vec3(0.33, 0.45, 0.27)

@@ -639,66 +639,60 @@ void VulkanEngine::spawn_hit_particles(glm::vec3 pos, glm::vec3 reflect_dir,
     }
 }
 
-void VulkanEngine::draw_decals(VkCommandBuffer cmd, const glm::mat4& vp) {
-    if (decals_.empty()) return;
-    // Bind cylinder mesh — its 16-segment side gives a near-round disc
-    // when scaled to a thin Y. (The previous cube path showed obvious
-    // square edges on close-up scorch marks.)
+// Projected burn decals (fx_decal.frag), drawn in the FX pass over the lit
+// scene: a box volume per decal; the shader projects the mark onto the
+// scene depth inside it. Caller has the FX render pass open, the scene
+// descriptor set bound and the cube mesh is bound here.
+void VulkanEngine::draw_decals(VkCommandBuffer cmd, const glm::mat4& vp, const glm::mat4& inv_vp) {
+    if (decals_.empty() || !fx_decal_pipeline_) return;
     VkDeviceSize off = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &cylinder_mesh_.vertex_buffer, &off);
-    vkCmdBindIndexBuffer(cmd, cylinder_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
-    // Back-to-front sort for correct alpha overlap on rapid-fire bursts.
-    // O(n log n) at kMaxDecals=64 is negligible — sort indices to avoid
-    // touching the parent_body_id pointers (decals_ stays in spawn order
-    // for FIFO eviction).
-    const glm::vec3 eye = player_.eye_position();
-    std::vector<uint32_t> order;
-    order.reserve(decals_.size());
-    for (uint32_t i = 0; i < decals_.size(); ++i) order.push_back(i);
-    std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
-        float da = glm::dot(decals_[a].pos - eye, decals_[a].pos - eye);
-        float db = glm::dot(decals_[b].pos - eye, decals_[b].pos - eye);
-        return da > db;   // farther first
-    });
-    for (uint32_t oi : order) {
-        const auto& d = decals_[oi];
-        float life = 1.0f - (d.age / d.ttl);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &cube_mesh_.vertex_buffer, &off);
+    vkCmdBindIndexBuffer(cmd, cube_mesh_.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fx_decal_pipeline_);
+    // Spawn order = draw order: a newer burn darkens / glows over older ones.
+    for (const auto& d : decals_) {
+        const float life = 1.0f - (d.age / d.ttl);
         if (life <= 0.0f) continue;
 
         glm::vec3 world_pos    = d.pos;
         glm::vec3 world_normal = d.normal;
         if (d.parent_body_id != 0) {
-            // Parented to a dyn body: transform local-frame pos+normal by
-            // the body's CURRENT world matrix so the decal travels with
-            // the crate. If the body has gone (despawn / FIFO eviction),
-            // skip drawing — update_decals will reap it next tick.
+            // Parented to a dyn body: the decal travels with the crate.
             glm::mat4 body_world;
-            if (!physics_->get_body_world_matrix_h(d.parent_handle, body_world)) {
-                continue;
-            }
+            if (!physics_->get_body_world_matrix_h(d.parent_handle, body_world)) continue;
             world_pos    = glm::vec3(body_world * glm::vec4(d.pos, 1.0f));
             world_normal = glm::vec3(body_world * glm::vec4(d.normal, 0.0f));
         }
+        const float nl = glm::length(world_normal);
+        if (nl < 1e-5f) continue;
+        const glm::vec3 n = world_normal / nl;
+        // Per-decal seed from its (frame-stable) stored position; also
+        // spins the tangent so no two marks share an orientation.
+        const float seed = glm::fract(std::sin(glm::dot(d.pos, glm::vec3(12.9898f, 78.233f, 37.719f))) * 43758.5453f);
+        const glm::vec3 ref = std::abs(n.y) < 0.95f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+        glm::vec3 x = glm::normalize(glm::cross(ref, n));
+        const glm::vec3 z0 = glm::cross(n, x);
+        const float ang = seed * 6.2831853f;
+        x = glm::normalize(x * std::cos(ang) + z0 * std::sin(ang));
+        const glm::vec3 z = glm::cross(n, x);
 
-        glm::mat4 model = align_local_y_to(world_pos, world_normal) *
-                          glm::scale(glm::mat4(1.0f),
-                                     glm::vec3(d.size, 0.002f, d.size));
-        // Dark charcoal scorch with a faint red ember glow so the decal
-        // stays visible against bright sunlit walls AND in shadow. The
-        // previous mid-grey 0.18 vanished against the busy brick triplanar.
-        glm::vec3 col(0.03f * life);
-        glm::vec3 emi(0.35f * life, 0.06f * life, 0.02f * life);
+        const float radius = d.size * 1.6f;          // soot halo reaches past the old disc
+        const float half_depth = 0.14f;              // wraps over relief / corners this deep
+        glm::mat4 model(1.0f);
+        model[0] = glm::vec4(x * (2.0f * radius), 0.0f);
+        model[1] = glm::vec4(n * (2.0f * half_depth), 0.0f);
+        model[2] = glm::vec4(z * (2.0f * radius), 0.0f);
+        model[3] = glm::vec4(world_pos, 1.0f);
         PushConstants pc{};
         pc.mvp = vp * model;
         pc.model = model;
-        pc.prev_mvp = pc.mvp;
-        pc.color    = glm::vec4(col, 1.0f);
-        pc.emissive = glm::vec4(emi, 1.0f);
-        pc.tex_params = glm::vec4(-1.0f, -1.0f, 1.0f, 0.0f);
-        vkCmdPushConstants(cmd, pipeline_layout_,
-                           kPushConstantStages,
-                           0, sizeof(PushConstants), &pc);
-        vkCmdDrawIndexed(cmd, cylinder_mesh_.index_count, 1, 0, 0, 0);
+        pc.prev_mvp = inv_vp;
+        pc.color    = glm::vec4(world_pos, radius);
+        pc.emissive = glm::vec4(n, life);
+        pc.tex_params = glm::vec4(x, seed);
+        pc.grass_params = glm::vec4(d.age, half_depth, 0.0f, 0.0f);
+        vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages, 0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, cube_mesh_.index_count, 1, 0, 0, 0);
     }
 }
 

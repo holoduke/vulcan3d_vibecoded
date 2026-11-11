@@ -295,6 +295,13 @@ float rmRand(uvec3 seed) {
 // Atmosphere sky-view LUT (atmosphere.comp; GENERAL layout).
 layout(set = 0, binding = 30) uniform sampler2D u_skyview;
 
+// Material texture arrays (same set-0 slots as cube.frag): only the castle
+// road cobbles are sampled here - the rest of this terrain is procedural.
+const int kRmTextureCount = 15;   // = cube.frag kTextureCount
+const int kRmMatRoad = 14;        // = cube.frag kMatRoad (PavingStones131)
+layout(set = 0, binding = 3) uniform sampler2D u_albedo[kRmTextureCount];
+layout(set = 0, binding = 4) uniform sampler2D u_normal[kRmTextureCount];
+
 #ifndef QLIKE_WATER
 // Slab-test ray vs AABB. Used to check sun occlusion through the voxel
 // castle AABB (voxels aren't in the TLAS — see voxel_origin comment).
@@ -1412,6 +1419,55 @@ float grassEligibility(vec2 worldXZ, float terrainY) {
     float underwater = (scene.water_params.x > 0.5 &&
                          terrainY < scene.water_params.y) ? 0.0 : 1.0;
     return mg.r * slope_w * alt_factor * underwater;
+}
+
+// Castle road, as on the mesh terrain (cube.frag "Castle road"): exact XZ
+// distance to the road polyline in the scene UBO gives the cobble / dirt-
+// verge weights; the bisector-partitioned second loop gives a road-space
+// UV (across, along) that stays continuous through the bends, so the
+// cobble rows follow the curve. Returns (road_w, verge_w).
+vec2 roadWeights(vec2 q, out vec2 road_uv, out vec2 r_dir) {
+    road_uv = vec2(0.0);
+    r_dir = vec2(0.0, 1.0);
+    int rn = int(scene.road_info.x + 0.5);
+    if (rn < 2 || any(lessThan(q, scene.road_bbox.xy)) || any(greaterThan(q, scene.road_bbox.zw)))
+        return vec2(0.0);
+    float best = 1e9;
+    for (int i = 0; i < 63; ++i) {
+        if (i + 1 >= rn) break;
+        vec2 a = scene.road_pts[i].xz, b = scene.road_pts[i + 1].xz;
+        vec2 ab = b - a;
+        float s = clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+        vec2 dv = q - (a + ab * s);
+        best = min(best, dot(dv, dv));
+    }
+    float rd = sqrt(best);
+    float hw = scene.road_info.y, vw = scene.road_info.z;
+    if (rd > hw + vw + 1.5) return vec2(0.0);
+    float best_lat = 1e9, r_along = 0.0;
+    for (int i = 0; i < 63; ++i) {
+        if (i + 1 >= rn) break;
+        vec2 a = scene.road_pts[i].xz, b = scene.road_pts[i + 1].xz;
+        vec2 ta = normalize(b - scene.road_pts[max(i - 1, 0)].xz);
+        vec2 tb = normalize(scene.road_pts[min(i + 2, rn - 1)].xz - a);
+        float da = dot(q - a, ta), db = dot(q - b, tb);
+        if (da < 0.0 && i > 0) continue;
+        if (db > 0.0 && i + 2 < rn) continue;
+        vec2 sd = normalize(b - a);
+        float lat = sd.x * (q - a).y - sd.y * (q - a).x;
+        if (abs(lat) < abs(best_lat)) {
+            best_lat = lat;
+            float f = da / max(da - db, 1e-4);
+            r_along = mix(scene.road_pts[i].w, scene.road_pts[i + 1].w, f);
+            r_dir = normalize(mix(ta, tb, clamp(f, 0.0, 1.0)));
+        }
+    }
+    float g_tile = max(scene.spom_params.z, 0.25);
+    if (best_lat < 1e8) road_uv = vec2(best_lat, r_along) / g_tile;
+    float jit = (noise2(q * 1.7) - 0.5) * 0.45 + (noise2(q * 0.31 + 17.0) - 0.5) * 0.6;
+    float road_w  = 1.0 - smoothstep(hw - 0.12, hw + 0.12, rd + jit);
+    float verge_w = (1.0 - smoothstep(hw + 0.4 * vw, hw + vw + 0.5, rd + jit * 1.6)) * (1.0 - road_w);
+    return vec2(road_w, verge_w);
 }
 
 // Layered material: rock base, grass on flats, snow up high (with
@@ -2743,6 +2799,23 @@ void main() {
         }
     }
     vec3 nor = calcNormal(pos, t);
+    // Castle road: cobble normal map in road space, before any lighting.
+    vec2 rm_road_uv, rm_road_dir;
+    vec2 rm_road = roadWeights(pos.xz, rm_road_uv, rm_road_dir);
+    float rm_road_lod = 0.0;
+    if (rm_road.x > 0.001) {
+        // Mip from the pixel footprint (no screen derivatives: road_uv is
+        // discontinuous at the road edge and across the march).
+        float fp = t * 2.0 / max(scene.viewport.y, 1.0);
+        float g_tile = max(scene.spom_params.z, 0.25);
+        rm_road_lod = log2(max(fp / g_tile * float(textureSize(u_albedo[kRmMatRoad], 0).x), 1.0));
+        vec3 rn = textureLod(u_normal[kRmMatRoad], rm_road_uv, rm_road_lod).xyz * 2.0 - 1.0;
+        vec3 dirw  = vec3(rm_road_dir.x, 0.0, rm_road_dir.y);
+        vec3 sidew = vec3(-rm_road_dir.y, 0.0, rm_road_dir.x);
+        vec3 rT = normalize(sidew - nor * dot(sidew, nor));
+        vec3 rB = normalize(dirw  - nor * dot(dirw,  nor));
+        nor = normalize(mix(nor, rT * rn.x + rB * rn.y + nor * rn.z, rm_road.x));
+    }
     vec3 sunDir = scene.sun_direction.xyz;
 
     float dif = clamp(dot(nor, sunDir), 0.0, 1.0);
@@ -3031,6 +3104,14 @@ void main() {
     }
 
     vec3 mate = getMaterial(pos, nor);
+    // Road: trodden dirt verge, then the cobbles. The procedural palette
+    // above is authored darker than texture albedo (rock 0.10 vs
+    // ~0.33), so the cobble texture is scaled toward that range.
+    if (rm_road.x + rm_road.y > 0.001) {
+        const float kRmAlbedoScale = 0.50;
+        mate = mix(mate, vec3(0.105, 0.078, 0.052), rm_road.y);
+        mate = mix(mate, textureLod(u_albedo[kRmMatRoad], rm_road_uv, rm_road_lod).rgb * kRmAlbedoScale, rm_road.x);
+    }
 
     // === Path-traced GI on the raymarched terrain =================
     // Mirrors cube.frag's GI loop: stratified cosine-hemisphere

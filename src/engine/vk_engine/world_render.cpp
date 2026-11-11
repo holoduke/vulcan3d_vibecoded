@@ -957,13 +957,6 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
     }
 
     prof_mark(cmd, "w_brushes_dyn");
-    // Bullet-impact decals — drawn AFTER static + dyn brushes so they sit
-    // on top of the wall textures, BEFORE sparks so the spark glow
-    // overlaps the scorch mark visually. Uses the still-bound cube mesh.
-    if (!decals_.empty()) {
-        draw_decals(cmd, vp);
-    }
-
     // Hit sparks (raster path).
     if (physics_ && !particles_.empty()) {
         vkCmdBindVertexBuffers(cmd, 0, 1, &cylinder_mesh_.vertex_buffer, &offset);

@@ -161,19 +161,37 @@ void VulkanEngine::init_world() {
                                 for (int x = 0; x < SW; ++x)
                                     delta[size_t(z) * SW + x] = saved[size_t(z) * SW + x] -
                                         hm.heights[size_t(z * r) * DW + size_t(x * r)];
+                            // Catmull-Rom (bicubic, interpolating, C1): a bilinear
+                            // upsample kept a crease along every old 1 m cell edge -
+                            // visible as hard lines in the shading and RT shadows.
                             const float inv = 1.0f / float(r);
-                            for (int z = 0; z < DW; ++z) {
-                                const int z0 = std::min(z / r, fdim - 1);
-                                const float tz = float(z - z0 * r) * inv;
+                            auto cr = [](float t, float w[4]) {
+                                const float t2 = t * t, t3 = t2 * t;
+                                w[0] = -0.5f * t3 + t2 - 0.5f * t;
+                                w[1] =  1.5f * t3 - 2.5f * t2 + 1.0f;
+                                w[2] = -1.5f * t3 + 2.0f * t2 + 0.5f * t;
+                                w[3] =  0.5f * t3 - 0.5f * t2;
+                            };
+                            std::vector<float> rowbuf(size_t(SW) * DW);   // x-upsampled rows
+                            for (int z = 0; z < SW; ++z) {
                                 for (int x = 0; x < DW; ++x) {
                                     const int x0 = std::min(x / r, fdim - 1);
-                                    const float tx = float(x - x0 * r) * inv;
-                                    const float* d0 = &delta[size_t(z0) * SW + x0];
-                                    const float* d1 = d0 + SW;
-                                    const float a = d0[0] + (d0[1] - d0[0]) * tx;
-                                    const float b = d1[0] + (d1[1] - d1[0]) * tx;
-                                    hm.heights[size_t(z) * DW + x] += a + (b - a) * tz;
+                                    float w[4]; cr(float(x - x0 * r) * inv, w);
+                                    float s = 0.0f;
+                                    for (int k = 0; k < 4; ++k)
+                                        s += w[k] * delta[size_t(z) * SW + std::clamp(x0 - 1 + k, 0, SW - 1)];
+                                    rowbuf[size_t(z) * DW + x] = s;
                                 }
+                            }
+                            for (int z = 0; z < DW; ++z) {
+                                const int z0 = std::min(z / r, fdim - 1);
+                                float w[4]; cr(float(z - z0 * r) * inv, w);
+                                const float* rows[4];
+                                for (int k = 0; k < 4; ++k)
+                                    rows[k] = &rowbuf[size_t(std::clamp(z0 - 1 + k, 0, SW - 1)) * DW];
+                                for (int x = 0; x < DW; ++x)
+                                    hm.heights[size_t(z) * DW + x] +=
+                                        w[0] * rows[0][x] + w[1] * rows[1][x] + w[2] * rows[2][x] + w[3] * rows[3][x];
                             }
                         } else {
                             const int r = fdim / hm.dim;
