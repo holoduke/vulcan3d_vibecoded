@@ -25,6 +25,7 @@
 //
 #include "engine/vk_engine.h"
 #include "engine/vk_engine/internal.h"
+#include "engine/frame_pacer.h"
 // Pulled in here (not in vk_engine.h) so the unique_ptr<voxel::VoxelWorld>
 // member's destructor can be generated in this TU where the type is
 // complete. Forward-declared in the header to keep its include surface tight.
@@ -385,6 +386,7 @@ void VulkanEngine::run(const RunOptions& opts) {
     if (monitor_hz <= 0) monitor_hz = 144;
     const auto frame_target = std::chrono::nanoseconds(1'000'000'000 / monitor_hz);
     log::infof("fps cap: %d Hz (monitor refresh)", monitor_hz);
+    FramePacer pacer(frame_target);
 
     auto last = std::chrono::steady_clock::now();
     auto demo_start = last;
@@ -394,18 +396,9 @@ void VulkanEngine::run(const RunOptions& opts) {
         window_->poll_events();
         if (resize_requested_) recreate_swapchain();
 
-        // Frame-rate cap: sleep until at least frame_target has elapsed
-        // since the previous frame began. std::this_thread::sleep_until
-        // is precise enough on Windows ≥ 8.1 (timeBeginPeriod isn't
-        // strictly needed at 144 Hz target), and the busy-wait tail in
-        // the OS scheduler keeps wake-up jitter under ~1ms. Skipped in
-        // headless mode (max_frames / screenshot) so test runs aren't
-        // throttled to monitor refresh.
-        if (!headless) {
-            auto target = last + frame_target;
-            auto now0 = std::chrono::steady_clock::now();
-            if (now0 < target) std::this_thread::sleep_until(target);
-        }
+        // Frame-rate cap (see frame_pacer.h). Skipped in headless mode
+        // (max_frames / screenshot) so test runs are not throttled.
+        if (!headless) pacer.wait();
 
         auto now = std::chrono::steady_clock::now();
         float frame_dt = std::chrono::duration<float>(now - last).count();

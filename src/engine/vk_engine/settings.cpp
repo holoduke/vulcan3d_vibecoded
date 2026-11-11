@@ -8,8 +8,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 
@@ -187,8 +189,18 @@ void VulkanEngine::maybe_autosave_settings(float frame_dt) {
     constexpr float kDebounceSec = 0.5f;
     bool changed_this_frame = !(rt_ == rt_prev_frame_) ||
                               !(game_ == game_prev_frame_);
+    // The terrain brush settings live outside rt_/game_; without this a
+    // brush tweak was only written at a clean exit.
+    const auto brush_now = std::make_tuple(
+        terrain_brush_radius_, terrain_brush_strength_, int(terrain_brush_mode_),
+        terrain_brush_flatten_target_, terrain_brush_noise_strength_, terrain_brush_noise_freq_,
+        terrain_brush_use_fbm_erosion_, terrain_brush_fbm_octaves_);
+    static auto brush_prev = brush_now;
+    static auto brush_saved = brush_now;
+    changed_this_frame = changed_this_frame || brush_now != brush_prev;
     bool dirty_vs_disk      = !(rt_ == rt_last_saved_) ||
-                              !(game_ == game_last_saved_);
+                              !(game_ == game_last_saved_) || brush_now != brush_saved;
+    brush_prev = brush_now;
     rt_prev_frame_   = rt_;
     game_prev_frame_ = game_;
 
@@ -201,6 +213,7 @@ void VulkanEngine::maybe_autosave_settings(float frame_dt) {
         settings_dirty_timer_ += frame_dt;
         if (settings_dirty_timer_ >= kDebounceSec) {
             save_settings();
+            brush_saved = brush_now;
             rt_last_saved_   = rt_;
             game_last_saved_ = game_;
             settings_dirty_timer_ = 0.0f;
@@ -495,17 +508,34 @@ void VulkanEngine::save_settings() const {
                opts_.autodemo_seconds > 0.0f || opts_.scene != 0;
     }();
     if (test_run) return;
-    std::ofstream f(kSettingsPath);
-    if (!f) {
-        log::warnf("could not open %s for write", kSettingsPath);
+    // Write a sibling temp file and rename it over the cfg: a crash or a
+    // kill mid-write (the autosave runs while playing) can no longer leave
+    // a truncated cfg that silently resets every missing setting.
+    const std::string tmp_path = std::string(kSettingsPath) + ".tmp";
+    {
+        std::ofstream f(tmp_path, std::ios::trunc);
+        if (!f) {
+            log::warnf("could not open %s for write", tmp_path.c_str());
+            return;
+        }
+        f << "# quake-like RT settings - auto-generated; safe to edit\n";
+        visit_settings(*this, [&](const char* key, const auto& v) {
+            f << key << " = ";
+            write_value(f, v);
+            f << "\n";
+        });
+        f.flush();
+        if (!f) {
+            log::warnf("write to %s failed - cfg left unchanged", tmp_path.c_str());
+            return;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp_path, kSettingsPath, ec);
+    if (ec) {
+        log::warnf("could not replace %s: %s", kSettingsPath, ec.message().c_str());
         return;
     }
-    f << "# quake-like RT settings — auto-generated; safe to edit\n";
-    visit_settings(*this, [&](const char* key, const auto& v) {
-        f << key << " = ";
-        write_value(f, v);
-        f << "\n";
-    });
     log::infof("settings saved to %s", kSettingsPath);
 }
 

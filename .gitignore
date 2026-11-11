@@ -74,3 +74,4 @@ external/_dl/
 tools/*.exe
 tools/*.obj
 qlike_settings.cfg.user-backup
+qlike_settings.cfg.tmp

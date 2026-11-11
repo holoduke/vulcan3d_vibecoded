@@ -404,6 +404,22 @@ void VulkanEngine::apply_terrain_brush(float dt) {
             }
         }
     }
+    // Castle-courtyard sink (same clamp init_world applies to the source
+    // heights): a brush stroke over the castle must not raise the ground
+    // through the courtyard floor slab.
+    {
+        const float kSinkR = 10.5f, kSinkH = 22.0f - 0.6f;
+        for (int iz = iz0; iz <= iz1; ++iz) {
+            const float wz = terrain_data_.origin_z + float(iz) * w;
+            if (std::abs(wz) >= kSinkR) continue;
+            for (int ix = ix0; ix <= ix1; ++ix) {
+                const float wx = terrain_data_.origin_x + float(ix) * w;
+                if (std::abs(wx) >= kSinkR) continue;
+                float& hv = terrain_data_.heights[size_t(iz) * W + ix];
+                hv = (std::min)(hv, kSinkH);
+            }
+        }
+    }
 
     // CLOD raster picks the edit up from the heightmap TEXTURE — no mesh
     // rebake. Refresh the min/max pyramid for the touched region (culling

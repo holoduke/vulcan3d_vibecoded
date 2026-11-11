@@ -307,6 +307,18 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
     // soft fade so it doesn't read as a hard ring.
     if (density_eff < 0.03) return distToTerrain;
     const float kEligThresh = 0.10;
+    // Eligibility (presence mask x slope) ONCE per map() call, at the
+    // centre cell. The mask is 2 m per texel and bilinear; the 3x3 cell
+    // block spans 0.5 m, so the nine per-cell fetches returned the same
+    // value to within a few percent - at nine texture reads per march
+    // step. Bare ground / rock / road now also skips the whole blade loop.
+    float elig;
+    {
+        vec2 mg = textureLod(u_grass_mask, (cellId * kPeriod / kHeightmapSide) + vec2(0.5), 0.0).rg;
+        float slope_w = 1.0 - smoothstep(ctx.slope_max * 0.7, ctx.slope_max * 1.2, mg.g * 2.0);
+        elig = mg.r * slope_w;
+    }
+    if (elig < kEligThresh) return distToTerrain;
     // Drop the 8 neighbour cells past ~35 % of kMaxDist — at that
     // distance blades are sub-pixel and the neighbour offsets
     // contribute < 1 pixel of silhouette difference. Keeps centre
@@ -318,17 +330,6 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
     for (int dy = -rad; dy <= rad; ++dy) {
         for (int dx = -rad; dx <= rad; ++dx) {
             vec2 nId = cellId + vec2(float(dx), float(dy));
-            // Eligibility mask FIRST (cheaper than hash42). Roughly
-            // half of cells get rejected on real terrain — paying the
-            // hash for them was wasted ALU.
-            vec2 cellW = nId * kPeriod;
-            vec2 mask_uv = (cellW / kHeightmapSide) + vec2(0.5);
-            vec2 mg = textureLod(u_grass_mask, mask_uv, 0.0).rg;
-            float slope_mag = mg.g * 2.0;
-            float slope_w = 1.0 - smoothstep(ctx.slope_max * 0.7,
-                                              ctx.slope_max * 1.2, slope_mag);
-            float elig = mg.r * slope_w;
-            if (elig < kEligThresh) continue;
             // Density-driven per-cell skip — only hash the cells we
             // didn't already reject by mask.
             // Up to two blades per cell: density 0..1 fills cells, 1..2 adds
