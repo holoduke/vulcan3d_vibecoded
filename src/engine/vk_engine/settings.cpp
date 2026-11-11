@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <type_traits>
+#include <unordered_map>
 
 namespace qlike {
 
@@ -208,6 +210,274 @@ void VulkanEngine::maybe_autosave_settings(float frame_dt) {
     }
 }
 
+// ---------------------------------------------------------------------
+// Settings registry: the ONE list of persisted keys. Save writes them in
+// this order; load parses each by the member's type (float / int / bool /
+// vec3 / enum). Adding a setting = one row here (+ a clamp below if it
+// needs a range). Ranges and cross-field fix-ups live in load_settings'
+// clamp block, so a hand-edited cfg cannot push values out of range.
+// `Self` is VulkanEngine or const VulkanEngine (save is const).
+// ---------------------------------------------------------------------
+template <class Self, class F>
+void VulkanEngine::visit_settings(Self& s, F&& f) {
+    f("sun_pitch_deg", s.rt_.sun_pitch_deg);
+    f("sun_yaw_deg", s.rt_.sun_yaw_deg);
+    f("sun_intensity", s.rt_.sun_intensity);
+    f("sun_color", s.rt_.sun_color);
+    f("sky_color", s.rt_.sky_color);
+    f("ground_ambient", s.rt_.ground_ambient);
+    f("ambient_strength", s.rt_.ambient_strength);
+    f("shadow_strength", s.rt_.shadow_strength);
+    f("shadow_enabled", s.rt_.shadow_enabled);
+    f("shadow_samples", s.rt_.shadow_samples);
+    f("shadow_softness", s.rt_.shadow_softness);
+    f("shadow_curve", s.rt_.shadow_curve);
+    f("ao_samples", s.rt_.ao_samples);
+    f("ao_radius", s.rt_.ao_radius);
+    f("gi_samples", s.rt_.gi_samples);
+    f("gi_bounces", s.rt_.gi_bounces);
+    f("gi_restir_enabled", s.rt_.gi_restir_enabled);
+    f("gi_shadow_max_bounce", s.rt_.gi_shadow_max_bounce);
+    f("ao_floor", s.rt_.ao_floor);
+    f("auto_exposure_strength", s.rt_.auto_exposure_strength);
+    f("sky_mode", s.rt_.sky_mode);
+    f("atmosphere_intensity", s.rt_.atmosphere_intensity);
+    f("aerial_scale", s.rt_.aerial_scale);
+    f("aerial_max_km", s.rt_.aerial_max_km);
+    f("clouds_enabled", s.rt_.clouds_enabled);
+    f("cloud_coverage", s.rt_.cloud_coverage);
+    f("cloud_density", s.rt_.cloud_density);
+    f("cloud_speed", s.rt_.cloud_speed);
+    f("tonemap_mode", s.rt_.tonemap_mode);
+    f("hdr_output", s.rt_.hdr_output);
+    f("radiance_cache", s.rt_.radiance_cache);
+    f("hdr_paper_nits", s.rt_.hdr_paper_nits);
+    f("hdr_peak_nits", s.rt_.hdr_peak_nits);
+    f("fog_volumetric", s.rt_.fog_volumetric);
+    f("fog_density", s.rt_.fog_density);
+    f("fog_height_falloff", s.rt_.fog_height_falloff);
+    f("fog_anisotropy", s.rt_.fog_anisotropy);
+    f("fog_max_dist", s.rt_.fog_max_dist);
+    f("use_merged_static_blas", s.rt_.use_merged_static_blas);
+    f("terrain_brush_radius", s.terrain_brush_radius_);
+    f("terrain_brush_strength", s.terrain_brush_strength_);
+    f("terrain_brush_mode", s.terrain_brush_mode_);
+    f("terrain_brush_flatten_target", s.terrain_brush_flatten_target_);
+    f("terrain_brush_noise_strength", s.terrain_brush_noise_strength_);
+    f("terrain_brush_noise_freq", s.terrain_brush_noise_freq_);
+    f("terrain_brush_use_fbm_erosion", s.terrain_brush_use_fbm_erosion_);
+    f("terrain_brush_fbm_octaves", s.terrain_brush_fbm_octaves_);
+    f("terrain_fog_strength", s.rt_.terrain_fog_strength);
+    f("terrain_wrap_strength", s.rt_.terrain_wrap_strength);
+    f("terrain_detail_strength", s.rt_.terrain_detail_strength);
+    f("terrain_shadow_softness_scale", s.rt_.terrain_shadow_softness_scale);
+    f("terrain_h_sand_grass_start", s.rt_.terrain_h_sand_grass_start);
+    f("terrain_h_sand_grass_end", s.rt_.terrain_h_sand_grass_end);
+    f("terrain_h_grass_dirt_start", s.rt_.terrain_h_grass_dirt_start);
+    f("terrain_h_grass_dirt_end", s.rt_.terrain_h_grass_dirt_end);
+    f("terrain_h_dirt_rock_start", s.rt_.terrain_h_dirt_rock_start);
+    f("terrain_h_dirt_rock_end", s.rt_.terrain_h_dirt_rock_end);
+    f("terrain_h_rock_snow_start", s.rt_.terrain_h_rock_snow_start);
+    f("terrain_h_rock_snow_end", s.rt_.terrain_h_rock_snow_end);
+    f("grass_enabled", s.rt_.grass_enabled);
+    f("grass_raymarch_enabled", s.rt_.grass_raymarch_enabled);
+    f("grass_raymarch_distance", s.rt_.grass_raymarch_distance);
+    f("grass_distance", s.rt_.grass_distance);
+    f("grass_wind", s.rt_.grass_wind);
+    f("grass_density", s.rt_.grass_density);
+    f("grass_height_scale", s.rt_.grass_height_scale);
+    f("grass_alpha_cutoff", s.rt_.grass_alpha_cutoff);
+    f("grass_cutoff_soft_dist", s.rt_.grass_cutoff_soft_dist);
+    f("grass_slope_n_min", s.rt_.grass_slope_n_min);
+    f("grass_distance_density", s.rt_.grass_distance_density);
+    f("grass_alt_min", s.rt_.grass_alt_min);
+    f("grass_alt_max", s.rt_.grass_alt_max);
+    f("grass_color_top", s.rt_.grass_color_top);
+    f("grass_color_bottom", s.rt_.grass_color_bottom);
+    f("grass_color_ground", s.rt_.grass_color_ground);
+    f("grass_color_ground_far", s.rt_.grass_color_ground_far);
+    f("grass_ground_tint_far_distance", s.rt_.grass_ground_tint_far_distance);
+    f("grass_base_ao_floor", s.rt_.grass_base_ao_floor);
+    f("grass_ground_tint_strength", s.rt_.grass_ground_tint_strength);
+    f("grass_shadow_strength", s.rt_.grass_shadow_strength);
+    f("grass_shadow_samples", s.rt_.grass_shadow_samples);
+    f("grass_shadow_max_dist", s.rt_.grass_shadow_max_dist);
+    f("shadow_map_resolution", s.rt_.shadow_map_resolution);
+    f("shadow_map_world_half", s.rt_.shadow_map_world_half);
+    f("shadow_debug_overlay", s.rt_.shadow_debug_overlay);
+    f("terrain_clod_range0", s.rt_.terrain_clod_range0);
+    f("terrain_wireframe", s.rt_.terrain_wireframe);
+    f("terrain_pom_strength", s.rt_.terrain_pom_strength);
+    f("terrain_disp_amp", s.rt_.terrain_disp_amp);
+    f("terrain_disp_smooth_mip", s.rt_.terrain_disp_smooth_mip);
+    f("terrain_pom_far_m", s.rt_.terrain_pom_far_m);
+    f("terrain_sand_ripple_scale", s.rt_.terrain_sand_ripple_scale);
+    f("terrain_grass_line_scale", s.rt_.terrain_grass_line_scale);
+    f("ground_mat_strength", s.rt_.ground_mat_strength);
+    f("ground_mat_tile_m", s.rt_.ground_mat_tile_m);
+    f("ground_mat_normal", s.rt_.ground_mat_normal);
+    f("terrain_antitile", s.rt_.terrain_antitile);
+    f("terrain_antitile_strength", s.rt_.terrain_antitile_strength);
+    f("grass_shadow_on_terrain", s.rt_.grass_shadow_on_terrain);
+    f("grass_shadow_on_terrain_strength", s.rt_.grass_shadow_on_terrain_strength);
+    f("grass_shadow_on_terrain_samples", s.rt_.grass_shadow_on_terrain_samples);
+    f("grass_shadow_on_terrain_dist", s.rt_.grass_shadow_on_terrain_dist);
+    f("grass_side_lit_enabled", s.rt_.grass_side_lit_enabled);
+    f("grass_side_lit_strength", s.rt_.grass_side_lit_strength);
+    f("terrain_bake_supersample", s.rt_.terrain_bake_supersample);
+    f("terrain_shading_contrast", s.rt_.terrain_shading_contrast);
+    f("spom_strength", s.rt_.spom_strength);
+    f("spom_mode", s.rt_.spom_mode);
+    f("terrain_heightmap_scale", s.rt_.terrain_heightmap_scale);
+    f("terrain_raymarch_enabled", s.rt_.terrain_raymarch_enabled);
+    f("terrain_raymarch_max_steps", s.rt_.terrain_raymarch_max_steps);
+    f("terrain_raymarch_shadow_steps", s.rt_.terrain_raymarch_shadow_steps);
+    f("terrain_raymarch_octaves", s.rt_.terrain_raymarch_octaves);
+    f("terrain_raymarch_normal_octaves", s.rt_.terrain_raymarch_normal_octaves);
+    f("taau_enabled", s.rt_.taau_enabled);
+    f("fsr2_enabled", s.rt_.fsr2_enabled);
+    f("fsr_backend", s.rt_.fsr_backend);
+    f("fg_enabled", s.rt_.fg_enabled);
+    f("terrain_raymarch_step_factor", s.rt_.terrain_raymarch_step_factor);
+    f("terrain_raymarch_lod_near_m", s.rt_.terrain_raymarch_lod_near_m);
+    f("terrain_raymarch_lod_far_m", s.rt_.terrain_raymarch_lod_far_m);
+    f("terrain_raymarch_lod_min_octaves", s.rt_.terrain_raymarch_lod_min_octaves);
+    f("terrain_raymarch_scale", s.rt_.terrain_raymarch_scale);
+    f("half_rate_shadows", s.rt_.half_rate_shadows);
+    f("terrain_raymarch_sharpen", s.rt_.terrain_raymarch_sharpen);
+    f("terrain_raymarch_fog_strength", s.rt_.terrain_raymarch_fog_strength);
+    f("terrain_raymarch_relaxation", s.rt_.terrain_raymarch_relaxation);
+    f("terrain_raymarch_fog_godrays", s.rt_.terrain_raymarch_fog_godrays);
+    f("terrain_raymarch_fog_y_start", s.rt_.terrain_raymarch_fog_y_start);
+    f("terrain_raymarch_fog_y_top", s.rt_.terrain_raymarch_fog_y_top);
+    f("terrain_raymarch_fog_noise", s.rt_.terrain_raymarch_fog_noise);
+    f("water_enabled", s.rt_.water_enabled);
+    f("water_level", s.rt_.water_level);
+    f("water_wave_strength", s.rt_.water_wave_strength);
+    f("water_wave_scale", s.rt_.water_wave_scale);
+    f("water_rt_reflections", s.rt_.water_rt_reflections);
+    f("water_tlas_reflections", s.rt_.water_tlas_reflections);
+    f("water_shore_blend", s.rt_.water_shore_blend);
+    f("water_shore_noise", s.rt_.water_shore_noise);
+    f("water_shadows_enabled", s.rt_.water_shadows_enabled);
+    f("water_transparency", s.rt_.water_transparency);
+    f("water_clarity_depth", s.rt_.water_clarity_depth);
+    f("water_shore_softness", s.rt_.water_shore_softness);
+    f("water_foam_opacity", s.rt_.water_foam_opacity);
+    f("water_color_shallow", s.rt_.water_color_shallow);
+    f("water_color", s.rt_.water_color);
+    f("water_foam_color", s.rt_.water_foam_color);
+    f("water_foam_strength", s.rt_.water_foam_strength);
+    f("water_foam_width", s.rt_.water_foam_width);
+    f("water_style", s.rt_.water_style);
+    f("water_river_speed", s.rt_.water_river_speed);
+    f("water_river_normal_str", s.rt_.water_river_normal_str);
+    f("water_river_flow_angle", s.rt_.water_river_flow_angle);
+    f("water_river_time_speed", s.rt_.water_river_time_speed);
+    f("water_river_detail", s.rt_.water_river_detail);
+    f("water_river_foam_amount", s.rt_.water_river_foam_amount);
+    f("water_river_extinct_color", s.rt_.water_river_extinct_color);
+    f("water_river_extinct_density", s.rt_.water_river_extinct_density);
+    f("water_lake_bump_strength", s.rt_.water_lake_bump_strength);
+    f("water_lake_time_speed", s.rt_.water_lake_time_speed);
+    f("water_lake_uv_scale", s.rt_.water_lake_uv_scale);
+    f("water_lake_bump_dist", s.rt_.water_lake_bump_dist);
+    f("grass_shore_color", s.rt_.grass_shore_color);
+    f("grass_shore_strength", s.rt_.grass_shore_strength);
+    f("grass_shore_distance", s.rt_.grass_shore_distance);
+    f("terrain_shore_color", s.rt_.terrain_shore_color);
+    f("terrain_shore_strength", s.rt_.terrain_shore_strength);
+    f("terrain_shore_distance", s.rt_.terrain_shore_distance);
+    f("distance_fog_color", s.rt_.distance_fog_color);
+    f("distance_fog_strength", s.rt_.distance_fog_strength);
+    f("distance_fog_density", s.rt_.distance_fog_density);
+    f("distance_fog_start", s.rt_.distance_fog_start);
+    f("distance_fog_height", s.rt_.distance_fog_height);
+    f("distance_fog_max", s.rt_.distance_fog_max);
+    f("terrain_shore_general_color", s.rt_.terrain_shore_general_color);
+    f("terrain_shore_general_strength", s.rt_.terrain_shore_general_strength);
+    f("terrain_shore_general_distance", s.rt_.terrain_shore_general_distance);
+    f("terrain_sand_color", s.rt_.terrain_sand_color);
+    f("shadow_near_mult", s.rt_.shadow_near_mult);
+    f("gi_strength", s.rt_.gi_strength);
+    f("gi_radius", s.rt_.gi_radius);
+    f("gi_softener", s.rt_.gi_softener);
+    f("reflections_enabled", s.rt_.reflections_enabled);
+    f("reflection_strength", s.rt_.reflection_strength);
+    f("taa_history_blend", s.rt_.taa_history_blend);
+    f("taa_spatial_strength", s.rt_.taa_spatial_strength);
+    f("bloom_enabled", s.rt_.bloom_enabled);
+    f("bloom_strength", s.rt_.bloom_strength);
+    f("bloom_threshold", s.rt_.bloom_threshold);
+    f("bloom_radius", s.rt_.bloom_radius);
+    f("spark_bloom", s.rt_.spark_bloom);
+    f("taa_jitter_enabled", s.rt_.taa_jitter_enabled);
+    f("textures_enabled", s.rt_.textures_enabled);
+    f("lens_flare_enabled", s.rt_.lens_flare_enabled);
+    f("lens_flare_strength", s.rt_.lens_flare_strength);
+    f("lens_flare_threshold", s.rt_.lens_flare_threshold);
+    f("lens_flare_dispersal", s.rt_.lens_flare_dispersal);
+    f("lens_flare_halo_width", s.rt_.lens_flare_halo_width);
+    f("lens_flare_ghosts", s.rt_.lens_flare_ghosts);
+    f("lens_flare_aberration", s.rt_.lens_flare_aberration);
+    f("taa_jitter_strength", s.rt_.taa_jitter_strength);
+    f("compose_sharpen_strength", s.rt_.compose_sharpen_strength);
+    f("sun_shaft_intensity", s.rt_.sun_shaft_intensity);
+    f("auto_golden_hour", s.rt_.auto_golden_hour);
+    f("sun_glare_strength", s.rt_.sun_glare_strength);
+    f("svgf_enabled", s.rt_.svgf_enabled);
+    f("image_contrast", s.rt_.image_contrast);
+    f("image_brightness", s.rt_.image_brightness);
+    f("image_gamma", s.rt_.image_gamma);
+    f("terrain_rt_lod_distance", s.rt_.terrain_rt_lod_distance);
+    f("terrain_ao_punch", s.rt_.terrain_ao_punch);
+    f("terrain_pcss_samples_cap", s.rt_.terrain_pcss_samples_cap);
+    f("terrain_gi_samples_cap", s.rt_.terrain_gi_samples_cap);
+    f("terrain_gi_bounces_cap", s.rt_.terrain_gi_bounces_cap);
+    f("terrain_ao_final_strength", s.rt_.terrain_ao_final_strength);
+    f("render_scale", s.rt_.render_scale);
+    f("quality_preset", s.rt_.quality_preset);
+    f("ao_mode", s.rt_.ao_mode);
+    f("gravity", s.game_.gravity);
+    f("cubes_per_minute", s.game_.cubes_per_minute);
+    f("bullet_mass", s.game_.bullet_mass);
+    f("fire_rate_rps", s.game_.fire_rate_rps);
+    f("bullet_speed", s.game_.bullet_speed);
+    f("spark_scale", s.game_.spark_scale);
+    f("player_pos_x", s.player_.position.x);
+    f("player_pos_y", s.player_.position.y);
+    f("player_pos_z", s.player_.position.z);
+    f("player_yaw", s.player_.yaw);
+    f("player_pitch", s.player_.pitch);
+}
+
+namespace {
+template <class T> void write_value(std::ostream& o, const T& v) {
+    if constexpr (std::is_same_v<T, bool>)            o << (v ? 1 : 0);
+    else if constexpr (std::is_same_v<T, glm::vec3>)  o << v.x << " " << v.y << " " << v.z;
+    else if constexpr (std::is_enum_v<T>)             o << static_cast<int>(v);
+    else                                              o << v;
+}
+// Returns false on a malformed value (the field is left unchanged).
+template <class T> bool parse_value(const std::string& s, T& out) {
+    if constexpr (std::is_same_v<T, bool>)      { out = std::stoi(s) != 0; }
+    else if constexpr (std::is_same_v<T, int>)  { out = std::stoi(s); }
+    else if constexpr (std::is_same_v<T, float>) { out = std::stof(s); }
+    else if constexpr (std::is_same_v<T, glm::vec3>) {
+        glm::vec3 v;
+        if (std::sscanf(s.c_str(), "%f %f %f", &v.x, &v.y, &v.z) != 3) return false;
+        out = v;
+    } else if constexpr (std::is_enum_v<T>) {
+        const int m = std::stoi(s);   // only enum: TerrainBrushMode (0..ErodeSmooth = 7)
+        if (m < 0 || m > 7) return false;
+        out = static_cast<T>(m);
+    } else {
+        static_assert(sizeof(T) == 0, "settings: add a parse_value overload for this type");
+    }
+    return true;
+}
+} // namespace
+
 void VulkanEngine::save_settings() const {
     std::ofstream f(kSettingsPath);
     if (!f) {
@@ -215,652 +485,41 @@ void VulkanEngine::save_settings() const {
         return;
     }
     f << "# quake-like RT settings — auto-generated; safe to edit\n";
-    auto v3 = [](glm::vec3 v) {
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "%.4f %.4f %.4f", v.x, v.y, v.z);
-        return std::string(buf);
-    };
-    f << "sun_pitch_deg = "      << rt_.sun_pitch_deg      << "\n";
-    f << "sun_yaw_deg = "        << rt_.sun_yaw_deg        << "\n";
-    f << "sun_intensity = "      << rt_.sun_intensity      << "\n";
-    f << "sun_color = "          << v3(rt_.sun_color)      << "\n";
-    f << "sky_color = "          << v3(rt_.sky_color)      << "\n";
-    f << "ground_ambient = "     << v3(rt_.ground_ambient) << "\n";
-    f << "ambient_strength = "   << rt_.ambient_strength   << "\n";
-    f << "shadow_strength = "    << rt_.shadow_strength    << "\n";
-    f << "shadow_enabled = "     << (rt_.shadow_enabled ? 1 : 0) << "\n";
-    f << "shadow_samples = "     << rt_.shadow_samples     << "\n";
-    f << "shadow_softness = "    << rt_.shadow_softness    << "\n";
-    f << "shadow_curve = "       << rt_.shadow_curve       << "\n";
-    f << "ao_samples = "         << rt_.ao_samples         << "\n";
-    f << "ao_radius = "          << rt_.ao_radius          << "\n";
-    f << "gi_samples = "         << rt_.gi_samples         << "\n";
-    f << "gi_bounces = "         << rt_.gi_bounces         << "\n";
-    f << "gi_restir_enabled = "  << (rt_.gi_restir_enabled ? 1 : 0) << "\n";
-    f << "gi_shadow_max_bounce = " << rt_.gi_shadow_max_bounce << "\n";
-    f << "ao_floor = "             << rt_.ao_floor             << "\n";
-    f << "auto_exposure_strength = " << rt_.auto_exposure_strength << "\n";
-    f << "sky_mode = " << rt_.sky_mode << "\n";
-    f << "atmosphere_intensity = " << rt_.atmosphere_intensity << "\n";
-    f << "aerial_scale = " << rt_.aerial_scale << "\n";
-    f << "aerial_max_km = " << rt_.aerial_max_km << "\n";
-    f << "clouds_enabled = " << rt_.clouds_enabled << "\n";
-    f << "cloud_coverage = " << rt_.cloud_coverage << "\n";
-    f << "cloud_density = " << rt_.cloud_density << "\n";
-    f << "cloud_speed = " << rt_.cloud_speed << "\n";
-    f << "tonemap_mode = " << rt_.tonemap_mode << "\n";
-    f << "hdr_output = " << rt_.hdr_output << "\n";
-    f << "radiance_cache = " << rt_.radiance_cache << "\n";
-    f << "hdr_paper_nits = " << rt_.hdr_paper_nits << "\n";
-    f << "hdr_peak_nits = " << rt_.hdr_peak_nits << "\n";
-    f << "fog_volumetric = " << rt_.fog_volumetric << "\n";
-    f << "fog_density = " << rt_.fog_density << "\n";
-    f << "fog_height_falloff = " << rt_.fog_height_falloff << "\n";
-    f << "fog_anisotropy = " << rt_.fog_anisotropy << "\n";
-    f << "fog_max_dist = " << rt_.fog_max_dist << "\n";
-    f << "use_merged_static_blas = " << (rt_.use_merged_static_blas ? 1 : 0) << "\n";
-    f << "terrain_brush_radius = "   << terrain_brush_radius_   << "\n";
-    f << "terrain_brush_strength = " << terrain_brush_strength_ << "\n";
-    f << "terrain_brush_mode = "     << static_cast<int>(terrain_brush_mode_) << "\n";
-    f << "terrain_brush_flatten_target = " << terrain_brush_flatten_target_ << "\n";
-    f << "terrain_brush_noise_strength = " << terrain_brush_noise_strength_ << "\n";
-    f << "terrain_brush_noise_freq = "     << terrain_brush_noise_freq_     << "\n";
-    f << "terrain_brush_use_fbm_erosion = " << (terrain_brush_use_fbm_erosion_ ? 1 : 0) << "\n";
-    f << "terrain_brush_fbm_octaves = "    << terrain_brush_fbm_octaves_    << "\n";
-    // terrain_edit_mode is transient interaction state, NOT a saved
-    // preference — persisting it meant a stray auto-save with the brush
-    // active made the edit ring reappear on every later launch even
-    // though the user never entered edit mode. Always start it off.
-    f << "terrain_fog_strength = "    << rt_.terrain_fog_strength << "\n";
-    f << "terrain_wrap_strength = "   << rt_.terrain_wrap_strength << "\n";
-    f << "terrain_detail_strength = " << rt_.terrain_detail_strength << "\n";
-    f << "terrain_shadow_softness_scale = " << rt_.terrain_shadow_softness_scale << "\n";
-    f << "terrain_h_sand_grass_start = " << rt_.terrain_h_sand_grass_start << "\n";
-    f << "terrain_h_sand_grass_end = "   << rt_.terrain_h_sand_grass_end   << "\n";
-    f << "terrain_h_grass_dirt_start = " << rt_.terrain_h_grass_dirt_start << "\n";
-    f << "terrain_h_grass_dirt_end = "   << rt_.terrain_h_grass_dirt_end   << "\n";
-    f << "terrain_h_dirt_rock_start = "  << rt_.terrain_h_dirt_rock_start  << "\n";
-    f << "terrain_h_dirt_rock_end = "    << rt_.terrain_h_dirt_rock_end    << "\n";
-    f << "terrain_h_rock_snow_start = "  << rt_.terrain_h_rock_snow_start  << "\n";
-    f << "terrain_h_rock_snow_end = "    << rt_.terrain_h_rock_snow_end    << "\n";
-    f << "grass_enabled = "       << (rt_.grass_enabled ? 1 : 0) << "\n";
-    f << "grass_raymarch_enabled = " << (rt_.grass_raymarch_enabled ? 1 : 0) << "\n";
-    f << "grass_raymarch_distance = " << rt_.grass_raymarch_distance << "\n";
-    f << "grass_distance = "      << rt_.grass_distance          << "\n";
-    f << "grass_wind = "          << rt_.grass_wind              << "\n";
-    f << "grass_density = "       << rt_.grass_density           << "\n";
-    f << "grass_height_scale = "  << rt_.grass_height_scale      << "\n";
-    f << "grass_alpha_cutoff = "  << rt_.grass_alpha_cutoff      << "\n";
-    f << "grass_cutoff_soft_dist = " << rt_.grass_cutoff_soft_dist << "\n";
-    f << "grass_slope_n_min = "   << rt_.grass_slope_n_min       << "\n";
-    f << "grass_distance_density = " << rt_.grass_distance_density << "\n";
-    f << "grass_alt_min = " << rt_.grass_alt_min << "\n";
-    f << "grass_alt_max = " << rt_.grass_alt_max << "\n";
-    f << "grass_color_top = "    << rt_.grass_color_top.x    << " "
-                                  << rt_.grass_color_top.y    << " "
-                                  << rt_.grass_color_top.z    << "\n";
-    f << "grass_color_bottom = " << rt_.grass_color_bottom.x << " "
-                                  << rt_.grass_color_bottom.y << " "
-                                  << rt_.grass_color_bottom.z << "\n";
-    f << "grass_color_ground = " << rt_.grass_color_ground.x << " "
-                                  << rt_.grass_color_ground.y << " "
-                                  << rt_.grass_color_ground.z << "\n";
-    f << "grass_color_ground_far = " << rt_.grass_color_ground_far.x << " "
-                                      << rt_.grass_color_ground_far.y << " "
-                                      << rt_.grass_color_ground_far.z << "\n";
-    f << "grass_ground_tint_far_distance = " << rt_.grass_ground_tint_far_distance << "\n";
-    f << "grass_base_ao_floor = "       << rt_.grass_base_ao_floor       << "\n";
-    f << "grass_ground_tint_strength = " << rt_.grass_ground_tint_strength << "\n";
-    f << "grass_shadow_strength = " << rt_.grass_shadow_strength << "\n";
-    f << "grass_shadow_samples = "  << rt_.grass_shadow_samples  << "\n";
-    f << "grass_shadow_max_dist = " << rt_.grass_shadow_max_dist << "\n";
-    f << "shadow_map_resolution = " << rt_.shadow_map_resolution << "\n";
-    f << "shadow_map_world_half = " << rt_.shadow_map_world_half << "\n";
-    f << "shadow_debug_overlay = "  << (rt_.shadow_debug_overlay ? 1 : 0) << "\n";
-    // Quadtree CLOD terrain (the chunk-LOD distance/stride/tess/densify
-    // keys are gone — stale lines in old cfg files are ignored on load).
-    f << "terrain_clod_range0 = " << rt_.terrain_clod_range0 << "\n";
-    f << "terrain_wireframe = " << (rt_.terrain_wireframe ? 1 : 0) << "\n";
-    f << "terrain_pom_strength = " << rt_.terrain_pom_strength << "\n";
-    f << "terrain_disp_amp = " << rt_.terrain_disp_amp << "\n";
-    f << "terrain_disp_smooth_mip = " << rt_.terrain_disp_smooth_mip << "\n";
-    f << "terrain_pom_far_m = " << rt_.terrain_pom_far_m << "\n";
-    f << "terrain_sand_ripple_scale = " << rt_.terrain_sand_ripple_scale << "\n";
-    f << "terrain_grass_line_scale = " << rt_.terrain_grass_line_scale << "\n";
-    f << "ground_mat_strength = " << rt_.ground_mat_strength << "\n";
-    f << "ground_mat_tile_m = " << rt_.ground_mat_tile_m << "\n";
-    f << "ground_mat_normal = " << rt_.ground_mat_normal << "\n";
-    f << "terrain_antitile = " << (rt_.terrain_antitile ? 1 : 0) << "\n";
-    f << "terrain_antitile_strength = " << rt_.terrain_antitile_strength << "\n";
-    f << "grass_shadow_on_terrain = " << (rt_.grass_shadow_on_terrain ? 1 : 0) << "\n";
-    f << "grass_shadow_on_terrain_strength = " << rt_.grass_shadow_on_terrain_strength << "\n";
-    f << "grass_shadow_on_terrain_samples = " << rt_.grass_shadow_on_terrain_samples << "\n";
-    f << "grass_shadow_on_terrain_dist = " << rt_.grass_shadow_on_terrain_dist << "\n";
-    f << "grass_side_lit_enabled = " << (rt_.grass_side_lit_enabled ? 1 : 0) << "\n";
-    f << "grass_side_lit_strength = " << rt_.grass_side_lit_strength << "\n";
-    f << "terrain_bake_supersample = " << rt_.terrain_bake_supersample << "\n";
-    f << "terrain_shading_contrast = " << rt_.terrain_shading_contrast << "\n";
-    f << "spom_strength = " << rt_.spom_strength << "\n";
-    f << "spom_mode = " << rt_.spom_mode << "\n";
-    f << "terrain_heightmap_scale = " << rt_.terrain_heightmap_scale << "\n";
-    f << "terrain_raymarch_enabled = " << (rt_.terrain_raymarch_enabled ? 1 : 0) << "\n";
-    f << "terrain_raymarch_max_steps = " << rt_.terrain_raymarch_max_steps << "\n";
-    f << "terrain_raymarch_shadow_steps = " << rt_.terrain_raymarch_shadow_steps << "\n";
-    f << "terrain_raymarch_octaves = " << rt_.terrain_raymarch_octaves << "\n";
-    f << "terrain_raymarch_normal_octaves = " << rt_.terrain_raymarch_normal_octaves << "\n";
-    f << "taau_enabled = "                << (rt_.taau_enabled ? 1 : 0) << "\n";
-    f << "fsr2_enabled = "                << (rt_.fsr2_enabled ? 1 : 0) << "\n";
-    f << "fsr_backend = "                 << rt_.fsr_backend << "\n";
-    f << "fg_enabled = "                  << (rt_.fg_enabled ? 1 : 0) << "\n";
-    f << "terrain_raymarch_step_factor = " << rt_.terrain_raymarch_step_factor << "\n";
-    f << "terrain_raymarch_lod_near_m = " << rt_.terrain_raymarch_lod_near_m << "\n";
-    f << "terrain_raymarch_lod_far_m = " << rt_.terrain_raymarch_lod_far_m << "\n";
-    f << "terrain_raymarch_lod_min_octaves = " << rt_.terrain_raymarch_lod_min_octaves << "\n";
-    f << "terrain_raymarch_scale = " << rt_.terrain_raymarch_scale << "\n";
-    f << "half_rate_shadows = " << (rt_.half_rate_shadows ? 1 : 0) << "\n";
-    f << "terrain_raymarch_sharpen = " << rt_.terrain_raymarch_sharpen << "\n";
-    f << "terrain_raymarch_fog_strength = " << rt_.terrain_raymarch_fog_strength << "\n";
-    f << "terrain_raymarch_relaxation = " << (rt_.terrain_raymarch_relaxation ? 1 : 0) << "\n";
-    f << "terrain_raymarch_fog_godrays = " << (rt_.terrain_raymarch_fog_godrays ? 1 : 0) << "\n";
-    f << "terrain_raymarch_fog_y_start = " << rt_.terrain_raymarch_fog_y_start << "\n";
-    f << "terrain_raymarch_fog_y_top = "   << rt_.terrain_raymarch_fog_y_top   << "\n";
-    f << "terrain_raymarch_fog_noise = "   << rt_.terrain_raymarch_fog_noise   << "\n";
-    f << "water_enabled = " << (rt_.water_enabled ? 1 : 0) << "\n";
-    f << "water_level = " << rt_.water_level << "\n";
-    f << "water_wave_strength = " << rt_.water_wave_strength << "\n";
-    f << "water_wave_scale = " << rt_.water_wave_scale << "\n";
-    f << "water_rt_reflections = " << (rt_.water_rt_reflections ? 1 : 0) << "\n";
-    f << "water_tlas_reflections = " << (rt_.water_tlas_reflections ? 1 : 0) << "\n";
-    f << "water_shore_blend = " << rt_.water_shore_blend << "\n";
-    f << "water_shore_noise = " << rt_.water_shore_noise << "\n";
-    f << "water_shadows_enabled = " << (rt_.water_shadows_enabled ? 1 : 0) << "\n";
-    f << "water_transparency = " << rt_.water_transparency << "\n";
-    f << "water_clarity_depth = " << rt_.water_clarity_depth << "\n";
-    f << "water_shore_softness = " << rt_.water_shore_softness << "\n";
-    f << "water_foam_opacity = " << rt_.water_foam_opacity << "\n";
-    f << "water_color_shallow = " << rt_.water_color_shallow.r << " "
-                                   << rt_.water_color_shallow.g << " "
-                                   << rt_.water_color_shallow.b << "\n";
-    f << "water_color = " << rt_.water_color.r << " "
-                            << rt_.water_color.g << " "
-                            << rt_.water_color.b << "\n";
-    f << "water_foam_color = " << rt_.water_foam_color.r << " "
-                                << rt_.water_foam_color.g << " "
-                                << rt_.water_foam_color.b << "\n";
-    f << "water_foam_strength = " << rt_.water_foam_strength << "\n";
-    f << "water_foam_width = "    << rt_.water_foam_width    << "\n";
-    f << "water_style = "             << rt_.water_style             << "\n";
-    f << "water_river_speed = "       << rt_.water_river_speed       << "\n";
-    f << "water_river_normal_str = "  << rt_.water_river_normal_str  << "\n";
-    f << "water_river_flow_angle = "  << rt_.water_river_flow_angle  << "\n";
-    f << "water_river_time_speed = "  << rt_.water_river_time_speed  << "\n";
-    f << "water_river_detail = "      << rt_.water_river_detail      << "\n";
-    f << "water_river_foam_amount = " << rt_.water_river_foam_amount << "\n";
-    f << "water_river_extinct_color = " << rt_.water_river_extinct_color.r << " "
-                                         << rt_.water_river_extinct_color.g << " "
-                                         << rt_.water_river_extinct_color.b << "\n";
-    f << "water_river_extinct_density = " << rt_.water_river_extinct_density << "\n";
-    f << "water_lake_bump_strength = " << rt_.water_lake_bump_strength << "\n";
-    f << "water_lake_time_speed = "    << rt_.water_lake_time_speed    << "\n";
-    f << "water_lake_uv_scale = "      << rt_.water_lake_uv_scale      << "\n";
-    f << "water_lake_bump_dist = "     << rt_.water_lake_bump_dist     << "\n";
-    f << "grass_shore_color = " << rt_.grass_shore_color.r << " "
-                                 << rt_.grass_shore_color.g << " "
-                                 << rt_.grass_shore_color.b << "\n";
-    f << "grass_shore_strength = " << rt_.grass_shore_strength << "\n";
-    f << "grass_shore_distance = " << rt_.grass_shore_distance << "\n";
-    f << "terrain_shore_color = " << rt_.terrain_shore_color.r << " "
-                                   << rt_.terrain_shore_color.g << " "
-                                   << rt_.terrain_shore_color.b << "\n";
-    f << "terrain_shore_strength = " << rt_.terrain_shore_strength << "\n";
-    f << "terrain_shore_distance = " << rt_.terrain_shore_distance << "\n";
-    f << "distance_fog_color = " << rt_.distance_fog_color.r << " "
-                                  << rt_.distance_fog_color.g << " "
-                                  << rt_.distance_fog_color.b << "\n";
-    f << "distance_fog_strength = " << rt_.distance_fog_strength << "\n";
-    f << "distance_fog_density = "  << rt_.distance_fog_density  << "\n";
-    f << "distance_fog_start = "    << rt_.distance_fog_start    << "\n";
-    f << "distance_fog_height = "   << rt_.distance_fog_height   << "\n";
-    f << "distance_fog_max = "      << rt_.distance_fog_max      << "\n";
-    f << "terrain_shore_general_color = " << rt_.terrain_shore_general_color.r << " "
-                                           << rt_.terrain_shore_general_color.g << " "
-                                           << rt_.terrain_shore_general_color.b << "\n";
-    f << "terrain_shore_general_strength = " << rt_.terrain_shore_general_strength << "\n";
-    f << "terrain_shore_general_distance = " << rt_.terrain_shore_general_distance << "\n";
-    f << "terrain_sand_color = " << rt_.terrain_sand_color.r << " "
-                                  << rt_.terrain_sand_color.g << " "
-                                  << rt_.terrain_sand_color.b << "\n";
-    f << "shadow_near_mult = " << rt_.shadow_near_mult << "\n";
-    f << "gi_strength = "        << rt_.gi_strength        << "\n";
-    f << "gi_radius = "          << rt_.gi_radius          << "\n";
-    f << "gi_softener = "        << rt_.gi_softener        << "\n";
-    f << "reflections_enabled = "<< (rt_.reflections_enabled ? 1 : 0) << "\n";
-    f << "reflection_strength = "<< rt_.reflection_strength << "\n";
-    f << "taa_history_blend = " << rt_.taa_history_blend    << "\n";
-    f << "taa_spatial_strength = " << rt_.taa_spatial_strength << "\n";
-    f << "bloom_enabled = "    << (rt_.bloom_enabled ? 1 : 0) << "\n";
-    f << "bloom_strength = "   << rt_.bloom_strength    << "\n";
-    f << "bloom_threshold = "  << rt_.bloom_threshold   << "\n";
-    f << "bloom_radius = "     << rt_.bloom_radius      << "\n";
-    f << "spark_bloom = "      << rt_.spark_bloom       << "\n";
-    f << "taa_jitter_enabled = " << (rt_.taa_jitter_enabled ? 1 : 0) << "\n";
-    f << "textures_enabled = "   << (rt_.textures_enabled   ? 1 : 0) << "\n";
-    f << "lens_flare_enabled = " << (rt_.lens_flare_enabled ? 1 : 0) << "\n";
-    f << "lens_flare_strength = "    << rt_.lens_flare_strength    << "\n";
-    f << "lens_flare_threshold = "   << rt_.lens_flare_threshold   << "\n";
-    f << "lens_flare_dispersal = "   << rt_.lens_flare_dispersal   << "\n";
-    f << "lens_flare_halo_width = "  << rt_.lens_flare_halo_width  << "\n";
-    f << "lens_flare_ghosts = "      << rt_.lens_flare_ghosts      << "\n";
-    f << "lens_flare_aberration = "  << rt_.lens_flare_aberration  << "\n";
-    f << "taa_jitter_strength = " << rt_.taa_jitter_strength << "\n";
-    f << "compose_sharpen_strength = " << rt_.compose_sharpen_strength << "\n";
-    f << "sun_shaft_intensity = " << rt_.sun_shaft_intensity << "\n";
-    f << "auto_golden_hour = " << (rt_.auto_golden_hour ? 1 : 0) << "\n";
-    f << "sun_glare_strength = " << rt_.sun_glare_strength << "\n";
-    f << "svgf_enabled = " << (rt_.svgf_enabled ? 1 : 0) << "\n";
-    f << "image_contrast = " << rt_.image_contrast << "\n";
-    f << "image_brightness = " << rt_.image_brightness << "\n";
-    f << "image_gamma = " << rt_.image_gamma << "\n";
-    f << "terrain_rt_lod_distance = " << rt_.terrain_rt_lod_distance << "\n";
-    f << "terrain_ao_punch = " << rt_.terrain_ao_punch << "\n";
-    f << "terrain_pcss_samples_cap = "  << rt_.terrain_pcss_samples_cap  << "\n";
-    f << "terrain_gi_samples_cap = "    << rt_.terrain_gi_samples_cap    << "\n";
-    f << "terrain_gi_bounces_cap = "    << rt_.terrain_gi_bounces_cap    << "\n";
-    f << "terrain_ao_final_strength = " << rt_.terrain_ao_final_strength << "\n";
-    f << "render_scale = "       << rt_.render_scale       << "\n";
-    f << "quality_preset = "     << rt_.quality_preset     << "\n";
-    f << "ao_mode = "            << rt_.ao_mode            << "\n";
-    f << "gravity = "             << game_.gravity            << "\n";
-    f << "cubes_per_minute = "    << game_.cubes_per_minute   << "\n";
-    f << "bullet_mass = "         << game_.bullet_mass        << "\n";
-    f << "fire_rate_rps = "       << game_.fire_rate_rps      << "\n";
-    f << "bullet_speed = "        << game_.bullet_speed       << "\n";
-    f << "spark_scale = "         << game_.spark_scale        << "\n";
-    // Persist player position + view orientation so re-launching the game
-    // opens at the same spot the user was inspecting (most useful while
-    // tuning visuals — relaunching shouldn't mean walking back across
-    // the map every time).
-    f << "player_pos_x = "        << player_.position.x       << "\n";
-    f << "player_pos_y = "        << player_.position.y       << "\n";
-    f << "player_pos_z = "        << player_.position.z       << "\n";
-    f << "player_yaw = "          << player_.yaw              << "\n";
-    f << "player_pitch = "        << player_.pitch            << "\n";
+    visit_settings(*this, [&](const char* key, const auto& v) {
+        f << key << " = ";
+        write_value(f, v);
+        f << "\n";
+    });
     log::infof("settings saved to %s", kSettingsPath);
 }
 
 void VulkanEngine::load_settings() {
     std::ifstream f(kSettingsPath);
     if (!f) return;  // first run; defaults are fine
+    std::unordered_map<std::string, std::string> kv;
     std::string line;
-    int loaded = 0;
     while (std::getline(f, line)) {
         line = trim(line);
         if (line.empty() || line[0] == '#') continue;
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
-        std::string key = trim(line.substr(0, eq));
-        std::string val = trim(line.substr(eq + 1));
-        try {
-            // Flat fast-path for keys added after the main chain hit
-            // MSVC's nesting depth limit (C1061). Each is independent
-            // of the chain below and short-circuits via `continue`.
-            if (key == "image_contrast")          { rt_.image_contrast = std::stof(val); ++loaded; continue; }
-            if (key == "image_brightness")        { rt_.image_brightness = std::stof(val); ++loaded; continue; }
-            if (key == "image_gamma")             { rt_.image_gamma = std::stof(val); ++loaded; continue; }
-            // Brush state — these live up here in the if-continue
-            // section because the giant else-if chain below already
-            // hits MSVC's nested-block-depth limit; adding more
-            // entries to it triggers C1061 "blocks nested too deeply".
-            if (key == "terrain_brush_noise_strength")  { terrain_brush_noise_strength_  = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_brush_noise_freq")      { terrain_brush_noise_freq_      = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_brush_use_fbm_erosion") { terrain_brush_use_fbm_erosion_ = (std::stoi(val) != 0); ++loaded; continue; }
-            if (key == "terrain_brush_fbm_octaves")     { terrain_brush_fbm_octaves_     = std::stoi(val); ++loaded; continue; }
-            // terrain_edit_mode intentionally NOT loaded — transient
-            // state, always starts off (old cfgs may still have the key;
-            // it just falls through as unknown and is ignored).
-            if (key == "terrain_edit_mode")             { ++loaded; continue; }
-            // Player pose — peeled out of the else-if chain because
-            // the recent merge added enough new keys (raymarch LOD,
-            // VRS, TAAU) to push past MSVC's nested-block depth limit
-            // (C1061). Restored after init_world resets defaults.
-            if (key == "player_pos_x")                  { player_.position.x = std::stof(val); ++loaded; continue; }
-            if (key == "player_pos_y")                  { player_.position.y = std::stof(val); ++loaded; continue; }
-            if (key == "player_pos_z")                  { player_.position.z = std::stof(val); ++loaded; continue; }
-            if (key == "player_yaw")                    { player_.yaw        = std::stof(val); ++loaded; continue; }
-            if (key == "player_pitch")                  { player_.pitch      = std::stof(val); ++loaded; continue; }
-            // ReSTIR-lite (session 1) — fast-path so it doesn't deepen the
-            // already-at-limit else-if chain below.
-            if (key == "gi_restir_enabled")             { rt_.gi_restir_enabled = (std::stoi(val) != 0); ++loaded; continue; }
-            // FSR backend select (0=FSR2, 1=FSR3 ffx-api). Persisted alongside
-            // fsr2_enabled in the fast-path section to dodge MSVC's nested-if depth limit.
-            if (key == "fsr_backend")                   { rt_.fsr_backend = std::stoi(val); ++loaded; continue; }
-            if (key == "fg_enabled")                    { rt_.fg_enabled  = (std::stoi(val) != 0); ++loaded; continue; }
-            // Quadtree CLOD terrain. The legacy chunk-LOD keys
-            // (terrain_lod_distance_*, terrain_lod_stride_*,
-            // terrain_lod_scale, terrain_near_density*, terrain_tess_*,
-            // terrain_rock_relief, terrain_lod1/2) are intentionally
-            // unhandled — stale lines in old cfg files fall through as
-            // unknown keys and are ignored.
-            if (key == "terrain_clod_range0")           { rt_.terrain_clod_range0 = std::stof(val); ++loaded; continue; }
-            if (key == "water_foam_color") {
-                glm::vec3 v(0.88f, 0.94f, 0.96f);
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.water_foam_color = v;
-                }
-                ++loaded; continue;
-            }
-            if (key == "water_foam_strength") { rt_.water_foam_strength = std::stof(val); ++loaded; continue; }
-            if (key == "water_foam_width")    { rt_.water_foam_width    = std::stof(val); ++loaded; continue; }
-            if (key == "water_style")            { rt_.water_style            = std::stoi(val); ++loaded; continue; }
-            if (key == "water_river_speed")      { rt_.water_river_speed      = std::stof(val); ++loaded; continue; }
-            if (key == "water_river_normal_str") { rt_.water_river_normal_str = std::stof(val); ++loaded; continue; }
-            if (key == "water_river_flow_angle") { rt_.water_river_flow_angle = std::stof(val); ++loaded; continue; }
-            if (key == "water_river_time_speed") { rt_.water_river_time_speed = std::stof(val); ++loaded; continue; }
-            if (key == "water_river_detail")     { rt_.water_river_detail     = std::stof(val); ++loaded; continue; }
-            if (key == "water_river_foam_amount"){ rt_.water_river_foam_amount= std::stof(val); ++loaded; continue; }
-            if (key == "water_river_extinct_color") {
-                glm::vec3 v = rt_.water_river_extinct_color;
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.water_river_extinct_color = v;
-                }
-                ++loaded; continue;
-            }
-            if (key == "water_river_extinct_density") { rt_.water_river_extinct_density = std::stof(val); ++loaded; continue; }
-            if (key == "water_lake_bump_strength") { rt_.water_lake_bump_strength = std::stof(val); ++loaded; continue; }
-            if (key == "water_lake_time_speed")    { rt_.water_lake_time_speed    = std::stof(val); ++loaded; continue; }
-            if (key == "water_lake_uv_scale")      { rt_.water_lake_uv_scale      = std::stof(val); ++loaded; continue; }
-            if (key == "water_lake_bump_dist")     { rt_.water_lake_bump_dist     = std::stof(val); ++loaded; continue; }
-            if (key == "grass_shore_color") {
-                glm::vec3 v(0.40f, 0.30f, 0.16f);
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.grass_shore_color = v;
-                }
-                ++loaded; continue;
-            }
-            if (key == "grass_shore_strength") { rt_.grass_shore_strength = std::stof(val); ++loaded; continue; }
-            if (key == "grass_shore_distance") { rt_.grass_shore_distance = std::stof(val); ++loaded; continue; }
-            if (key == "grass_ground_tint_far_distance") { rt_.grass_ground_tint_far_distance = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_shore_color") {
-                glm::vec3 v(0.55f, 0.46f, 0.30f);
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.terrain_shore_color = v;
-                }
-                ++loaded; continue;
-            }
-            if (key == "terrain_shore_strength") { rt_.terrain_shore_strength = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_shore_distance") { rt_.terrain_shore_distance = std::stof(val); ++loaded; continue; }
-            if (key == "distance_fog_color") {
-                glm::vec3 v(0.62f, 0.70f, 0.78f);
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.distance_fog_color = v;
-                }
-                ++loaded; continue;
-            }
-            if (key == "distance_fog_strength") { rt_.distance_fog_strength = std::stof(val); ++loaded; continue; }
-            if (key == "distance_fog_density")  { rt_.distance_fog_density  = std::stof(val); ++loaded; continue; }
-            if (key == "distance_fog_start")    { rt_.distance_fog_start    = std::stof(val); ++loaded; continue; }
-            if (key == "distance_fog_height")   { rt_.distance_fog_height   = std::stof(val); ++loaded; continue; }
-            if (key == "distance_fog_max")      { rt_.distance_fog_max      = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_shore_general_color") {
-                glm::vec3 v = rt_.terrain_shore_general_color;
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.terrain_shore_general_color = v;
-                }
-                ++loaded; continue;
-            }
-            if (key == "terrain_shore_general_strength") { rt_.terrain_shore_general_strength = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_shore_general_distance") { rt_.terrain_shore_general_distance = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_sand_color") {
-                glm::vec3 v = rt_.terrain_sand_color;
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.terrain_sand_color = v;
-                }
-                ++loaded; continue;
-            }
-            if (key == "terrain_rt_lod_distance") { rt_.terrain_rt_lod_distance = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_ao_punch")        { rt_.terrain_ao_punch = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_pcss_samples_cap")  { rt_.terrain_pcss_samples_cap  = std::stoi(val); ++loaded; continue; }
-            if (key == "terrain_gi_samples_cap")    { rt_.terrain_gi_samples_cap    = std::stoi(val); ++loaded; continue; }
-            if (key == "terrain_gi_bounces_cap")    { rt_.terrain_gi_bounces_cap    = std::stoi(val); ++loaded; continue; }
-            if (key == "terrain_ao_final_strength") { rt_.terrain_ao_final_strength = std::stof(val); ++loaded; continue; }
-            if (key == "grass_color_top") {
-                glm::vec3 v = rt_.grass_color_top;
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.grass_color_top = v;
-                }
-                ++loaded; continue;
-            }
-            if (key == "grass_color_bottom") {
-                glm::vec3 v = rt_.grass_color_bottom;
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.grass_color_bottom = v;
-                }
-                ++loaded; continue;
-            }
-            if (key == "grass_color_ground") {
-                glm::vec3 v = rt_.grass_color_ground;
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.grass_color_ground = v;
-                }
-                ++loaded; continue;
-            }
-            if (key == "grass_color_ground_far") {
-                glm::vec3 v = rt_.grass_color_ground_far;
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.grass_color_ground_far = v;
-                }
-                ++loaded; continue;
-            }
-            if (key == "grass_base_ao_floor")        { rt_.grass_base_ao_floor        = std::stof(val); ++loaded; continue; }
-            if (key == "grass_ground_tint_strength") { rt_.grass_ground_tint_strength = std::stof(val); ++loaded; continue; }
-            if (key == "grass_shadow_strength")      { rt_.grass_shadow_strength      = std::stof(val); ++loaded; continue; }
-            // SPOM strength lives in the flat fast-path block, NOT in
-            // the if/else-if chain below — adding one more `else if`
-            // there exceeds MSVC's nested-block limit (C1061).
-            if (key == "spom_strength")              { rt_.spom_strength              = std::stof(val); ++loaded; continue; }
-            if (key == "spom_mode")                  { int m = std::stoi(val); rt_.spom_mode = m < 0 ? 0 : (m > 2 ? 2 : m); ++loaded; continue; }
-            if (key == "terrain_wireframe")           { rt_.terrain_wireframe           = std::stoi(val) != 0; ++loaded; continue; }
-            if (key == "terrain_pom_strength")        { rt_.terrain_pom_strength        = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_disp_amp")            { rt_.terrain_disp_amp            = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_disp_smooth_mip")     { rt_.terrain_disp_smooth_mip     = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_pom_far_m")           { rt_.terrain_pom_far_m           = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_sand_ripple_scale")   { rt_.terrain_sand_ripple_scale   = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_grass_line_scale")    { rt_.terrain_grass_line_scale    = std::stof(val); ++loaded; continue; }
-            if (key == "water_clarity_depth")         { rt_.water_clarity_depth         = std::stof(val); ++loaded; continue; }
-            if (key == "water_shore_softness")        { rt_.water_shore_softness        = std::stof(val); ++loaded; continue; }
-            if (key == "water_foam_opacity")          { rt_.water_foam_opacity          = std::stof(val); ++loaded; continue; }
-            if (key == "ground_mat_strength")         { rt_.ground_mat_strength         = std::stof(val); ++loaded; continue; }
-            if (key == "ground_mat_tile_m")           { rt_.ground_mat_tile_m           = std::stof(val); ++loaded; continue; }
-            if (key == "ground_mat_normal")           { rt_.ground_mat_normal           = std::stof(val); ++loaded; continue; }
-            if (key == "terrain_antitile")            { rt_.terrain_antitile            = std::stoi(val) != 0; ++loaded; continue; }
-            if (key == "terrain_antitile_strength")   { rt_.terrain_antitile_strength   = std::stof(val); ++loaded; continue; }
-            if (key == "grass_shadow_on_terrain")     { rt_.grass_shadow_on_terrain     = std::stoi(val) != 0; ++loaded; continue; }
-            if (key == "grass_shadow_on_terrain_strength") { rt_.grass_shadow_on_terrain_strength = std::stof(val); ++loaded; continue; }
-            if (key == "grass_shadow_on_terrain_samples")  { rt_.grass_shadow_on_terrain_samples  = std::stoi(val); ++loaded; continue; }
-            if (key == "grass_shadow_on_terrain_dist")     { rt_.grass_shadow_on_terrain_dist     = std::stof(val); ++loaded; continue; }
-            if (key == "grass_side_lit_enabled")      { rt_.grass_side_lit_enabled      = std::stoi(val) != 0; ++loaded; continue; }
-            if (key == "grass_side_lit_strength")     { rt_.grass_side_lit_strength     = std::stof(val); ++loaded; continue; }
-            if (key == "grass_shadow_samples")       { rt_.grass_shadow_samples       = std::stoi(val); ++loaded; continue; }
-            if (key == "half_rate_shadows")          { rt_.half_rate_shadows          = std::stoi(val) != 0; ++loaded; continue; }
-            if (key == "sun_shaft_intensity")        { rt_.sun_shaft_intensity        = std::stof(val); ++loaded; continue; }
-            if (key == "auto_golden_hour")           { rt_.auto_golden_hour           = std::stoi(val) != 0; ++loaded; continue; }
-            if (key == "sun_glare_strength")         { rt_.sun_glare_strength         = std::stof(val); ++loaded; continue; }
-            if (key == "svgf_enabled")               { rt_.svgf_enabled               = std::stoi(val) != 0; ++loaded; continue; }
-            if (key == "grass_shadow_max_dist")      { rt_.grass_shadow_max_dist      = std::stof(val); ++loaded; continue; }
-            // Physical sky + clouds (flat fast path: the else-if chain below
-            // is at MSVC's block-nesting limit).
-            if (key == "sky_mode")             { rt_.sky_mode = std::stoi(val); ++loaded; continue; }
-            if (key == "atmosphere_intensity") { rt_.atmosphere_intensity = std::stof(val); ++loaded; continue; }
-            if (key == "aerial_scale")         { rt_.aerial_scale = std::stof(val); ++loaded; continue; }
-            if (key == "aerial_max_km")        { rt_.aerial_max_km = std::stof(val); ++loaded; continue; }
-            if (key == "clouds_enabled")       { rt_.clouds_enabled = std::stoi(val); ++loaded; continue; }
-            if (key == "cloud_coverage")       { rt_.cloud_coverage = std::stof(val); ++loaded; continue; }
-            if (key == "cloud_density")        { rt_.cloud_density = std::stof(val); ++loaded; continue; }
-            if (key == "cloud_speed")          { rt_.cloud_speed = std::stof(val); ++loaded; continue; }
-            if (key == "tonemap_mode")         { rt_.tonemap_mode = std::stoi(val); ++loaded; continue; }
-            if (key == "hdr_output")     { rt_.hdr_output = std::stoi(val); ++loaded; continue; }
-            if (key == "radiance_cache") { rt_.radiance_cache = std::stoi(val); ++loaded; continue; }
-            if (key == "hdr_paper_nits") { rt_.hdr_paper_nits = std::stof(val); ++loaded; continue; }
-            if (key == "hdr_peak_nits")  { rt_.hdr_peak_nits = std::stof(val); ++loaded; continue; }
-            if (key == "fog_volumetric")       { rt_.fog_volumetric = std::stoi(val); ++loaded; continue; }
-            if (key == "fog_density")          { rt_.fog_density = std::stof(val); ++loaded; continue; }
-            if (key == "fog_height_falloff")   { rt_.fog_height_falloff = std::stof(val); ++loaded; continue; }
-            if (key == "fog_anisotropy")       { rt_.fog_anisotropy = std::stof(val); ++loaded; continue; }
-            if (key == "fog_max_dist")         { rt_.fog_max_dist = std::stof(val); ++loaded; continue; }
-            if      (key == "sun_pitch_deg")       rt_.sun_pitch_deg = std::stof(val);
-            else if (key == "sun_yaw_deg")         rt_.sun_yaw_deg = std::stof(val);
-            else if (key == "sun_intensity")       rt_.sun_intensity = std::stof(val);
-            else if (key == "sun_color" ||
-                     key == "sky_color" ||
-                     key == "ground_ambient") {
-                glm::vec3 v;
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    if      (key == "sun_color")      rt_.sun_color = v;
-                    else if (key == "sky_color")      rt_.sky_color = v;
-                    else                              rt_.ground_ambient = v;
-                }
-            }
-            else if (key == "ambient_strength")    rt_.ambient_strength = std::stof(val);
-            else if (key == "shadow_strength")     rt_.shadow_strength = std::stof(val);
-            else if (key == "shadow_enabled")      rt_.shadow_enabled = std::stoi(val) != 0;
-            else if (key == "shadow_samples")      rt_.shadow_samples = std::stoi(val);
-            else if (key == "shadow_softness")     rt_.shadow_softness = std::stof(val);
-            else if (key == "shadow_curve")        rt_.shadow_curve = std::stof(val);
-            else if (key == "ao_samples")          rt_.ao_samples = std::stoi(val);
-            else if (key == "ao_radius")           rt_.ao_radius = std::stof(val);
-            else if (key == "gi_samples")          rt_.gi_samples = std::stoi(val);
-            else if (key == "gi_bounces")          rt_.gi_bounces = std::stoi(val);
-            else if (key == "gi_shadow_max_bounce") rt_.gi_shadow_max_bounce = std::stoi(val);
-            else if (key == "ao_floor")             rt_.ao_floor = std::stof(val);
-            else if (key == "auto_exposure_strength") rt_.auto_exposure_strength = std::stof(val);
-            else if (key == "use_merged_static_blas") rt_.use_merged_static_blas = (std::stoi(val) != 0);
-            else if (key == "terrain_brush_radius")   terrain_brush_radius_   = std::stof(val);
-            else if (key == "terrain_brush_strength") terrain_brush_strength_ = std::stof(val);
-            else if (key == "terrain_brush_mode") {
-                // Enum widened from 4 → 8 (added GrassAdd/Remove + Erode +/Smooth).
-                // Keep the upper bound in sync with TerrainBrushMode::ErodeSmooth.
-                int m = std::stoi(val);
-                if (m >= 0 && m <= 7) terrain_brush_mode_ = static_cast<TerrainBrushMode>(m);
-            }
-            else if (key == "terrain_brush_flatten_target") terrain_brush_flatten_target_ = std::stof(val);
-            else if (key == "terrain_fog_strength")    rt_.terrain_fog_strength    = std::stof(val);
-            else if (key == "terrain_wrap_strength")   rt_.terrain_wrap_strength   = std::stof(val);
-            else if (key == "terrain_detail_strength") rt_.terrain_detail_strength = std::stof(val);
-            else if (key == "terrain_shadow_softness_scale") rt_.terrain_shadow_softness_scale = std::stof(val);
-            else if (key == "terrain_h_sand_grass_start") rt_.terrain_h_sand_grass_start = std::stof(val);
-            else if (key == "terrain_h_sand_grass_end")   rt_.terrain_h_sand_grass_end   = std::stof(val);
-            else if (key == "terrain_h_grass_dirt_start") rt_.terrain_h_grass_dirt_start = std::stof(val);
-            else if (key == "terrain_h_grass_dirt_end")   rt_.terrain_h_grass_dirt_end   = std::stof(val);
-            else if (key == "terrain_h_dirt_rock_start")  rt_.terrain_h_dirt_rock_start  = std::stof(val);
-            else if (key == "terrain_h_dirt_rock_end")    rt_.terrain_h_dirt_rock_end    = std::stof(val);
-            else if (key == "terrain_h_rock_snow_start")  rt_.terrain_h_rock_snow_start  = std::stof(val);
-            else if (key == "terrain_h_rock_snow_end")    rt_.terrain_h_rock_snow_end    = std::stof(val);
-            else if (key == "grass_enabled")      rt_.grass_enabled       = (std::stoi(val) != 0);
-            else if (key == "grass_raymarch_enabled") rt_.grass_raymarch_enabled = (std::stoi(val) != 0);
-            else if (key == "grass_raymarch_distance") rt_.grass_raymarch_distance = std::stof(val);
-            else if (key == "grass_distance")     rt_.grass_distance      = std::stof(val);
-            else if (key == "grass_wind")         rt_.grass_wind          = std::stof(val);
-            else if (key == "grass_density")      rt_.grass_density       = std::stof(val);
-            else if (key == "grass_height_scale") rt_.grass_height_scale  = std::stof(val);
-            else if (key == "grass_alpha_cutoff") rt_.grass_alpha_cutoff  = std::stof(val);
-            else if (key == "grass_cutoff_soft_dist") rt_.grass_cutoff_soft_dist = std::stof(val);
-            else if (key == "grass_slope_n_min")  rt_.grass_slope_n_min   = std::stof(val);
-            else if (key == "grass_distance_density") rt_.grass_distance_density = std::stof(val);
-            else if (key == "grass_alt_min")  rt_.grass_alt_min  = std::stof(val);
-            else if (key == "grass_alt_max")  rt_.grass_alt_max  = std::stof(val);
-            else if (key == "shadow_map_resolution") rt_.shadow_map_resolution = std::stoi(val);
-            else if (key == "shadow_map_world_half") rt_.shadow_map_world_half = std::stof(val);
-            else if (key == "shadow_debug_overlay")  rt_.shadow_debug_overlay  = std::stoi(val) != 0;
-            else if (key == "terrain_bake_supersample") rt_.terrain_bake_supersample = std::stoi(val);
-            else if (key == "terrain_shading_contrast") rt_.terrain_shading_contrast = std::stof(val);
-            else if (key == "terrain_heightmap_scale") rt_.terrain_heightmap_scale = std::stoi(val);
-            else if (key == "terrain_raymarch_enabled") rt_.terrain_raymarch_enabled = std::stoi(val) != 0;
-            else if (key == "terrain_raymarch_max_steps") rt_.terrain_raymarch_max_steps = std::stoi(val);
-            else if (key == "terrain_raymarch_shadow_steps") rt_.terrain_raymarch_shadow_steps = std::stoi(val);
-            else if (key == "terrain_raymarch_octaves") rt_.terrain_raymarch_octaves = std::stoi(val);
-            else if (key == "terrain_raymarch_normal_octaves") rt_.terrain_raymarch_normal_octaves = std::stoi(val);
-            else if (key == "taau_enabled") rt_.taau_enabled = std::stoi(val) != 0;
-            else if (key == "fsr2_enabled") rt_.fsr2_enabled = std::stoi(val) != 0;
-            else if (key == "terrain_raymarch_step_factor") rt_.terrain_raymarch_step_factor = std::stof(val);
-            else if (key == "terrain_raymarch_lod_near_m") rt_.terrain_raymarch_lod_near_m = std::stof(val);
-            else if (key == "terrain_raymarch_lod_far_m") rt_.terrain_raymarch_lod_far_m = std::stof(val);
-            else if (key == "terrain_raymarch_lod_min_octaves") rt_.terrain_raymarch_lod_min_octaves = std::stoi(val);
-            else if (key == "terrain_raymarch_scale") rt_.terrain_raymarch_scale = std::stof(val);
-            else if (key == "terrain_raymarch_sharpen") rt_.terrain_raymarch_sharpen = std::stof(val);
-            else if (key == "terrain_raymarch_fog_strength") rt_.terrain_raymarch_fog_strength = std::stof(val);
-            else if (key == "terrain_raymarch_relaxation") rt_.terrain_raymarch_relaxation = std::stoi(val) != 0;
-            else if (key == "terrain_raymarch_fog_godrays") rt_.terrain_raymarch_fog_godrays = std::stoi(val) != 0;
-            else if (key == "terrain_raymarch_fog_y_start") rt_.terrain_raymarch_fog_y_start = std::stof(val);
-            else if (key == "terrain_raymarch_fog_y_top")   rt_.terrain_raymarch_fog_y_top   = std::stof(val);
-            else if (key == "terrain_raymarch_fog_noise")   rt_.terrain_raymarch_fog_noise   = std::stof(val);
-            else if (key == "water_enabled")        rt_.water_enabled = std::stoi(val) != 0;
-            else if (key == "water_level")          rt_.water_level = std::stof(val);
-            else if (key == "water_wave_strength")  rt_.water_wave_strength = std::stof(val);
-            else if (key == "water_wave_scale")     rt_.water_wave_scale = std::stof(val);
-            else if (key == "water_rt_reflections") rt_.water_rt_reflections = std::stoi(val) != 0;
-            else if (key == "water_tlas_reflections") rt_.water_tlas_reflections = std::stoi(val) != 0;
-            else if (key == "water_shore_blend") rt_.water_shore_blend = std::stof(val);
-            else if (key == "water_shore_noise") rt_.water_shore_noise = std::stof(val);
-            else if (key == "water_shadows_enabled") rt_.water_shadows_enabled = std::stoi(val) != 0;
-            else if (key == "water_transparency") rt_.water_transparency = std::stof(val);
-            else if (key == "water_color_shallow") {
-                glm::vec3 v;
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.water_color_shallow = v;
-                }
-            }
-            else if (key == "water_color") {
-                glm::vec3 v;
-                if (std::sscanf(val.c_str(), "%f %f %f", &v.x, &v.y, &v.z) == 3) {
-                    rt_.water_color = v;
-                }
-            }
-            else if (key == "shadow_near_mult") rt_.shadow_near_mult = std::stof(val);
-            else if (key == "gi_strength")         rt_.gi_strength = std::stof(val);
-            else if (key == "gi_radius")           rt_.gi_radius = std::stof(val);
-            else if (key == "gi_softener")         rt_.gi_softener = std::stof(val);
-            else if (key == "reflections_enabled") rt_.reflections_enabled = std::stoi(val) != 0;
-            else if (key == "reflection_strength") rt_.reflection_strength = std::stof(val);
-            else if (key == "taa_history_blend")    rt_.taa_history_blend = std::stof(val);
-            else if (key == "taa_spatial_strength") rt_.taa_spatial_strength = std::stof(val);
-            else if (key == "bloom_enabled")        rt_.bloom_enabled = std::stoi(val) != 0;
-            else if (key == "bloom_strength")       rt_.bloom_strength = std::stof(val);
-            else if (key == "bloom_threshold")      rt_.bloom_threshold = std::stof(val);
-            else if (key == "bloom_radius")         rt_.bloom_radius = std::stof(val);
-            else if (key == "spark_bloom")          rt_.spark_bloom = std::stof(val);
-            else if (key == "taa_jitter_enabled")   rt_.taa_jitter_enabled = std::stoi(val) != 0;
-            else if (key == "textures_enabled")     rt_.textures_enabled   = std::stoi(val) != 0;
-            else if (key == "lens_flare_enabled")   rt_.lens_flare_enabled = std::stoi(val) != 0;
-            else if (key == "lens_flare_strength")  rt_.lens_flare_strength = std::stof(val);
-            else if (key == "lens_flare_threshold") rt_.lens_flare_threshold = std::stof(val);
-            else if (key == "lens_flare_dispersal") rt_.lens_flare_dispersal = std::stof(val);
-            else if (key == "lens_flare_halo_width")rt_.lens_flare_halo_width = std::stof(val);
-            else if (key == "lens_flare_ghosts")    rt_.lens_flare_ghosts = std::stoi(val);
-            else if (key == "lens_flare_aberration")rt_.lens_flare_aberration = std::stof(val);
-            else if (key == "taa_jitter_strength")  rt_.taa_jitter_strength = std::stof(val);
-            else if (key == "compose_sharpen_strength") rt_.compose_sharpen_strength = std::stof(val);
-            // (image_contrast, image_brightness, image_gamma,
-            //  terrain_rt_lod_distance, terrain_ao_punch are handled
-            //  in the flat fast-path above.)
-            else if (key == "render_scale")        rt_.render_scale = std::stof(val);
-            else if (key == "quality_preset")      rt_.quality_preset = std::stoi(val);
-            else if (key == "ao_mode")             rt_.ao_mode = std::stoi(val);
-            else if (key == "gravity")              game_.gravity = std::stof(val);
-            else if (key == "cubes_per_minute")     game_.cubes_per_minute = std::stoi(val);
-            else if (key == "bullet_mass")          game_.bullet_mass = std::stof(val);
-            else if (key == "fire_rate_rps")        game_.fire_rate_rps = std::stof(val);
-            else if (key == "bullet_speed")         game_.bullet_speed = std::stof(val);
-            else if (key == "spark_scale")          game_.spark_scale = std::stof(val);
-            else {
-                log::warnf("settings: unknown key '%s' (ignored)", key.c_str());
-                continue;
-            }
-            ++loaded;
-        } catch (...) {
-            log::warnf("settings: failed to parse '%s' = '%s'",
-                       key.c_str(), val.c_str());
-        }
+        kv[trim(line.substr(0, eq))] = trim(line.substr(eq + 1));
     }
+    // Transient state that older cfgs may still carry: never restored.
+    kv.erase("terrain_edit_mode");
+    int loaded = 0;
+    visit_settings(*this, [&](const char* key, auto& v) {
+        auto it = kv.find(key);
+        if (it == kv.end()) return;
+        try {
+            if (parse_value(it->second, v)) ++loaded;
+            else log::warnf("settings: bad value '%s' = '%s' (kept default)", key, it->second.c_str());
+        } catch (...) {
+            log::warnf("settings: failed to parse '%s' = '%s'", key, it->second.c_str());
+        }
+        kv.erase(it);
+    });
+    for (const auto& [k, v] : kv) log::warnf("settings: unknown key '%s' (ignored)", k.c_str());
     // Clamp loaded values into sane ranges. A hand-edited or corrupted cfg
     // shouldn't be able to set shadow_samples = -1 and crash the renderer.
     auto clampi = [](int& v, int lo, int hi) { v = std::max(lo, std::min(hi, v)); };
@@ -913,6 +572,7 @@ void VulkanEngine::load_settings() {
     clampf(rt_.render_scale,     0.4f,    2.5f);
     clampi(rt_.quality_preset,  -1,         3);  // -1 = custom
     clampi(rt_.ao_mode,          0,         3);  // 0=off,1=fast,2=RTAO,3=HBAO
+    clampi(rt_.spom_mode,        0,         2);
     clampf(game_.gravity,        0.0f, 1500.0f);
     clampi(game_.cubes_per_minute, 0,    1000);
     clampf(game_.bullet_mass,    0.5f,  200.0f);

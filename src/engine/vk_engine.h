@@ -195,6 +195,9 @@ private:
     // (FBM vs FastNoiseLite) can match what the user toggled last session.
     void preload_terrain_raymarch_flag();
     void save_settings() const;
+    // Persisted-settings registry (settings.cpp): calls f(key, member&)
+    // for every saved key. Self = VulkanEngine or const VulkanEngine.
+    template <class Self, class F> static void visit_settings(Self& s, F&& f);
     // Diff rt_ against last-saved snapshot; debounce-save 500ms after the
     // last detected change so dragging a slider doesn't churn the disk.
     void maybe_autosave_settings(float frame_dt);
