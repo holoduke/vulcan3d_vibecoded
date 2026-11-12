@@ -418,6 +418,98 @@ void build_herb(std::vector<Vertex>& v, std::vector<uint32_t>& ix, const Herb& h
     }
 }
 
+// Reed / bulrush clump (Typha-like) for the shore. A tuft of long, narrow,
+// keeled leaf blades that rise almost vertically and arch over near the
+// tip, round flowering stems among them, and the familiar brown cattail
+// heads (a velvety cylinder with a thin spike above). Leaves carry
+// leaf-space coordinates (part 3, like plant_leaf) so the leaf texture
+// and venation run along them; heads are part 5.
+void reed_blade(std::vector<Vertex>& v, std::vector<uint32_t>& ix, glm::vec3 base, glm::vec3 lean,
+                float len, float wid, float arch, uint32_t seed) {
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    const glm::vec3 L = glm::normalize(glm::vec3(lean.x, 0.0f, lean.z) + glm::vec3(1e-4f));
+    const glm::vec3 side = glm::normalize(glm::cross(up, L));
+    const float twist = (float((seed * 2654435761u) >> 8 & 0xFFFF) / 65535.0f - 0.5f) * 1.6f;
+    const int segs = 10;
+    auto spine = [&](float t) {
+        // Straight up most of the way, then bending over toward `lean`.
+        float bend = arch * t * t * t;
+        return base + up * (len * t * (1.0f - 0.35f * arch * t * t)) + L * (len * (0.10f * t + bend * 0.55f));
+    };
+    const uint32_t b0 = uint32_t(v.size());
+    for (int s = 0; s <= segs; ++s) {
+        const float t = float(s) / float(segs);
+        const glm::vec3 p = spine(t);
+        const glm::vec3 tg = glm::normalize(spine(std::min(t + 0.05f, 1.0f)) - spine(std::max(t - 0.05f, 0.0f)));
+        const float tw = twist * t;
+        glm::vec3 sd = glm::normalize(side * std::cos(tw) + glm::cross(tg, side) * std::sin(tw));
+        const float w = wid * (t < 0.85f ? 1.0f - 0.25f * t : (1.0f - t) / 0.15f * 0.79f);
+        glm::vec3 nrm = glm::normalize(glm::cross(sd, tg));
+        if (glm::dot(nrm, L) < 0.0f) nrm = -nrm;
+        // Keeled (V-shaped) cross-section: the edges sit a little behind the midrib.
+        const glm::vec3 keel = -nrm * (w * 0.35f);
+        const float pk = t * (0.98f / 32.0f);
+        v.push_back({ p - sd * w + keel, nrm, { 3.0f - 0.4f, pk } });
+        v.push_back({ p,                 nrm, { 3.0f,        pk } });
+        v.push_back({ p + sd * w + keel, nrm, { 3.0f + 0.4f, pk } });
+    }
+    for (int s = 0; s < segs; ++s) {
+        const uint32_t r0 = b0 + uint32_t(s) * 3u, r1 = r0 + 3u;
+        ix.insert(ix.end(), { r0, r0 + 1, r1 + 1, r0, r1 + 1, r1, r0 + 1, r0 + 2, r1 + 2, r0 + 1, r1 + 2, r1 + 1 });
+    }
+}
+
+void build_reed(std::vector<Vertex>& v, std::vector<uint32_t>& ix) {
+    uint32_t seed = 0xBEEDu;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return float((seed >> 8) & 0xFFFFu) / 65535.0f; };
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    // Leaves: ~26 blades from a ~0.3 m wide base, outer ones lower and more arched.
+    for (int i = 0; i < 26; ++i) {
+        const float a = 6.2831853f * rnd();
+        const float r = 0.16f * std::sqrt(rnd());
+        const glm::vec3 base(std::cos(a) * r, -0.05f, std::sin(a) * r);
+        const float outer = r / 0.16f;
+        const float len = 1.25f + 0.85f * rnd() - 0.45f * outer;
+        const glm::vec3 lean(std::cos(a) + (rnd() - 0.5f) * 0.8f, 0.0f, std::sin(a) + (rnd() - 0.5f) * 0.8f);
+        reed_blade(v, ix, base, lean, len, 0.011f + 0.006f * rnd(), 0.25f + 0.65f * outer * rnd(), seed);
+    }
+    // Flowering stems with cattail heads.
+    for (int i = 0; i < 4; ++i) {
+        const float a = 6.2831853f * rnd(), r = 0.07f * rnd();
+        const glm::vec3 b(std::cos(a) * r, -0.05f, std::sin(a) * r);
+        const float H = 1.75f + 0.55f * rnd();
+        const glm::vec3 lean = glm::vec3(std::cos(a), 0.0f, std::sin(a)) * (0.05f + 0.10f * rnd());
+        std::vector<glm::vec3> path;
+        for (int k = 0; k <= 8; ++k) {
+            const float t = float(k) / 8.0f;
+            path.push_back(b + up * (H * t) + lean * (H * t * t));
+        }
+        plant_tube(v, ix, path, 0.0065f, 0.0040f, 5, 0.0f, 1.0f);
+        // Head: a 16-sided cylinder ~0.20 m long below the stem tip, rounded ends.
+        const glm::vec3 hb = path[8] - up * 0.34f + lean * 0.2f, ht = hb + up * 0.20f;
+        const float rr = 0.016f + 0.004f * rnd();
+        std::vector<glm::vec3> hp = { hb - up * 0.012f, hb, hb + up * 0.06f, ht - up * 0.06f, ht, ht + up * 0.012f };
+        const uint32_t h0 = uint32_t(v.size());
+        const float rad[6] = { 0.45f, 0.92f, 1.0f, 1.0f, 0.92f, 0.45f };
+        const int S = 16;
+        for (int k = 0; k < 6; ++k)
+            for (int s = 0; s < S; ++s) {
+                const float ang = 6.2831853f * float(s) / float(S);
+                const glm::vec3 d(std::cos(ang), 0.0f, std::sin(ang));
+                const glm::vec3 nrm = glm::normalize(d + up * (k == 0 ? -0.8f : (k == 5 ? 0.8f : 0.0f)));
+                v.push_back({ hp[k] + d * (rr * rad[k]), nrm, { 5.0f, 1.0f } });
+            }
+        for (int k = 0; k < 5; ++k)
+            for (int s = 0; s < S; ++s) {
+                const uint32_t a0 = h0 + uint32_t(k * S + s), a1 = h0 + uint32_t(k * S + (s + 1) % S);
+                ix.insert(ix.end(), { a0, a1, a1 + uint32_t(S), a0, a1 + uint32_t(S), a0 + uint32_t(S) });
+            }
+        // Thin male spike above the head.
+        std::vector<glm::vec3> sp = { ht + up * 0.02f, ht + up * 0.16f };
+        plant_tube(v, ix, sp, 0.0030f, 0.0012f, 4, 1.0f, 1.0f);
+    }
+}
+
 // Sort instances by 32 m ground cell and emit one contiguous range per
 // cell with a conservative AABB (instance size + raymarch-surface offset).
 void sort_into_cells(std::vector<ScatterInstance>& v, uint32_t base,
@@ -542,6 +634,7 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             case 3: build_herb(pv, pi, { 0.34f, 3, 3, 0.24f, 0.022f, false, 0, 0.10f, 6, 0.036f, -0.9f, 0.95f, 6, 0.50f, 12.0f, 118.0f, 2.6f, 7u }); break;   // bluebell: one-sided nodding raceme
             case 4: build_herb(pv, pi, { 0.48f, 6, 4, 0.16f, 0.018f, false, 2, 0.14f, 16, 0.050f, 0.20f, 0.45f, 0, 0.3f, 137.5f, 62.0f, 0.0f, 9u }); break;   // cornflower: thin rays, branched
             case 5: build_herb(pv, pi, { 0.26f, 4, 3, 0.13f, 0.045f, false, 3, 0.09f, 5, 0.034f, 0.70f, 1.10f, 0, 0.3f, 137.5f, 62.0f, 0.0f, 11u }); break;  // buttercup: loose cyme of small cups
+            case 7: build_reed(pv, pi); break;
             case 6: build_herb(pv, pi, { 0.66f, 4, 4, 0.20f, 0.040f, true, 0, 0.10f, 5, 0.030f, 0.45f, 0.95f, 12, 0.48f, 137.5f, 58.0f, 0.0f, 13u }); break;  // lupin: palmate leaves, dense spike
             }
             s.plant_mesh[sp] = create_mesh_from_data(device, alloc, queue, queue_family,
@@ -599,6 +692,35 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             si.rot_tint = glm::vec4(u01(rng) * glm::two_pi<float>(), col.x, col.y, col.z);
             per[sp].push_back(si);
         }
+        // Reed beds along the shore: dense clumps on the wet margin, from a
+        // little below the waterline (standing in the shallows) to just above.
+        {
+            int reeds = 0;
+            for (int i = 0; i < 600000 && reeds < 9000; ++i) {
+                float wx = (u01(rng) * 2.0f - 1.0f) * ext;
+                float wz = (u01(rng) * 2.0f - 1.0f) * ext;
+                if (std::abs(wx) < params.keep_out_xz.x && std::abs(wz) < params.keep_out_xz.y) continue;
+                if (params.road && wx > params.road->bb_min.x && wx < params.road->bb_max.x &&
+                    wz > params.road->bb_min.y && wz < params.road->bb_max.y &&
+                    params.road->distance(wx, wz) < params.road->half_width + params.road->shoulder + 1.0f) continue;
+                float h = h_at(wx, wz);
+                if (h < params.water_level - 0.35f || h > params.water_level + 0.9f) continue;
+                if (n_y_at(wx, wz) < 0.72f) continue;
+                // Beds, not a uniform fringe: low-frequency patches plus density
+                // falling off with height above the water.
+                float bed = hash31(glm::vec3(std::floor(wx * 0.11f), 31.0f, std::floor(wz * 0.11f))) * 0.6f +
+                            hash31(glm::vec3(std::floor(wx * 0.37f), 37.0f, std::floor(wz * 0.37f))) * 0.4f;
+                float wet = 1.0f - glm::smoothstep(params.water_level + 0.1f, params.water_level + 0.9f, h);
+                if (bed < 0.42f || u01(rng) > wet * glm::clamp(params.flower_density, 0.0f, 2.0f)) continue;
+                ScatterInstance si{};
+                si.pos_scale = glm::vec4(wx, h - 0.03f, wz, 0.75f + 0.55f * u01(rng));
+                glm::vec3 col = glm::mix(glm::vec3(0.32f, 0.38f, 0.16f), glm::vec3(0.42f, 0.40f, 0.20f), u01(rng));
+                si.rot_tint = glm::vec4(u01(rng) * glm::two_pi<float>(), col.x, col.y, col.z);
+                per[7].push_back(si);
+                ++reeds;
+            }
+        }
+
         std::vector<ScatterInstance> all;
         for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {
             s.plant_first[sp] = uint32_t(all.size());
@@ -628,9 +750,9 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
                 s.plant_cpu = all;
             }
         }
-        log::infof("[scatter] plants: %u ferns, %u daisies, %u poppies, %u bluebells, %u cornflowers, %u buttercups, %u lupins",
+        log::infof("[scatter] plants: %u ferns, %u daisies, %u poppies, %u bluebells, %u cornflowers, %u buttercups, %u lupins, %u reeds",
                    s.plant_count[0], s.plant_count[1], s.plant_count[2], s.plant_count[3],
-                   s.plant_count[4], s.plant_count[5], s.plant_count[6]);
+                   s.plant_count[4], s.plant_count[5], s.plant_count[6], s.plant_count[7]);
     }
 
     if (inst.empty()) return s;

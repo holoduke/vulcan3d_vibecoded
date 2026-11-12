@@ -115,9 +115,17 @@ void main() {
         // tint), petals = instance colour, flower centre golden.
         int part = int(vUv.x + 0.5);
         bool fern = vColor.g > vColor.r * 1.5 && vColor.g > vColor.b * 1.5 && vColor.g < 0.35;
+        bool reed = vColor.r > 0.28 && vColor.r < 0.5 && vColor.g > 0.3 && vColor.b < 0.25 && vColor.g < vColor.r * 1.25;
         vec3 leaf = fern ? vColor : vec3(0.11, 0.22, 0.05);
         leaf *= 0.8 + 0.4 * vUv.y;                // tips catch more light
         albedo = (part == 0) ? leaf : (part == 1 ? vColor : vec3(0.75, 0.55, 0.04));
+        if (part == 5) {
+            // Cattail head: dense, velvety, dark chocolate brown with fine
+            // vertical grain and a slightly lighter, worn top.
+            float gn = fract(sin(dot(floor(wpos * vec3(260.0, 90.0, 260.0)), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+            albedo = vec3(0.16, 0.085, 0.04) * (0.80 + 0.40 * gn);
+            albedo = mix(albedo, vec3(0.26, 0.17, 0.10), smoothstep(0.75, 1.0, fract(wpos.y * 4.0)) * 0.3);
+        }
         if (part == 4) {
             // Petal: the photographed petal structure (atlas right half), tinted.
             float pu = clamp((vUv.x - 4.0) / 0.4, -1.0, 1.0);
@@ -158,6 +166,9 @@ void main() {
                 vec3 lm = textureLod(u_albedo[18], vec2(0.25, 0.5), 8.0).rgb;
                 albedo *= clamp(lt / max(lm, vec3(0.03)), vec3(0.55), vec3(1.6));
                 if (fern) albedo = albedo * (vColor / vec3(0.085, 0.20, 0.045)) * 0.9;   // ferns keep their own green
+                // Reed blades: grey-green with straw tips, parallel veins only.
+                if (reed) albedo = mix(albedo, vColor * 0.55, 0.6) * mix(1.0, 1.25, smoothstep(0.75, 1.0, t)) +
+                                   vec3(0.10, 0.08, 0.02) * smoothstep(0.82, 1.0, t);
             }
             // Relief: the blade bulges between the veins.
             vec3 across = normalize(cross(N, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
