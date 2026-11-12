@@ -549,6 +549,10 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SeparatorText("Sun");
         ImGui::SliderFloat("pitch (deg)", &rt_.sun_pitch_deg, 5.0f, 89.0f);
         ImGui::SliderFloat("yaw (deg)", &rt_.sun_yaw_deg, -180.0f, 180.0f);
+        if (ImGui::Button("Recalculate shadows")) shadow_rebake_request_ = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Re-bakes the precomputed ground shadow and ambient-occlusion maps\n"
+                              "and the terrain ray-tracing geometry. Live shadows update every frame anyway.");
         ImGui::Checkbox("Auto golden-hour tint (warm sun + sky when low)",
                         &rt_.auto_golden_hour);
         ImGui::SliderFloat("sun glare / flare strength", &rt_.sun_glare_strength,

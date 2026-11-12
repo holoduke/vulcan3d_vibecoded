@@ -1016,7 +1016,25 @@ void VulkanEngine::run(const RunOptions& opts) {
             }
             tick_terrain_shadow_progressive();
         }
+        // Menu: 'Recalculate shadows' - force a full re-bake of everything
+        // precomputed: the heightmap sun-shadow texture (mesh terrain, grass,
+        // deferred terrain), the curvature / sky-visibility aux map, and the
+        // terrain BLAS + collision.
+        if (shadow_rebake_request_ && !terrain_data_.heights.empty()) {
+            shadow_rebake_request_ = false;
+            const float p_rad = glm::radians(rt_.sun_pitch_deg), y_rad = glm::radians(rt_.sun_yaw_deg);
+            const glm::vec3 cur_sun(std::sin(y_rad) * std::cos(p_rad), std::sin(p_rad),
+                                    std::cos(y_rad) * std::cos(p_rad));
+            vkDeviceWaitIdle(device_);
+            destroy_terrain_aux_texture();
+            init_terrain_aux_texture();
+            refresh_terrain_blas();
+            refresh_terrain_collision();
+            enqueue_terrain_shadow_rebake(cur_sun);
+            log::info("[shadow] full re-bake requested from the menu");
+        }
         // Re-upload the heightmap delta texture if the user sculpted /
+
         // added plateau noise this frame. Cheap one-shot upload of
         // dim*dim*4 bytes; happens only on the frame the dirty bit
         // is set, not every frame the brush is held.
