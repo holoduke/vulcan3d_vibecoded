@@ -174,13 +174,32 @@ void main() {
     // Materials: 0 bark (rock tex, brown), 1 needles, 2 leaves, 3 bush,
     // 4 rock (rock tex). Foliage untextured -> cube.frag procedural tint.
     vec3  col = vec3(0.075, 0.16, 0.08);
+    float inner_k = 1.0;
     vec4  tp  = vec4(-1.0, -1.0, 1.0, 0.0);
     if (mat == 0)      { col = vec3(0.95, 0.90, 0.84); tp = vec4(16.0, 16.0, 0.55, 0.0); }   // bark texture
     else if (mat == 2) { col = vec3(0.16, 0.28, 0.07); }
     else if (mat == 3) { col = vec3(0.14, 0.24, 0.08); }
     else if (mat == 7) {            // leaf card: needles darker and bluer than broad leaves
         float tone = fract(card_uvk.z);
-        col = (mod(floor(card_uvk.z), 2.0) > 0.5 ? vec3(0.72, 0.80, 0.76) : (card_uvk.z >= 2.0 ? vec3(0.46, 0.52, 0.40) : vec3(0.60, 0.64, 0.50))) * (0.80 + 0.40 * tone);   // tint over the atlas
+        // Darker toward the inside of the crown / bush: leaves there see
+        // little sky and almost no direct sun. Analytic, so it is stable
+        // where the ray-traced occlusion is too coarse to resolve it.
+        {
+            vec4  ai2 = arch[uint(I.rot_arch_phase.y + 0.5)];
+            float Hc = max(ai2.y * 2.0 * s * ysq, 0.3);
+            vec3  rel = rest_wp - I.pos_scale.xyz;
+            float rr;
+            if (mod(floor(card_uvk.z), 2.0) > 0.5) {          // conifer: distance from the trunk
+                float rad = max(0.34 * Hc * (1.0 - clamp(rel.y / Hc, 0.0, 0.95)), 0.25);
+                rr = length(rel.xz) / rad;
+            } else {                                           // broadleaf / bush: from the crown centre
+                float cy = Hc * (ai2.w > 1.5 ? 0.45 : 0.66);
+                rr = length(vec3(rel.x, (rel.y - cy) * 1.25, rel.z)) / max(0.36 * Hc, 0.3);
+            }
+            tone = tone;   // (kept: per-leaf tone)
+            inner_k = mix(0.42, 1.0, smoothstep(0.15, 0.85, rr));
+        }
+        col = (mod(floor(card_uvk.z), 2.0) > 0.5 ? vec3(0.72, 0.80, 0.76) : (card_uvk.z >= 2.0 ? vec3(0.46, 0.52, 0.40) : vec3(0.60, 0.64, 0.50))) * (0.80 + 0.40 * tone) * inner_k;   // tint over the atlas
     }
     else if (mat == 6) {            // leaf blade (real geometry): each leaf its own tone
         float lv = fract(sin(dot(floor(rest_wp * 2.3), vec3(12.9898, 78.233, 37.719))) * 43758.5453);

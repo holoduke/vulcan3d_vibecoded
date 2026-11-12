@@ -450,21 +450,24 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
             pcd.light_pos[s] = glm::vec4(c.pos, c.radius);
             pcd.light_col[s] = glm::vec4(1.0f, 0.52f, 0.20f, c.inten);
         }
-        // Free slots: the nearest road lanterns (warm, short range).
-        int used = int(std::min<size_t>(2, cands.size() > first ? cands.size() - first : 0));
-        if (used < 2 && !lamp_lights_.empty()) {
+        // Road lanterns. The NEAREST one always owns slot 1 (it used to
+        // take whatever the explosions left free, so every bomb or jet
+        // crash switched the lantern light off and on again); the second
+        // nearest takes slot 0 while no explosion needs it.
+        if (!lamp_lights_.empty()) {
             std::vector<std::pair<float, size_t>> lamps_by_d;
             for (size_t i = 0; i < lamp_lights_.size(); ++i) {
                 const float d = glm::distance(eye, lamp_lights_[i]);
-                if (d < 90.0f) lamps_by_d.push_back({ d, i });
+                if (d < 120.0f) lamps_by_d.push_back({ d, i });
             }
             std::sort(lamps_by_d.begin(), lamps_by_d.end());
-            for (size_t k = 0; k < lamps_by_d.size() && used < 2; ++k, ++used) {
-                pcd.light_pos[used] = glm::vec4(lamp_lights_[lamps_by_d[k].second], 13.0f);
-                pcd.light_col[used] = glm::vec4(1.0f, 0.62f, 0.28f, 5.0f);
-            }
+            auto put = [&](int slot, size_t k) {
+                pcd.light_pos[slot] = glm::vec4(lamp_lights_[lamps_by_d[k].second], 13.0f);
+                pcd.light_col[slot] = glm::vec4(1.0f, 0.62f, 0.28f, 5.0f);
+            };
+            if (!lamps_by_d.empty()) put(1, 0);
+            if (lamps_by_d.size() > 1 && pcd.light_pos[0].w < 1e-3f) put(0, 1);
         }
-
     }
     // Slots 2-3 of light_pos / light_col carry the clutter shadow light-VP
     // (columns 0-1 in light_pos, 2-3 in light_col; shader loop uses 0-1).

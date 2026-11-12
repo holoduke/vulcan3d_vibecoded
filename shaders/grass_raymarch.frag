@@ -330,7 +330,9 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
     {
         vec2 nc = floor(p.xz / 0.9);
         float en = hash12(nc) * 0.6 + hash12(floor(p.xz / 2.7) + 17.0) * 0.4;
-        elig += (en - 0.5) * 0.35 * edge_soft;
+        // Only where there is grass at all: on cleared ground (the road,
+        // rock) the noise alone used to push bare cells over the threshold.
+        elig += (en - 0.5) * 0.35 * edge_soft * smoothstep(0.04, 0.30, elig);
     }
     if (elig < kEligThresh) return distToTerrain;
     float edge_k = mix(1.0, smoothstep(kEligThresh, kEligThresh + 0.55, elig), edge_soft);

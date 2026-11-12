@@ -658,9 +658,28 @@ float plateauGroundDetail(vec2 wp) {
 // ripples on sand. Always >= 0 (the rendered surface must never drop
 // below the baked heightmap that shadows / objects use) and faded out by
 // 34 m, where it is sub-pixel anyway.
+float rm_road_dist(vec2 q) {         // distance to the road centreline (1e9 outside its bounds)
+    int rn = int(scene.road_info.x + 0.5);
+    if (rn < 2 || any(lessThan(q, scene.road_bbox.xy)) || any(greaterThan(q, scene.road_bbox.zw))) return 1e9;
+    float best = 1e9;
+    for (int i = 0; i + 1 < rn && i < 63; ++i) {
+        vec2 a = scene.road_pts[i].xz, ab = scene.road_pts[i + 1].xz - a;
+        vec2 dv = q - (a + ab * clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0));
+        best = min(best, dot(dv, dv));
+    }
+    return sqrt(best);
+}
 float rm_ground_detail(vec2 wp, float t, float h) {
     float w = 1.0 - smoothstep(10.0, 26.0, t);
     if (w <= 0.0) return 0.0;
+    // Not on the road: the paving is flat (crouching on it showed the
+    // rills as noise in the cobbles).
+    {
+        float rdist = rm_road_dist(wp);
+        float keep = scene.road_info.y + scene.road_info.z;
+        w *= smoothstep(keep + 0.2, keep + 1.6, rdist);
+        if (w <= 0.0) return 0.0;
+    }
     float lod = log2(max(t * 2.0 * scene.viewport.w * 0.45 * 2048.0, 1.0));
     float disp = textureLod(u_normal[9], wp * 0.45, lod).a;
     float wn = noise2(wp * 0.21);                      // one noise warps both axes
