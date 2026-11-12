@@ -32,6 +32,9 @@ layout(location = 4) out float vCullKill;
 layout(location = 5) out float vDistToCam;
 layout(location = 6) out vec4 vPrevClip;
 layout(location = 7) out vec2 vUv;
+layout(location = 8) out vec3 vObj;            // rock: object-space hull point
+layout(location = 9) flat out vec4 vInst;      // rock: base xyz, scale
+layout(location = 10) flat out vec2 vRotSeed;  // rock: rotY, shape seed
 
 layout(set = 0, binding = 6) uniform sampler2D u_terrain_shadow;
 layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
@@ -73,7 +76,14 @@ void main() {
 
     float c = cos(rot), s = sin(rot);
     mat3 R = mat3(vec3(c, 0, s), vec3(0, 1, 0), vec3(-s, 0, c));
-    vec3 world = R * (inPos * scale * fade) + base;
+    // Stones are ray-marched in the fragment shader (rock_sdf.glsl); the
+    // mesh is only a hull around the implicit surface.
+    vec3 lpos = inPos;
+    if (pc.grass_params.y < 0.5) lpos = normalize(inPos) * 1.88;
+    vObj = lpos;
+    vInst = vec4(base, scale * fade);
+    vRotSeed = vec2(rot, fract(sin(dot(base.xz, vec2(41.3, 17.9))) * 951.135) * 40.0);
+    vec3 world = R * (lpos * scale * fade) + base;
     // Plants: wind sway weighted by uv.y (0 at the root, 1 at the tips).
     if (pc.grass_params.y > 0.5 && plant_sway > 0.0) {
         float t = pc.grass_params.z;

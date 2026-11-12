@@ -1352,25 +1352,30 @@ void main() {
     }
     // ---- Ray-marched rock (GPU vegetation, material 4) ----------------
     if (vVegInfo.z < -0.5 && pc.grass_params.w < -0.5 && pc.grass_params.x > 0.5) {
-        if (!gl_FrontFacing) discard;
+        // Tag < -1000: the camera is inside the hull (veg.vert) - we look at
+        // the inside of a small ball around the eye, i.e. its back faces.
+        bool r_inside = vVegInfo.z < -500.0;
+        if (r_inside == gl_FrontFacing) discard;
+        float r_variant = -(r_inside ? vVegInfo.z + 1000.0 : vVegInfo.z) - 1.0;
         float rs = vObjectNormal.x, rysq = vObjectNormal.y, rrot = vObjectNormal.z;
         float rc = cos(rrot), rsn = sin(rrot);
         vec3  rscl = vec3(rs, rs * rysq, rs);
         // World -> object: undo translation, rotation (veg.vert) and scale.
         vec3 cw = scene.camera_pos.xyz - vShellBase;
         vec3 co = vec3(rc * cw.x + rsn * cw.z, cw.y, -rsn * cw.x + rc * cw.z) / rscl;
-        vec3 ro = vObjectPos;
-        vec3 rdo = ro - co;
+        vec3 rdo = vObjectPos - co;
         float dist_o = length(rdo);
         rdo /= max(dist_o, 1e-5);
+        // Outside: start at the hull. Inside: start at the eye.
+        vec3 ro = r_inside ? co : vObjectPos;
         float seed, amp, strata;
-        rock_params(-vVegInfo.z - 1.0, seed, amp, strata);
+        rock_params(r_variant, seed, amp, strata);
         // Detail follows the pixel footprint (object units per pixel).
-        float cam_d = distance(vWorldPos, scene.camera_pos.xyz);
+        float cam_d = r_inside ? 0.6 * rs : distance(vWorldPos, scene.camera_pos.xyz);
         float fp = cam_d * 2.0 * scene.viewport.w / max(rs, 0.05);
         float fine = 1.0 - smoothstep(0.006, 0.03, fp);
         float eps = max(fp * 0.6, 0.0012);
-        float th = rock_march(ro, rdo, 3.6, seed, amp, strata, fine, eps);
+        float th = rock_march(ro, rdo, r_inside ? 5.5 : 3.6, seed, amp, strata, fine, eps);
         if (th < 0.0) discard;
         vec3 po = ro + rdo * th;
         float cav;
@@ -1394,6 +1399,18 @@ void main() {
         alb = mix(alb, vec3(0.10, 0.17, 0.05), moss);
         float snr = smoothstep(scene.terrain_h_high.x + 10.0, scene.terrain_h_high.z, wposr.y) * smoothstep(0.35, 0.75, Nr.y);
         alb = mix(alb, vec3(0.88, 0.9, 0.95), clamp(snr, 0.0, 1.0));
+        // Where the rock meets the ground: soil creeps up the foot (colour
+        // and normal blend toward the ground) and the contact is darkened,
+        // so the rock sits IN the terrain instead of ending at a hard line.
+        {
+            float hgt = textureLod(u_heightmap_full, wposr.xz / 2048.0 + 0.5, 0.0).r;
+            float above = (wposr.y - hgt) / max(rs, 0.2);
+            float gb = 1.0 - smoothstep(0.03, 0.28 + 0.10 * rk_vnoise(wposr * 3.1), above);
+            vec3 soil = texture(u_albedo[9], wposr.xz * 0.45).rgb * vec3(0.55, 0.50, 0.40);
+            alb = mix(alb, soil, gb * 0.85);
+            alb *= mix(1.0, 0.55, (1.0 - smoothstep(0.0, 0.12, above)));
+            Nr = normalize(mix(Nr, vec3(0.0, 1.0, 0.0), gb * 0.6));
+        }
         g_veg_solid = true;
         outGBuffer0 = vec4(clamp(alb, vec3(0.0), vec3(1.0)), 1.0 / 255.0);
         outGBuffer1 = vec4(octa_encode(Nr), mix(0.9, 0.7, moss), gbuf_flags(true, 0.0));

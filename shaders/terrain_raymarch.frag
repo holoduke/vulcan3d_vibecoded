@@ -652,7 +652,28 @@ float plateauGroundDetail(vec2 wp) {
 // Octave count is the per-frame quality knob (pc.tex_params.z, 4..9):
 // last 3 of 9 contribute ~1.5 % of total amplitude so dropping them
 // barely changes the shape but cuts ~30 % of the inner work.
+// Close-range GEOMETRIC ground detail (real displacement of the marched
+// surface, not a normal trick): erosion rills carved between raised
+// ground, a finer second set, the scanned soil relief, lumps, and wind
+// ripples on sand. Always >= 0 (the rendered surface must never drop
+// below the baked heightmap that shadows / objects use) and faded out by
+// 34 m, where it is sub-pixel anyway.
+float rm_ground_detail(vec2 wp, float t, float h) {
+    float w = 1.0 - smoothstep(12.0, 34.0, t);
+    if (w <= 0.0) return 0.0;
+    float lod = log2(max(t * 2.0 * scene.viewport.w * 0.45 * 2048.0, 1.0));
+    float disp = textureLod(u_normal[9], wp * 0.45, lod).a;
+    vec2  q  = wp * 0.55 + vec2(noise2(wp * 0.21), noise2(wp * 0.21 + 7.3)) * 1.7;
+    float g1 = 1.0 - smoothstep(0.0, 0.22, abs(noise2(q) * 2.0 - 1.0));              // main rills
+    float g2 = 1.0 - smoothstep(0.0, 0.25, abs(noise2(q * 2.7 + 3.1) * 2.0 - 1.0));  // side cracks
+    float d = 0.11 * (1.0 - g1) + 0.045 * (1.0 - g2) + 0.07 * disp + 0.03 * noise2(wp * 3.3);
+    float sand = 1.0 - smoothstep(scene.water_params.y + 0.4, scene.water_params.y + 2.5, h);
+    d += sand * 0.03 * (0.5 + 0.5 * sin(dot(wp, vec2(9.0, 3.5)) + 2.5 * noise2(wp * 0.8)));
+    return d * w;
+}
+
 float terrainM(vec2 p) {
+
     vec2 wp = p;
     p *= TERRAIN_SCALE;
     float a = 0.0, b = 1.0;
@@ -754,6 +775,7 @@ float terrainM_lod(vec2 p, float ray_t) {
     // ring. Skip the texture tap on far raymarch steps — biggest
     // single texture-bandwidth win on terrain pixels.
     h += sampleHeightDelta(wp);   // (reverted 80 m gate — no near/far seam)
+    h += rm_ground_detail(wp, ray_t, h) * (1.0 - tpl);
     return h;
 }
 
@@ -787,6 +809,7 @@ float terrainH_lod_pw(vec2 p, float ray_t, float tpl) {
     float h = a * TERRAIN_HEIGHT;
     h = mix(h, pc.color.w, tpl);
     h += sampleHeightDelta(wp);   // (reverted 80 m gate — no near/far seam)
+    h += rm_ground_detail(wp, ray_t, h) * (1.0 - tpl);
     return h;
 }
 

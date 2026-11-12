@@ -14,6 +14,9 @@ layout(location = 4) in float vCullKill;
 layout(location = 5) in float vDistToCam;
 layout(location = 6) in vec4 vPrevClip;
 layout(location = 7) in vec2 vUv;
+layout(location = 8) in vec3 vObj;
+layout(location = 9) flat in vec4 vInst;
+layout(location = 10) flat in vec2 vRotSeed;
 
 layout(push_constant) uniform PC {
     mat4 mvp;
@@ -35,6 +38,8 @@ layout(set = 0, binding = 3) uniform sampler2D u_albedo[kTextureCount];
 
 #include "scene_ubo.glsl"
 
+#include "rock_sdf.glsl"
+
 vec2 _octa_encode(vec3 n) {
     n /= (abs(n.x) + abs(n.y) + abs(n.z));
     vec2 e = (n.z >= 0.0)
@@ -49,6 +54,38 @@ void main() {
 
     vec3 N = normalize(vNormal);
     bool plant = pc.grass_params.y > 0.5;
+    vec3 wpos = vWorldPos;
+    gl_FragDepth = gl_FragCoord.z;
+    float stone_cav = 0.0, stone_ground = 0.0;
+    if (!plant) {
+        // Ray-marched stone: every instance its own shape (seed from its
+        // position), half sunk in the ground.
+        float sc = max(vInst.w, 1e-3);
+        float rc = cos(vRotSeed.x), rsn = sin(vRotSeed.x);
+        vec3 cw = scene.camera_pos.xyz - vInst.xyz;
+        vec3 co = vec3(rc * cw.x + rsn * cw.z, cw.y, -rsn * cw.x + rc * cw.z) / sc;
+        const vec3 kOff = kRockC - vec3(0.0, 0.30, 0.0);        // stone centre 0.3 above its base
+        vec3 ro = vObj + kOff;
+        vec3 rdo = normalize(vObj - co);
+        float seed = vRotSeed.y;
+        float fp = distance(vWorldPos, scene.camera_pos.xyz) * 2.0 * scene.viewport.w / sc;
+        float fine = 1.0 - smoothstep(0.006, 0.03, fp);
+        float eps = max(fp * 0.6, 0.0015);
+        float th = rock_march(ro, rdo, 3.4, seed, 0.24, 0.0, fine, eps);
+        if (th < 0.0) discard;
+        vec3 po = ro + rdo * th;
+        rock_sdf(po, seed, 0.24, 0.0, fine, stone_cav);
+        vec3 no = rock_normal(po, seed, 0.24, 0.0, fine, max(eps * 1.2, 0.002));
+        vec3 pl = (po - kOff) * sc;
+        wpos = vec3(rc * pl.x - rsn * pl.z, pl.y, rsn * pl.x + rc * pl.z) + vInst.xyz;
+        N = normalize(vec3(rc * no.x - rsn * no.z, no.y, rsn * no.x + rc * no.z));
+        vec4 clipr = pc.mvp * vec4(wpos, 1.0);
+        gl_FragDepth = clipr.z / max(clipr.w, 1e-4);
+        // Foot of the stone: soil-stained, normal eased toward the ground.
+        stone_ground = 1.0 - smoothstep(0.02, 0.30, (wpos.y - vInst.y) / sc);
+        N = normalize(mix(N, vec3(0.0, 1.0, 0.0), stone_ground * 0.5));
+    }
+
     if (plant) {
         // Two-sided cards / fronds: face the normal toward the viewer.
         vec3 V = normalize(scene.camera_pos.xyz - vWorldPos);
@@ -58,13 +95,17 @@ void main() {
     // Rock albedo: 2-axis "biplanar" sample of the terrain rock layer
     // (slot 7) — full triplanar is overkill for fist-sized clutter.
     vec3 bw = abs(N);
-    vec2 uvA = vWorldPos.zy * 2.0;
-    vec2 uvB = vWorldPos.xz * 2.0;
+    vec2 uvA = wpos.zy * 2.0;
+    vec2 uvB = wpos.xz * 2.0;
     float wA = bw.x + bw.z * 0.5;
     float wB = bw.y;
     vec3 tex = (texture(u_albedo[7], uvA).rgb * wA +
                 texture(u_albedo[7], uvB).rgb * wB) / max(wA + wB, 1e-3);
     vec3 albedo = tex * vColor;
+    if (!plant) {
+        albedo *= 1.0 - 0.5 * clamp(stone_cav, 0.0, 1.0);
+        albedo = mix(albedo, albedo * vec3(0.52, 0.47, 0.38), stone_ground * 0.85);
+    }
     if (plant) {
         // Part colours: stems / leaves green (ferns carry their own
         // tint), petals = instance colour, flower centre golden.

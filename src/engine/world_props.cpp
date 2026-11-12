@@ -1021,6 +1021,15 @@ std::vector<VegArchetype> build_veg_archetypes(int seed) {
         for (int l = 0; l < kVegLods; ++l)
             add_blob(a.lods[l], *ic[l], glm::vec3(0.0f, 0.35f, 0.0f), glm::vec3(1.0f), 0.0f, sd,
                      amp, 1.6f, strata, -0.2f, glm::vec2(0.0f, 4.0f), 0.0f);
+        // Same mid-scale lumps as rock_sdf.glsl, so the ray-traced shadow and
+        // the collider follow the ray-marched surface.
+        for (int l = 0; l < kVegLods; ++l)
+            for (auto& vx : a.lods[l].verts) {
+                const glm::vec3 q = vx.p - glm::vec3(0.0f, 0.35f, 0.0f);
+                const float len = glm::length(q);
+                if (len < 1e-4f || vx.p.y < -0.19f) continue;
+                vx.p += (q / len) * ((fbm(vx.p * 4.3f + glm::vec3(sd), 3) - 0.5f) * 0.11f);
+            }
         finish(a); out.push_back(std::move(a));
     }
     return out;

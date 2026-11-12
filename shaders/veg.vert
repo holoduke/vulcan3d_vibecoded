@@ -87,7 +87,20 @@ void main() {
             float rv = -air.z - 1.0;
             float ramp = 0.26 + 0.1 * fract(rv * 0.37);
             const vec3 rc = vec3(0.0, 0.35, 0.0);
-            Pl = rc + normalize(inPosition - rc) * ((1.0 + ramp + 0.12) * 1.30);
+            float Rb = (1.0 + ramp + 0.12) * 1.30;
+            Pl = rc + normalize(inPosition - rc) * Rb;
+            // Camera inside (or touching) the hull: its front faces would be
+            // clipped / culled and the rock vanished when you walked up to
+            // it. Shrink the hull to a small ball around the camera instead;
+            // the fragment shader then marches from the eye (rock_tag < -1000).
+            float cr = cos(I.rot_arch_phase.x), sr = sin(I.rot_arch_phase.x);
+            float rsc = I.pos_scale.w, rys = I.rot_arch_phase.w > 0.0 ? I.rot_arch_phase.w : 1.0;
+            vec3 cw = scene.camera_pos.xyz - I.pos_scale.xyz;
+            vec3 co = vec3(cr * cw.x + sr * cw.z, cw.y, -sr * cw.x + cr * cw.z) / vec3(rsc, rsc * rys, rsc);
+            if (distance(co, rc) < Rb + 0.35 / max(rsc, 0.05)) {
+                Pl = co + normalize(inPosition - rc) * (0.2 / max(rsc, 0.05));
+                rock_tag -= 1000.0;
+            }
         }
     }
     if (matRaw >= 7) {                           // wind weight from the position in the tree
