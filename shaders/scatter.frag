@@ -167,6 +167,31 @@ void main() {
     }
 
     vec3  L = normalize(scene.sun_direction.xyz);
+    // Plant-scale light and dark side. Every leaf / petal is shaded on its
+    // own (two-sided, wrapped), so a whole flower or fern came out evenly
+    // lit. The half of the plant turned away from the sun sits in the
+    // plant's own shade: darken it by where the point lies around the
+    // plant's centre, seen from the sun.
+    if (plant) {
+        float sc  = max(vInst.w, 0.05);
+        // Horizontal offset from the plant's axis, against the sun's compass
+        // direction: the far half of a flower head / fern is in shade even
+        // with a high sun. Lower parts are shaded by the parts above them.
+        vec2  rel = wpos.xz - vInst.xz;
+        float rl  = length(rel);
+        vec2  Lh  = L.xz / max(length(L.xz), 1e-3);
+        float side = rl > 1e-4 ? dot(rel / rl, Lh) : 0.0;  // +1 sun side .. -1 shade side
+        float k    = smoothstep(0.0, 0.05 * sc, rl);
+        float lit_side = mix(0.38, 1.10, smoothstep(-0.8, 0.7, side));
+        float h01  = clamp((wpos.y - vInst.y) / (0.45 * sc), 0.0, 1.0);
+        // Plant-level normal (the crown trick of the trees): bend the
+        // shading normal outward from the stem, so the deferred sun term
+        // itself goes dark on the far side. Scaling the albedo alone was
+        // washed out by the bright sun after tone mapping.
+        vec3 outw = normalize(vec3(rel.x, 0.55 * rl + 0.02 * sc, rel.y));
+        N = normalize(mix(N, outw, 0.75 * k));
+        albedo *= mix(1.0, mix(0.70, 1.05, smoothstep(-0.8, 0.7, side)), k) * mix(0.62, 1.0, h01);
+    }
     // Half-Lambert wrap (same reason as grass.frag): hard Lambert on
     // randomly-rotated faceted rocks floors half the faces to black.
     float ndl_raw = dot(N, L);
