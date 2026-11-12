@@ -2762,9 +2762,54 @@ void main() {
         vec3 rn = textureLod(u_normal[kRmMatRoad], rm_road_uv, rm_road_lod).xyz * 2.0 - 1.0;
         nor = normalize(mix(nor, rT * rn.x + rB * rn.y + nor * rn.z, rm_road.x));
     }
+    // ---- Close-up ground detail --------------------------------------
+    // The procedural palette is flat colour; within ~45 m the photo-scanned
+    // ground sets (soil on the flats, rock on the steeps) supply the fine
+    // structure: a normal map for the lighting, the albedo as a tint
+    // around its own mean (so the palette's colour is kept) and the
+    // displacement as cavity darkening. Two scales - a ~2 m tile and a
+    // ~0.5 m one that takes over right under the camera.
+    vec3 rm_det_tint = vec3(1.0);
+    {
+        float dw = (1.0 - smoothstep(18.0, 45.0, t)) * (1.0 - max(rm_road.x, rm_road.y));
+        if (dw > 0.01) {
+            const int kSoil = 9, kRock = 7;
+            float rockw = 1.0 - smoothstep(0.5, 0.8, nor.y);
+            float fp = t * 2.0 * scene.viewport.w;                       // ~metres per pixel
+            // Soil: planar from above. Rock: project along the wall.
+            vec2 uvS = pos.xz * 0.45;
+            vec2 uvR = (abs(nor.x) > abs(nor.z) ? pos.zy : pos.xy) * 0.30;
+            uvR = mix(pos.xz * 0.30, uvR, smoothstep(0.35, 0.6, 1.0 - nor.y));
+            float lodS = log2(max(fp * 0.45 * float(textureSize(u_albedo[kSoil], 0).x), 1.0));
+            float lodR = log2(max(fp * 0.30 * float(textureSize(u_albedo[kRock], 0).x), 1.0));
+            vec4 nS = textureLod(u_normal[kSoil], uvS, lodS), nR = textureLod(u_normal[kRock], uvR, lodR);
+            vec3 aS = textureLod(u_albedo[kSoil], uvS, lodS).rgb / max(textureLod(u_albedo[kSoil], uvS, 12.0).rgb, vec3(0.02));
+            vec3 aR = textureLod(u_albedo[kRock], uvR, lodR).rgb / max(textureLod(u_albedo[kRock], uvR, 12.0).rgb, vec3(0.02));
+            vec4 nD = mix(nS, nR, rockw);
+            vec3 aD = mix(aS, aR, rockw);
+            // Fine layer under the camera.
+            float fw = 1.0 - smoothstep(3.0, 12.0, t);
+            if (fw > 0.01) {
+                vec2 uvF = pos.xz * 1.9 + vec2(3.1, 7.7);
+                float lodF = log2(max(fp * 1.9 * float(textureSize(u_albedo[kSoil], 0).x), 1.0));
+                vec4 nF = textureLod(u_normal[kSoil], uvF, lodF);
+                vec3 aF = textureLod(u_albedo[kSoil], uvF, lodF).rgb / max(textureLod(u_albedo[kSoil], uvF, 12.0).rgb, vec3(0.02));
+                nD.xy = mix(nD.xy, (nD.xy - 0.5) + (nF.xy - 0.5) * 1.2 + 0.5, fw * (1.0 - rockw));
+                nD.a  = mix(nD.a, nD.a * (0.5 + nF.a), fw * (1.0 - rockw));
+                aD = mix(aD, aD * aF, fw * (1.0 - rockw) * 0.8);
+            }
+            vec3 dn = vec3((nD.xy * 2.0 - 1.0) * 0.85, 1.0);
+            vec3 dT = normalize(vec3(1.0, 0.0, 0.0) - nor * nor.x);
+            vec3 dB = cross(nor, dT);
+            nor = normalize(mix(nor, normalize(dT * dn.x + dB * dn.y + nor * dn.z), dw));
+            float cav = mix(0.80, 1.05, smoothstep(0.15, 0.85, nD.a));  // pits darker, bumps a touch brighter
+            rm_det_tint = mix(vec3(1.0), clamp(mix(vec3(1.0), aD, 0.55), vec3(0.6), vec3(1.5)) * cav, dw);
+        }
+    }
     vec3 sunDir = scene.sun_direction.xyz;
 
     float dif = clamp(dot(nor, sunDir), 0.0, 1.0);
+
     // Match cube.frag's terrain contrast power on n_dot_l. Without
     // this, the 'Terrain shading contrast' slider only affected the
     // chunked rasterised mesh path; raymarched terrain stayed pure
@@ -3091,7 +3136,7 @@ void main() {
         if (cav_w > 0.01) ao *= mix(1.0, terrainCavityAO(pos.xz), cav_w);
     }
 
-    vec3 mate = getMaterial(pos, nor);
+    vec3 mate = getMaterial(pos, nor) * rm_det_tint;
     // Road: trodden dirt verge, then the cobbles. The procedural palette
     // above is authored darker than texture albedo (rock 0.10 vs
     // ~0.33), so the cobble texture is scaled toward that range.
@@ -3280,7 +3325,10 @@ void main() {
     // Sky fill. 0.35 left sun-shadowed ground almost black (far darker than
     // the mesh terrain shows the same shadow), so the shadow of a trunk or
     // rock read as a hole in the ground rather than as shade.
-    lin += amb * scene.sky_color.rgb * 0.75 * ao_shaped;
+    // Under trees / beside objects the sky is partly covered as well: the
+    // shadow of a canopy takes most of the sky fill with it (a forest
+    // floor is dark, an open slope in the shade of a hill is not).
+    lin += amb * scene.sky_color.rgb * 0.75 * ao_shaped * mix(1.0, 0.42, dyn_shadow);
     lin += fre * scene.sky_color.rgb * 0.25 * ao_shaped;
 
     vec3 col = mate * lin + gi_indirect;

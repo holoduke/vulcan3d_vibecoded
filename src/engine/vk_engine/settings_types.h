@@ -721,8 +721,8 @@ struct RtSettings {
         bool  voxel_tower_enabled = false;   // destructible tower beside the castle (restart)
         // Colour grading (compose.frag, after the tonemap).
         float grade_temperature = 0.06f;   // -1 cool .. +1 warm
-        float grade_saturation  = 1.06f;   // 0 grey .. 2
-        float grade_vibrance    = 0.25f;   // boosts muted colours only
+        float grade_saturation  = 1.16f;   // 0 grey .. 2
+        float grade_vibrance    = 0.50f;   // boosts muted colours only
         float grade_split_tone  = 0.25f;   // teal shadows / warm highlights
         float film_grain        = 0.12f;
         float vignette_strength = 0.30f;
