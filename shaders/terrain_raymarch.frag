@@ -1509,7 +1509,36 @@ float raymarchMesh(vec3 ro, vec3 rd, float t_max) {
     }
     return -1.0;
 }
+// Reflection ray over the baked heightmap (one texture fetch per step).
+// Steps grow with distance so 96 of them reach the far mountains; a ray
+// that runs out of steps or range is a MISS (the old FBM version returned
+// wherever it had got to, which painted a dark sheet over the lake).
+float raymarchReflectHM(vec3 ro, vec3 rd) {
+    float maxH = terrainMaxHeight();
+    if (rd.y >= 0.0 && ro.y > maxH) return -1.0;
+    float t = 0.5, t_prev = 0.0;
+    for (int i = 0; i < 96; ++i) {
+        vec3 p = ro + rd * t;
+        if (p.y > maxH && rd.y >= 0.0) return -1.0;
+        if (any(greaterThan(abs(p.xz), vec2(kHeightmapSide * 0.5 - 2.0)))) return -1.0;
+        float h = p.y - meshHeight(p.xz);
+        if (h < 0.0) {
+            float a = t_prev, b = t;
+            for (int k = 0; k < 5; ++k) {
+                float m = 0.5 * (a + b);
+                vec3 q = ro + rd * m;
+                if (q.y - meshHeight(q.xz) > 0.0) a = m; else b = m;
+            }
+            return a;
+        }
+        t_prev = t;
+        t += max(0.6 + t * 0.03, h * 0.6);
+        if (t > 1600.0) break;
+    }
+    return -1.0;
+}
 float raymarchReflectMesh(vec3 ro, vec3 rd) {
+
     float maxH = scene.terrain_local_info.y;
     if (ro.y > maxH && rd.y >= 0.0) return -1.0;
     float t = 0.0;
@@ -2053,6 +2082,7 @@ void main() {
         sky_refl += scene.sun_color.rgb * scene.sun_color.a * sh4 * 0.30;
 
         vec3 reflCol = sky_refl;
+        float refl_terrain_t = 1e9;     // terrain hit along the reflection (objects behind it stay hidden)
         // RT-style FBM-march reflection — picks up the actual mountain
         // / valley silhouettes in the water surface. Cheap because
         // we use a reduced-quality march; if it misses (refl ray
@@ -2070,8 +2100,9 @@ void main() {
             // procedural march. All the shading below (material, grass
             // tint, extinction, fog) is FBM-free and shared.
             float t_r = water_only ? raymarchReflectMesh(r_ro, refl)
-                                   : raymarchReflect(r_ro, refl);
+                                   : raymarchReflectHM(r_ro, refl);
             if (t_r > 0.0) {
+                refl_terrain_t = t_r;
                 vec3 r_pos = r_ro + refl * t_r;
                 vec3 r_nor = water_only ? meshNormal(r_pos.xz)
                                         : calcNormal(r_pos, t_r);
@@ -2084,7 +2115,7 @@ void main() {
                 vec3  r_mat = getMaterial(r_pos, r_nor);
                 vec3  r_lin = r_dif * scene.sun_color.rgb *
                                 scene.sun_color.a +
-                              r_amb * scene.sky_color.rgb * 0.35;
+                              r_amb * scene.sky_color.rgb * 0.75;
                 vec3  r_col = r_mat * r_lin;
                 // Grass tint boost in reflections — getMaterial already
                 // includes a grass-eligibility tint, but reflections
@@ -2173,7 +2204,8 @@ void main() {
             float t_tlas = kReflRange;
             float t_vox  = kReflRange;
             uint  vox_pal = 0u;
-            bool  tlas_hit = closest_hit_no_terrain(r_ro, refl, kReflRange, t_tlas);
+            int   r_inst = 0, r_prim = 0;
+            bool  tlas_hit = closest_hit_material_no_terrain(r_ro, refl, min(kReflRange, refl_terrain_t), t_tlas, r_inst, r_prim);
             bool  vox_hit  = water_vox_march(r_ro, refl,
                                               tlas_hit ? min(t_tlas, 200.0) : 200.0,
                                               t_vox, vox_pal);
@@ -2193,14 +2225,23 @@ void main() {
                 else
                     r_nor = vec3(0.0, 0.0, refl.z > 0.0 ? -1.0 : 1.0);
                 r_nor = normalize(mix(r_nor, vec3(0.0, 1.0, 0.0), 0.25));
-                float sun_vis = (t_use < 250.0 && any_hit_shadow_caster(hit_pos + r_nor * 0.08, sunDirW, 200.0)) ? 0.0 : 1.0;
-                float r_dif = max(dot(r_nor, sunDirW), 0.0) * sun_vis;
+                // Only near hits get a sun-shadow ray, and it dims rather than
+                // blacks out (a reflected forest is mostly leaves in half light).
+                float sun_vis = (t_use < 120.0 && any_hit_shadow_caster(hit_pos + r_nor * 0.08, sunDirW, 200.0)) ? 0.35 : 1.0;
+                float r_dif = (0.35 + 0.65 * max(dot(r_nor, sunDirW), 0.0)) * sun_vis;
                 float r_amb = 0.5 + 0.5 * r_nor.y;
                 vec3 stone = vec3(0.55, 0.52, 0.48);
                 // For voxel hits use the actual palette colour so the
                 // tower's sandstone/wood reads back in the water; TLAS
                 // hits stick with the generic stone fallback (cheap).
                 vec3 albedo = stone;
+                if (tlas_hit && !use_vox) {
+                    // The hit instance's own colour (trees green, castle stone,
+                    // vehicles) instead of one grey for everything.
+                    int r_mi = (r_inst == kStaticBlasSentinel) ? (r_prim / kCubeTrisPerBox) : r_inst;
+                    albedo = clamp(materials[r_mi].color.rgb, vec3(0.02), vec3(1.0));
+                    if (materials[r_mi].tex.x >= 0.0) albedo *= vec3(0.55, 0.52, 0.48);
+                }
                 if (use_vox) {
                     if      (vox_pal == 1u) albedo = vec3(0.95, 0.78, 0.45);
                     else if (vox_pal == 2u) albedo = vec3(0.75, 0.30, 0.15);
@@ -2210,7 +2251,7 @@ void main() {
                 }
                 vec3 r_col = albedo * (r_dif * scene.sun_color.rgb *
                                        scene.sun_color.a +
-                                       r_amb * scene.sky_color.rgb * 0.35);
+                                       r_amb * scene.sky_color.rgb * 0.75);
                 // Atmospheric extinction over reflection distance.
                 vec3 r_ext = exp(-t_use * 0.00025 *
                                   vec3(1.0, 1.3, 2.0));
