@@ -2998,6 +2998,30 @@ void main() {
     float self_shadow = (dif > 0.0)
         ? (1.0 - calcShadow(pos + nor * 0.05, sunDir))
         : 1.0;
+#ifndef QLIKE_WATER
+    // Near-field ground occlusion. calcShadow starts half a metre out and
+    // takes few steps, so a small rise right next to the receiver did not
+    // shade it - and the object shadows below (ray traced / small-caster
+    // map) know nothing about the terrain at all. A point just behind a
+    // bump was therefore lit, and showed the shadows of rocks, trunk bases
+    // and bushes standing on the sunny side of the bump: their outlines
+    // appeared on the ground in front of them, as if seen through it.
+    // Walk the first metres of the sun ray over the baked heightmap (the
+    // rendered surface never lies below it, so a hit is a real blocker).
+    if (dif > 0.0 && self_shadow < 0.995 && distance(pos, scene.camera_pos.xyz) < 220.0) {
+        float lit_g = 1.0;
+        float tg = 0.10;
+        for (int i = 0; i < 14; ++i) {
+            vec3 q = pos + sunDir * tg;
+            if (any(greaterThan(abs(q.xz), vec2(kHeightmapSide * 0.5 - 2.0)))) break;
+            float hg = q.y - meshHeight(q.xz);
+            lit_g = min(lit_g, smoothstep(-0.10, -0.02, hg));
+            if (lit_g < 0.01) break;
+            tg *= 1.5;                       // 0.10 .. ~19 m
+        }
+        self_shadow = max(self_shadow, 1.0 - lit_g);
+    }
+#endif /* ! QLIKE_WATER */
 
     // Fake grass-cast shadow: probe the grass mask along the sun's
     // XZ direction from this terrain pixel; cells with grass darken
@@ -3451,7 +3475,10 @@ void main() {
     // 'AO darkness (raymarch terrain)' slider.
     float ao_punch  = max(scene.ambient.w, 0.5);
     float ao_shaped = pow(ao, ao_punch);
-    lin += amb * scene.sky_color.rgb * 0.35 * ao_shaped;
+    // Sky fill. 0.35 left sun-shadowed ground almost black (far darker than
+    // the mesh terrain shows the same shadow), so the shadow of a trunk or
+    // rock read as a hole in the ground rather than as shade.
+    lin += amb * scene.sky_color.rgb * 0.75 * ao_shaped;
     lin += fre * scene.sky_color.rgb * 0.25 * ao_shaped;
 
     vec3 col = mate * lin + gi_indirect;
@@ -3485,7 +3512,10 @@ void main() {
             float piv = 0.12 * dot(scene.sun_color.rgb * scene.sun_color.a * 0.45 +
                                    scene.sky_color.rgb * 0.35, kLum);
             float l = dot(col, kLum);
-            col *= clamp(pow(max(l, 1e-5) / max(piv, 1e-4), rm_con - 1.0), 0.15, 4.0);
+            // Below the pivot the curve is much gentler: full strength there
+            // crushed shadowed ground to black.
+            float rel = max(l, 1e-5) / max(piv, 1e-4);
+            col *= clamp(pow(rel, (rm_con - 1.0) * (rel < 1.0 ? 0.3 : 1.0)), 0.15, 4.0);
         }
     }
 
