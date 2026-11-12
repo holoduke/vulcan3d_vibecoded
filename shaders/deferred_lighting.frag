@@ -679,6 +679,36 @@ void main() {
             }
         }
     }
+    // Flowers / ferns / bushes as RECEIVERS of the small-caster map: the
+    // ray-traced shadow only sees trees, rocks and buildings (the small
+    // plants are not in the TLAS), so a flower under a fern or beside
+    // another flower got full sun. Start a few cm toward the sun so a
+    // plant does not shadow the very spot it is drawn at.
+    if (leafy && scene.rt_params.w > 1e-3) {
+        mat4 cvp = mat4(pc.light_pos[2], pc.light_pos[3], pc.light_col[2], pc.light_col[3]);
+        if (cvp[3].w > 0.5) {
+            vec4 lc = cvp * vec4(world_pos + L * 0.06, 1.0);
+            vec2 luv = lc.xy * 0.5 + 0.5;
+            if (all(greaterThan(luv, vec2(0.002))) && all(lessThan(luv, vec2(0.998))) &&
+                lc.z > 0.0 && lc.z < 1.0) {
+                vec2 ts = 1.0 / vec2(textureSize(u_clutter_shadow, 0).xy);
+                vec2 nndc = lc.xy * 4.0;
+                float nr = max(abs(nndc.x), abs(nndc.y));
+                bool near_c = nr < 0.97;
+                vec2 suv = near_c ? nndc * 0.5 + 0.5 : luv;
+                float layer = near_c ? 1.0 : 0.0;
+                float bias = near_c ? 0.0005 : 0.0010;
+                float occ = 0.0;
+                for (int y = -1; y <= 1; ++y)
+                    for (int x = -1; x <= 1; ++x)
+                        occ += (textureLod(u_clutter_shadow, vec3(suv + vec2(x, y) * ts, layer), 0.0).r < lc.z - bias) ? 1.0 : 0.0;
+                occ /= 9.0;
+                float edge = min(min(luv.x, luv.y), min(1.0 - luv.x, 1.0 - luv.y));
+                occ *= smoothstep(0.0, 0.08, edge) * clamp(scene.rt_params.w, 0.0, 1.0);
+                shadow = max(shadow, occ * 0.85);
+            }
+        }
+    }
 
     // ---------------------------------------------------------------
     //  Ambient occlusion (short-ray RT, modes off / fast / full / HBAO)
