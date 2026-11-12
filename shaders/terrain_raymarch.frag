@@ -676,43 +676,6 @@ float terrainM(vec2 p) {
     return h;
 }
 
-// Variant of terrainM_lod that ALSO returns the accumulated gradient
-// squared norm (dot(d,d)) — the local Lipschitz constant for the FBM
-// at this pixel. The marcher uses it as a per-step "1/sqrt(1+slope²)"
-// overstep multiplier so flat ground takes bigger strides without
-// risking overshoot on cliffs. Idea from Peter Stefek's heightfield
-// raymarch writeup; proven safe because we already track d for the
-// derivative-erosion damp term, so the data is free.
-//
-// Returns vec2(height, gradient_sq_in_noise_space). Height is the
-// SAME value terrainM_lod would return.
-vec2 terrainM_lod_d(vec2 p, float ray_t) {
-    vec2 wp = p;
-    p *= TERRAIN_SCALE;
-    int oct_full = int(pc.tex_params.z);
-    int oct_min  = max(2, min(oct_full, int(pc.emissive.w)));
-    float lod_f  = smoothstep(pc.emissive.y, pc.emissive.z, ray_t);
-    float oct_f  = float(oct_full) - lod_f * float(oct_full - oct_min);
-    int   oct    = int(ceil(oct_f));
-    float frac   = 1.0 - (float(oct) - oct_f);
-    float a = 0.0, b = 1.0;
-    vec2 d = vec2(0.0);
-    const int kMaxOct = 24;
-    for (int i = 0; i < kMaxOct; i++) {
-        if (i >= oct) break;
-        vec3 n = noised(p);
-        float w = (i == oct - 1) ? frac : 1.0;
-        d += n.yz * w;
-        a += b * n.x * w / (1.0 + dot(d, d));
-        b *= 0.5;
-        p = m2 * p * 2.0;
-    }
-    float h = a * TERRAIN_HEIGHT;
-    float t = plateauWeight(wp);
-    h = mix(h, pc.color.w, t);
-    h += sampleHeightDelta(wp);   // (reverted 80 m gate — no near/far seam)
-    return vec2(h, dot(d, d));
-}
 
 // Distance-LOD variant: drops octaves smoothly as the ray distance
 // grows. The full octave count is the user's pc.tex_params.z; we
@@ -773,31 +736,6 @@ float terrainM_lod(vec2 p, float ray_t) {
     return h;
 }
 
-// Normal-detail FBM — finite-difference normals call this 3× per hit
-// pixel, so it's the single biggest cost in calcNormal. Octave count
-// is pc.tex_params.w (4..16). 8 is barely-distinguishable from 16 at
-// gameplay distances.
-float terrainH(vec2 p) {
-    vec2 wp = p;
-    p *= TERRAIN_SCALE;
-    float a = 0.0, b = 1.0;
-    vec2 d = vec2(0.0);
-    int kOct = int(pc.tex_params.w);
-    for (int i = 0; i < kOct; i++) {
-        vec3 n = noised(p);
-        d += n.yz;
-        a += b * n.x / (1.0 + dot(d, d));
-        b *= 0.5;
-        p = m2 * p * 2.0;
-    }
-    float h = a * TERRAIN_HEIGHT;
-    // Plateau is now tiny (11.5 m, hidden under castle) — no need
-    // for extra ground-detail noise here.
-    float t = plateauWeight(wp);
-    h = mix(h, pc.color.w, t);
-    h += sampleHeightDelta(wp);
-    return h;
-}
 
 // Variant of terrainH_lod that takes a precomputed plateau weight,
 // so callers like calcNormal — which evaluates the FBM at three
@@ -831,41 +769,6 @@ float terrainH_lod_pw(vec2 p, float ray_t, float tpl) {
     return h;
 }
 
-// Distance-LOD variant of terrainH. calcNormal calls this 3× per hit
-// pixel — the dominant FBM cost — so dropping octaves at distance is
-// the single biggest win for raymarch perf at typical horizon views.
-// Same LOD ramp as terrainM_lod (pc.emissive.{y,z,w}) so march hits
-// and normal samples stay coherent.
-float terrainH_lod(vec2 p, float ray_t) {
-    vec2 wp = p;
-    p *= TERRAIN_SCALE;
-    int oct_full = int(pc.tex_params.w);
-    int oct_min  = max(2, min(oct_full, int(pc.emissive.w)));
-    float lod_f  = smoothstep(pc.emissive.y, pc.emissive.z, ray_t);
-    // Fractional-octave fade — same scheme as terrainM_lod so the
-    // marcher and normals agree across the LOD threshold.
-    float oct_f  = float(oct_full) - lod_f * float(oct_full - oct_min);
-    int   oct    = int(ceil(oct_f));
-    float frac   = 1.0 - (float(oct) - oct_f);
-    float a = 0.0, b = 1.0;
-    vec2 d = vec2(0.0);
-    const int kMaxOct = 32;
-    for (int i = 0; i < kMaxOct; i++) {
-        if (i >= oct) break;
-        vec3 n = noised(p);
-        float w = (i == oct - 1) ? frac : 1.0;
-        d += n.yz * w;
-        a += b * n.x * w / (1.0 + dot(d, d));
-        b *= 0.5;
-        p = m2 * p * 2.0;
-    }
-    float h = a * TERRAIN_HEIGHT;
-    float t = plateauWeight(wp);
-    h = mix(h, pc.color.w, t);
-    // Same far-pixel sculpt skip as terrainM_lod above.
-    h += sampleHeightDelta(wp);   // (reverted 80 m gate — no near/far seam)
-    return h;
-}
 
 // Generous headroom: sampleHeightDelta() (sculpt strokes + disk
 // overlays) can push the FBM-derived terrain well above TERRAIN_HEIGHT.
@@ -920,114 +823,8 @@ float terrainM_shadow(vec2 p, float ray_t) {
     return h;
 }
 
-// _d variant exposing dot(d,d) for the shadow-march local-Lipschitz
-// overstep — same trick as the primary marcher uses (terrainM_lod_d).
-// Bigger shadow-march jumps on flats while keeping conservative
-// behaviour on cliffs.
-vec2 terrainM_shadow_d(vec2 p, float ray_t) {
-    vec2 wp = p;
-    p *= TERRAIN_SCALE;
-    int oct_full = int(pc.tex_params.z);
-    int oct_min  = max(2, min(oct_full, int(pc.emissive.w)));
-    float lod_f  = smoothstep(pc.emissive.y, pc.emissive.z, ray_t);
-    float oct_f  = float(oct_full) - lod_f * float(oct_full - oct_min);
-    int   oct    = int(ceil(oct_f));
-    float frac   = 1.0 - (float(oct) - oct_f);
-    float a = 0.0, b = 1.0;
-    vec2 d = vec2(0.0);
-    const int kMaxOct = 24;
-    for (int i = 0; i < kMaxOct; i++) {
-        if (i >= oct) break;
-        vec3 n = noised(p);
-        float w = (i == oct - 1) ? frac : 1.0;
-        d += n.yz * w;
-        a += b * n.x * w / (1.0 + dot(d, d));
-        b *= 0.5;
-        p = m2 * p * 2.0;
-    }
-    float h = a * TERRAIN_HEIGHT;
-    float t = plateauWeight(wp);
-    h = mix(h, pc.color.w, t);
-    return vec2(h, dot(d, d));
-}
 
-// Same FBM as terrainH() but propagates the analytic gradient through
-// the per-octave Jacobian: J starts as TERRAIN_SCALE·I (world→local),
-// each octave multiplies J by m2·2 (matching p_new = m2 * p_old * 2).
-// The world-space derivative of the noise value is transpose(J) * n.yz
-// (chain rule on the local-coord gradient noised() returns).
-//
-// Plateau + sculpt-overlay terms contribute to the height only — their
-// gradient is small at the wavelengths normals care about and would
-// just slightly smooth the lit normal. Damp factor's gradient is also
-// dropped: it's a slowly-varying weight, the contribution to dh/dp is
-// noise-floor.
-//
-// Returns vec3(height, dh/dx_world, dh/dz_world). Used by calcNormal
-// to replace 3× terrainH() finite-difference taps with one analytic
-// evaluation — biggest single per-pixel terrain saving.
-vec3 terrainH_grad(vec2 wp) {
-    vec2 p = wp * TERRAIN_SCALE;
-    mat2 J = mat2(TERRAIN_SCALE, 0.0, 0.0, TERRAIN_SCALE);
-    float a = 0.0, b = 1.0;
-    vec2 d = vec2(0.0);
-    vec2 grad = vec2(0.0);
-    int kOct = int(pc.tex_params.w);
-    for (int i = 0; i < kOct; i++) {
-        vec3 n = noised(p);
-        d += n.yz;
-        float damp = 1.0 / (1.0 + dot(d, d));
-        a += b * n.x * damp;
-        grad += b * damp * (transpose(J) * n.yz);
-        b *= 0.5;
-        p = m2 * p * 2.0;
-        J = m2 * J * 2.0;
-    }
-    float h = a * TERRAIN_HEIGHT;
-    float t = plateauWeight(wp);
-    h = mix(h, pc.color.w, t);
-    h += sampleHeightDelta(wp);
-    return vec3(h, grad.x * TERRAIN_HEIGHT, grad.y * TERRAIN_HEIGHT);
-}
 
-// Distance-LOD variant — same octave-fade scheme as terrainH_lod and
-// the same far-pixel sculpt skip. calcNormal uses this past the
-// near-detail band so the normal evaluation drops from 3 × kOct
-// finite-difference taps down to 1 × oct_lod analytic-gradient call.
-// At 30+ m the per-octave damp-derivative term dropped by the chain
-// rule is sub-pixel — verified by comparing renders at lod_far and
-// against the 3-tap path; no visible difference past the gate.
-vec3 terrainH_grad_lod(vec2 wp, float ray_t) {
-    vec2 p = wp * TERRAIN_SCALE;
-    mat2 J = mat2(TERRAIN_SCALE, 0.0, 0.0, TERRAIN_SCALE);
-    int oct_full = int(pc.tex_params.w);
-    int oct_min  = max(2, min(oct_full, int(pc.emissive.w)));
-    float lod_f  = smoothstep(pc.emissive.y, pc.emissive.z, ray_t);
-    float oct_f  = float(oct_full) - lod_f * float(oct_full - oct_min);
-    int   oct    = int(ceil(oct_f));
-    float frac   = 1.0 - (float(oct) - oct_f);
-    float a = 0.0, b = 1.0;
-    vec2 d = vec2(0.0);
-    vec2 grad = vec2(0.0);
-    const int kMaxOct = 32;
-    for (int i = 0; i < kMaxOct; i++) {
-        if (i >= oct) break;
-        vec3 n = noised(p);
-        float w = (i == oct - 1) ? frac : 1.0;
-        d += n.yz * w;
-        float damp = 1.0 / (1.0 + dot(d, d));
-        a += b * n.x * w * damp;
-        grad += b * w * damp * (transpose(J) * n.yz);
-        b *= 0.5;
-        p = m2 * p * 2.0;
-        J = m2 * J * 2.0;
-    }
-    float h = a * TERRAIN_HEIGHT;
-    float tpl = plateauWeight(wp);
-    h = mix(h, pc.color.w, tpl);
-    h += sampleHeightDelta(wp);   // (reverted 80 m gate — no near/far seam)
-    return vec3(h, grad.x * TERRAIN_HEIGHT, grad.y * TERRAIN_HEIGHT);
-}
 
 // Coarse 3-octave heightfield — strictly for AO + GI occlusion
 // raymarches where sub-meter detail doesn't matter. Cuts the per-step
@@ -1183,6 +980,22 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
     // produces ghost terrain projected into the sky.
     vec3 final_pos = ro + t * rd;
     float final_h  = final_pos.y - terrainM_lod(final_pos.xz, t);
+    // Out of steps while still clearly above the ground: carry on over the
+    // baked heightmap (one fetch per step) instead of accepting a point in
+    // the air as the hit.
+    if (final_h > 4.0 * 0.0025 * t) {
+        for (int k = 0; k < 32; ++k) {
+            vec3 q = ro + t * rd;
+            if (rd.y > 0.0 && q.y > maxH_cap) return -1.0;
+            if (t > t_limit) return -1.0;
+            if (any(greaterThan(abs(q.xz), vec2(kHeightmapSide * 0.5 - 2.0)))) break;
+            float hq = q.y - meshHeight(q.xz);
+            if (hq < 0.0025 * t) return t;
+            t += max(hq * 0.8, 0.002 * t);
+        }
+        final_pos = ro + t * rd;
+        final_h   = final_pos.y - terrainM_lod(final_pos.xz, t);
+    }
     // Treat as sky if we ended up well above the surface (>5m) AND
     // we were rising. Below that → accept as a hit (the FBM-LOD just
     // didn't converge tightly).
@@ -2276,7 +2089,7 @@ void main() {
                 // Same atmospheric extinction as the primary
                 // shading, applied to the reflection-ray distance.
                 vec3  r_ext = exp(-t_r * 0.00025 *
-                                  vec3(1.0, 1.5, 4.0));
+                                  vec3(1.0, 1.3, 2.0));
                 // pow(x, 8) → 3 squarings.
                 float rf1 = max(dot(refl, sunDirW), 0.0);
                 float rf2 = rf1 * rf1; float rf4 = rf2 * rf2; float rf8 = rf4 * rf4;
@@ -2391,7 +2204,7 @@ void main() {
 #else /* QLIKE_WATER */
                 vec3 r_ext = exp(-t_use * 0.00025 *
 #endif /* QLIKE_WATER */
-                                  vec3(1.0, 1.5, 4.0));
+                                  vec3(1.0, 1.3, 2.0));
                 // pow(x, 8) → 3 squarings — same trick as the rest
                 // of the file; this water-TLAS-reflection branch was
                 // the last stray pow.
@@ -2736,7 +2549,7 @@ void main() {
         // existing block by jumping to a tail). To keep the diff
         // tight we re-do the fog inline here using the same code path.
         float sundotW = clamp(dot(rd, sunDirW), 0.0, 1.0);
-        vec3 ext_w = exp(-t_water * 0.00025 * vec3(1.0, 1.5, 4.0));
+        vec3 ext_w = exp(-t_water * 0.00025 * vec3(1.0, 1.3, 2.0));
         // pow(x, 8) → 3 squarings.
         float sd2 = sundotW * sundotW;
         float sd4 = sd2 * sd2;
@@ -3555,7 +3368,7 @@ void main() {
     // Wavelength-dependent atmospheric extinction (blue attenuates
     // ~4× faster than red), with a sun-tinted fog colour near the sun
     // direction so the horizon glows warm where the sun touches it.
-    vec3 extinction = exp(-t * 0.00025 * vec3(1.0, 1.5, 4.0));
+    vec3 extinction = exp(-t * 0.00025 * vec3(1.0, 1.3, 2.0));
     float sundot = clamp(dot(rd, sunDir), 0.0, 1.0);
     // pow(x, 8) → 3 squarings.
     float sn2 = sundot * sundot;

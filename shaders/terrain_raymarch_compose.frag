@@ -107,6 +107,7 @@ void main() {
     // visually identical edge-preserving falloff to the previous
     // exp(-k·|d|) at a fraction of the ALU. α=64 gives the same kink
     // depth as the old kSharp=8.
+    vec3 edge_motion = vec3(0.0);
     vec4 d4 = textureGather(u_lr_depth, uv);                   // .x TL, .y TR, .z BR, .w BL
     vec4 r4 = textureGather(u_lr_color, uv, 0);
     vec4 g4 = textureGather(u_lr_color, uv, 1);
@@ -142,7 +143,18 @@ void main() {
         vec4 z4 = 0.05 / max(vec4(1.0000333) - d4, vec4(1e-7));   // view distance (near 0.05, far 1500)
         float zmin = min(min(z4.x, z4.y), min(z4.z, z4.w));
         float zmax = max(max(z4.x, z4.y), max(z4.z, z4.w));
-        if (zmax > zmin * 1.2 + 0.05) {
+        // A depth step, and not just a plane seen at a grazing angle: NDC
+        // depth is linear across the screen on a plane, so its second
+        // difference is ~0 there (flat ground far away also spans > 20 %
+        // in depth per texel and used to take this path needlessly).
+        vec2  lt_d = 1.0 / vec2(textureSize(u_lr_depth, 0));
+        float dL = textureLod(u_lr_depth, uv - vec2(lt_d.x, 0.0), 0.0).r;
+        float dR = textureLod(u_lr_depth, uv + vec2(lt_d.x, 0.0), 0.0).r;
+        float dU = textureLod(u_lr_depth, uv - vec2(0.0, lt_d.y), 0.0).r;
+        float dD = textureLod(u_lr_depth, uv + vec2(0.0, lt_d.y), 0.0).r;
+        float curv = max(abs(dL + dR - 2.0 * lr_depth), abs(dU + dD - 2.0 * lr_depth));
+        bool  stepped = curv > 0.12 * (1.0000333 - lr_depth);
+        if (stepped && zmax > zmin * 1.2 + 0.05) {
             vec2 fr = fract(uv * vec2(textureSize(u_lr_depth, 0)) - 0.5);
             // textureGather order: .x (0,1)  .y (1,1)  .z (1,0)  .w (0,0)
             vec4 bw = vec4((1.0 - fr.x) * fr.y, fr.x * fr.y, fr.x * (1.0 - fr.y), (1.0 - fr.x) * (1.0 - fr.y));
@@ -159,9 +171,13 @@ void main() {
             pick /= ps;
             c = cTL * pick.x + cTR * pick.y + cBR * pick.z + cBL * pick.w;
             lr_depth = dot(pick, d4);
+            // Motion from the same side (a bilinear mix dragged in the sky's
+            // zero motion / the far side's).
+            vec4 mx4 = textureGather(u_lr_motion, uv, 0), my4 = textureGather(u_lr_motion, uv, 1);
+            edge_motion = vec3(dot(pick, mx4), dot(pick, my4), 1.0);
         }
     }
     outColor     = vec4(c, 1.0);
-    outMotion    = texture(u_lr_motion, uv).rg;
+    outMotion    = edge_motion.z > 0.5 ? edge_motion.xy : texture(u_lr_motion, uv).rg;
     gl_FragDepth = lr_depth;
 }
