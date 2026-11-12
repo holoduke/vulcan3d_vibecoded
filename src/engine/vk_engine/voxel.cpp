@@ -99,8 +99,36 @@ void VulkanEngine::init_voxel() {
     const float base_y = std::min(std::min(h0, h1), std::min(h2, h3)) - 2.0f;
     glm::vec3 base_corner(-kTowerSizeX * 0.5f, base_y,
                           kTowerCenterZ - kTowerSizeZ * 0.5f);
-    const int shape_idx = voxel_world_->add_procedural_tower(base_corner);
-    (void)shape_idx;
+    // Switched off for now ('voxel_tower_enabled' in the cfg brings it back).
+    if (rt_.voxel_tower_enabled) voxel_world_->add_procedural_tower(base_corner);
+    else {
+        log::info("[voxel] destructible tower disabled");
+        voxel_world_.reset();
+        // The world shaders still declare the voxel SSBOs (scene set,
+        // bindings 24 / 25): give them a small dummy buffer. They never
+        // read it - scene.voxel_origin.w stays 0 without a voxel world.
+        if (scene_desc_set_ != VK_NULL_HANDLE && !voxel_dir_buffer_) {
+            VkBufferCreateInfo bci{};
+            bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bci.size = 4608;                                  // >= one brick record
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            VmaAllocationCreateInfo aci{};
+            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            if (vmaCreateBuffer(allocator_, &bci, &aci, &voxel_dir_buffer_, &voxel_dir_alloc_, nullptr) == VK_SUCCESS) {
+                VkDescriptorBufferInfo bi{ voxel_dir_buffer_, 0, VK_WHOLE_SIZE };
+                VkWriteDescriptorSet w[2]{};
+                w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w[0].dstSet = scene_desc_set_; w[0].dstBinding = 24;
+                w[0].descriptorCount = 1;
+                w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                w[0].pBufferInfo = &bi;
+                w[1] = w[0];
+                w[1].dstBinding = 25;
+                vkUpdateDescriptorSets(device_, 2, w, 0, nullptr);
+            }
+        }
+        return;
+    }
 
     const auto& bricks = voxel_world_->bricks();
     const auto& shapes = voxel_world_->shapes();

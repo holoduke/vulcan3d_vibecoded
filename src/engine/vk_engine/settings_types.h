@@ -718,6 +718,7 @@ struct RtSettings {
         // pass-through. > 1 lifts midtones (lighter look); < 1
         // darkens. Range 0.4..2.5.
         float image_gamma = 1.0f;
+        bool  voxel_tower_enabled = false;   // destructible tower beside the castle (restart)
         // Colour grading (compose.frag, after the tonemap).
         float grade_temperature = 0.06f;   // -1 cool .. +1 warm
         float grade_saturation  = 1.06f;   // 0 grey .. 2

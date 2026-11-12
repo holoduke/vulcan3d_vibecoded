@@ -455,6 +455,7 @@ void VulkanEngine::visit_settings(Self& s, F&& f) {
     f("image_contrast", s.rt_.image_contrast);
     f("image_brightness", s.rt_.image_brightness);
     f("image_gamma", s.rt_.image_gamma);
+    f("voxel_tower_enabled", s.rt_.voxel_tower_enabled);
     f("grade_temperature", s.rt_.grade_temperature);
     f("grade_saturation", s.rt_.grade_saturation);
     f("grade_vibrance", s.rt_.grade_vibrance);
