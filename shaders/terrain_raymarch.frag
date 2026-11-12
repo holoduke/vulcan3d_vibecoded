@@ -931,8 +931,30 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
     // sub-pixel only.
     t += jitter * 0.5;
     float maxH_cap = terrainMaxHeight();
+#ifndef QLIKE_WATER
+    // Eye at or under the marched surface. The full FBM sits up to ~0.5 m
+    // above the baked heightmap the player stands on (plus the close-range
+    // ground detail), so a crouching / crawling eye can be INSIDE it: every
+    // ray then "hit" at once and the ground in front turned to noise. March
+    // the baked heightmap for this pixel instead - the eye is always above that.
+    if (all(lessThan(abs(ro.xz), vec2(kHeightmapSide * 0.5 - 2.0))) &&
+        ro.y - terrainM_lod(ro.xz, 0.0) < 0.12) {
+        float th = 0.0;
+        for (int i = 0; i < 96; ++i) {
+            vec3 p = ro + rd * th;
+            if (rd.y > 0.0 && p.y > maxH_cap) return -1.0;
+            if (any(greaterThan(abs(p.xz), vec2(kHeightmapSide * 0.5 - 2.0)))) return -1.0;
+            float hh = p.y - meshHeight(p.xz);
+            if (hh < 0.002 * th + 0.004) return th;
+            th += max(hh * 0.6, 0.01 + 0.004 * th);
+            if (th > t_limit) return -1.0;
+        }
+        return th;
+    }
+#endif
     float t_prev = t;
     for (int i = 0; i < kSteps; i++) {
+
         vec3 pos = ro + t * rd;
         // Sky escape: any ray rising above the FBM ceiling with a
         // positive y-component cannot ever hit terrain — bail early

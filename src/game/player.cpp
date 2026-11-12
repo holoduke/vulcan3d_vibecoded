@@ -1,4 +1,5 @@
 #include "game/player.h"
+#include <cstdlib>
 
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -46,7 +47,8 @@ void update_player(Player& p, const PlayerInput& in,
     // Smooth crouch lerp at ~8/sec (≈125 ms full transition). Decoupled from
     // hitbox to avoid the "uncrouch into a low ceiling" trap.
     {
-        float target = in.crawl ? 1.0f : 0.0f;
+        static const bool test_crawl = std::getenv("QLIKE_TEST_CRAWL") != nullptr;   // capture hook
+        float target = (in.crawl || test_crawl) ? 1.0f : 0.0f;
         float k = std::min(1.0f, 8.0f * dt);
         p.crouch_factor += (target - p.crouch_factor) * k;
         p.crouch_factor = std::clamp(p.crouch_factor, 0.0f, 1.0f);
