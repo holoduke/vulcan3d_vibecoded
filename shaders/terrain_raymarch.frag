@@ -3011,13 +3011,21 @@ void main() {
     if (dif > 0.0 && self_shadow < 0.995 && distance(pos, scene.camera_pos.xyz) < 220.0) {
         float lit_g = 1.0;
         float tg = 0.10;
-        for (int i = 0; i < 14; ++i) {
+        // 14 steps x1.5 cover the first ~19 m finely, 16 more x1.22 carry
+        // on to ~450 m: a whole hill between this point and the sun. The
+        // FBM shadow march above runs out of steps long before that at
+        // medium range, which left the ground in front of a hill sunlit -
+        // and the ray-traced object shadows (which ignore the terrain)
+        // then drew the trees and rocks BEHIND the hill onto it.
+        float g_top = terrainMaxHeight();
+        for (int i = 0; i < 30; ++i) {
             vec3 q = pos + sunDir * tg;
+            if (q.y > g_top) break;
             if (any(greaterThan(abs(q.xz), vec2(kHeightmapSide * 0.5 - 2.0)))) break;
             float hg = q.y - meshHeight(q.xz);
-            lit_g = min(lit_g, smoothstep(-0.10, -0.02, hg));
+            lit_g = min(lit_g, smoothstep(-(0.10 + 0.02 * tg), -(0.02 + 0.004 * tg), hg));
             if (lit_g < 0.01) break;
-            tg *= 1.5;                       // 0.10 .. ~19 m
+            tg *= (i < 14) ? 1.5 : 1.22;
         }
         self_shadow = max(self_shadow, 1.0 - lit_g);
     }

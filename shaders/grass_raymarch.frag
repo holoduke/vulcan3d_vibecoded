@@ -465,7 +465,15 @@ void main() {
             // shore blades that silhouette against the water - starting
             // the march near the bed skipped them all (no grass in front
             // of water).
-            if (abs(ps.y - yS) < 0.6 && ps.y > scene.water_params.y + 0.05) {
+            // ONLY with the mesh terrain (pc.emissive.x): the raymarched terrain
+            // is not in the prepass, so there the prepass surface is always an
+            // object. Its low parts (trunk bases, rocks, small bushes) pass the
+            // 'near the ground' test below even when they stand BEHIND a hill -
+            // the march then started out at the object and skipped every blade
+            // on the hill in front, punching the object's outline through the
+            // grass.
+            if (pc.emissive.x > 0.5 &&
+                abs(ps.y - yS) < 0.6 && ps.y > scene.water_params.y + 0.05) {
                 vec3  Ns   = calcTerrainNormalApprox(ps.xz, yS, t_surf);
                 float cosg = abs(dot(rd, Ns));
                 float back = min(14.0, 0.9 / max(cosg, 0.06));
