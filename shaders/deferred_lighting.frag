@@ -342,8 +342,9 @@ void main() {
     // gbuffer1.b: terrain = POM relief sun visibility, else roughness.
     // gbuffer1.a (2 bits): 1 = foliage, 2/3 = metal, 0 = dielectric.
     float relief_vis = (material_id == 3) ? g1.b : 1.0;
-    bool  foliage   = g1.a > 0.83;
-    float metallic  = (!foliage && g1.a > 0.5) ? 1.0 : 0.0;
+    bool  leafy     = g1.a > 0.83;                          // leaves / needles
+    bool  foliage   = leafy || (g1.a > 0.17 && g1.a < 0.5);  // + bark / rocks of the vegetation
+    float metallic  = (g1.a > 0.5 && g1.a < 0.83) ? 1.0 : 0.0;
     float roughness = (material_id == 3)
         // terrain: snow / wet-ish rock smoother than soil and grass
         ? mix(0.92, 0.48, smoothstep(0.45, 0.75, dot(g0.rgb, vec3(0.333))))
@@ -428,9 +429,12 @@ void main() {
     // rule. Brushes/dyn props use 0x01.
     uint shadow_mask = (material_id == 3) ? 0x02u : 0x01u;
     float shadow = 0.0;
+    // Leaves are lit with wrap + transmission (below), so they need the
+    // sun visibility on their far side as well.
+    const float kLeafWrap = 0.5;
     bool shadow_on = scene.rt_flags.x != 0 &&
                      scene.rt_params.w > 1e-3 &&
-                     ndl_raw > 0.04;
+                     (ndl_raw > 0.04 || leafy);
     if (shadow_on) {
         vec3 ref = abs(L.y) < 0.999 ? vec3(0.0, 1.0, 0.0)
                                      : vec3(1.0, 0.0, 0.0);
@@ -1316,6 +1320,30 @@ void main() {
         // into E), so the specular BRDF is scaled by pi to match.
         vec3 spec = d_ggx(NoH, a_r) * v_smith_ggx_correlated(NoV, max(ndl, 1e-4), a_r) * F * ms_comp * kPI;
         sun_term = (diff_albedo * (1.0 - F) + spec) * sun_rad;
+    }
+    // Leaves and needles: scattering instead of plain Lambert.
+    //  * wrap diffuse + a warm band at the light/shadow transition
+    //    (GPU Gems 1 ch. 16, 'Real-Time Approximations to Subsurface
+    //    Scattering'): light bleeds past the terminator of the crown;
+    //  * transmission: sun through the leaf when it is lit from behind,
+    //    plus a forward-scattering lobe when looking toward the sun
+    //    (The Witness' cloud / vegetation shading), thinned where the
+    //    surface is edge-on to the light. The shadow ray stands in for
+    //    the thickness: more canopy between leaf and sun -> less glow.
+    if (leafy) {
+        vec3  sunE  = scene.sun_color.rgb * scene.sun_color.a;
+        float lit   = 1.0 - shadow;
+        float nw    = max(0.0, (ndl_raw + kLeafWrap) / (1.0 + kLeafWrap));
+        const float kSw = 0.30;
+        float band  = smoothstep(0.0, kSw, nw) * smoothstep(kSw * 2.0, kSw, nw);
+        vec3  tcol  = diff_albedo * vec3(1.75, 1.95, 0.45);          // light filtered by the leaf
+        float back  = clamp((0.25 - ndl_raw) / 1.25, 0.0, 1.0);
+        float fwd   = pow(clamp(dot(-Vv, L), 0.0, 1.0), 3.0) * clamp(1.25 - abs(ndl_raw), 0.0, 1.0);
+        float thin  = mix(0.22, 1.0, lit);
+        vec3  spec_keep = sun_term - diff_albedo * sun_rad;          // specular part computed above
+        sun_term = max(spec_keep, vec3(0.0)) +
+                   sunE * lit * (diff_albedo * nw * 0.9 + tcol * band * 0.30) +
+                   sunE * tcol * (back * 0.40 + fwd * 0.85) * thin;
     }
 
     // ---------------------------------------------------------------

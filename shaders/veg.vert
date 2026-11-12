@@ -27,6 +27,7 @@ layout(push_constant) uniform PC {
 struct VegInstance { vec4 pos_scale; vec4 rot_arch_phase; };
 layout(std430, set = 1, binding = 0) readonly buffer Instances { VegInstance inst[]; };
 layout(std430, set = 1, binding = 1) readonly buffer Visible   { uint visible[]; };
+layout(std430, set = 1, binding = 3) readonly buffer ArchInfo  { vec4 arch[]; };   // radius, half height, impostor, species
 layout(std430, set = 1, binding = 5) readonly buffer Fade      { float fade[]; };
 
 layout(location = 0) out vec3 vNormal;
@@ -67,6 +68,25 @@ void main() {
     }
 
     const vec3 rest_wp = wp;   // pre-sway position: anchors the leaf cut-out pattern
+    // Crown-level normals (The Witness' vegetation / cloud shading): each
+    // leaf clump is its own little ball, so with its own normals every
+    // clump gets a lit top and a dark underside and the crown reads as a
+    // pile of balls. Bending the normals toward the direction from the
+    // crown centre gives one smooth field across the whole crown - it
+    // then shades as a single soft volume, with the clumps as detail.
+    if (mat0 >= 1 && mat0 <= 3) {
+        vec4  ai = arch[uint(I.rot_arch_phase.y + 0.5)];
+        float H  = ai.y * 2.0 * s * ysq;
+        vec3  base = I.pos_scale.xyz;
+        vec3  dc;
+        if (mat0 == 1) {            // conifer: outward from the trunk, a little up
+            vec2 o = wp.xz - base.xz;
+            dc = normalize(vec3(o.x, 0.45 * length(o) + 0.05, o.y));
+        } else {
+            dc = normalize(wp - (base + vec3(0.0, H * (mat0 == 3 ? 0.40 : 0.68), 0.0)));
+        }
+        N = normalize(mix(N, dc, mat0 == 1 ? 0.45 : 0.6));
+    }
     // Wind: trunk base still, crown sways; per-instance phase. The previous
     // frame's pose (time - 0.016, the CPU step) feeds the motion vector so
     // swaying crowns reproject correctly in TAA.

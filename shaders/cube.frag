@@ -790,8 +790,13 @@ vec2 surface_rough_metal(int tex_idx, bool foliage, bool mesh_draw) {
         default: return vec2(0.78, 0.0);   // rock / stone clutter etc.
     }
 }
-// gbuffer1.a (2 bits): 1.0 = foliage, 2/3 = metal, 0 = dielectric.
-float gbuf_flags(bool foliage, float metal) { return foliage ? 1.0 : (metal > 0.5 ? 0.6667 : 0.0); }
+// gbuffer1.a (2 bits): 1.0 = leaves / needles, 1/3 = other vegetation
+// (bark, rocks: foliage ray offsets but no translucency), 2/3 = metal,
+// 0 = dielectric.
+bool g_veg_solid = false;
+float gbuf_flags(bool foliage, float metal) {
+    return foliage ? (g_veg_solid ? 0.3333 : 1.0) : (metal > 0.5 ? 0.6667 : 0.0);
+}
 
 // Interleaved Gradient Noise (Jorge Jimenez, "Next Generation Post-Processing
 // in Call of Duty: Advanced Warfare", SIGGRAPH 2014).
@@ -1421,6 +1426,10 @@ void main() {
     // the raster one sways - rays self-hit the canopy -> crawling patches).
     bool is_foliage_px = is_mesh_draw && pc.grass_params.z > 0.5 &&
                          (vTexParams.x < 0.0 || pc.grass_params.x > 0.5);   // .x = GPU veg draw
+    {   // GPU vegetation bark (0) and rocks (4) are not leaves.
+        int vm_f = int(vUv.y + 0.5);
+        g_veg_solid = is_foliage_px && pc.grass_params.x > 0.5 && (vm_f == 0 || vm_f == 4) && vVegInfo.z < 0.5;
+    }
 
     // ---- Terrain debug visualisation (set in pause-menu Graphics) ----
     // Bypasses everything except a basic Lambert / normal preview so we

@@ -91,8 +91,8 @@ void main() {
         return;
     }
 
-    bool  foliage   = g1.a > 0.83;
-    float metallic  = (!foliage && g1.a > 0.5) ? 1.0 : 0.0;
+    bool  foliage   = g1.a > 0.83 || (g1.a > 0.17 && g1.a < 0.5);
+    float metallic  = (g1.a > 0.5 && g1.a < 0.83) ? 1.0 : 0.0;
     float roughness = (material_id == 3)
         ? mix(0.92, 0.48, smoothstep(0.45, 0.75, dot(g0.rgb, vec3(0.333))))
         : clamp(g1.b, 0.05, 1.0);
