@@ -48,7 +48,7 @@ struct WorldPropStats { int formations = 0, boulders = 0, pines = 0, broadleaf =
 // local space (base at origin, y up). Vertex uv = (wind weight, material:
 // 0 bark, 1 needles, 2 leaves, 3 bush, 4 rock).
 constexpr int kVegLods = 4;
-constexpr int kVegRtLevels = 3;   // BLAS detail levels for ray tracing
+constexpr int kVegRtLevels = 4;   // BLAS detail levels for ray tracing (one per mesh LOD)
 struct VegArchetype {
     int species = 0;                 // 0 pine, 1 broadleaf, 2 bush, 3 rock
     game::LevelMesh lods[kVegLods];

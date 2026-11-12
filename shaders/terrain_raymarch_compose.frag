@@ -96,6 +96,37 @@ void main() {
     if (strength > 0.0 && pc.color.y > 0.5 && pc.color.z > 0.5) {
         c = casSharpen(c0, cTL, cTR, cBR, cBL, strength);
     }
+
+    // Depth edges. Where the four low-res texels straddle a silhouette
+    // (a near bump in front of far ground), the bilinear depth above is a
+    // mix of the two: just inside the outline it lands far BEHIND the near
+    // surface, so rocks, trunks and bushes standing behind the bump were
+    // drawn over it in a fringe one low-res texel wide. Instead pick the
+    // side that owns the pixel (bilinear weight >= 1/2, the same outline
+    // the blend would give) and take depth AND colour from that side only.
+    {
+        vec4 z4 = 0.05 / max(vec4(1.0000333) - d4, vec4(1e-7));   // view distance (near 0.05, far 1500)
+        float zmin = min(min(z4.x, z4.y), min(z4.z, z4.w));
+        float zmax = max(max(z4.x, z4.y), max(z4.z, z4.w));
+        if (zmax > zmin * 1.2 + 0.05) {
+            vec2 fr = fract(uv * vec2(textureSize(u_lr_depth, 0)) - 0.5);
+            // textureGather order: .x (0,1)  .y (1,1)  .z (1,0)  .w (0,0)
+            vec4 bw = vec4((1.0 - fr.x) * fr.y, fr.x * fr.y, fr.x * (1.0 - fr.y), (1.0 - fr.x) * (1.0 - fr.y));
+            vec4 nearm = vec4(lessThan(z4, vec4(zmin * 1.2 + 0.05)));
+            vec4 skym  = vec4(greaterThanEqual(d4, vec4(0.99999)));
+            vec4 farm  = (1.0 - nearm) * (1.0 - skym);
+            float wn = dot(bw, nearm), ws = dot(bw, skym), wf = dot(bw, farm);
+            vec4 pick;
+            if (wn >= 0.5)      pick = bw * nearm;
+            else if (ws > wf)   discard;
+            else                pick = bw * farm;
+            float ps = pick.x + pick.y + pick.z + pick.w;
+            if (ps < 1e-5) discard;
+            pick /= ps;
+            c = cTL * pick.x + cTR * pick.y + cBR * pick.z + cBL * pick.w;
+            lr_depth = dot(pick, d4);
+        }
+    }
     outColor     = vec4(c, 1.0);
     outMotion    = texture(u_lr_motion, uv).rg;
     gl_FragDepth = lr_depth;

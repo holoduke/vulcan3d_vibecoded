@@ -342,9 +342,9 @@ void VulkanEngine::build_veg_blas() {
     const uint32_t shared_families[2] = { graphics_queue_family_, compute_queue_family_ };
     const VkDeviceAddress vbo = buffer_device_address(device_, veg_mesh_.vertex_buffer);
     const VkDeviceAddress ibo = buffer_device_address(device_, veg_mesh_.index_buffer);
-    // Three RT shapes per archetype: LOD0 (near: matches the raster
-    // silhouette), LOD1 (mid), LOD3 (far shadows, ~20 tris).
-    static constexpr int kRtLod[kVegRtLevels] = { 0, 1, 3 };
+    // One RT shape per mesh LOD, so the shape a shadow ray meets is the
+    // one that is drawn (see collect_veg_rt_instances).
+    static constexpr int kRtLod[kVegRtLevels] = { 0, 1, 2, 3 };
     veg_blas_.resize(veg_arch_.size() * kVegRtLevels);
     for (size_t q = 0; q < veg_blas_.size(); ++q) {
         const size_t a = q / kVegRtLevels;
@@ -454,9 +454,19 @@ void VulkanEngine::collect_veg_rt_instances(glm::vec3 eye, uint32_t cap,
         std::nth_element(cand.begin(), cand.begin() + cap, cand.end());
         cand.resize(cap);
     }
-    // Encode the RT shape level in the top 2 bits (0 near, 1 mid, 2 far).
+    // Encode the RT shape level in the top 2 bits. It follows the LOD the
+    // rasteriser picks (same pixel-radius thresholds as veg_cull.comp):
+    // with a finer shape in the TLAS than on screen, the extra leaf clumps
+    // of the fine model shadowed the coarse crown in black patches.
+    const float ppr = float(render_extent_.height) / (2.0f * std::tan(glm::radians(80.0f) * 0.5f)) *
+                      std::max(0.25f, rt_.veg_lod_bias);
     for (const auto& c : cand) {
-        uint32_t lvl = c.first < 70.0f * 70.0f ? 0u : c.first < 220.0f * 220.0f ? 1u : 2u;
+        const auto& v = veg_inst_cpu_[c.second];
+        const size_t a = size_t(v.rot_arch_phase.y + 0.5f);
+        const float ysq = v.rot_arch_phase.w > 0.0f ? v.rot_arch_phase.w : 1.0f;
+        const float r = (a < veg_arch_.size() ? veg_arch_[a].radius : 1.0f) * v.pos_scale.w * std::max(ysq, 1.0f) + 0.6f;
+        const float px = r / std::max(std::sqrt(c.first), 0.1f) * ppr;
+        const uint32_t lvl = px > 85.0f ? 0u : px > 40.0f ? 1u : px > 16.0f ? 2u : 3u;
         out.push_back(c.second | (lvl << 30));
     }
 }
