@@ -884,6 +884,10 @@ float terrainM_shadow(vec2 p, float ray_t) {
     float h = a * TERRAIN_HEIGHT;
     float t = plateauWeight(wp);
     h = mix(h, pc.color.w, t);
+    // The edits to the ground (castle site lowered, road cut and levelled,
+    // sculpting) live in the delta texture. Without it the shadow march saw
+    // the ORIGINAL hill there and threw a phantom shadow over the road.
+    h += sampleHeightDelta(wp);
     return h;
 }
 
