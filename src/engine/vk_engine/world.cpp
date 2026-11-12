@@ -364,7 +364,30 @@ void VulkanEngine::init_world() {
                 log::infof("[outpost] tower style %d at (%.0f, %.1f, %.0f)", st, cd.p.x, cd.p.y, cd.p.z);
             }
         }
+        // Lamp posts along the castle road: one about every 50 m, on a
+        // random side, arm over the verge toward the paving.
+        if (!castle_road_.empty()) {
+            uint32_t lr = 0x1A4E7u;
+            const auto& P = castle_road_.pts;
+            float acc = 0.0f, next = 26.0f;
+            for (size_t i = 1; i + 1 < P.size(); ++i) {
+                acc += glm::length(glm::vec2(P[i].x - P[i - 1].x, P[i].z - P[i - 1].z));
+                if (acc < next) continue;
+                next = acc + frand_range(lr, 42.0f, 58.0f);
+                glm::vec2 t = glm::normalize(glm::vec2(P[i + 1].x - P[i - 1].x, P[i + 1].z - P[i - 1].z));
+                const float side = frand_range(lr, 0.0f, 1.0f) < 0.5f ? -1.0f : 1.0f;
+                const glm::vec2 n(-t.y * side, t.x * side);
+                const float off = castle_road_.half_width + 0.75f;
+                const float x = P[i].x + n.x * off, z = P[i].z + n.y * off;
+                const float y = hm.sample_world(x, z);
+                if (y < rt_.water_level + 0.2f) continue;
+                lamp_lights_.push_back(game::append_lamp_post(world_, glm::vec3(x, y, z), glm::vec3(-n.x, 0.0f, -n.y),
+                                                              0xC0FFEEu + uint32_t(i) * 131u));
+                log::infof("[lamp] post at (%.1f, %.1f, %.1f)", x, y, z);
+            }
+        }
         // Procedural trees, bushes, rock formations: GPU-instanced with LOD
+
         // over the whole map (vegetation.cpp). Adds trunk / rock colliders.
         place_aa_vehicles(hm);           // before vegetation (keep-out)
         init_aa_meshes();

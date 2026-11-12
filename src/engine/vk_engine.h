@@ -677,7 +677,7 @@ private:
     // are procedurally baked seamless terrain materials, splatted in
     // cube.frag's is_terrain block by the height/slope weights.
     static constexpr int kFileTextureCount   = 7;
-    static constexpr int kTerrainMatCount    = 10;    // +ProcGrass, Roof, Road, Leaf atlas, Bark
+    static constexpr int kTerrainMatCount    = 11;    // +ProcGrass, Roof, Road, Leaf atlas, Bark
     static constexpr int kTextureCount       = kFileTextureCount +
                                                kTerrainMatCount;   // 15
     // Albedo/normal-array indices of the baked terrain materials.
@@ -701,6 +701,7 @@ private:
     // conifer spray right half). 16: tree bark. assets/foliage/.
     static constexpr int kTexLeaf = kFileTextureCount + 8;  // 15
     static constexpr int kTexBark = kFileTextureCount + 9;  // 16
+    static constexpr int kTexTimber = kFileTextureCount + 10;  // 17: weathered timber (lamp posts)
     struct TextureSlot {
         VkImage image = VK_NULL_HANDLE;
         VmaAllocation alloc = nullptr;
@@ -1389,6 +1390,7 @@ private:
     // heightmap is cached; drives carving, grass/scatter keep-out and
     // the terrain shader road polyline (SceneUBO road_pts).
     Road castle_road_{};
+    std::vector<glm::vec3> lamp_lights_;   // road lantern positions (point lights)
     // Castle mesh parts (round towers, roofs, gate arch) from
     // Level::meshes, lifted to the plateau. Raster through the world
     // pipeline in "static mesh" mode (grass_params.w = -1: UV texturing,
@@ -1400,6 +1402,7 @@ private:
         glm::vec3 bmin{0.0f}, bmax{0.0f};
         bool triplanar = false, sway = false;
         float uv_scale = 1.0f;
+        glm::vec4 emissive{0.0f};     // rgb, a = 1 full-emissive
         VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
         VkBuffer blas_buf = VK_NULL_HANDLE;
         VmaAllocation blas_alloc = nullptr;

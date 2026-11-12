@@ -652,5 +652,119 @@ void append_outpost_tower(Level& lv, glm::vec3 base, int style, uint32_t seed) {
     for (const auto& a : cols) lv.aabbs.push_back(a);
 }
 
+
+// ---------------------------------------------------------------------
+// Road lamp post: a hewn timber post with a braced arm and a hanging iron
+// lantern (world space; `base` on the ground, the arm reaches along
+// `arm_dir`, a horizontal unit vector, toward the road).
+// ---------------------------------------------------------------------
+namespace {
+
+// Tapered prism along a -> b with `segs` sides (4 = square beam, more =
+// round). UVs: u around, v along (texture repeats, tile_m metres each).
+void lp_beam(LevelMesh& m, glm::vec3 a, glm::vec3 b, float r0, float r1, int segs,
+             glm::vec3 ref, float tile_m, bool caps, float twist = 0.0f) {
+    const glm::vec3 ax = glm::normalize(b - a);
+    glm::vec3 u = glm::normalize(ref - ax * glm::dot(ref, ax));
+    const glm::vec3 w = glm::cross(ax, u);
+    const float len = glm::length(b - a);
+    const float k = segs == 4 ? 1.41421356f : 1.0f;      // square: r is the half side
+    auto dir = [&](int i, float t) {
+        const float ang = 2.0f * kPi * (float(i) + (segs == 4 ? 0.5f : 0.0f)) / float(segs) + twist * t;
+        return u * std::cos(ang) + w * std::sin(ang);
+    };
+    for (int i = 0; i < segs; ++i) {
+        const glm::vec3 d0a = dir(i, 0.0f), d1a = dir(i + 1, 0.0f), d0b = dir(i, 1.0f), d1b = dir(i + 1, 1.0f);
+        const glm::vec3 n = glm::normalize(d0a + d1a);
+        const glm::vec3 n0 = segs <= 6 ? n : d0a, n1 = segs <= 6 ? n : d1a;      // flat faces on beams
+        const float u0 = float(i) * 2.0f * r0 * k / tile_m, u1 = u0 + 2.0f * r0 * k / tile_m;
+        mesh_quad(m, { a + d0a * (r0 * k), n0, u0, 0.0f }, { a + d1a * (r0 * k), n1, u1, 0.0f },
+                     { b + d1b * (r1 * k), n1, u1, -len / tile_m }, { b + d0b * (r1 * k), n0, u0, -len / tile_m });
+    }
+    if (caps)
+        for (int i = 1; i + 1 < segs; ++i) {
+            mesh_quad(m, { b + dir(0, 1.0f) * (r1 * k), ax, 0.0f, 0.0f }, { b + dir(i, 1.0f) * (r1 * k), ax, 0.1f, 0.0f },
+                         { b + dir(i + 1, 1.0f) * (r1 * k), ax, 0.1f, 0.1f }, { b + dir(i + 1, 1.0f) * (r1 * k), ax, 0.1f, 0.1f });
+            mesh_quad(m, { a + dir(0, 0.0f) * (r0 * k), -ax, 0.0f, 0.0f }, { a + dir(i, 0.0f) * (r0 * k), -ax, 0.1f, 0.0f },
+                         { a + dir(i + 1, 0.0f) * (r0 * k), -ax, 0.1f, 0.1f }, { a + dir(i + 1, 0.0f) * (r0 * k), -ax, 0.1f, 0.1f });
+        }
+}
+
+}  // namespace
+
+glm::vec3 append_lamp_post(Level& lv, glm::vec3 base, glm::vec3 arm_dir, uint32_t seed) {
+    constexpr int kWood = 17, kMetal = 3;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return float((seed >> 8) & 0xFFFFu) / 65535.0f; };
+    LevelMesh wood; wood.tex_albedo = kWood; wood.tex_normal = kWood;
+    wood.tint = glm::vec3(0.95f, 0.90f, 0.84f); wood.fallback = glm::vec3(0.30f, 0.21f, 0.13f);
+    LevelMesh iron; iron.tex_albedo = kMetal; iron.tex_normal = kMetal;
+    iron.tint = glm::vec3(0.16f, 0.15f, 0.14f); iron.fallback = glm::vec3(0.09f, 0.09f, 0.09f);
+    LevelMesh glass;                                     // warm, self-lit panes + flame
+    glass.tint = glass.fallback = glm::vec3(1.0f, 0.74f, 0.36f);
+    glass.emissive = glm::vec3(3.2f, 2.0f, 0.75f);
+    glass.full_emissive = true;
+
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    const glm::vec3 A = glm::normalize(glm::vec3(arm_dir.x, 0.0f, arm_dir.z));
+    const glm::vec3 S(-A.z, 0.0f, A.x);
+    const float H = 3.55f + 0.25f * rnd();
+    const glm::vec3 lean = (A * (rnd() - 0.5f) + S * (rnd() - 0.5f)) * 0.10f;   // posts are never plumb
+    const glm::vec3 foot = base - up * 0.7f;
+    const glm::vec3 top = base + up * H + lean;
+    const float wt = 0.55f;                              // wood texture: metres per repeat
+
+    // Post: hewn octagon, slightly tapered and twisted, with a chamfered top.
+    lp_beam(wood, foot, top - up * 0.12f, 0.105f, 0.085f, 8, A, wt, false, 0.25f);
+    lp_beam(wood, top - up * 0.12f, top, 0.085f, 0.05f, 8, A, wt, true, 0.0f);
+    // Stone-packed footing collar.
+    lp_beam(wood, base - up * 0.05f, base + up * 0.16f, 0.15f, 0.125f, 8, A, wt, true);
+    // Arm (square beam) through the post, and a diagonal brace under it.
+    const glm::vec3 arm_c = base + up * (H - 0.42f) + lean * 0.88f;
+    const glm::vec3 arm_a = arm_c - A * 0.22f, arm_b = arm_c + A * 0.98f + up * 0.03f;
+    lp_beam(wood, arm_a, arm_b, 0.052f, 0.045f, 4, up, wt, true);
+    lp_beam(wood, base + up * (H - 1.18f) + lean * 0.67f + A * 0.07f, arm_c + A * 0.66f - up * 0.04f,
+            0.036f, 0.036f, 4, S, wt, true);
+    // Iron: straps round the joint, pegs, and the hook plate at the arm end.
+    lp_beam(iron, arm_c - up * 0.075f, arm_c + up * 0.075f, 0.097f, 0.097f, 8, A, 0.3f, false);
+    lp_beam(iron, arm_c + A * 0.62f - up * 0.062f, arm_c + A * 0.70f - up * 0.062f, 0.058f, 0.058f, 4, up, 0.3f, true);
+    const glm::vec3 hook = arm_b - A * 0.10f;
+    lp_beam(iron, hook - up * 0.06f - A * 0.03f, hook - up * 0.06f + A * 0.03f, 0.056f, 0.056f, 4, up, 0.3f, true);
+    // Chain: four alternating links.
+    glm::vec3 c = hook - up * 0.055f;
+    for (int i = 0; i < 4; ++i) {
+        const glm::vec3 side = (i & 1) ? A : S;
+        lp_beam(iron, c - side * 0.012f, c - up * 0.055f - side * 0.012f, 0.0045f, 0.0045f, 4, side, 0.2f, false);
+        lp_beam(iron, c + side * 0.012f, c - up * 0.055f + side * 0.012f, 0.0045f, 0.0045f, 4, side, 0.2f, false);
+        c -= up * 0.05f;
+    }
+    // Lantern: ring, pyramid roof with a finial, four corner bars, base
+    // tray, glass panes and a flame.
+    const float lw = 0.105f, lh = 0.27f;                 // half width, body height
+    const glm::vec3 lt = c - up * 0.10f;                 // top of the body
+    const glm::vec3 lb = lt - up * lh;
+    lp_beam(iron, c, lt + up * 0.12f, 0.008f, 0.012f, 6, A, 0.2f, false);
+    lp_beam(iron, lt + up * 0.11f, lt + up * 0.135f, 0.022f, 0.016f, 6, A, 0.2f, true);
+    lp_beam(iron, lt, lt + up * 0.115f, lw * 1.28f, 0.02f, 4, A, 0.3f, true);             // roof
+    lp_beam(iron, lt - up * 0.018f, lt, lw * 1.12f, lw * 1.28f, 4, A, 0.3f, true);        // eave
+    lp_beam(iron, lb - up * 0.03f, lb, lw * 0.80f, lw * 1.10f, 4, A, 0.3f, true);         // tray
+    lp_beam(iron, lb - up * 0.05f, lb - up * 0.03f, 0.02f, lw * 0.80f, 4, A, 0.3f, true);
+    for (int k = 0; k < 4; ++k) {
+        const glm::vec3 d = (A * ((k & 1) ? 1.0f : -1.0f) + S * ((k & 2) ? 1.0f : -1.0f)) * lw;
+        lp_beam(iron, lb + d, lt + d, 0.0085f, 0.0085f, 4, A, 0.2f, false);
+        // mid rail on each side
+        const glm::vec3 e = (k & 1) ? A : S, f = (k & 1) ? S : A;
+        const glm::vec3 mc = lb + up * (lh * 0.5f) + e * (((k & 2) ? 1.0f : -1.0f) * lw);
+        lp_beam(iron, mc - f * lw, mc + f * lw, 0.005f, 0.005f, 4, up, 0.2f, false);
+    }
+    lp_beam(glass, lb + up * 0.004f, lt - up * 0.004f, lw * 0.93f, lw * 0.93f, 4, A, 1.0f, false);   // panes
+    lp_beam(glass, lb + up * 0.02f, lb + up * 0.13f, 0.022f, 0.004f, 6, A, 1.0f, true);              // flame
+
+    lv.meshes.push_back(std::move(wood));
+    lv.meshes.push_back(std::move(iron));
+    lv.meshes.push_back(std::move(glass));
+    lv.aabbs.push_back({ base - glm::vec3(0.13f, 0.3f, 0.13f), base + glm::vec3(0.13f, H, 0.13f) });
+    return lb + up * (lh * 0.5f);
+}
+
 } // namespace qlike::game
 

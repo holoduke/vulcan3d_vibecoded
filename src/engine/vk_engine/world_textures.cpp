@@ -620,10 +620,10 @@ void VulkanEngine::load_foliage_textures() {
             ++loaded;
         }
     }
-    if (std::string p = resolve("bark.png"); !p.empty()) {
+    if (std::string p = resolve("timber.png"); !p.empty()) {
         int w = 0, h = 0, c = 0;
         if (unsigned char* px = stbi_load(p.c_str(), &w, &h, &c, 4)) {
-            put(albedo_textures_[kTexBark], px, w, h, VK_FORMAT_R8G8B8A8_SRGB, "foliage/bark");
+            put(albedo_textures_[kTexTimber], px, w, h, VK_FORMAT_R8G8B8A8_SRGB, "foliage/timber");
             // Height = luminance (furrows are dark), normal = its gradient.
             std::vector<float> ht(size_t(w) * size_t(h));
             for (size_t i = 0; i < ht.size(); ++i)
@@ -640,7 +640,7 @@ void VulkanEngine::load_foliage_textures() {
                     o[2] = static_cast<unsigned char>(std::clamp((il * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
                     o[3] = static_cast<unsigned char>(std::clamp(H(x, y) * 255.0f, 0.0f, 255.0f));
                 }
-            put(normal_textures_[kTexBark], nrm.data(), w, h, VK_FORMAT_R8G8B8A8_UNORM, "foliage/bark_n");
+            put(normal_textures_[kTexTimber], nrm.data(), w, h, VK_FORMAT_R8G8B8A8_UNORM, "foliage/timber_n");
             stbi_image_free(px);
             ++loaded;
         }
@@ -650,7 +650,7 @@ void VulkanEngine::load_foliage_textures() {
         if (s.view)  vkDestroyImageView(device_, s.view, nullptr);
         if (s.image) vmaDestroyImage(allocator_, s.image, s.alloc);
     }
-    log::infof("[foliage] %d/2 textures loaded (leaf atlas, bark)", loaded);
+    log::infof("[foliage] %d/2 textures loaded (leaf atlas, timber)", loaded);
 }
 
 void VulkanEngine::load_terrain_pbr_overrides() {
@@ -1151,6 +1151,7 @@ void VulkanEngine::bake_terrain_materials() {
         // Placeholders for the foliage slots (load_foliage_textures()).
         { TM_GRASS, kTexLeaf,      "foliage/leaf_placeholder" },
         { TM_ROCK,  kTexBark,      "foliage/bark_placeholder" },
+        { TM_DIRT,  kTexTimber,    "foliage/timber_placeholder" },
     };
     // CPU generation of all materials in parallel (pure functions of
     // kind + size); uploads stay on this thread (queue owner).
