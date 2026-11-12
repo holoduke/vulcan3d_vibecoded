@@ -10,6 +10,8 @@
 #include <cmath>
 #include <map>
 #include <random>
+#include <map>
+#include <mutex>
 #include <thread>
 #include <unordered_set>
 
@@ -552,7 +554,22 @@ void build_broadleaf(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, c
         nodes.push_back({ q, i - 1, 0.0f, i < tn ? 1 : 0 });
     }
     const float step = 0.52f;
-    colonize(nodes, r, centre, radii, 420, step);
+    {
+        // Both detailed LODs share one skeleton: grow it once per tree seed.
+        struct Grown { std::vector<SkNode> nodes; std::mt19937 rng; };
+        static std::mutex mu;
+        static std::map<uint32_t, Grown> cache;
+        const uint32_t key = uint32_t(p.seed * 1000.0f) ^ (uint32_t(p.H * 64.0f) << 12) ^ (uint32_t(p.spread * 64.0f) << 22);
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache.find(key);
+        if (it == cache.end()) {
+            colonize(nodes, r, centre, radii, 420, step);
+            cache.emplace(key, Grown{ nodes, r });
+        } else {
+            nodes = it->second.nodes;
+            r = it->second.rng;
+        }
+    }
 
     // Pipe-model radii, tips first (children always follow their parent).
     const float n_exp = 2.35f, r_tip = 0.022f;

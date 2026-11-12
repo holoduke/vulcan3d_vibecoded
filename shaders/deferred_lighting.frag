@@ -386,7 +386,7 @@ void main() {
     // self-hits -> distant props and castle went near-black. Pull all ray
     // origins back toward the camera by the expected error.
     vec3 wp_safe = world_pos + (view_vec / max(cam_dist, 1e-3)) *
-                   min(0.002 + cam_dist * cam_dist * 4.0e-6, 2.5);
+                   min(0.004 + cam_dist * cam_dist * 1.2e-5, 2.5);
 
     // World-anchored noise seed for shadow / AO jitter. A screen-pixel
     // seed printed the SAME noise pattern on screen whatever the camera

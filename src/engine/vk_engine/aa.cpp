@@ -435,6 +435,21 @@ void VulkanEngine::tick_sam(float dt) {
     }
 
     // ---- Flares ----
+    // Test hook: QLIKE_TEST_FLARE=1 dumps a flare string ahead of the camera.
+    static const bool kTestFlare = std::getenv("QLIKE_TEST_FLARE") != nullptr;
+    if (kTestFlare && flares_.empty()) {
+        const glm::vec3 fw(std::sin(player_.yaw), 0.0f, -std::cos(player_.yaw));
+        const glm::vec3 rt(-fw.z, 0.0f, fw.x);
+        for (int k = 0; k < 6; ++k) {
+            Flare fl{};
+            fl.pos = player_.position + fw * 120.0f + glm::vec3(0.0f, 70.0f, 0.0f);
+            fl.vel = rt * (90.0f - float(k) * 9.0f) + fw * ((k & 1 ? 1.0f : -1.0f) * frand_range(R, 14.0f, 30.0f)) -
+                     glm::vec3(0.0f, frand_range(R, 8.0f, 22.0f), 0.0f);
+            fl.life = frand_range(R, 2.8f, 4.2f);
+            fl.id = flare_next_id_++;
+            flares_.push_back(fl);
+        }
+    }
     for (auto& fl : flares_) {
         fl.t += dt;
         fl.vel.y -= 9.81f * 0.55f * dt;                       // light, draggy

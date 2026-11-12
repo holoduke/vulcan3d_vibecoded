@@ -734,8 +734,8 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
     // flame while it burns, and a bright flash at ignition.
     for (const auto& s : sam_missiles_) {
         if (s.trail.size() >= 2) {
-            std::vector<glm::vec3> p; std::vector<float> w, a;
-            p.reserve(s.trail.size() + 1);
+            static std::vector<glm::vec3> p; static std::vector<float> w, a;   // reused every frame
+            p.clear(); w.clear(); a.clear();
             for (const auto& tp : s.trail) {
                 float age = s.t - tp.w;
                 float burn = 1.0f - glm::smoothstep(7.0f - 0.8f, 7.0f, tp.w);   // thinner after burnout

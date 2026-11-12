@@ -1339,7 +1339,8 @@ void main() {
     // stable per-pixel noise: the coarse LOD keeps pixels n >= f, the fine
     // one n < f, so together they cover every pixel exactly once.
     if (vVegInfo.x > 0.0) {
-        float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy + 5.588238 * float(uint(scene.rt_flags.w) & 7u),
+                                                  vec2(0.06711056, 0.00583715))));
         if (vVegInfo.y > 0.5 ? (n >= vVegInfo.x) : (n < vVegInfo.x)) discard;
     }
     bool veg_imp = vVegInfo.z > 0.5;

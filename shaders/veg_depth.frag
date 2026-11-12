@@ -12,7 +12,8 @@ layout(location = 10) flat in vec4 vVegInfo;
 #include "veg_leaf.glsl"
 void main() {
     if (vVegInfo.x > 0.0) {
-        float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy + 5.588238 * float(uint(scene.rt_flags.w) & 7u),
+                                                  vec2(0.06711056, 0.00583715))));
         if (vVegInfo.y > 0.5 ? (n >= vVegInfo.x) : (n < vVegInfo.x)) discard;
     }
     if (vVegInfo.z > 0.5) {
