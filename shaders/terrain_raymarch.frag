@@ -2838,6 +2838,14 @@ void main() {
         rm_road = roadWeights(pos.xz, rm_road_uv, rm_road_dir);
     }
     g_rm_detail_mul = 1.0 - rm_road.x;
+    // Hand-laid look: the stone rows wander and bulge (two scales of domain
+    // warp on the paving uv), so the cobbles are not a perfect repeat.
+    if (rm_road.x > 0.001) {
+        vec2 wq = pos.xz;
+        vec2 warp = vec2(noise2(wq * 0.31) - 0.5, noise2(wq * 0.31 + 17.7) - 0.5) * 0.24 +
+                    vec2(noise2(wq * 1.13 + 5.3) - 0.5, noise2(wq * 1.13 + 41.1) - 0.5) * 0.08;
+        rm_road_uv += warp;
+    }
     vec3 nor = calcNormal(pos, t);
     g_rm_detail_mul = 1.0;
     if (rm_road.x > 0.001) {
@@ -3295,7 +3303,12 @@ void main() {
             vec3 verge = vec3(0.105, 0.078, 0.052) * clamp(soil, vec3(0.45), vec3(1.8)) * mix(0.72, 1.25, vn);
             mate = mix(mate, verge, rm_road.y);
         }
-        mate = mix(mate, textureLod(u_albedo[kRmMatRoad], rm_road_uv, rm_road_lod).rgb * kRmAlbedoScale, rm_road.x);
+        // Stone-to-stone colour variation: patches of lighter / darker and
+        // slightly warmer / cooler stone, plus some sun-bleached wear.
+        vec3 cob = textureLod(u_albedo[kRmMatRoad], rm_road_uv, rm_road_lod).rgb * kRmAlbedoScale;
+        float cv1 = noise2(pos.xz * 6.5 + 9.1) * 0.6 + noise2(pos.xz * 2.1 + 1.7) * 0.4, cv2 = noise2(pos.xz * 0.55 + 3.3);
+        cob *= mix(0.74, 1.22, cv1) * mix(vec3(1.06, 1.0, 0.92), vec3(0.94, 0.98, 1.05), cv2);
+        mate = mix(mate, cob, rm_road.x);
     }
 
     // === Path-traced GI on the raymarched terrain =================
