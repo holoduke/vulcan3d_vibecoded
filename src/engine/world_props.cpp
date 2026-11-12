@@ -587,7 +587,7 @@ void build_broadleaf(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, c
     std::vector<glm::vec3> spots;
     for (size_t i = size_t(tn) + 1; i < nodes.size(); ++i)
         if (nodes[i].kids == 0 || (nodes[i].r < 0.03f && (i % 3) == 0)) spots.push_back(nodes[i].p);
-    const size_t want = lod == 0 ? 90 : 24;
+    const size_t want = lod == 0 ? 90 : 44;
     const size_t stride = std::max<size_t>(1, (spots.size() + want - 1) / want);
     // Fewer clumps -> each must cover more of the envelope.
     const float cover = std::sqrt(float(stride)) * (lod == 0 ? 1.0f : 1.25f);

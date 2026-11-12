@@ -601,6 +601,7 @@ struct RtSettings {
         int   terrain_gi_samples_cap     = 4;     // max GI primary rays per pixel
         int   terrain_gi_bounces_cap     = 1;     // max GI bounces per ray
         float terrain_ao_final_strength  = 0.45f; // 0=no final-colour AO, 1=full
+        float terrain_rm_contrast        = 1.25f; // raymarched terrain: 1 = neutral
         // Specular reflection on flagged surfaces (the pedestal).
         bool  reflections_enabled = true;
         float reflection_strength = 0.5f;

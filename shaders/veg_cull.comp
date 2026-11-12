@@ -91,7 +91,7 @@ void main() {
     float dither = fract(I.rot_arch_phase.z * 2.7182818) * 0.25 + 0.88;
     px *= dither;
     // Thresholds between LOD k and k+1 (pixels of bounding radius).
-    const float th[4] = float[4](150.0, 55.0, 16.0, 7.0);
+    const float th[4] = float[4](85.0, 40.0, 16.0, 7.0);
     int nl = has_imp ? 5 : 4;
     int lod = nl - 1;
     for (int k = 0; k < nl - 1; ++k) if (px > th[k]) { lod = k; break; }

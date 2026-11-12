@@ -3446,6 +3446,20 @@ void main() {
     float ao_floor     = 1.0 - ao_final_str;
     col *= mix(ao_floor, 1.0, ao_shaped);
 
+    // Contrast ('contrast (raymarch terrain)' slider): a power curve on
+    // luminance around the brightness of average ground under the current
+    // sun + sky, so it tracks time of day. Hue is kept (RGB scaled alike).
+    {
+        float rm_con = scene.grass_rm_params2.w;
+        if (abs(rm_con - 1.0) > 0.005) {
+            const vec3 kLum = vec3(0.2126, 0.7152, 0.0722);
+            float piv = 0.12 * dot(scene.sun_color.rgb * scene.sun_color.a * 0.45 +
+                                   scene.sky_color.rgb * 0.35, kLum);
+            float l = dot(col, kLum);
+            col *= clamp(pow(max(l, 1e-5) / max(piv, 1e-4), rm_con - 1.0), 0.15, 4.0);
+        }
+    }
+
     // Debug viz: replace the final colour with the GI contribution
     // only (scaled). 0 = off, 1 = scaled gi_indirect, 2 = scaled raw
     // gi (no albedo modulation, no softener). Toggled from

@@ -699,6 +699,10 @@ void VulkanEngine::build_menu_ui() {
                           &rt_.terrain_gi_bounces_cap, 1, 3);
         ImGui::SliderFloat("AO final strength (terrain)",
                           &rt_.terrain_ao_final_strength, 0.0f, 1.0f);
+        ImGui::SliderFloat("contrast (raymarch terrain)",
+                          &rt_.terrain_rm_contrast, 0.5f, 2.5f);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("1 = neutral. Higher deepens the dark parts of the ground and lifts the bright ones.");
 
         ImGui::SeparatorText("Anti-aliasing (TAA + Halton sub-pixel jitter)");
         ImGui::Checkbox("sub-pixel jitter", &rt_.taa_jitter_enabled);

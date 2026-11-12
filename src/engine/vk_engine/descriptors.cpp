@@ -626,7 +626,8 @@ void VulkanEngine::update_scene_ubo() {
         data.grass_rm_params2 = glm::vec4(
             slope_max,
             (rt_.grass_shadow_on_terrain && rt_.grass_raymarch_enabled) ? 1.0f : 0.0f,
-            glm::clamp(rt_.grass_shadow_on_terrain_strength, 0.0f, 1.0f), 0.0f);
+            glm::clamp(rt_.grass_shadow_on_terrain_strength, 0.0f, 1.0f),
+            rt_.terrain_rm_contrast);   // .w: raymarched-terrain contrast
     }
     // Side-lit grass shading. .z is reused (was reserved) as the
     // cube.frag wall-displacement mode: 0 = legacy SPOM, 1 = SSDM

@@ -3026,10 +3026,12 @@ void main() {
         if (pc.grass_params.x > 0.5) {
             float lk = 1.0 - smoothstep(25.0, 55.0, distance(vWorldPos, scene.camera_pos.xyz));
             if (lk > 0.01) {
-                vec3 lc = floor(vObjectPos * 12.0);
-                vec3 lh = vec3(veg_leaf_h(lc), veg_leaf_h(lc + 17.3), veg_leaf_h(lc + 41.7));
+                vec3 lh;
+                float ld = veg_leaf_cell(vObjectPos, lh);
                 N = normalize(N + (lh - 0.5) * (0.9 * lk));
-                albedo *= mix(1.0, 0.72 + 0.56 * lh.x, lk);
+                albedo *= mix(1.0, 0.70 + 0.60 * lh.x, lk);
+                // Leaf rim slightly darker / yellower than its midrib side.
+                albedo *= mix(vec3(1.0), mix(vec3(1.0), vec3(0.80, 0.84, 0.62), smoothstep(0.35, 1.0, ld)), lk);
             }
         }
     }
