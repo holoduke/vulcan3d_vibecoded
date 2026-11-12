@@ -3,6 +3,7 @@
 #include "engine/road.h"
 #include "engine/terrain.h"
 #include "engine/lsystem.h"
+#include "engine/eztree.h"
 
 #include <glm/geometric.hpp>
 #include <glm/common.hpp>
@@ -731,7 +732,20 @@ void build_broadleaf(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, c
 // LOD tables: LOD0 full detail .. LOD3 ~10-30 tris (far silhouette).
 void build_pine(LevelMesh& m, const PineParams& p, int lod, const Ico& lo, const Ico& hi) {
     (void)lo; (void)hi;
-    if (lod <= 1) { build_conifer(m, p, lod); return; }
+    if (lod <= 1) {
+        // Close range: EZ-Tree evergreen (trunk + whorled boughs carrying
+        // needle-spray cards). Trimmed from the 'pine medium' preset to a
+        // real-time triangle budget.
+        EzTreeOptions o = ez_preset_pine();
+        o.seed = uint32_t(p.seed * 9173.0f) + 11u;
+        o.children[0] = glm::clamp(int(p.H * 4.6f), 44, 74);
+        o.sections[0] = 10; o.sections[1] = 5; o.segments[1] = 4;
+        o.leaf_count = 14;
+        o.leaf_size = 2.3f;
+        o.length[1] = 23.87f * glm::clamp(p.r0 / 2.6f, 0.75f, 1.3f);
+        build_ez_tree(m, o, lod, p.H);
+        return;
+    }
     const int   trunk_segs[4] = { 12, 6, 4, 3 };
     const int   cone_segs[4]  = { 18, 10, 6, 5 };
     // LOD0: ~1.5x more, thinner tiers (layered branches); far LODs unchanged.
@@ -762,7 +776,23 @@ void build_pine(LevelMesh& m, const PineParams& p, int lod, const Ico& lo, const
 
 void build_oak(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, const Ico& hi, const Ico& tiny,
                const Ico& ultra) {
-    if (lod <= 1) { build_broadleaf(m, p, lod, lo, tiny); return; }
+    if (lod <= 1) {
+        // Close range: EZ-Tree deciduous, from the 'oak medium' preset.
+        // The crown shape parameter picks the habit (wide / tall / round).
+        (void)lo;
+        EzTreeOptions o = ez_preset_oak();
+        o.seed = uint32_t(p.seed * 7919.0f) + 3u;
+        o.leaf_count = 9;
+        o.leaf_size = 3.4f;
+        o.children[0] = 5 + int(p.branches % 3);
+        const float wide = p.crown.x / glm::max(p.crown.y, 0.2f);      // > 1 wide, < 1 tall
+        o.angle[1] = glm::clamp(54.0f * wide, 30.0f, 70.0f);
+        o.length[0] = 37.24f * glm::clamp(1.0f / wide, 0.8f, 1.35f);
+        o.length[1] = 11.08f * glm::clamp(wide, 0.8f, 1.4f) * 1.5f;
+        o.length[2] = 12.39f * 0.9f;
+        build_ez_tree(m, o, lod, p.H * 1.2f);
+        return;
+    }
     glm::vec3 b(0.0f);
     glm::vec3 top = b + p.top_off + glm::vec3(0, p.H * 0.62f, 0);
     const int limb_segs[4] = { 12, 6, 4, 3 };

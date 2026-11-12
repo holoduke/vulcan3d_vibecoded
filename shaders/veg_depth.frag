@@ -7,6 +7,7 @@ layout(location = 0) in vec3 vNormal;
 layout(location = 2) in vec3 vWorldPos;
 layout(location = 4) in vec2 vUv;
 layout(location = 6) in vec3 vObjectPos;
+layout(location = 7) in vec3 vObjectNormal;
 layout(location = 10) flat in vec4 vVegInfo;
 #include "scene_ubo.glsl"
 #include "veg_leaf.glsl"
@@ -33,5 +34,6 @@ void main() {
     } else {
         int vm = int(vUv.y + 0.5);
         if ((vm == 2 || vm == 3) && veg_leaf_cut(vObjectPos, vWorldPos, vNormal, scene.camera_pos.xyz)) discard;
+        if (vm == 7) { float sh; if (!veg_card(vObjectNormal.xy, vObjectNormal.z, sh)) discard; }
     }
 }

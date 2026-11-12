@@ -794,6 +794,7 @@ vec2 surface_rough_metal(int tex_idx, bool foliage, bool mesh_draw) {
 // (bark, rocks: foliage ray offsets but no translucency), 2/3 = metal,
 // 0 = dielectric.
 bool g_veg_solid = false;
+float g_card_shade = -2.0;     // leaf card: -1 twig, 0..1 leaf (edge .. midrib); -2 = not a card
 float gbuf_flags(bool foliage, float metal) {
     return foliage ? (g_veg_solid ? 0.3333 : 1.0) : (metal > 0.5 ? 0.6667 : 0.0);
 }
@@ -1368,6 +1369,11 @@ void main() {
         // GPU vegetation canopy / bush: leafy cut-out silhouette (veg_leaf.glsl).
         int vm = int(vUv.y + 0.5);
         if ((vm == 2 || vm == 3) && veg_leaf_cut(vObjectPos, vWorldPos, vNormal, scene.camera_pos.xyz)) discard;
+        if (vm == 7) {
+            float sh;
+            if (!veg_card(vObjectNormal.xy, vObjectNormal.z, sh)) discard;
+            g_card_shade = sh;
+        }
     }
     vec3 N = normalize(vNormal);
     if (veg_imp) {
@@ -3033,7 +3039,11 @@ void main() {
         // Leaf-scale facets (GPU vegetation, near): every ~8 cm cell is one
         // "leaf" with its own tilt and tone, so a canopy catches the sun
         // as a mass of leaves rather than as one smooth surface.
-        if (pc.grass_params.x > 0.5) {
+        if (g_card_shade > -1.5) {
+            // Leaf card: pale midrib, darker blade edge; the twig is bark brown.
+            if (g_card_shade < 0.0) albedo = vec3(0.16, 0.11, 0.07);
+            else albedo *= mix(0.78, 1.22, smoothstep(0.0, 0.9, g_card_shade));
+        } else if (pc.grass_params.x > 0.5) {
             float lk = 1.0 - smoothstep(25.0, 55.0, distance(vWorldPos, scene.camera_pos.xyz));
             if (lk > 0.01) {
                 vec3 lh;

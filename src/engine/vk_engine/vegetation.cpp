@@ -242,7 +242,7 @@ void VulkanEngine::init_vegetation_pipelines() {
     VkVertexInputAttributeDescription a1{ 1, 0, VK_FORMAT_R32G32B32_SFLOAT, uint32_t(offsetof(Vertex, normal)) };
     VkVertexInputAttributeDescription a2{ 2, 0, VK_FORMAT_R32G32_SFLOAT, uint32_t(offsetof(Vertex, uv)) };
     cfg.vattrs = { a0, a1, a2 };
-    cfg.cull = VK_CULL_MODE_BACK_BIT;
+    cfg.cull = VK_CULL_MODE_NONE;       // leaf cards are seen from both sides
     veg_color_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
     if (frag_gbuf_module_) {
         auto g = cfg; g.frag = frag_gbuf_module_;
