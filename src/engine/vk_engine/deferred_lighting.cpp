@@ -454,7 +454,10 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         // take whatever the explosions left free, so every bomb or jet
         // crash switched the lantern light off and on again); the second
         // nearest takes slot 0 while no explosion needs it.
-        if (!lamp_lights_.empty()) {
+        // Lanterns only light their surroundings from dusk on: full below a
+        // sun elevation of 4 deg, nothing above 16 deg.
+        const float lamp_night = 1.0f - glm::smoothstep(4.0f, 16.0f, rt_.sun_pitch_deg);
+        if (!lamp_lights_.empty() && lamp_night > 0.01f) {
             std::vector<std::pair<float, size_t>> lamps_by_d;
             for (size_t i = 0; i < lamp_lights_.size(); ++i) {
                 const float d = glm::distance(eye, lamp_lights_[i]);
@@ -463,7 +466,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
             std::sort(lamps_by_d.begin(), lamps_by_d.end());
             auto put = [&](int slot, size_t k) {
                 pcd.light_pos[slot] = glm::vec4(lamp_lights_[lamps_by_d[k].second], 13.0f);
-                pcd.light_col[slot] = glm::vec4(1.0f, 0.62f, 0.28f, 5.0f);
+                pcd.light_col[slot] = glm::vec4(1.0f, 0.62f, 0.28f, 5.0f * lamp_night);
             };
             if (!lamps_by_d.empty()) put(1, 0);
             if (lamps_by_d.size() > 1 && pcd.light_pos[0].w < 1e-3f) put(0, 1);

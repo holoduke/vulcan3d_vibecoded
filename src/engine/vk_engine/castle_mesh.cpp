@@ -174,7 +174,13 @@ void VulkanEngine::draw_castle_meshes(VkCommandBuffer cmd, const glm::mat4& vp,
                                         g.triplanar ? 1.0f : 0.0f, -1.0f);
             if (!depth_only) {
                 pc.color = glm::vec4(tex_on ? g.tint : g.fallback, 1.0f);
+                // Self-lit parts (lantern glass) glow faintly by day, fully at night.
                 pc.emissive = g.emissive;
+                if (g.emissive.a > 0.5f) {
+                    const float night = 1.0f - glm::smoothstep(4.0f, 16.0f, rt_.sun_pitch_deg);
+                    pc.emissive = glm::vec4(glm::vec3(g.emissive) * glm::mix(0.12f, 1.0f, night), g.emissive.a);
+                    pc.color = glm::vec4(glm::vec3(pc.color) * glm::mix(0.45f, 1.0f, night), 1.0f);
+                }
                 pc.tex_params = tex_on
                     ? glm::vec4(static_cast<float>(g.tex_albedo),
                                 static_cast<float>(g.tex_normal), g.uv_scale, 0.0f)
