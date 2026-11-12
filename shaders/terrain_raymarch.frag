@@ -333,7 +333,8 @@ bool ray_aabb_hit(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
     float t0 = max(max(lo.x, lo.y), lo.z);
     float t1 = min(min(hi.x, hi.y), hi.z);
     return t1 > max(t0, 0.0);
-#else /* QLIKE_WATER */
+}
+#endif /* ! QLIKE_WATER */
 // Voxel brickmap atlas + shape directory. Shared with cube.frag at the
 // same binding slots — both shaders live in the same descriptor set.
 // Suffixed _w so glslang doesn't see a block-name conflict if both
@@ -436,7 +437,6 @@ bool water_vox_march(vec3 origin_w, vec3 dir_w, float t_max,
         }
     }
     return false;
-#endif /* QLIKE_WATER */
 }
 
 // Max terrain height of the 64 m cell containing world XZ. Branch-free
@@ -2119,26 +2119,26 @@ void main() {
                             (water_only && pc.grass_params.w > 0.5);
         if (tlas_refl_on && refl.y > 0.02) {
             vec3 r_ro = wpos + wnor * 0.05;
-#ifndef QLIKE_WATER
-            float t_tlas;
-            if (closest_hit_no_terrain(r_ro, refl, 200.0, t_tlas)) {
-                // Face-normal heuristic: for axis-aligned voxel/brush
-                // geometry, the face a reflection ray hits is the one
-                // whose normal OPPOSES the ray's dominant axis. (A ray
-                // traveling +X enters the box's -X face → normal is -X.)
-                // Not exact for off-axis hits but the wavy water
-                // surface scatters reflection directions enough that
-                // adjacent pixels often hit different faces anyway —
-                // a stable approximate normal per pixel reads better
-                // than a noisy per-pixel exact normal.
-                //
-                // Earlier attempt (screen-space derivatives of hit_pos)
-                // failed here because adjacent water pixels have very
-                // different wave normals → different reflection rays →
-                // different hit positions, so dFdx(hit_pos) is huge in
-                // all directions and the smallest-variation heuristic
-                // is meaningless.
-                vec3 hit_pos = r_ro + refl * t_tlas;
+            // TLAS (castle, props, trees, vehicles, jets) plus the voxel
+            // tower, which is not in the TLAS and needs its own march.
+            // Same code for the raymarched-terrain water and the water
+            // plane of the mesh terrain (the former used to skip the voxel
+            // march and stop at 200 m: no tower, no aircraft in the lake).
+            const float kReflRange = 900.0;
+            float t_tlas = kReflRange;
+            float t_vox  = kReflRange;
+            uint  vox_pal = 0u;
+            bool  tlas_hit = closest_hit_no_terrain(r_ro, refl, kReflRange, t_tlas);
+            bool  vox_hit  = water_vox_march(r_ro, refl,
+                                              tlas_hit ? min(t_tlas, 200.0) : 200.0,
+                                              t_vox, vox_pal);
+            bool  use_vox  = vox_hit && (!tlas_hit || t_vox < t_tlas);
+            if (tlas_hit || vox_hit) {
+                float t_use = use_vox ? t_vox : t_tlas;
+                // Face normal: the axis-aligned face opposing the ray's
+                // dominant axis (exact for voxels / brushes, a stable
+                // stand-in for everything else).
+                vec3 hit_pos = r_ro + refl * t_use;
                 vec3 ar = abs(refl);
                 vec3 r_nor;
                 if (ar.x > ar.y && ar.x > ar.z)
@@ -2147,42 +2147,11 @@ void main() {
                     r_nor = vec3(0.0, refl.y > 0.0 ? -1.0 : 1.0, 0.0);
                 else
                     r_nor = vec3(0.0, 0.0, refl.z > 0.0 ? -1.0 : 1.0);
-
-                // Sun shadow at the hit: trace a sun ray from a small
-                // offset along the derived normal. Mask 0x01 = shadow
-                // casters (includes terrain + castle + dyn props), so
-                // both other voxels and the surrounding hills shadow
-                // this reflected fragment.
-                vec3  r_so = hit_pos + r_nor * 0.05;
-                float sun_vis = any_hit_shadow_caster(r_so, sunDirW,
-                                                     200.0) ? 0.0 : 1.0;
-
+                r_nor = normalize(mix(r_nor, vec3(0.0, 1.0, 0.0), 0.25));
+                float sun_vis = (t_use < 250.0 && any_hit_shadow_caster(hit_pos + r_nor * 0.08, sunDirW, 200.0)) ? 0.0 : 1.0;
                 float r_dif = max(dot(r_nor, sunDirW), 0.0) * sun_vis;
-#else /* QLIKE_WATER */
-            float t_tlas = 200.0;
-            float t_vox  = 200.0;
-            uint  vox_pal = 0u;
-            bool  tlas_hit = closest_hit_no_terrain(r_ro, refl, 200.0, t_tlas);
-            // Also probe the voxel tower — it's not in the TLAS, so the
-            // TLAS-only query above can't see it.
-            bool  vox_hit  = water_vox_march(r_ro, refl,
-                                              tlas_hit ? t_tlas : 200.0,
-                                              t_vox, vox_pal);
-            bool  use_vox  = vox_hit && (!tlas_hit || t_vox < t_tlas);
-            if (tlas_hit || vox_hit) {
-                float t_use = use_vox ? t_vox : t_tlas;
-                // Fake a vaguely-up normal weighted toward the
-                // reflection ray (no real RT normal without a hit-
-                // attribute pass). Good enough for water mirrors.
-                vec3 r_nor = normalize(mix(vec3(0.0, 1.0, 0.0),
-                                            -refl, 0.4));
-                float r_dif = max(dot(r_nor, sunDirW), 0.0);
-#endif /* QLIKE_WATER */
                 float r_amb = 0.5 + 0.5 * r_nor.y;
                 vec3 stone = vec3(0.55, 0.52, 0.48);
-#ifndef QLIKE_WATER
-                vec3 r_col = stone * (r_dif * scene.sun_color.rgb *
-#else /* QLIKE_WATER */
                 // For voxel hits use the actual palette colour so the
                 // tower's sandstone/wood reads back in the water; TLAS
                 // hits stick with the generic stone fallback (cheap).
@@ -2195,15 +2164,10 @@ void main() {
                                                         float(max(int(vox_pal) - 3, 0)) / 12.0);
                 }
                 vec3 r_col = albedo * (r_dif * scene.sun_color.rgb *
-#endif /* QLIKE_WATER */
                                        scene.sun_color.a +
                                        r_amb * scene.sky_color.rgb * 0.35);
                 // Atmospheric extinction over reflection distance.
-#ifndef QLIKE_WATER
-                vec3 r_ext = exp(-t_tlas * 0.00025 *
-#else /* QLIKE_WATER */
                 vec3 r_ext = exp(-t_use * 0.00025 *
-#endif /* QLIKE_WATER */
                                   vec3(1.0, 1.3, 2.0));
                 // pow(x, 8) → 3 squarings — same trick as the rest
                 // of the file; this water-TLAS-reflection branch was

@@ -22,6 +22,7 @@ layout(push_constant) uniform PC {
 } pc;
 
 #include "scene_ubo.glsl"
+layout(set = 0, binding = 29) uniform sampler2D u_scene_depth;
 
 float h3(vec3 p) {
     p = fract(p * 0.3183099 + 0.1);
@@ -40,6 +41,20 @@ float vnoise(vec3 x) {
 void main() {
     int   kind  = int(pc.color.x + 0.5);
     float inten = pc.color.y;
+    if (pc.color.w > 0.5) {
+        // Mirrored draw (reflection in the water): keep it only where the
+        // visible surface is the water plane, dimmed like a reflection and
+        // broken up a little by the ripples.
+        float zs = texelFetch(u_scene_depth, ivec2(gl_FragCoord.xy), 0).r;
+        if (zs >= 0.99999) discard;
+        vec2 suv = gl_FragCoord.xy * scene.viewport.zw;
+        vec4 wp  = pc.prev_mvp * vec4(suv * 2.0 - 1.0, zs, 1.0);
+        vec3 sp  = wp.xyz / wp.w;
+        float sd = distance(sp, scene.camera_pos.xyz);
+        if (abs(sp.y - scene.water_params.y) > 0.12 + 0.004 * sd) discard;
+        float rip = 0.75 + 0.25 * sin(sp.x * 3.1 + pc.color.z * 1.7) * sin(sp.z * 2.7 - pc.color.z * 1.3);
+        inten *= 0.55 * rip;
+    }
     float time  = pc.color.z;
     if (kind == 0) {
         // Smoke / vapour trail: soft gaussian cross-section, broken up by

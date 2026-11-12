@@ -1101,6 +1101,7 @@ private:
     VkShaderModule fx_ribbon_frag_module_ = VK_NULL_HANDLE;
     VkShaderModule fx_volume_frag_module_ = VK_NULL_HANDLE;
     VkPipeline     fx_ribbon_pipeline_   = VK_NULL_HANDLE;
+    VkPipeline     fx_ribbon_refl_pipeline_ = VK_NULL_HANDLE;   // no depth test: mirrored glow in water
     VkPipeline     fx_volume_pipeline_   = VK_NULL_HANDLE;
     VkPipeline     fx_volume_inside_pipeline_ = VK_NULL_HANDLE;
     VkPipeline     fx_decal_pipeline_ = VK_NULL_HANDLE;

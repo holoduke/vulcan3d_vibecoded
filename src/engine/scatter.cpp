@@ -136,20 +136,45 @@ void plant_tube(std::vector<Vertex>& v, std::vector<uint32_t>& ix, const std::ve
 // Curved, folded leaf blade from `b` along `dir` (4 segments).
 void plant_leaf(std::vector<Vertex>& v, std::vector<uint32_t>& ix, glm::vec3 b, glm::vec3 dir,
                 float len, float wid, float lift, float w_base) {
-    glm::vec3 side = glm::normalize(glm::vec3(-dir.z, 0.0f, dir.x));
-    const int segs = 4;
-    auto rib = [&](float t) {
-        return b + dir * (len * t) + glm::vec3(0.0f, std::sin(t * 2.0f) * lift - t * t * lift * 0.6f, 0.0f);
+    // A smooth curved surface S(t, u): t along the midrib, u across the
+    // blade. Shared vertices with analytic (finite-difference) normals, so
+    // the leaf shades as one continuous, gently cupped surface instead of
+    // a strip of flat facets.
+    const glm::vec3 side = glm::normalize(glm::vec3(-dir.z, 0.0f, dir.x));
+    const int segs = 8, across = 4;                       // 9 x 5 vertices
+    auto half_w = [&](float t) {                          // rounded base, widest at 40 %, pointed tip
+        float a = std::pow(std::sin(3.14159f * std::pow(glm::clamp(t, 0.0f, 1.0f), 0.75f)), 0.8f);
+        return wid * (0.06f + 0.94f * a) * (t > 0.999f ? 0.0f : 1.0f);
     };
-    for (int s = 0; s < segs; ++s) {
-        float t0 = float(s) / segs, t1 = float(s + 1) / segs;
-        float wa = wid * std::sin(3.14159f * std::min(1.0f, t0 * 0.95f + 0.05f));
-        float wb = wid * std::sin(3.14159f * std::min(1.0f, t1 * 0.95f + 0.05f));
-        glm::vec3 p0 = rib(t0), p1 = rib(t1), fold(0.0f, -0.008f, 0.0f);
-        float s0 = w_base + 0.25f * t0, s1 = w_base + 0.25f * t1;
-        plant_quad(v, ix, p0, p0 + side * wa + fold, p1 + side * wb + fold, p1, 0.0f, s0, s1);
-        plant_quad(v, ix, p0 - side * wa + fold, p0, p1, p1 - side * wb + fold, 0.0f, s0, s1);
+    auto S = [&](float t, float u) {                      // u in -1..1
+        glm::vec3 rib = b + dir * (len * t) +
+                        glm::vec3(0.0f, std::sin(t * 2.0f) * lift - t * t * lift * 0.6f, 0.0f);
+        float w = half_w(t);
+        // Cupped along the midrib (edges raised), edges slightly wavy.
+        float cup = 0.35f * w * u * u + 0.06f * w * std::sin(t * 9.0f) * u;
+        return rib + side * (w * u) + glm::vec3(0.0f, cup, 0.0f);
+    };
+    const uint32_t base = uint32_t(v.size());
+    for (int s = 0; s <= segs; ++s) {
+        float t = float(s) / float(segs);
+        for (int a = 0; a <= across; ++a) {
+            float u = -1.0f + 2.0f * float(a) / float(across);
+            const float e = 0.02f;
+            glm::vec3 dt = S(std::min(t + e, 1.0f), u) - S(std::max(t - e, 0.0f), u);
+            glm::vec3 du = S(std::min(t, 0.97f), std::min(u + 0.1f, 1.0f)) - S(std::min(t, 0.97f), std::max(u - 0.1f, -1.0f));
+            glm::vec3 n = glm::cross(dt, du);
+            float l = glm::length(n);
+            n = l > 1e-9f ? n / l : glm::vec3(0.0f, 1.0f, 0.0f);
+            if (n.y < 0.0f) n = -n;
+            v.push_back({ S(t, u), n, { 0.0f, w_base + 0.25f * t } });
+        }
     }
+    const uint32_t row = uint32_t(across + 1);
+    for (int s = 0; s < segs; ++s)
+        for (int a = 0; a < across; ++a) {
+            uint32_t i0 = base + uint32_t(s) * row + uint32_t(a), i1 = i0 + 1, i2 = i0 + row, i3 = i2 + 1;
+            ix.insert(ix.end(), { i0, i1, i3, i0, i3, i2 });
+        }
 }
 
 // Flower head at hc facing `up`: segmented rounded petals that cup

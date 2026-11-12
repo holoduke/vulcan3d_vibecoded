@@ -458,6 +458,9 @@ void VulkanEngine::init_fx() {
     cfg.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
     cfg.premultiplied_blend = true;
     fx_ribbon_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    cfg.depth_test = false;
+    fx_ribbon_refl_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
+    cfg.depth_test = true;
 
     // Volumes: camera outside the box -> front faces, depth-tested (the
     // opaque scene occludes the box front); inside -> back faces, no test.
@@ -490,7 +493,7 @@ void VulkanEngine::init_fx() {
 }
 
 void VulkanEngine::destroy_fx() {
-    for (VkPipeline* p : { &fx_ribbon_pipeline_, &fx_volume_pipeline_, &fx_volume_inside_pipeline_,
+    for (VkPipeline* p : { &fx_ribbon_refl_pipeline_, &fx_ribbon_pipeline_, &fx_volume_pipeline_, &fx_volume_inside_pipeline_,
                            &fx_decal_pipeline_ }) {
         if (*p) vkDestroyPipeline(device_, *p, nullptr);
         *p = VK_NULL_HANDLE;
@@ -1030,6 +1033,29 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
                                sizeof(PushConstants), &pc);
             vkCmdDraw(cmd, r.second, 1, r.first, 0);
         };
+        // Water reflections of the glowing effects (lasers, tracers, engine
+        // glow, muzzle and explosion flashes): the same ribbons mirrored in
+        // the water plane, drawn without depth test and kept by the shader
+        // only on pixels whose surface is the water (pc.color.w = 1).
+        if (rt_.water_enabled && fx_ribbon_refl_pipeline_ && eye.y > rt_.water_level + 0.05f) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fx_ribbon_refl_pipeline_);
+            glm::mat4 mirror(1.0f);
+            mirror[1][1] = -1.0f; mirror[3][1] = 2.0f * rt_.water_level;
+            auto draw_refl = [&](std::pair<uint32_t, uint32_t> r, float kind) {
+                if (r.second == 0) return;
+                PushConstants pc{};
+                pc.mvp = fv.vp * mirror;
+                pc.model = mirror;
+                pc.prev_mvp = fv.inv_vp;
+                pc.color = glm::vec4(kind, 1.0f, now, 1.0f);
+                vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages, 0,
+                                   sizeof(PushConstants), &pc);
+                vkCmdDraw(cmd, r.second, 1, r.first, 0);
+            };
+            draw_refl(r_glow, 1.0f);
+            draw_refl(r_flash, 2.0f);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fx_ribbon_pipeline_);
+        }
         draw(r_smoke, 0.0f, 1.0f);
         draw(r_glow,  1.0f, 1.0f);
         draw(r_flash, 2.0f, 1.0f);
