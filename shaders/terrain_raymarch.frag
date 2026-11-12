@@ -3221,7 +3221,19 @@ void main() {
     //    Where it's lit, the RT cone fills in castle / cube
     //    contributions. Result reads identical to the rasterised
     //    terrain shadow path.
+    // Far field: beyond the soft RT shadow band (RT LOD distance) the object
+    // shadows (trees, castle, rocks) used to stop dead. Out to ~900 m one
+    // hard shadow ray per pixel keeps them - a penumbra is sub-pixel there
+    // anyway - blended in across the band.
+    if (dif > 0.0 && scene.rt_flags.x != 0 && scene.rt_params.w > 1e-3 &&
+        rt_lod_t < 0.999 && cam_dist_pos < 900.0) {
+        float far_w = 1.0 - smoothstep(700.0, 900.0, cam_dist_pos);
+        vec3  fo = pos + nor * (0.15 + cam_dist_pos * 0.002) + sunDir * (0.3 + cam_dist_pos * 0.002);
+        float far_sh = any_hit_no_terrain(fo, sunDir, 220.0) ? scene.rt_params.w * far_w : 0.0;
+        dyn_shadow = mix(far_sh, dyn_shadow, rt_lod_t);
+    }
     float shadow = max(dyn_shadow, self_shadow);
+
     float sha = (1.0 - shadow) * rm_road_vis;
 
     // RT ambient occlusion against castle / boxes / dyn-props
