@@ -706,7 +706,7 @@ void VulkanEngine::update_scene_ubo() {
     data.grass_shore_color = glm::vec4(rt_.grass_shore_color,
                                         rt_.grass_shore_strength);
     data.grass_shore_params = glm::vec4(std::max(0.05f, rt_.grass_shore_distance),
-                                         0.0f, 0.0f, 0.0f);
+                                         glm::clamp(rt_.grass_near_boost, 0.0f, 2.0f), 0.0f, 0.0f);   // .y near density boost
     // Shoreline TERRAIN tint — same packing.
     data.terrain_shore_color = glm::vec4(rt_.terrain_shore_color,
                                           rt_.terrain_shore_strength);

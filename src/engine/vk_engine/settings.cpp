@@ -306,6 +306,7 @@ void VulkanEngine::visit_settings(Self& s, F&& f) {
     f("grass_wind", s.rt_.grass_wind);
     f("grass_density", s.rt_.grass_density);
     f("grass_edge_softness", s.rt_.grass_edge_softness);
+    f("grass_near_boost", s.rt_.grass_near_boost);
     f("forest_density", s.rt_.forest_density);
     f("bush_density", s.rt_.bush_density);
     f("flower_density", s.rt_.flower_density);
