@@ -1244,6 +1244,12 @@ void VulkanEngine::build_menu_ui() {
             ImGui::SliderFloat("raymarch distance (m)",
                                 &rt_.grass_raymarch_distance, 5.0f, 400.0f);
             ImGui::SliderFloat("grass density", &rt_.grass_density, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("grass edge softness", &rt_.grass_edge_softness, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How gradually grass thins out and shortens at the border of a patch.");
+            ImGui::SeparatorText("Foliage density (restart to apply)");
+            ImGui::SliderFloat("forest density", &rt_.forest_density, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("bush density", &rt_.bush_density, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("flower density", &rt_.flower_density, 0.0f, 2.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blades per ground cell: 1 = every cell, 2 = two blades per cell (denser, a bit slower)");
             ImGui::SliderFloat("height scale",   &rt_.grass_height_scale, 0.30f, 2.0f);
             ImGui::SliderFloat("distance (m)",   &rt_.grass_distance,   10.0f, 200.0f);

@@ -56,6 +56,10 @@ VkBuffer make_buffer(VmaAllocator a, VkDeviceSize size, VkBufferUsageFlags usage
 void VulkanEngine::init_vegetation_data(const Heightmap& hm) {
     WorldPropParams wp{};
     wp.water_level  = rt_.water_level;
+    wp.tree_density = glm::clamp(rt_.forest_density, 0.0f, 2.0f);
+    wp.bush_density = glm::clamp(rt_.bush_density, 0.0f, 2.0f);
+    wp.max_trees    = int(float(wp.max_trees) * std::max(1.0f, wp.tree_density));
+    wp.max_bushes   = int(float(wp.max_bushes) * std::max(1.0f, wp.bush_density));
     wp.rock_band_lo = rt_.terrain_h_dirt_rock_start;
     for (const auto& a : aa_) wp.keep_out.push_back(glm::vec3(a.pos.x, a.pos.z, 9.0f));
     for (const auto& o : outposts_) wp.keep_out.push_back(glm::vec3(o.x, o.z, 10.0f));

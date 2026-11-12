@@ -72,6 +72,7 @@ struct ScatterParams {
     int   seed          = 0xB0BA;
     // Rules (heights in world Y, matching the splat bands).
     float water_level   = 20.9f;    // reject below water + margin
+    float flower_density = 1.0f;    // ferns + flowers multiplier (0..2)
     float rock_band_h   = 60.0f;    // boulders favoured above this
     float snow_band_h   = 110.0f;   // density tapers off into snow
     // Castle keep-out (same as grass).

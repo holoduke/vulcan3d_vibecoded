@@ -1138,7 +1138,7 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
         if (ny_at(x, z) < 0.72f) continue;
         float f = forest(x, z);
         float dens = f * f + 0.004f;                  // rare lone trees in meadows
-        if (u() > dens) continue;
+        if (u() > dens * P.tree_density) continue;
         bool pine = u() < std::clamp((h - 28.0f) / 30.0f, 0.15f, 0.95f);
         float scale = 0.75f + 0.55f * u();
         if (!try_mark(x, z, (pine ? 1.6f : 2.4f) * scale)) continue;
@@ -1166,7 +1166,7 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
         if (!dry(x, z, 1.2f)) continue;
         // Undergrowth inside forests + thickets along the edges.
         float dens = std::clamp(f * 0.45f + (1.0f - std::abs(f - 0.4f) * 3.0f) * 0.5f, 0.0f, 1.0f) * 0.7f + 0.01f;
-        if (u() > dens) continue;
+        if (u() > dens * P.bush_density) continue;
         float scale = 0.6f + 0.9f * u();
         const auto& pool = by_species[2];
         int ai = pool[size_t(u() * float(pool.size())) % pool.size()];

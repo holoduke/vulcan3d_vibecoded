@@ -564,7 +564,7 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             float pf = patch(0.06f, 1.0f), pd = patch(0.05f, 2.0f), pp = patch(0.045f, 3.0f), pb = patch(0.055f, 4.0f);
             float pc = patch(0.05f, 5.0f), pu = patch(0.065f, 6.0f), pl = patch(0.04f, 7.0f);
             int sp = -1;
-            float r = u01(rng);
+            float r = u01(rng) / std::max(params.flower_density, 0.01f);
             if (pf > 0.62f && r < 0.22f) sp = 0;
             else if (pd > 0.60f && r < 0.55f) sp = 1;
             else if (pp > 0.64f && r < 0.55f) sp = 2;

@@ -443,6 +443,7 @@ void VulkanEngine::init_world() {
         // splat rules. Rendered regardless of which grass path is on.
         ScatterParams sp{};
         sp.water_level = rt_.water_level;
+        sp.flower_density = glm::clamp(rt_.flower_density, 0.0f, 2.0f);
         sp.rock_band_h = rt_.terrain_h_dirt_rock_start;
         sp.snow_band_h = rt_.terrain_h_rock_snow_start;
         sp.road = &castle_road_;

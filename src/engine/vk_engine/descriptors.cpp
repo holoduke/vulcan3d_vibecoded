@@ -638,7 +638,8 @@ void VulkanEngine::update_scene_ubo() {
     data.grass_side_lit_params = glm::vec4(
         glm::clamp(rt_.grass_side_lit_strength, 0.0f, 1.0f),
         rt_.grass_side_lit_enabled ? 1.0f : 0.0f,
-        static_cast<float>(rt_.spom_mode), 0.0f);
+        static_cast<float>(rt_.spom_mode),
+        glm::clamp(rt_.grass_edge_softness, 0.0f, 1.0f));   // .w: grass patch edge softness
     // Ocean / water plane params. Time is derived from frame number
     // at a nominal 60 Hz — exact wall-clock isn't needed for waves
     // and avoids threading a real timer here.

@@ -161,6 +161,11 @@ struct RtSettings {
         // Density: fraction of placed blades to actually draw (0..1).
         // Drives instance count in vkCmdDrawIndexed — cheap perf knob.
         float grass_density        = 0.7f;
+        float grass_edge_softness  = 0.6f;   // 0 = hard patch border, 1 = long thinning fringe
+        // Placement densities (applied when the world is built: restart).
+        float forest_density       = 1.0f;
+        float bush_density         = 1.0f;
+        float flower_density       = 1.0f;
         // Vegetation LOD bias: >1 keeps higher LODs further out.
         float veg_lod_bias         = 1.0f;
         // Per-blade Y multiplier (0.3..2.0). 1.0 = built-in 0.55 m blades.

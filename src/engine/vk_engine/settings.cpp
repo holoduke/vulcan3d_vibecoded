@@ -305,6 +305,10 @@ void VulkanEngine::visit_settings(Self& s, F&& f) {
     f("grass_distance", s.rt_.grass_distance);
     f("grass_wind", s.rt_.grass_wind);
     f("grass_density", s.rt_.grass_density);
+    f("grass_edge_softness", s.rt_.grass_edge_softness);
+    f("forest_density", s.rt_.forest_density);
+    f("bush_density", s.rt_.bush_density);
+    f("flower_density", s.rt_.flower_density);
     f("grass_height_scale", s.rt_.grass_height_scale);
     f("grass_alpha_cutoff", s.rt_.grass_alpha_cutoff);
     f("grass_cutoff_soft_dist", s.rt_.grass_cutoff_soft_dist);

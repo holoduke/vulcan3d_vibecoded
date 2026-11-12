@@ -318,7 +318,17 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
         float slope_w = 1.0 - smoothstep(ctx.slope_max * 0.7, ctx.slope_max * 1.2, mg.g * 2.0);
         elig = mg.r * slope_w;
     }
+    // Soft patch border ('grass edge softness'): the mask alone gave a
+    // wall of full-height grass next to bare ground. A low-frequency noise
+    // frays the outline, and toward it the grass thins out and shortens.
+    float edge_soft = scene.grass_side_lit_params.w;
+    {
+        vec2 nc = floor(p.xz / 0.9);
+        float en = hash12(nc) * 0.6 + hash12(floor(p.xz / 2.7) + 17.0) * 0.4;
+        elig += (en - 0.5) * 0.35 * edge_soft;
+    }
     if (elig < kEligThresh) return distToTerrain;
+    float edge_k = mix(1.0, smoothstep(kEligThresh, kEligThresh + 0.55, elig), edge_soft);
     // Drop the 8 neighbour cells past ~35 % of kMaxDist — at that
     // distance blades are sub-pixel and the neighbour offsets
     // contribute < 1 pixel of silhouette difference. Keeps centre
@@ -338,12 +348,12 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
             const int nb = (density_eff > 1.0 && rad > 0) ? 2 : 1;
             for (int bi = 0; bi < nb; ++bi) {
             vec4 r = hash42(nId + vec2(31.7, 47.3) * float(bi));
-            if (r.x > density_eff - float(bi)) continue;
+            if (r.x > (density_eff - float(bi)) * mix(0.25, 1.0, edge_k)) continue;
             vec3 np = lp - vec3(float(dx), 0.0, float(dy)) * kPeriod;
             // Per-blade rotation + sub-cell xy offset.
             np.xz = rotate2d(r.z * kPi2) * np.xz;
             np.xz += (r.xy - 0.5) * kPeriod;
-            float bh = clamp(pc.grass_params.w, 0.05, 3.0) * 0.36;
+            float bh = clamp(pc.grass_params.w, 0.05, 3.0) * 0.36 * mix(0.45, 1.0, edge_k);
             // Wind sway + a per-blade static lean (some blades stand, some
             // splay out), bending with height.
             float wind_t = pc.color.z + r.w * kPi2;

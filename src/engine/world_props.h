@@ -40,6 +40,8 @@ struct WorldPropParams {
     std::vector<glm::vec3> keep_out;
     int   max_boulders    = 1800;
     int   bush_attempts   = 500000;
+    float tree_density    = 1.0f;   // multiplies the forest density field
+    float bush_density    = 1.0f;
 };
 
 struct WorldPropStats { int formations = 0, boulders = 0, pines = 0, broadleaf = 0, bushes = 0; };
