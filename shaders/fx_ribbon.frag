@@ -85,6 +85,9 @@ void main() {
             float seam = 1.0 - smoothstep(0.0, 0.035, min(fract(uv.x * 16.0), 1.0 - fract(uv.x * 16.0)));
             alb *= 1.0 - 0.35 * seam;
             alb *= 1.0 - 0.3 * smoothstep(0.94, 1.0, uv.y);
+            alb *= 1.0 - 0.35 * (1.0 - smoothstep(0.0, 0.03, uv.y));      // vent band
+            // Inside of the canopy (seen from below): shaded, cloth lit from behind.
+            if (!gl_FrontFacing) alb *= 0.62;
             base = alb;
         } else if (design == 3) {
             alb = vec3(0.10, 0.09, 0.08);          // suspension line

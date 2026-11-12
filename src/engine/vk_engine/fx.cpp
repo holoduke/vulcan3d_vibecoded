@@ -378,11 +378,9 @@ void VulkanEngine::tick_fx(float dt) {
     // Test hook: QLIKE_TEST_CHUTE=1 hangs an opened parachute bomb in front of the camera.
     static const bool kTestChute = std::getenv("QLIKE_TEST_CHUTE") != nullptr;
     if (kTestChute && bombs_.empty()) {
-        const FrameView& fv = current_frame_view_;
-        glm::vec3 fwd = -glm::vec3(fv.inv_view[2]);
         Bomb b{};
-        b.pos = fv.eye_pos + glm::normalize(glm::vec3(fwd.x, 0.0f, fwd.z)) * 26.0f + glm::vec3(0.0f, 22.0f, 0.0f);
-        b.prev_pos = b.pos; b.vel = glm::vec3(20.0f, -3.0f, 0.0f); b.chute = true; b.t = 0.4f;
+        b.pos = player_.position + glm::vec3(std::sin(player_.yaw), 0.0f, -std::cos(player_.yaw)) * 24.0f + glm::vec3(0.0f, 26.0f, 0.0f);
+        b.prev_pos = b.pos; b.vel = glm::vec3(3.0f, -8.5f, 0.0f); b.chute = true; b.t = 0.5f; b.open = 1.0f;
         bombs_.push_back(b);
     }
     // Bombs: ballistic with light quadratic drag; detonate on terrain,
@@ -800,12 +798,19 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
         const float Rc = 3.4f * (0.18f + 0.82f * o * o) * breathe;        // skirt radius
         const float Hc = 2.3f * (1.6f - 0.6f * o);                          // crown height (streamer -> dome)
         const glm::vec3 base = b.pos + A * (1.2f + 6.6f * std::min(1.0f, o * 1.6f));
-        const int NG = 16, NR = 5;
+        // 16 gores, two segments each: the cloth bulges out between the
+        // lines and is pinched in where each line pulls on the hem.
+        const int NG = 32, NR = 7;
+        const float vent = 0.11f;                                           // apex vent (rad)
         auto P = [&](int g, int r) {
             float ang = 6.2831853f * float(g) / float(NG);
-            float ph = 1.5707963f * float(r) / float(NR);                    // 0 crown .. pi/2 skirt
-            // Scalloped skirt: the hem is pulled in at each line.
-            float sc = (r == NR) ? 0.94f : 1.0f;
+            float fr = float(r) / float(NR);
+            float ph = vent + (1.62f - vent) * fr;                           // vent .. just past the equator
+            // Lobes: full radius mid-gore, pinched at the lines; stronger toward the hem.
+            float lobe = (g & 1) ? 1.0f : 0.0f;
+            float sc = 1.0f - (0.035f + 0.085f * fr * fr) * (1.0f - lobe) * o;
+            // Gusts ripple the hem a little.
+            sc *= 1.0f + 0.02f * fr * std::sin(ang * 3.0f + b.t * 4.3f + b.phase);
             return base + A * (Hc * std::cos(ph)) +
                    (T1 * std::cos(ang) + T2 * std::sin(ang)) * (Rc * std::sin(ph) * sc);
         };
@@ -819,9 +824,12 @@ void VulkanEngine::render_fx(VkCommandBuffer cmd) {
                 cloth.v.insert(cloth.v.end(), { q0, q1, q2, q0, q2, q3 });
             }
         const glm::vec3 conf = b.pos + A * 1.0f;                             // confluence point above the bomb
-        for (int g = 0; g < NG; g += 2) {
+        // Far away a line is thinner than a pixel: draw every other one so
+        // the rigging does not turn into dark bars.
+        const int line_step = glm::distance(b.pos, eye) > 70.0f ? 4 : 2;
+        for (int g = 0; g < NG; g += line_step) {
             glm::vec3 hem = P(g, NR);
-            glm::vec3 side = glm::normalize(glm::cross(hem - conf, eye - hem)) * min_w(hem, 0.012f, 0.6f);
+            glm::vec3 side = glm::normalize(glm::cross(hem - conf, eye - hem)) * min_w(hem, 0.009f, 0.3f);
             Vertex l0{ conf - side, glm::vec3(3.0f, 0.0f, 0.0f), {0.0f, 0.0f} };
             Vertex l1{ conf + side, glm::vec3(3.0f, 0.0f, 0.0f), {1.0f, 0.0f} };
             Vertex l2{ hem + side,  glm::vec3(3.0f, 0.0f, 0.0f), {1.0f, 1.0f} };
