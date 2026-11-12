@@ -525,6 +525,7 @@ void VulkanEngine::ensure_grass_raster_built() {
     gp.height_max  = 200.0f;
     gp.half_extent = 200.0f;
     gp.keep_out_xz = glm::vec2(12.0f, 12.0f);  // full castle footprint
+    gp.road = &castle_road_;
     gp.max_blades  = 800000;
     destroy_grass(allocator_, grass_);   // a previous empty build still owns its blade mesh
     grass_ = build_grass(device_, allocator_,

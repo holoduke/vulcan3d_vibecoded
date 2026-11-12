@@ -1,4 +1,5 @@
 #include "engine/grass.h"
+#include "engine/road.h"
 
 #include "engine/log.h"
 
@@ -161,6 +162,13 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
         if (params.keep_out_xz.x > 0.0f && params.keep_out_xz.y > 0.0f &&
             std::abs(wx) < params.keep_out_xz.x &&
             std::abs(wz) < params.keep_out_xz.y) {
+            continue;
+        }
+
+        if (params.road && !params.road->empty() &&
+            wx > params.road->bb_min.x && wx < params.road->bb_max.x &&
+            wz > params.road->bb_min.y && wz < params.road->bb_max.y &&
+            params.road->distance(wx, wz) < params.road->half_width + params.road->shoulder + 0.5f) {
             continue;
         }
 

@@ -52,9 +52,17 @@ void main() {
     // they're physically not in shadow. Half-Lambert remaps N·L from
     // [-1, 1] to [0, 1] then squares so back-facing blades still pick
     // up ~25% of direct, killing the "random pure-black blade" look.
+    // A blade is a thin two-sided leaf: the face turned to the viewer is
+    // either its sunlit side or its dark side. Orient the normal toward
+    // the viewer so the far side really is dark, then let some sun through
+    // it (transmission below) - the old half-Lambert lit both sides alike.
+    {
+        vec3 Vn = normalize(scene.camera_pos.xyz - vWorldPos + vec3(1e-5));
+        if (dot(N, Vn) < 0.0) N = -N;
+    }
     float n_dot_l_raw = dot(N, L);
-    float wrap = n_dot_l_raw * 0.5 + 0.5;
-    float n_dot_l = wrap * wrap;
+    float n_dot_l = max(0.0, (n_dot_l_raw + 0.25) / 1.25);
+    float blade_back = clamp(-n_dot_l_raw, 0.0, 1.0);
 
     // Light intensity (scalar, preserves blade tint). Sun contribution
     // is the dominant term so blade brightness actually responds to
@@ -109,7 +117,7 @@ void main() {
     float vdl2    = view_dot_l * view_dot_l;
     float backlit = vdl2 * vdl2 * (1.0 - n_dot_l) * vHeightRatio;
     vec3  trans   = vec3(0.95, 1.05, 0.55) *
-                    backlit * 0.30 * scene.sun_color.a;
+                    (backlit * 0.30 + blade_back * 0.16 * mix(0.5, 1.0, vHeightRatio)) * scene.sun_color.a;
 
     // Base AO — darken the bottom 20% of the blade so blades read as
     // anchored to the ground instead of floating. Falls off past 60 m

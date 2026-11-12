@@ -442,6 +442,7 @@ void VulkanEngine::init_world() {
         // overlaps a brush stay invisible — the wall geometry occludes
         // them from outside views.
         gp.keep_out_xz = glm::vec2(12.0f, 12.0f);  // full castle footprint
+        gp.road = &castle_road_;
         // 800k placed blades: density slider 0..4 maps to render
         // fraction (density / 4) × placed, so density=1.0 → 200k,
         // density=4.0 → 800k. Earlier 2M cap meant density=4 fired

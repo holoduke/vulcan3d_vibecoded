@@ -65,6 +65,8 @@ struct GrassParams {
     // the castle's footprint stays clear of blades that would poke
     // through the brushes. (0,0) disables the zone.
     glm::vec2 keep_out_xz = glm::vec2(0.0f, 0.0f);
+    // No blades on the road (paving + verge). Null = no road.
+    const struct Road* road = nullptr;
 };
 
 struct GrassMesh {
