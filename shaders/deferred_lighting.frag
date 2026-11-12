@@ -1358,7 +1358,10 @@ void main() {
         // Light filtered by the leaf: green tissue passes yellow-green,
         // petals pass their own colour.
         float green = clamp((diff_albedo.g - max(diff_albedo.r, diff_albedo.b)) * 8.0, 0.0, 1.0);
-        vec3  tcol  = diff_albedo * mix(vec3(1.5), vec3(1.75, 1.95, 0.45), green);
+        // Petals (non-green, often near white) let far less light through
+        // than thin green tissue: their shade side was glowing as bright as
+        // the sunlit side.
+        vec3  tcol  = diff_albedo * mix(vec3(0.45), vec3(1.75, 1.95, 0.45), green);
         float back  = clamp((0.25 - ndl_raw) / 1.25, 0.0, 1.0);
         float fwd   = pow(clamp(dot(-Vv, L), 0.0, 1.0), 3.0) * clamp(1.25 - abs(ndl_raw), 0.0, 1.0);
         float thin  = mix(0.08, 1.0, lit);

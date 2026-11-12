@@ -189,8 +189,8 @@ void main() {
         // itself goes dark on the far side. Scaling the albedo alone was
         // washed out by the bright sun after tone mapping.
         vec3 outw = normalize(vec3(rel.x, 0.55 * rl + 0.02 * sc, rel.y));
-        N = normalize(mix(N, outw, 0.75 * k));
-        albedo *= mix(1.0, mix(0.70, 1.05, smoothstep(-0.8, 0.7, side)), k) * mix(0.62, 1.0, h01);
+        N = normalize(mix(N, outw, 0.88 * k));
+        albedo *= mix(1.0, mix(0.55, 1.05, smoothstep(-0.8, 0.7, side)), k) * mix(0.62, 1.0, h01);
     }
     // Half-Lambert wrap (same reason as grass.frag): hard Lambert on
     // randomly-rotated faceted rocks floors half the faces to black.
