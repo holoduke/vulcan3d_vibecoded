@@ -35,13 +35,61 @@ void rock_params(float v, out float seed, out float amp, out float strata) {
     seed = 3.7 + 6.1 * v;
     amp = 0.26 + 0.1 * fract(v * 0.37);
     strata = (mod(v, 2.0) < 0.5) ? 0.55 : 0.0;
+    // Every third variant is a SLAB formation (strata < 0 selects it).
+    if (mod(v, 3.0) > 0.5 && mod(v, 3.0) < 1.5) strata = -1.0;
 }
+float rk_h1(float x) { return fract(sin(x * 127.1) * 43758.5453); }
+// Slab formation: three or four flat limestone beds stacked like worn
+// steps - each an irregular polygon in plan, a little smaller and shifted
+// against the one below, with flat tops and near-vertical broken edges.
+float rock_slabs(vec3 q, float seed) {
+    float d = 1e9;
+    for (int i = 0; i < 4; ++i) {
+        float fi = float(i);
+        float h = rk_h1(seed + fi * 7.3);
+        if (i == 3 && h < 0.45) break;                       // some have only three beds
+        float th = 0.085 + 0.04 * rk_h1(seed + fi * 2.9);    // half thickness
+        float yc = -0.27 + 0.215 * fi;
+        float r  = 1.08 - 0.20 * fi - 0.10 * h;
+        vec2  off = (vec2(rk_h1(seed + fi * 3.1), rk_h1(seed + fi * 5.7)) - 0.5) * 0.30 * fi;
+        vec2  xz = q.xz - off;
+        float dp = -1e9;
+        float a0 = h * 6.2832;
+        for (int k = 0; k < 5; ++k) {
+            float a = a0 + float(k) * 1.2566 + (rk_h1(seed + fi + float(k) * 1.7) - 0.5) * 0.5;
+            dp = max(dp, dot(xz, vec2(cos(a), sin(a))) - r * (0.72 + 0.28 * rk_h1(seed + fi * 4.1 + float(k))));
+        }
+        vec2 w = vec2(dp, abs(q.y - yc) - th);
+        d = min(d, min(max(w.x, w.y), 0.0) + length(max(w, 0.0)) - 0.018);
+    }
+    return d;
+}
+
 // Signed "distance" (not exact - march with a step factor). `fine` 0..1
 // fades the small-scale detail out with distance; `cav` returns how deep
 // in a crack / pit the point is (for shading).
 float rock_sdf(vec3 p, float seed, float amp, float strata, float fine, out float cav) {
     vec3 q = p - kRockC;
+    if (strata < 0.0) {
+        // Slab formation: beds + weathering. Grikes (the straight-ish
+        // fissures of a limestone pavement) cut down into the flat tops.
+        float d = rock_slabs(q, seed);
+        float m = rk_fbm(p * 3.1 + seed, 3);
+        float gr = abs(rk_vnoise(vec3(p.xz * 2.3 + seed, 0.0)) - 0.5);
+        float grike = 1.0 - smoothstep(0.0, 0.045, gr);
+        float det = (m - 0.5) * 0.045 - 0.07 * grike;
+        cav = grike * 0.9;
+        if (fine > 0.01) {
+            float cr = abs(rk_fbm(p * 9.0 - seed, 3) - 0.5);
+            float crack = 1.0 - smoothstep(0.0, 0.03, cr);
+            float grain = rk_fbm(p * 31.0 + seed * 2.0, 3) - 0.5;
+            det += fine * (-0.02 * crack + 0.012 * grain);
+            cav += fine * (crack * 0.7 + max(-grain, 0.0) * 0.6);
+        }
+        return d - det;
+    }
     float l = length(q);
+
     vec3 d = q / max(l, 1e-4);
     float n = rk_fbm(d * 1.6 + vec3(seed, seed * 1.3, -seed), 4);
     vec3 s = d * (1.0 + amp * (n - 0.5) * 2.0);

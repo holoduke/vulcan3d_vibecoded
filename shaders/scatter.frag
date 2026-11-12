@@ -68,14 +68,18 @@ void main() {
         vec3 ro = vObj + kOff;
         vec3 rdo = normalize(vObj - co);
         float seed = vRotSeed.y;
+        // Per-stone variety: lumpiness, layered ones, and flat slab pieces.
+        float sv = fract(seed * 0.618);
+        float s_amp = 0.15 + 0.22 * fract(seed * 0.37);
+        float s_strata = sv < 0.22 ? -1.0 : (sv > 0.72 ? 0.5 : 0.0);
         float fp = distance(vWorldPos, scene.camera_pos.xyz) * 2.0 * scene.viewport.w / sc;
         float fine = 1.0 - smoothstep(0.006, 0.03, fp);
         float eps = max(fp * 0.6, 0.0015);
-        float th = rock_march(ro, rdo, 3.4, seed, 0.24, 0.0, fine, eps);
+        float th = rock_march(ro, rdo, 3.4, seed, s_amp, s_strata, fine, eps);
         if (th < 0.0) discard;
         vec3 po = ro + rdo * th;
-        rock_sdf(po, seed, 0.24, 0.0, fine, stone_cav);
-        vec3 no = rock_normal(po, seed, 0.24, 0.0, fine, max(eps * 1.2, 0.002));
+        rock_sdf(po, seed, s_amp, s_strata, fine, stone_cav);
+        vec3 no = rock_normal(po, seed, s_amp, s_strata, fine, max(eps * 1.2, 0.002));
         vec3 pl = (po - kOff) * sc;
         wpos = vec3(rc * pl.x - rsn * pl.z, pl.y, rsn * pl.x + rc * pl.z) + vInst.xyz;
         N = normalize(vec3(rc * no.x - rsn * no.z, no.y, rsn * no.x + rc * no.z));
