@@ -77,7 +77,21 @@ void main() {
         Pl = inPosition - inNormal * (r * (1.0 - g));
         mat0 = 0;
     }
+    // Rock: the mesh is only a bounding hull for the per-pixel ray march
+    // (rock_sdf.glsl) - blow it up into a sphere that encloses the surface.
+    float rock_tag = 0.0;
+    if (matRaw == 4) {
+        vec4 air = arch[uint(I.rot_arch_phase.y + 0.5)];
+        if (air.z < -0.5) {
+            rock_tag = air.z;
+            float rv = -air.z - 1.0;
+            float ramp = 0.26 + 0.1 * fract(rv * 0.37);
+            const vec3 rc = vec3(0.0, 0.35, 0.0);
+            Pl = rc + normalize(inPosition - rc) * ((1.0 + ramp + 0.12) * 1.30);
+        }
+    }
     if (matRaw >= 7) {                           // wind weight from the position in the tree
+
         float Hl = max(arch[uint(I.rot_arch_phase.y + 0.5)].y * 2.0, 0.5);
         float hh = clamp(Pl.y / Hl, 0.0, 1.0);
         windW = clamp(0.85 * hh * hh + 0.25 * clamp(length(Pl.xz) / (0.35 * Hl), 0.0, 1.0), 0.0, 1.0);
@@ -177,5 +191,10 @@ void main() {
     vTexParams  = tp;
     if (mat0 == 5) { vUv = imp_uv; vColor = inNormal.z < 1.5 ? vec3(0.075, 0.16, 0.08) : vec3(0.16, 0.28, 0.07); }
     vVegInfo = vec4(fd, (ve & 0x80000000u) != 0u ? 1.0 : 0.0,
-                    mat0 == 5 ? inNormal.z : 0.0, I.rot_arch_phase.z);
+                    mat0 == 5 ? inNormal.z : rock_tag, I.rot_arch_phase.z);
+    if (rock_tag < -0.5) {      // object-space hull point + the instance transform for the march
+        vObjectPos    = Pl;
+        vShellBase    = I.pos_scale.xyz;
+        vObjectNormal = vec3(s, ysq, I.rot_arch_phase.x);
+    }
 }

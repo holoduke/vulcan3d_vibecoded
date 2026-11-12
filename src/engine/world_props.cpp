@@ -1012,13 +1012,15 @@ std::vector<VegArchetype> build_veg_archetypes(int seed) {
     }
     for (int v = 0; v < 8; ++v) {                      // rocks (species 3)
         VegArchetype a; a.species = 3;
-        float sd = U(rng) * 50.0f;
+        // Deterministic in the variant index: shaders/rock_sdf.glsl ray-marches
+        // the same function (rock_params) for the visible surface.
+        float sd = 3.7f + 6.1f * float(v);
         float strata = (v % 2 == 0) ? 0.55f : 0.0f;
-        float amp = 0.26f + 0.1f * U(rng);
+        float amp = 0.26f + 0.1f * glm::fract(float(v) * 0.37f);
         const Ico* ic[kVegLods] = { &ultra, &hi, &lo, &tiny };
         for (int l = 0; l < kVegLods; ++l)
             add_blob(a.lods[l], *ic[l], glm::vec3(0.0f, 0.35f, 0.0f), glm::vec3(1.0f), 0.0f, sd,
-                     l >= 3 ? amp * 0.6f : amp, 1.6f, strata, -0.2f, glm::vec2(0.0f, 4.0f), 0.0f);
+                     amp, 1.6f, strata, -0.2f, glm::vec2(0.0f, 4.0f), 0.0f);
         finish(a); out.push_back(std::move(a));
     }
     return out;

@@ -18,6 +18,8 @@ void main() {
                                                   vec2(0.06711056, 0.00583715))));
         if (vVegInfo.y > 0.5 ? (n >= vVegInfo.x) : (n < vVegInfo.x)) discard;
     }
+    // Ray-marched rocks write their own (deeper) depth in the colour pass.
+    if (vVegInfo.z < -0.5) discard;
     if (vVegInfo.z > 0.5) {
         float u = vUv.x, v = vUv.y;
         float jag = (fract(sin(dot(floor(vec2(u * 9.0, v * 14.0)), vec2(12.9, 78.2))) * 43758.5) - 0.5);

@@ -84,6 +84,7 @@ vec2 octa_encode(vec3 n) {
 
 #include "scene_ubo.glsl"
 #include "veg_leaf.glsl"
+#include "rock_sdf.glsl"
 
 // Half-rate shadow producer output, sampled when terrain_local_info.z
 // is on. linear_sampler_ → bilinear interpolation across the 4 nearest
@@ -1348,6 +1349,59 @@ void main() {
         float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy + 5.588238 * float(uint(scene.rt_flags.w) & 7u),
                                                   vec2(0.06711056, 0.00583715))));
         if (vVegInfo.y > 0.5 ? (n >= vVegInfo.x) : (n < vVegInfo.x)) discard;
+    }
+    // ---- Ray-marched rock (GPU vegetation, material 4) ----------------
+    if (vVegInfo.z < -0.5 && pc.grass_params.w < -0.5 && pc.grass_params.x > 0.5) {
+        if (!gl_FrontFacing) discard;
+        float rs = vObjectNormal.x, rysq = vObjectNormal.y, rrot = vObjectNormal.z;
+        float rc = cos(rrot), rsn = sin(rrot);
+        vec3  rscl = vec3(rs, rs * rysq, rs);
+        // World -> object: undo translation, rotation (veg.vert) and scale.
+        vec3 cw = scene.camera_pos.xyz - vShellBase;
+        vec3 co = vec3(rc * cw.x + rsn * cw.z, cw.y, -rsn * cw.x + rc * cw.z) / rscl;
+        vec3 ro = vObjectPos;
+        vec3 rdo = ro - co;
+        float dist_o = length(rdo);
+        rdo /= max(dist_o, 1e-5);
+        float seed, amp, strata;
+        rock_params(-vVegInfo.z - 1.0, seed, amp, strata);
+        // Detail follows the pixel footprint (object units per pixel).
+        float cam_d = distance(vWorldPos, scene.camera_pos.xyz);
+        float fp = cam_d * 2.0 * scene.viewport.w / max(rs, 0.05);
+        float fine = 1.0 - smoothstep(0.006, 0.03, fp);
+        float eps = max(fp * 0.6, 0.0012);
+        float th = rock_march(ro, rdo, 3.6, seed, amp, strata, fine, eps);
+        if (th < 0.0) discard;
+        vec3 po = ro + rdo * th;
+        float cav;
+        rock_sdf(po, seed, amp, strata, fine, cav);
+        vec3 no = rock_normal(po, seed, amp, strata, fine, max(eps * 1.2, 0.002));
+        // Object -> world.
+        vec3 pl = po * rscl;
+        vec3 wposr = vec3(rc * pl.x - rsn * pl.z, pl.y, rsn * pl.x + rc * pl.z) + vShellBase;
+        vec3 nl = no / rscl;
+        vec3 Nr = normalize(vec3(rc * nl.x - rsn * nl.z, nl.y, rsn * nl.x + rc * nl.z));
+        // The lower part sits in the ground (the mesh version squashes it flat).
+        vec4 clipr = pc.mvp * vec4(wposr, 1.0);
+        gl_FragDepth = max(gl_FragCoord.z, clipr.z / max(clipr.w, 1e-4));
+        // Albedo: the rock set, triplanar at the HIT point, with darker
+        // cracks, pale weathered ledges and a little moss on sheltered tops.
+        vec3 alb = triplanar_sample(u_albedo[7], wposr * 0.22, Nr) * vec3(1.4, 1.34, 1.27);
+        float big = rk_vnoise(po * 1.7 + seed);
+        alb *= mix(0.80, 1.12, big);
+        alb *= 1.0 - 0.55 * clamp(cav, 0.0, 1.0);
+        float moss = smoothstep(0.55, 0.9, Nr.y) * smoothstep(0.45, 0.75, rk_fbm(po * 2.6 - seed, 3)) * 0.55;
+        alb = mix(alb, vec3(0.10, 0.17, 0.05), moss);
+        float snr = smoothstep(scene.terrain_h_high.x + 10.0, scene.terrain_h_high.z, wposr.y) * smoothstep(0.35, 0.75, Nr.y);
+        alb = mix(alb, vec3(0.88, 0.9, 0.95), clamp(snr, 0.0, 1.0));
+        g_veg_solid = true;
+        outGBuffer0 = vec4(clamp(alb, vec3(0.0), vec3(1.0)), 1.0 / 255.0);
+        outGBuffer1 = vec4(octa_encode(Nr), mix(0.9, 0.7, moss), gbuf_flags(true, 0.0));
+        // Deferred path: the lighting pass shades it. Forward fallback: sun + sky.
+        vec3 Lr = normalize(scene.sun_direction.xyz);
+        outColor = vec4(alb * (scene.sun_color.rgb * scene.sun_color.a * max(dot(Nr, Lr), 0.0) +
+                               scene.sky_color.rgb * 0.35 * (0.5 + 0.5 * Nr.y)), 1.0);
+        return;
     }
     bool veg_imp = vVegInfo.z > 0.5;
     if (veg_imp) {

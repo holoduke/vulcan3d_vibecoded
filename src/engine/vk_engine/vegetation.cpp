@@ -147,9 +147,15 @@ void VulkanEngine::init_vegetation_data(const Heightmap& hm) {
                                ssbo | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                false, veg_ind_alloc_, nullptr);
     std::vector<glm::vec4> ainfo;
-    for (size_t a = 0; a < veg_arch_.size(); ++a)
-        ainfo.push_back(glm::vec4(veg_arch_[a].radius, veg_arch_[a].height * 0.5f,
-                                  float(veg_has_imp_[a]), float(veg_arch_[a].species)));
+    int rock_variant = 0;
+    for (size_t a = 0; a < veg_arch_.size(); ++a) {
+        const bool rock = veg_arch_[a].species == 3;
+        // Rocks: .z = -(variant + 1) (the ray-marched surface derives its
+        // shape parameters from it); radius covers the inflated hull.
+        ainfo.push_back(glm::vec4(veg_arch_[a].radius * (rock ? 1.45f : 1.0f), veg_arch_[a].height * 0.5f,
+                                  rock ? -float(++rock_variant) : float(veg_has_imp_[a]),
+                                  float(veg_arch_[a].species)));
+    }
     veg_arch_buf_ = make_buffer(allocator_, sizeof(glm::vec4) * ainfo.size(), ssbo, true, veg_arch_alloc_, &mp);
     if (mp) std::memcpy(mp, ainfo.data(), sizeof(glm::vec4) * ainfo.size());
     vmaFlushAllocation(allocator_, veg_arch_alloc_, 0, VK_WHOLE_SIZE);
