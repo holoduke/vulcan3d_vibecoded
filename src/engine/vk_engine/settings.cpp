@@ -451,6 +451,12 @@ void VulkanEngine::visit_settings(Self& s, F&& f) {
     f("image_contrast", s.rt_.image_contrast);
     f("image_brightness", s.rt_.image_brightness);
     f("image_gamma", s.rt_.image_gamma);
+    f("grade_temperature", s.rt_.grade_temperature);
+    f("grade_saturation", s.rt_.grade_saturation);
+    f("grade_vibrance", s.rt_.grade_vibrance);
+    f("grade_split_tone", s.rt_.grade_split_tone);
+    f("film_grain", s.rt_.film_grain);
+    f("vignette_strength", s.rt_.vignette_strength);
     f("terrain_rt_lod_distance", s.rt_.terrain_rt_lod_distance);
     f("terrain_ao_punch", s.rt_.terrain_ao_punch);
     f("terrain_pcss_samples_cap", s.rt_.terrain_pcss_samples_cap);

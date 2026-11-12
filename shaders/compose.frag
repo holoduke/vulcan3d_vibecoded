@@ -984,6 +984,38 @@ void main() {
     mapped = clamp((mapped - 0.5) * contrast + 0.5, 0.0, 1.0);
     mapped = pow(mapped, vec3(1.0 / gamma_v));
 
+    // ---- Colour grading (display-linear). Controls are packed four 6-bit
+    // values per float in pc.viewport.xy (see frame.cpp). ----
+    vec4 gA, gB;
+    {
+        float a = pc.viewport.x, b = pc.viewport.y;
+        gA = vec4(mod(a, 64.0), mod(floor(a / 64.0), 64.0), mod(floor(a / 4096.0), 64.0), floor(a / 262144.0));
+        gB = vec4(mod(b, 64.0), mod(floor(b / 64.0), 64.0), mod(floor(b / 4096.0), 64.0), floor(b / 262144.0));
+    }
+    float g_temp  = gA.x / 63.0 * 2.0 - 1.0;
+    float g_sat   = gA.y / 63.0 * 2.0;
+    float g_vib   = gA.z / 63.0;
+    float g_frame = gA.w;
+    float g_split = gB.x / 63.0, g_grain = gB.y / 63.0, g_vig = gB.z / 63.0;
+    {
+        const vec3 kL = vec3(0.2126, 0.7152, 0.0722);
+        // White balance: scale red against blue, luminance preserved.
+        vec3 wb = vec3(1.0 + 0.16 * g_temp, 1.0, 1.0 - 0.20 * g_temp);
+        mapped *= wb / dot(wb, kL);
+        // Split toning: cool shadows, warm highlights (the classic film look).
+        float Y = dot(mapped, kL);
+        vec3 sh = vec3(0.90, 1.00, 1.10), hi = vec3(1.08, 1.00, 0.88);
+        vec3 tone = mix(sh / dot(sh, kL), hi / dot(hi, kL), smoothstep(0.15, 0.75, Y));
+        mapped *= mix(vec3(1.0), tone, g_split);
+        // Saturation, then vibrance (lifts muted colours, leaves vivid ones).
+        Y = dot(mapped, kL);
+        mapped = mix(vec3(Y), mapped, g_sat);
+        float mx = max(mapped.r, max(mapped.g, mapped.b)), mn = min(mapped.r, min(mapped.g, mapped.b));
+        float cs = (mx - mn) / max(mx, 1e-4);
+        mapped = mix(vec3(Y), mapped, 1.0 + g_vib * (1.0 - cs) * 0.8);
+        mapped = clamp(mapped, 0.0, 1.0);
+    }
+
     // Brush size indicator. Drawn in tonemapped LDR (post-aces) so the
     // ring colour reads the same in any lighting. Reconstruct this
     // pixel's world position from its depth value, compare its world
@@ -1018,8 +1050,16 @@ void main() {
     {
         vec2 ndc = gl_FragCoord.xy * pc.viewport.zw * 2.0 - 1.0;
         float r  = length(ndc);
-        float vig = 1.0 - 0.18 * smoothstep(0.6, 1.4, r);
+        float vig = 1.0 - 0.60 * g_vig * smoothstep(0.6, 1.4, r);
         mapped *= vig;
+    }
+    // Film grain: animated, strongest in the midtones, none in pure black / white.
+    if (g_grain > 0.0) {
+        vec2 gp = gl_FragCoord.xy + vec2(g_frame * 37.0, g_frame * 91.0);
+        float n = fract(sin(dot(gp, vec2(12.9898, 78.233))) * 43758.5453) +
+                  fract(sin(dot(gp, vec2(39.3468, 11.135))) * 24634.6345) - 1.0;     // triangular, -1..1
+        float Yg = dot(mapped, vec3(0.2126, 0.7152, 0.0722));
+        mapped = max(mapped + n * g_grain * 0.045 * (0.25 + 4.0 * Yg * (1.0 - Yg) * 0.75), vec3(0.0));
     }
 
     float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy,

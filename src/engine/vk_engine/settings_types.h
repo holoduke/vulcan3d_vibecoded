@@ -713,6 +713,13 @@ struct RtSettings {
         // pass-through. > 1 lifts midtones (lighter look); < 1
         // darkens. Range 0.4..2.5.
         float image_gamma = 1.0f;
+        // Colour grading (compose.frag, after the tonemap).
+        float grade_temperature = 0.06f;   // -1 cool .. +1 warm
+        float grade_saturation  = 1.06f;   // 0 grey .. 2
+        float grade_vibrance    = 0.25f;   // boosts muted colours only
+        float grade_split_tone  = 0.25f;   // teal shadows / warm highlights
+        float film_grain        = 0.12f;
+        float vignette_strength = 0.30f;
         // Raymarched-terrain RT (shadows / AO / GI) cutoff distance.
         // Effect fades smoothly from `* 0.6` to this value, then turns
         // off entirely past it. 250 m default keeps gameplay-range

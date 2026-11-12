@@ -666,6 +666,14 @@ void VulkanEngine::build_menu_ui() {
         ImGui::SliderFloat("image gamma (curve)",
                             &rt_.image_gamma,      0.4f, 2.5f);
 
+        ImGui::SeparatorText("Colour grading");
+        ImGui::SliderFloat("white balance (cool - warm)", &rt_.grade_temperature, -1.0f, 1.0f);
+        ImGui::SliderFloat("saturation", &rt_.grade_saturation, 0.0f, 2.0f);
+        ImGui::SliderFloat("vibrance (muted colours)", &rt_.grade_vibrance, 0.0f, 1.0f);
+        ImGui::SliderFloat("split toning (teal shadows / warm highlights)", &rt_.grade_split_tone, 0.0f, 1.0f);
+        ImGui::SliderFloat("film grain", &rt_.film_grain, 0.0f, 1.0f);
+        ImGui::SliderFloat("vignette", &rt_.vignette_strength, 0.0f, 1.0f);
+
         ImGui::SeparatorText("Path-traced GI (multi-bounce)");
         ImGui::SliderInt("GI samples (0=off)", &rt_.gi_samples, 0, 128);
         // ReSTIR-lite (session 1 of multi-session plan — see

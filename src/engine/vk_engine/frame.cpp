@@ -1055,6 +1055,16 @@ void VulkanEngine::record_compose_and_ui(FrameData& frame, uint32_t img_index) {
         float w = static_cast<float>(swapchain_extent_.width);
         float h = static_cast<float>(swapchain_extent_.height);
         pc_data.viewport = glm::vec4(w, h, 1.0f / w, 1.0f / h);
+        {
+            // The push-constant block is full (256 B), so the colour-grading
+            // controls ride in viewport.xy (unused by the shader): four 6-bit
+            // values per float.
+            auto q6 = [](float v01) { return std::floor(glm::clamp(v01, 0.0f, 1.0f) * 63.0f + 0.5f); };
+            auto pack4 = [](float a, float b, float c, float d) { return a + 64.0f * (b + 64.0f * (c + 64.0f * d)); };
+            pc_data.viewport.x = pack4(q6(rt_.grade_temperature * 0.5f + 0.5f), q6(rt_.grade_saturation * 0.5f),
+                                       q6(rt_.grade_vibrance), float(frame_number_ % 64u));
+            pc_data.viewport.y = pack4(q6(rt_.grade_split_tone), q6(rt_.film_grain), q6(rt_.vignette_strength), 0.0f);
+        }
         pc_data.bloom_params = glm::vec4(rt_.bloom_strength,
                                          rt_.bloom_threshold,
                                          rt_.bloom_radius,
