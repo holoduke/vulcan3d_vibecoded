@@ -1004,6 +1004,16 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
                 hm = pos.y - meshHeight(pos.xz) - kHmMargin;
             coarse = hm > 0.75;
             h = coarse ? hm : pos.y - terrainM_lod(pos.xz, t);
+            // On the road the marched surface IS the baked (levelled) one.
+            // The FBM's extra octaves stand up to ~0.5 m proud of it; seen
+            // from a low eye along the road they formed a lumpy, spiky
+            // hump across the paving a few metres ahead.
+            if (!coarse && h < 0.65 && t < 90.0 && rd.y > -0.16) {   // grazing rays only: steep ones are fixed by the slide in main()
+                float rdist = rm_road_dist(pos.xz);
+                float keep = scene.road_info.y + scene.road_info.z;
+                if (rdist < keep + 1.2)
+                    h = mix(pos.y - meshHeight(pos.xz), h, smoothstep(keep, keep + 1.2, rdist));
+            }
         }
 #else /* QLIKE_WATER */
         float h = pos.y - terrainM_lod(pos.xz, t);
@@ -2807,15 +2817,22 @@ void main() {
     // Castle road: cobble normal map in road space, before any lighting.
     vec2 rm_road_uv, rm_road_dir;
     vec2 rm_road = roadWeights(pos.xz, rm_road_uv, rm_road_dir);
-    if (rm_road.x + rm_road.y > 0.001 && rd.y < -0.02) {
+    if (rm_road.x + rm_road.y > 0.001 && rd.y < -0.0015) {
         // The march hit the procedural surface, which keeps decimetre FBM
         // lumps on top of the carved road. Slide the hit along the ray onto
         // the smooth baked heightmap so the paving lies flat.
         float t_s = t;
-        for (int i = 0; i < 4; ++i) {
+        // Also at grazing angles (a low eye looking along the road): the
+        // old cut-off at rd.y = -0.02 left the lumpy FBM surface showing in
+        // a band a few metres ahead. More, larger steps when the ray is flat.
+        float graze = 1.0 - smoothstep(0.02, 0.15, -rd.y);
+        int   n_it  = 4 + int(graze * 4.0);
+        float lim   = 1.5;
+        for (int i = 0; i < n_it; ++i) {
             vec3 ps = ro + t_s * rd;
-            t_s += clamp((ps.y - meshHeight(ps.xz)) / -rd.y, -1.5, 1.5) * 0.85;
+            t_s += clamp((ps.y - meshHeight(ps.xz)) / -rd.y, -lim, lim) * 0.85;
         }
+        t_s = max(t_s, 0.05);
         t = mix(t, t_s, clamp(rm_road.x + rm_road.y * 0.5, 0.0, 1.0));
         pos = ro + t * rd;
         rm_road = roadWeights(pos.xz, rm_road_uv, rm_road_dir);
