@@ -483,7 +483,6 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             wz > params.road->bb_min.y && wz < params.road->bb_max.y &&
             params.road->distance(wx, wz) <
                 params.road->half_width + params.road->shoulder + 0.6f) continue;
-        if (params.road2 && params.road2->distance(wx, wz) < params.road2->half_width) continue;
         float h = h_at(wx, wz);
         if (h < params.water_level + 0.4f) continue;     // not in/at water
         float ny = n_y_at(wx, wz);
@@ -552,7 +551,6 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             if (params.road && wx > params.road->bb_min.x && wx < params.road->bb_max.x &&
                 wz > params.road->bb_min.y && wz < params.road->bb_max.y &&
                 params.road->distance(wx, wz) < params.road->half_width + 0.4f) continue;
-            if (params.road2 && params.road2->distance(wx, wz) < params.road2->half_width) continue;
             float h = h_at(wx, wz);
             if (h < params.water_level + 0.6f || h > params.rock_band_h + 5.0f) continue;
             float ny = n_y_at(wx, wz);

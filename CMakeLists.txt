@@ -329,7 +329,6 @@ add_library(qlike_engine STATIC
     src/engine/grass.cpp
     src/engine/scatter.cpp
     src/engine/road.cpp
-    src/engine/cave.cpp
     src/engine/world_props.cpp
     src/engine/aa_vehicle.cpp
 )
