@@ -637,7 +637,10 @@ void main() {
                     (n_dot_l_wrap * sun_lit) +
                     scene.sun_color.rgb * scene.sun_color.a * vec3(1.25, 1.40, 0.45) *
                     (blade_back * 0.42 * sun_lit * mix(0.45, 1.0, h_t));
-    vec3 sky_term = scene.sky_color.rgb * 0.18;
+    // Sky fill. 0.18 left shaded grass about four times darker than the
+    // shaded ground beside it (terrain uses 0.75 * hemisphere), so grass in
+    // a tree or hill shadow went near black. A little ground bounce too.
+    vec3 sky_term = scene.sky_color.rgb * 0.46 + scene.sun_color.rgb * scene.sun_color.a * 0.02;
     // Side-lit blade shading: sun-side brighter, away-side darker.
     // Uses RAW dot(N, L) so the sign carries direction (n_dot_l above
     // was max'd to 0 for Lambert, which would always tint upward).
@@ -652,7 +655,8 @@ void main() {
                               1.0 + sl_str * 0.9);
         }
     }
-    vec3 col = grassCol * (sun_term * side_tint + sky_term) * ao;
+    // The root darkening (ao) is gentler on the sky fill than on the sun.
+    vec3 col = grassCol * (sun_term * side_tint * ao + sky_term * mix(1.0, ao, 0.6));
 
     // View-dependent backlit / translucency — sun shining THROUGH the
     // blade from behind makes the leaves glow warm. Strongest when:
