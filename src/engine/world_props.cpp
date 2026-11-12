@@ -732,8 +732,8 @@ void build_broadleaf(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, c
 // LOD tables: LOD0 full detail .. LOD3 ~10-30 tris (far silhouette).
 void build_pine(LevelMesh& m, const PineParams& p, int lod, const Ico& lo, const Ico& hi) {
     (void)lo; (void)hi;
-    if (lod <= 1) {
-        // Close range: EZ-Tree evergreen (trunk + whorled boughs carrying
+    {
+        // Every LOD bucket: EZ-Tree evergreen (trunk + whorled boughs carrying
         // needle-spray cards). Trimmed from the 'pine medium' preset to a
         // real-time triangle budget.
         EzTreeOptions o = ez_preset_pine();
@@ -743,7 +743,7 @@ void build_pine(LevelMesh& m, const PineParams& p, int lod, const Ico& lo, const
         o.leaf_count = 14;
         o.leaf_size = 2.3f;
         o.length[1] = 23.87f * glm::clamp(p.r0 / 2.6f, 0.75f, 1.3f);
-        build_ez_tree(m, o, lod, p.H);
+        build_ez_tree(m, o, kVegDetail[lod], p.H);
         return;
     }
     const int   trunk_segs[4] = { 12, 6, 4, 3 };
@@ -776,8 +776,8 @@ void build_pine(LevelMesh& m, const PineParams& p, int lod, const Ico& lo, const
 
 void build_oak(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, const Ico& hi, const Ico& tiny,
                const Ico& ultra) {
-    if (lod <= 1) {
-        // Close range: EZ-Tree deciduous, from the 'oak medium' preset.
+    {
+        // Every LOD bucket: EZ-Tree deciduous, from the 'oak medium' preset.
         // The crown shape parameter picks the habit (wide / tall / round).
         (void)lo;
         EzTreeOptions o = ez_preset_oak();
@@ -790,7 +790,7 @@ void build_oak(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, const I
         o.length[0] = 37.24f * glm::clamp(1.0f / wide, 0.8f, 1.35f);
         o.length[1] = 11.08f * glm::clamp(wide, 0.8f, 1.4f) * 1.5f;
         o.length[2] = 12.39f * 0.9f;
-        build_ez_tree(m, o, lod, p.H * 1.2f);
+        build_ez_tree(m, o, kVegDetail[lod], p.H * 1.2f);
         return;
     }
     glm::vec3 b(0.0f);
@@ -997,10 +997,10 @@ std::vector<VegArchetype> build_veg_archetypes(int seed) {
         float sd = U(rng) * 50.0f;
         float strata = (v % 2 == 0) ? 0.55f : 0.0f;
         float amp = 0.26f + 0.1f * U(rng);
-        const Ico* ic[kVegLods] = { &hi, &lo, &tiny, &tiny };
+        const Ico* ic[kVegLods] = { &ultra, &hi, &lo, &tiny };
         for (int l = 0; l < kVegLods; ++l)
             add_blob(a.lods[l], *ic[l], glm::vec3(0.0f, 0.35f, 0.0f), glm::vec3(1.0f), 0.0f, sd,
-                     l >= 2 ? amp * 0.6f : amp, 1.6f, strata, -0.2f, glm::vec2(0.0f, 4.0f), 0.0f);
+                     l >= 3 ? amp * 0.6f : amp, 1.6f, strata, -0.2f, glm::vec2(0.0f, 4.0f), 0.0f);
         finish(a); out.push_back(std::move(a));
     }
     return out;

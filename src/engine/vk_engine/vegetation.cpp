@@ -284,7 +284,9 @@ void VulkanEngine::cull_vegetation(VkCommandBuffer cmd) {
     build_veg_hiz(cmd);
     struct { glm::vec4 planes[6]; glm::vec4 cam; glm::vec4 params; glm::mat4 prev_vp; glm::vec4 hiz; } pc{};
     for (int i = 0; i < 6; ++i) pc.planes[i] = fv.frustum.planes[i];
-    const float ppr = float(render_extent_.height) / (2.0f * std::tan(glm::radians(80.0f) * 0.5f));
+    // Detail is chosen for the OUTPUT resolution (the upscaler reconstructs
+    // to it), not the internal render resolution.
+    const float ppr = float(swapchain_extent_.height) / (2.0f * std::tan(glm::radians(80.0f) * 0.5f));
     pc.cam = glm::vec4(fv.eye_pos, ppr);
     pc.params = glm::vec4(float(veg_count_), 1450.0f, std::max(0.25f, rt_.veg_lod_bias),
                           (veg_hiz_ready_ && !std::getenv("QLIKE_NO_HIZ")) ? 1.0f : 0.0f);
@@ -462,7 +464,7 @@ void VulkanEngine::collect_veg_rt_instances(glm::vec3 eye, uint32_t cap,
     // rasteriser picks (same pixel-radius thresholds as veg_cull.comp):
     // with a finer shape in the TLAS than on screen, the extra leaf clumps
     // of the fine model shadowed the coarse crown in black patches.
-    const float ppr = float(render_extent_.height) / (2.0f * std::tan(glm::radians(80.0f) * 0.5f)) *
+    const float ppr = float(swapchain_extent_.height) / (2.0f * std::tan(glm::radians(80.0f) * 0.5f)) *
                       std::max(0.25f, rt_.veg_lod_bias);
     for (const auto& c : cand) {
         const auto& v = veg_inst_cpu_[c.second];
@@ -470,7 +472,11 @@ void VulkanEngine::collect_veg_rt_instances(glm::vec3 eye, uint32_t cap,
         const float ysq = v.rot_arch_phase.w > 0.0f ? v.rot_arch_phase.w : 1.0f;
         const float r = (a < veg_arch_.size() ? veg_arch_[a].radius : 1.0f) * v.pos_scale.w * std::max(ysq, 1.0f) + 0.6f;
         const float px = r / std::max(std::sqrt(c.first), 0.1f) * ppr;
-        const uint32_t lvl = px > 85.0f ? 0u : px > 40.0f ? 1u : px > 16.0f ? 2u : 3u;
+        uint32_t lvl = px > 85.0f ? 0u : px > 40.0f ? 1u : px > 16.0f ? 2u : 3u;
+        if (a < veg_arch_.size() && veg_arch_[a].species <= 1) {     // trees: same detail curve as veg_cull.comp
+            const float detail = std::clamp(std::pow(px / 60.0f, 1.2f), 0.03f, 1.0f);
+            lvl = detail > 0.5f ? 0u : detail > 0.22f ? 1u : detail > 0.09f ? 2u : 3u;
+        }
         out.push_back(c.second | (lvl << 30));
     }
 }

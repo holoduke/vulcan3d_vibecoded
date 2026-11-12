@@ -102,3 +102,10 @@ bool veg_card(vec2 uv, float kind, out float shade) {
     if (twig) { shade = -1.0; return true; }
     return false;
 }
+
+// Leaf card from the foliage atlas (albedo slot 15: broadleaf twig in the
+// left half, conifer spray in the right). `uv` as for veg_card. Returns
+// rgb + coverage; `lod_bias` < 0 keeps thin needles from fading with the mips.
+vec2 veg_card_uv(vec2 uv, float kind) {
+    return vec2((kind >= 1.0 ? 0.5 : 0.0) + clamp(uv.x, 0.006, 0.994) * 0.5, 1.0 - clamp(uv.y, 0.004, 0.996));
+}

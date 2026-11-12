@@ -11,6 +11,7 @@ layout(location = 7) in vec3 vObjectNormal;
 layout(location = 10) flat in vec4 vVegInfo;
 #include "scene_ubo.glsl"
 #include "veg_leaf.glsl"
+layout(set = 0, binding = 3) uniform sampler2D u_albedo[17];
 void main() {
     if (vVegInfo.x > 0.0) {
         float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy + 5.588238 * float(uint(scene.rt_flags.w) & 7u),
@@ -34,6 +35,6 @@ void main() {
     } else {
         int vm = int(vUv.y + 0.5);
         if ((vm == 2 || vm == 3) && veg_leaf_cut(vObjectPos, vWorldPos, vNormal, scene.camera_pos.xyz)) discard;
-        if (vm == 7) { float sh; if (!veg_card(vObjectNormal.xy, vObjectNormal.z, sh)) discard; }
+        if (vm == 7 && texture(u_albedo[15], veg_card_uv(vObjectNormal.xy, vObjectNormal.z), -0.7).a < 0.33) discard;
     }
 }

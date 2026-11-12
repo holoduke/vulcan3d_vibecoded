@@ -45,14 +45,49 @@ layout(location = 10) flat out vec4 vVegInfo;
 void main() {
     uint  ve = visible[gl_InstanceIndex];
     VegInstance I = inst[ve & 0x7FFFFFFFu];
-    float fd = fade[gl_InstanceIndex];
-    int   mat0 = int(inUv.y + 0.5);
+    float fdp = fade[gl_InstanceIndex];
+    float detail = floor(fdp) / 1023.0;          // continuous LOD: fraction of the tree drawn
+    float fd = fract(fdp) / 0.99;                // mesh <-> billboard cross-fade
+    int   matRaw = int(inUv.y + 0.5);
+    int   mat0 = matRaw;
+    vec3  Pl = inPosition, Nl = inNormal;
+    float windW = inUv.x;
+    vec3  card_uvk = vec3(0.0);
+    // Continuous-LOD tree elements (eztree.h). Each carries a priority; it
+    // is drawn when priority <= detail and grows from nothing just above
+    // that, so branches and leaves fade in and out instead of popping.
+    if (matRaw == 7 || matRaw == 9) {            // leaf card
+        float q = floor(inUv.x * 0.25);
+        float corner = inUv.x - 4.0 * q;
+        float prio = q / 1023.0;
+        float g = clamp((detail - prio) / (0.03 + 0.25 * prio), 0.0, 1.0);
+        // Fewer leaves -> larger ones, so the crown keeps its cover.
+        float comp = inversesqrt(max(detail, 0.03));   // leaf count ~ detail -> area kept
+        vec3 origin = inPosition - inNormal;
+        Pl = origin + inNormal * (g * comp);
+        float tone = fract(sin(dot(origin, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+        card_uvk = vec3(mod(corner, 2.0), floor(corner * 0.5 + 0.01), (matRaw == 9 ? 1.0 : 0.0) + 0.05 + 0.9 * tone);
+        Nl = vec3(0.0, 1.0, 0.0);
+        mat0 = 7;
+    } else if (matRaw == 8) {                    // branch tube: thins to nothing
+        float q = floor(inUv.x);
+        float r = inUv.x - q;
+        float prio = q / 1023.0;
+        float g = clamp((detail - prio) / (0.03 + 0.25 * prio), 0.0, 1.0);
+        Pl = inPosition - inNormal * (r * (1.0 - g));
+        mat0 = 0;
+    }
+    if (matRaw >= 7) {                           // wind weight from the position in the tree
+        float Hl = max(arch[uint(I.rot_arch_phase.y + 0.5)].y * 2.0, 0.5);
+        float hh = clamp(Pl.y / Hl, 0.0, 1.0);
+        windW = clamp(0.85 * hh * hh + 0.25 * clamp(length(Pl.xz) / (0.35 * Hl), 0.0, 1.0), 0.0, 1.0);
+    }
     float s   = I.pos_scale.w;
     float ysq = I.rot_arch_phase.w > 0.0 ? I.rot_arch_phase.w : 1.0;
     float c = cos(I.rot_arch_phase.x), sn = sin(I.rot_arch_phase.x);
-    vec3 lp = inPosition * vec3(s, s * ysq, s);
+    vec3 lp = Pl * vec3(s, s * ysq, s);
     vec3 wp = vec3(c * lp.x - sn * lp.z, lp.y, sn * lp.x + c * lp.z) + I.pos_scale.xyz;
-    vec3 ln = inNormal / vec3(1.0, ysq, 1.0);
+    vec3 ln = Nl / vec3(1.0, ysq, 1.0);
     vec3 N  = normalize(vec3(c * ln.x - sn * ln.z, ln.y, sn * ln.x + c * ln.z));
     // Impostor card (LOD 4, material 5): cylindrical billboard facing the
     // camera. inPosition = (u * half_width, v * height, kind).
@@ -74,8 +109,6 @@ void main() {
     // pile of balls. Bending the normals toward the direction from the
     // crown centre gives one smooth field across the whole crown - it
     // then shades as a single soft volume, with the clumps as detail.
-    vec3 card_uvk = vec3(0.0);
-    if (mat0 == 7) { card_uvk = inNormal; N = vec3(0.0, 1.0, 0.0); }   // leaf card: (u, v, kind + tone)
     if ((mat0 >= 1 && mat0 <= 3) || mat0 == 6 || mat0 == 7) {
         vec4  ai = arch[uint(I.rot_arch_phase.y + 0.5)];
         float H  = ai.y * 2.0 * s * ysq;
@@ -92,7 +125,7 @@ void main() {
     // Wind: trunk base still, crown sways; per-instance phase. The previous
     // frame's pose (time - 0.016, the CPU step) feeds the motion vector so
     // swaying crowns reproject correctly in TAA.
-    float w = inUv.x;
+    float w = windW;
     vec3 wp_prev = wp;
     if (w > 0.001) {
         float ws = 0.35 + clamp(scene.grass_rm_params.y, 0.0, 3.0);
@@ -110,17 +143,17 @@ void main() {
         }
     }
 
-    int mat = int(inUv.y + 0.5);
+    int mat = mat0;
     // Materials: 0 bark (rock tex, brown), 1 needles, 2 leaves, 3 bush,
     // 4 rock (rock tex). Foliage untextured -> cube.frag procedural tint.
     vec3  col = vec3(0.075, 0.16, 0.08);
     vec4  tp  = vec4(-1.0, -1.0, 1.0, 0.0);
-    if (mat == 0)      { col = vec3(0.85, 0.66, 0.50); tp = vec4(7.0, 7.0, 1.4, 0.0); }
+    if (mat == 0)      { col = vec3(0.95, 0.90, 0.84); tp = vec4(16.0, 16.0, 0.55, 0.0); }   // bark texture
     else if (mat == 2) { col = vec3(0.16, 0.28, 0.07); }
     else if (mat == 3) { col = vec3(0.14, 0.24, 0.08); }
     else if (mat == 7) {            // leaf card: needles darker and bluer than broad leaves
         float tone = fract(card_uvk.z);
-        col = (card_uvk.z >= 1.0 ? vec3(0.070, 0.150, 0.075) : vec3(0.150, 0.290, 0.065)) * (0.78 + 0.44 * tone);
+        col = (card_uvk.z >= 1.0 ? vec3(0.72, 0.80, 0.76) : vec3(0.60, 0.64, 0.50)) * (0.80 + 0.40 * tone);   // tint over the atlas
     }
     else if (mat == 6) {            // leaf blade (real geometry): each leaf its own tone
         float lv = fract(sin(dot(floor(rest_wp * 2.3), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
@@ -140,7 +173,7 @@ void main() {
     vNormal     = N;
     vColor      = col;
     vEmissive   = vec4(0.0);
-    vUv         = inUv;
+    vUv         = vec2(windW, float(mat0));
     vTexParams  = tp;
     if (mat0 == 5) { vUv = imp_uv; vColor = inNormal.z < 1.5 ? vec3(0.075, 0.16, 0.08) : vec3(0.16, 0.28, 0.07); }
     vVegInfo = vec4(fd, (ve & 0x80000000u) != 0u ? 1.0 : 0.0,

@@ -33,6 +33,9 @@ layout(push_constant) uniform PC {
 
 const int kLods = 5;
 
+// `fd` packs the instance's continuous detail (integer part, 0..1023) and
+// the LOD cross-fade factor (fraction): see veg.vert.
+float pack_fd(float detail, float f) { return floor(clamp(detail, 0.0, 1.0) * 1023.0) + clamp(f, 0.0, 1.0) * 0.99; }
 void emit(uint a, uint lod, uint id, float f) {
     uint b = a * uint(kLods) + lod;
     uint slot = atomicAdd(cmd[b * 5u + 1u], 1u);
@@ -86,10 +89,30 @@ void main() {
         }
     }
 
-    // ---- LOD selection with cross-fade ----
+    // ---- LOD selection ----
     bool has_imp = ai.z > 0.5;
     float dither = fract(I.rot_arch_phase.z * 2.7182818) * 0.25 + 0.88;
     px *= dither;
+    if (ai.w < 1.5) {
+        // Trees: CONTINUOUS detail. `detail` (0..1) is the fraction of the
+        // tree's branches / leaves that is drawn; the vertex shader fades
+        // elements in and out around it, so nothing pops. The bucket only
+        // decides how much of the (priority-ordered) mesh is submitted -
+        // bucket k holds the elements with priority <= kDetail[k].
+        float detail = clamp(pow(px / 60.0, 1.2), 0.03, 1.0);
+        uint lod = detail > 0.5 ? 0u : (detail > 0.22 ? 1u : (detail > 0.09 ? 2u : 3u));
+        // Far away the mesh hands over to the billboard with a dithered blend.
+        const float kImp = 7.0;
+        if (has_imp && px < kImp) {
+            float f = clamp((px - kImp * 0.7) / (kImp * 0.3), 0.0, 1.0);
+            emit(a, 4u, i, pack_fd(detail, f));                       // draws where noise >= f
+            if (f > 0.0) emit(a, lod, i | 0x80000000u, pack_fd(detail, f));   // draws where noise <  f
+            return;
+        }
+        emit(a, lod, i, pack_fd(detail, 0.0));
+        return;
+    }
+    // Bushes / rocks: discrete LODs with a dithered cross-fade.
     // Thresholds between LOD k and k+1 (pixels of bounding radius).
     const float th[4] = float[4](85.0, 40.0, 16.0, 7.0);
     int nl = has_imp ? 5 : 4;
@@ -99,14 +122,12 @@ void main() {
     // the finer LOD k-1. f = 0 -> pure `lod`, 1 -> pure `lod-1`.
     if (lod > 0) {
         float t = th[lod - 1];
-        // Reaches 1 exactly at the threshold, where `lod` flips to the finer
-        // one (the old /0.30 band only got to 0.5 there -> visible pop).
         float f = clamp((px - t * 0.85) / (t * 0.15), 0.0, 1.0);
         if (f > 0.0) {
-            emit(a, uint(lod), i, f);                 // draws where noise >= f
-            emit(a, uint(lod - 1), i | 0x80000000u, f); // draws where noise <  f
+            emit(a, uint(lod), i, pack_fd(1.0, f));                 // draws where noise >= f
+            emit(a, uint(lod - 1), i | 0x80000000u, pack_fd(1.0, f)); // draws where noise <  f
             return;
         }
     }
-    emit(a, uint(lod), i, 0.0);
+    emit(a, uint(lod), i, pack_fd(1.0, 0.0));
 }

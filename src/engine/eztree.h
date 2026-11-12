@@ -49,9 +49,22 @@ struct EzTreeOptions {
 EzTreeOptions ez_preset_oak();
 EzTreeOptions ez_preset_pine();
 
-// Generates the tree and appends it to `m`, uniformly scaled so it stands
-// `target_height` metres tall (base at the origin, +Y up). lod 0 = full
-// detail, 1 = every other section / half the leaves (larger).
-void build_ez_tree(game::LevelMesh& m, const EzTreeOptions& o, int lod, float target_height);
+// Continuous level of detail. Every element of a tree (a branch, a leaf
+// card) has a PRIORITY in 0..1: the trunk 0, limbs low, twigs high, leaves
+// spread uniformly above their branch. An instance drawn at detail d shows
+// the elements with priority <= d; veg.vert shrinks the ones just below d
+// to nothing and enlarges the remaining leaves to keep the crown covered,
+// so detail changes continuously with distance instead of in steps. The
+// draw buckets are prefixes of that ordering: bucket k holds the elements
+// with priority <= kVegDetail[k].
+constexpr float kVegDetail[4] = { 1.0f, 0.5f, 0.22f, 0.09f };
+
+// Generates the tree and appends the elements with priority <= max_detail
+// to `m`, uniformly scaled so it stands `target_height` metres tall (base
+// at the origin, +Y up).
+//   branch vertex : normal = outward normal, u = floor(priority * 1023) + radius (< 1 m), v = 8
+//   leaf card     : normal = corner - leaf origin, u = 4 * floor(priority * 1023) + corner (0..3),
+//                   v = 7 (broadleaf) / 9 (needles)
+void build_ez_tree(game::LevelMesh& m, const EzTreeOptions& o, float max_detail, float target_height);
 
 }  // namespace qlike

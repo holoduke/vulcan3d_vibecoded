@@ -147,7 +147,7 @@ layout(set = 0, binding = 25, std430) readonly buffer VoxShapeDir {
 const uint kVoxEmpty = 0xFFFFFFFFu;
 
 // Bound texture arrays (must match kTextureCount on the C++ side).
-const int kTextureCount = 15;     // +1 for kTexProcGrass (slot 12)
+const int kTextureCount = 17;     // +1 for kTexProcGrass (slot 12)
 // Procedurally-baked terrain material slots (see bake_terrain_materials
 // in world.cpp). Must match kTexRock/.. in vk_engine.h.
 const int kMatRock  = 7;
@@ -794,7 +794,7 @@ vec2 surface_rough_metal(int tex_idx, bool foliage, bool mesh_draw) {
 // (bark, rocks: foliage ray offsets but no translucency), 2/3 = metal,
 // 0 = dielectric.
 bool g_veg_solid = false;
-float g_card_shade = -2.0;     // leaf card: -1 twig, 0..1 leaf (edge .. midrib); -2 = not a card
+vec4 g_card_tex = vec4(0.0, 0.0, 0.0, -1.0);   // leaf card: atlas colour (a >= 0 marks a card pixel)
 float gbuf_flags(bool foliage, float metal) {
     return foliage ? (g_veg_solid ? 0.3333 : 1.0) : (metal > 0.5 ? 0.6667 : 0.0);
 }
@@ -1370,9 +1370,8 @@ void main() {
         int vm = int(vUv.y + 0.5);
         if ((vm == 2 || vm == 3) && veg_leaf_cut(vObjectPos, vWorldPos, vNormal, scene.camera_pos.xyz)) discard;
         if (vm == 7) {
-            float sh;
-            if (!veg_card(vObjectNormal.xy, vObjectNormal.z, sh)) discard;
-            g_card_shade = sh;
+            g_card_tex = texture(u_albedo[15], veg_card_uv(vObjectNormal.xy, vObjectNormal.z), -0.7);
+            if (g_card_tex.a < 0.33) discard;
         }
     }
     vec3 N = normalize(vNormal);
@@ -3039,10 +3038,9 @@ void main() {
         // Leaf-scale facets (GPU vegetation, near): every ~8 cm cell is one
         // "leaf" with its own tilt and tone, so a canopy catches the sun
         // as a mass of leaves rather than as one smooth surface.
-        if (g_card_shade > -1.5) {
-            // Leaf card: pale midrib, darker blade edge; the twig is bark brown.
-            if (g_card_shade < 0.0) albedo = vec3(0.16, 0.11, 0.07);
-            else albedo *= mix(0.78, 1.22, smoothstep(0.0, 0.9, g_card_shade));
+        if (g_card_tex.a >= 0.0) {
+            // Leaf card: photographed leaves, tinted per leaf / per tree (vColor).
+            albedo = g_card_tex.rgb * vColor;
         } else if (pc.grass_params.x > 0.5) {
             float lk = 1.0 - smoothstep(25.0, 55.0, distance(vWorldPos, scene.camera_pos.xyz));
             if (lk > 0.01) {

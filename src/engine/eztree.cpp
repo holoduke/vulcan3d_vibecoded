@@ -23,9 +23,9 @@ struct Rng {
 };
 
 struct Section { glm::vec3 origin; glm::quat q; float radius; };
-struct Branch { glm::vec3 origin; glm::quat q; float length, radius; int level, sections, segments; };
-struct SkBranch { std::vector<Section> sections; int segments; int level; };
-struct Leaf { glm::vec3 origin; glm::quat q; float size; };
+struct Branch { glm::vec3 origin; glm::quat q; float length, radius; int level, sections, segments; float prio; };
+struct SkBranch { std::vector<Section> sections; int segments; int level; float prio; };
+struct Leaf { glm::vec3 origin; glm::quat q; float size; float prio; };
 
 glm::quat axis_q(glm::vec3 axis, float ang) { return glm::angleAxis(ang, axis); }
 
@@ -36,9 +36,17 @@ struct Gen {
     std::vector<SkBranch> branches;
     std::vector<Leaf> leaves;
 
+    Rng prng{ 0x51ED270Bu };          // priorities: separate stream, the shape stays that of the seed
+    float cur_prio = 0.0f;            // priority of the branch being grown
     void record_leaf(glm::vec3 origin, glm::quat q) {
         const float size = o.leaf_size * (1.0f + rng.random(o.leaf_size_variance, -o.leaf_size_variance));
-        leaves.push_back({ origin, q, size });
+        leaves.push_back({ origin, q, size, prng.u() });   // uniform: the leaf count is proportional to the detail
+    }
+    // Children appear after their parent; thin orders come in late.
+    float child_prio(int level) {
+        const float lo = o.evergreen ? 0.0f : (level == 1 ? 0.0f : level == 2 ? 0.08f : 0.18f);
+        const float hi = o.evergreen ? 0.85f : (level == 1 ? 0.10f : level == 2 ? 0.32f : 0.55f);
+        return std::min(0.9f, cur_prio + lo + (hi - lo) * prng.u());
     }
     std::vector<int> shuffled(int count) {
         std::vector<int> a(static_cast<size_t>(count));
@@ -90,14 +98,15 @@ struct Gen {
             }
             q = glm::normalize(q);
         }
-        branches.push_back({ sec, br.segments, br.level });
+        branches.push_back({ sec, br.segments, br.level, br.prio });
+        cur_prio = br.prio;
 
         // Deciduous: a terminal branch continues from the end of the parent.
         if (!o.evergreen) {
             const Section& lastS = sec.back();
             if (br.level < o.levels)
                 queue.push_back({ lastS.origin, lastS.q, o.length[br.level + 1], lastS.radius, br.level + 1,
-                                  br.sections, br.segments });
+                                  br.sections, br.segments, child_prio(br.level + 1) });
             else
                 record_leaf(lastS.origin, lastS.q);
         }
@@ -120,7 +129,7 @@ struct Gen {
             const glm::quat cq = pq * axis_q(glm::vec3(0, 1, 0), radial) *
                                  axis_q(glm::vec3(1, 0, 0), glm::radians(o.angle[level]));
             const float len = o.length[level] * (o.evergreen ? 1.0f - st : 1.0f);
-            queue.push_back({ origin, cq, len, o.radius[level] * pr, level, o.sections[level], o.segments[level] });
+            queue.push_back({ origin, cq, len, o.radius[level] * pr, level, o.sections[level], o.segments[level], child_prio(level) });
         }
     }
 
@@ -142,7 +151,7 @@ struct Gen {
     }
 
     void run() {
-        queue.push_back({ glm::vec3(0.0f), glm::quat(1, 0, 0, 0), o.length[0], o.radius[0], 0, o.sections[0], o.segments[0] });
+        queue.push_back({ glm::vec3(0.0f), glm::quat(1, 0, 0, 0), o.length[0], o.radius[0], 0, o.sections[0], o.segments[0], 0.0f });
         while (!queue.empty()) {
             const Branch b = queue.front();
             queue.pop_front();
@@ -198,37 +207,33 @@ EzTreeOptions ez_preset_pine() {
     return o;
 }
 
-void build_ez_tree(game::LevelMesh& m, const EzTreeOptions& o, int lod, float target_height) {
+void build_ez_tree(game::LevelMesh& m, const EzTreeOptions& o, float max_detail, float target_height) {
     Gen g{ o, Rng{ o.seed * 2654435761u + 977u }, {}, {}, {} };
     g.run();
     float top = 1e-3f;
     for (const auto& b : g.branches) for (const auto& s : b.sections) top = std::max(top, s.origin.y);
     for (const auto& l : g.leaves) top = std::max(top, l.origin.y);
     const float sc = target_height / top;
-    auto sway = [&](glm::vec3 p_scaled) {
-        // Trunk base still, crown and outer branches move.
-        const float h = glm::clamp(p_scaled.y / target_height, 0.0f, 1.0f);
-        const float out = glm::clamp(glm::length(glm::vec2(p_scaled.x, p_scaled.z)) / (0.35f * target_height), 0.0f, 1.0f);
-        return glm::clamp(0.85f * h * h + 0.25f * out, 0.0f, 1.0f);
-    };
+    auto qprio = [](float p) { return std::floor(glm::clamp(p, 0.0f, 1.0f) * 1023.0f); };
 
     // ---- Branches: tubes through the section rings ----
-    const int stride = lod == 0 ? 1 : 2;
+    const int stride = max_detail > 0.6f ? 1 : 2;
     for (const auto& b : g.branches) {
-        if (lod >= 1 && b.level >= 3) continue;             // twigs are hidden in the leaves
-        const int segs = std::max(3, lod == 0 ? b.segments : (b.segments + 1) / 2 + 1);
+        if (b.prio > max_detail) continue;
+        const int segs = std::max(3, int(std::lround(float(b.segments) * glm::mix(0.5f, 1.0f, max_detail))));
         std::vector<Section> ring;
         for (size_t i = 0; i < b.sections.size(); i += size_t(stride)) ring.push_back(b.sections[i]);
         if ((b.sections.size() - 1) % size_t(stride) != 0) ring.push_back(b.sections.back());
         if (ring.size() < 2) continue;
         const uint32_t base = uint32_t(m.verts.size());
+        const float qp = qprio(b.prio);
         for (const Section& s : ring) {
             const glm::vec3 c = s.origin * sc;
-            const float w = sway(c);
+            const float r = glm::clamp(std::max(s.radius, 0.004f) * sc, 0.002f, 0.98f);
             for (int j = 0; j < segs; ++j) {
                 const float a = 2.0f * kPi * float(j) / float(segs);
                 const glm::vec3 n = glm::normalize(s.q * glm::vec3(std::cos(a), 0.0f, std::sin(a)));
-                push(m, c + n * (std::max(s.radius, 0.004f) * sc), n, w, 0.0f);
+                push(m, c + n * r, n, qp + r, 8.0f);
             }
         }
         for (size_t i = 0; i + 1 < ring.size(); ++i)
@@ -236,32 +241,30 @@ void build_ez_tree(game::LevelMesh& m, const EzTreeOptions& o, int lod, float ta
                 const uint32_t v1 = base + uint32_t(i) * uint32_t(segs) + uint32_t(j);
                 const uint32_t v2 = base + uint32_t(i) * uint32_t(segs) + uint32_t((j + 1) % segs);
                 const uint32_t v3 = v1 + uint32_t(segs), v4 = v2 + uint32_t(segs);
-                // Outward-facing with the engine's winding (front = cross(b - a, c - a)).
                 m.idx.insert(m.idx.end(), { v1, v3, v2, v2, v3, v4 });
             }
     }
 
-    // ---- Leaves: cards. The normal slot carries (u, v, kind + per-leaf
-    // tone): veg.vert builds the shading normal from the crown instead. ----
-    const size_t leaf_stride = lod == 0 ? 1 : 2;
-    const float leaf_scale = lod == 0 ? 1.0f : 1.45f;
-    Rng tone{ o.seed ^ 0x9E3779B9u };
-    for (size_t li = 0; li < g.leaves.size(); li += leaf_stride) {
-        const Leaf& l = g.leaves[li];
-        const float size = l.size * leaf_scale * sc;
+    // ---- Leaves: cards. A second, crossed card per leaf joins in at the
+    // upper half of the detail range. ----
+    const float mat = o.leaf_kind >= 1.0f ? 9.0f : 7.0f;
+    for (const Leaf& l : g.leaves) {
+        const float size = l.size * sc;
         const glm::vec3 origin = l.origin * sc;
-        const float w = sway(origin + glm::vec3(0.0f, size * 0.5f, 0.0f));
-        const float kind = o.leaf_kind + 0.05f + 0.9f * tone.u() * 0.999f;   // integer part = kind, fraction = tone
-        const int cards = (o.leaf_double && lod == 0) ? 2 : 1;
+        const int cards = o.leaf_double ? 2 : 1;
         for (int cIdx = 0; cIdx < cards; ++cIdx) {
+            const float prio = cIdx == 0 ? l.prio : 0.5f + 0.5f * l.prio;
+            if (prio > max_detail) continue;
+            const float qp = qprio(prio) * 4.0f;
             const glm::quat q = l.q * axis_q(glm::vec3(0, 1, 0), cIdx == 0 ? 0.0f : kPi * 0.5f);
             const glm::vec3 x = q * glm::vec3(size * 0.5f, 0.0f, 0.0f), y = q * glm::vec3(0.0f, size, 0.0f);
             const uint32_t k = uint32_t(m.verts.size());
-            push(m, origin - x + y, glm::vec3(0.0f, 1.0f, kind), w, 7.0f);
-            push(m, origin - x,     glm::vec3(0.0f, 0.0f, kind), w, 7.0f);
-            push(m, origin + x,     glm::vec3(1.0f, 0.0f, kind), w, 7.0f);
-            push(m, origin + x + y, glm::vec3(1.0f, 1.0f, kind), w, 7.0f);
-            m.idx.insert(m.idx.end(), { k, k + 1, k + 2, k, k + 2, k + 3 });
+            // corner id = u + 2 v
+            push(m, origin - x,     -x,     qp + 0.0f, mat);
+            push(m, origin + x,      x,     qp + 1.0f, mat);
+            push(m, origin - x + y, -x + y, qp + 2.0f, mat);
+            push(m, origin + x + y,  x + y, qp + 3.0f, mat);
+            m.idx.insert(m.idx.end(), { k, k + 1, k + 3, k, k + 3, k + 2 });
         }
     }
 }

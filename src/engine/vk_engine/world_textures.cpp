@@ -579,6 +579,7 @@ void VulkanEngine::init_textures() {
     }
 
     load_terrain_pbr_overrides();
+    load_foliage_textures();
 }
 
 // ----------------------------------------------------------------------
@@ -590,7 +591,70 @@ void VulkanEngine::init_textures() {
 // u_normal[kMatRock].a, so every layer that ships displacement gets
 // parallax-capable normals for free. Missing sets leave the procedural
 // bake in place (probe-and-fallback like every other asset).
+// Foliage textures (assets/foliage): the leaf / needle card atlas (RGBA,
+// alpha = coverage) and tree bark. The bark ships as albedo only; its
+// normal map (height in alpha) is derived from the luminance.
+void VulkanEngine::load_foliage_textures() {
+    auto resolve = [](const std::string& tail) -> std::string {
+        for (const std::string& p : { "assets/foliage/" + tail, "../assets/foliage/" + tail,
+                                      "../../assets/foliage/" + tail }) {
+            std::ifstream f(p);
+            if (f.good()) return p;
+        }
+        return std::string();
+    };
+    std::vector<TextureSlot> retired;
+    auto put = [&](TextureSlot& slot, const unsigned char* px, int w, int h, VkFormat fmt, const char* label) {
+        Texture2D t = upload_texture_from_pixels(device_, allocator_, graphics_queue_, graphics_queue_family_,
+                                                 px, w, h, fmt, label);
+        if (!t.ok) return;
+        retired.push_back(slot);
+        slot = { t.image, t.alloc, t.view };
+    };
+    int loaded = 0;
+    if (std::string p = resolve("leaf_atlas.png"); !p.empty()) {
+        int w = 0, h = 0, c = 0;
+        if (unsigned char* px = stbi_load(p.c_str(), &w, &h, &c, 4)) {
+            put(albedo_textures_[kTexLeaf], px, w, h, VK_FORMAT_R8G8B8A8_SRGB, "foliage/leaf_atlas");
+            stbi_image_free(px);
+            ++loaded;
+        }
+    }
+    if (std::string p = resolve("bark.png"); !p.empty()) {
+        int w = 0, h = 0, c = 0;
+        if (unsigned char* px = stbi_load(p.c_str(), &w, &h, &c, 4)) {
+            put(albedo_textures_[kTexBark], px, w, h, VK_FORMAT_R8G8B8A8_SRGB, "foliage/bark");
+            // Height = luminance (furrows are dark), normal = its gradient.
+            std::vector<float> ht(size_t(w) * size_t(h));
+            for (size_t i = 0; i < ht.size(); ++i)
+                ht[i] = (0.2126f * px[i * 4] + 0.7152f * px[i * 4 + 1] + 0.0722f * px[i * 4 + 2]) / 255.0f;
+            std::vector<unsigned char> nrm(size_t(w) * size_t(h) * 4);
+            auto H = [&](int x, int y) { return ht[size_t((y + h) % h) * size_t(w) + size_t((x + w) % w)]; };
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x) {
+                    const float dx = (H(x + 1, y) - H(x - 1, y)) * 3.0f, dy = (H(x, y + 1) - H(x, y - 1)) * 3.0f;
+                    const float il = 1.0f / std::sqrt(dx * dx + dy * dy + 1.0f);
+                    unsigned char* o = &nrm[(size_t(y) * size_t(w) + size_t(x)) * 4];
+                    o[0] = static_cast<unsigned char>(std::clamp((-dx * il * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+                    o[1] = static_cast<unsigned char>(std::clamp((dy * il * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+                    o[2] = static_cast<unsigned char>(std::clamp((il * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+                    o[3] = static_cast<unsigned char>(std::clamp(H(x, y) * 255.0f, 0.0f, 255.0f));
+                }
+            put(normal_textures_[kTexBark], nrm.data(), w, h, VK_FORMAT_R8G8B8A8_UNORM, "foliage/bark_n");
+            stbi_image_free(px);
+            ++loaded;
+        }
+    }
+    if (!retired.empty()) texture_upload_batch_sync(device_, allocator_, graphics_queue_);
+    for (TextureSlot& s : retired) {
+        if (s.view)  vkDestroyImageView(device_, s.view, nullptr);
+        if (s.image) vmaDestroyImage(allocator_, s.image, s.alloc);
+    }
+    log::infof("[foliage] %d/2 textures loaded (leaf atlas, bark)", loaded);
+}
+
 void VulkanEngine::load_terrain_pbr_overrides() {
+
     struct PbrSet { int slot; const char* name; };
     const PbrSet sets[] = {
         { kTexRock,  "Rock035"   },
@@ -1083,6 +1147,9 @@ void VulkanEngine::bake_terrain_materials() {
         // ambientCG sets in load_terrain_pbr_overrides()).
         { TM_ROCK,  kTexRoof,      "terrain/roof_placeholder" },
         { TM_DIRT,  kTexRoad,      "terrain/road_placeholder" },
+        // Placeholders for the foliage slots (load_foliage_textures()).
+        { TM_GRASS, kTexLeaf,      "foliage/leaf_placeholder" },
+        { TM_ROCK,  kTexBark,      "foliage/bark_placeholder" },
     };
     // CPU generation of all materials in parallel (pure functions of
     // kind + size); uploads stay on this thread (queue owner).

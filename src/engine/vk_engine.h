@@ -270,6 +270,7 @@ private:
     // bakes (assets/terrain_pbr). AO baked into albedo, displacement
     // packed into the normal alpha for the POM marcher.
     void load_terrain_pbr_overrides();
+    void load_foliage_textures();
     void destroy_textures();
     // Recreate texture_sampler_ with the FSR2 mip-bias if applicable.
     // Idempotent — bias resolves to 0 when fsr2 is off or render scale
@@ -676,7 +677,7 @@ private:
     // are procedurally baked seamless terrain materials, splatted in
     // cube.frag's is_terrain block by the height/slope weights.
     static constexpr int kFileTextureCount   = 7;
-    static constexpr int kTerrainMatCount    = 8;     // +ProcGrass, Roof, Road
+    static constexpr int kTerrainMatCount    = 10;    // +ProcGrass, Roof, Road, Leaf atlas, Bark
     static constexpr int kTextureCount       = kFileTextureCount +
                                                kTerrainMatCount;   // 15
     // Albedo/normal-array indices of the baked terrain materials.
@@ -696,6 +697,10 @@ private:
     // load_terrain_pbr_overrides() from assets/terrain_pbr/.
     static constexpr int kTexRoof = kFileTextureCount + 6;  // 13
     static constexpr int kTexRoad = kFileTextureCount + 7;  // 14
+    // 15: foliage atlas (RGBA, alpha = coverage; broadleaf twig left half,
+    // conifer spray right half). 16: tree bark. assets/foliage/.
+    static constexpr int kTexLeaf = kFileTextureCount + 8;  // 15
+    static constexpr int kTexBark = kFileTextureCount + 9;  // 16
     struct TextureSlot {
         VkImage image = VK_NULL_HANDLE;
         VmaAllocation alloc = nullptr;
