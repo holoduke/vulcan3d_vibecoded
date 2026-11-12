@@ -1821,6 +1821,7 @@ void VulkanEngine::init_grass_mask_texture() {
     load_grass_mask();
     // Keep the road paving + verge clear of blades.
     clear_grass_mask(castle_road_, grass_mask_data_, dim, kWorldSide);
+    if (!cave_footprint_.empty()) clear_grass_mask(cave_footprint_, grass_mask_data_, dim, kWorldSide);
 
     // Upload as a sampled RG8 image.
     VkImageCreateInfo ici{};

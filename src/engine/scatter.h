@@ -79,6 +79,7 @@ struct ScatterParams {
     glm::vec2 keep_out_xz = glm::vec2(14.0f, 14.0f);
     // Optional extra keep-out (the castle road). Null = none.
     const struct Road* road = nullptr;
+    const struct Road* road2 = nullptr;   // second keep-out footprint (the cave)
     // When set, per-instance offsets to the raymarched surface are
     // precomputed (`rm_octaves` FBM octaves, the near-camera detail).
     const HeightmapParams* rm_params = nullptr;

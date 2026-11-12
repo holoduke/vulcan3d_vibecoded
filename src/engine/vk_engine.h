@@ -24,6 +24,7 @@
 #include "engine/grass.h"
 #include "engine/scatter.h"
 #include "engine/road.h"
+#include "engine/cave.h"
 #include "engine/world_props.h"
 #include "engine/aa_vehicle.h"
 #include "engine/texture.h"   // for BackgroundDecodeHandle
@@ -1384,6 +1385,8 @@ private:
     // heightmap is cached; drives carving, grass/scatter keep-out and
     // the terrain shader road polyline (SceneUBO road_pts).
     Road castle_road_{};
+    Cave cave_;                 // cave beside the road (cave.h)
+    Road cave_footprint_;       // its footprint, for vegetation keep-outs
     // Castle mesh parts (round towers, roofs, gate arch) from
     // Level::meshes, lifted to the plateau. Raster through the world
     // pipeline in "static mesh" mode (grass_params.w = -1: UV texturing,

@@ -240,6 +240,15 @@ void VulkanEngine::init_world() {
         castle_road_ = make_castle_road(hm, rt_.water_level, hp.plateau_height + 0.05f);
         carve_heights(castle_road_, hm);
         log::infof("[road] %zu centreline points carved", castle_road_.pts.size());
+        // Cave beside the road: trench carved here (same reason as the road),
+        // rock shell appended with the other world meshes below.
+        cave_ = make_cave(hm, castle_road_, rt_.water_level);
+        carve_cave(cave_, hm);
+        cave_footprint_ = cave_footprint(cave_);
+        if (!cave_.empty())
+            log::infof("[cave] mouth at (%.1f, %.1f, %.1f) heading (%.2f, %.2f), end (%.1f, %.1f, %.1f)",
+                       cave_.mouth.x, cave_.mouth.y, cave_.mouth.z, cave_.mouth_dir.x, cave_.mouth_dir.z,
+                       cave_.pts[size_t(cave_.n_inner - 1)].x, cave_.pts[size_t(cave_.n_inner - 1)].y, cave_.pts[size_t(cave_.n_inner - 1)].z);
         // Cache for collision + Phase 4 sculpt access.
         terrain_data_.dim = hm.dim;
         terrain_data_.cell = hm.cell;
@@ -364,6 +373,7 @@ void VulkanEngine::init_world() {
                 log::infof("[outpost] tower style %d at (%.0f, %.1f, %.0f)", st, cd.p.x, cd.p.y, cd.p.z);
             }
         }
+        append_cave_mesh(world_, cave_);
         // Procedural trees, bushes, rock formations: GPU-instanced with LOD
         // over the whole map (vegetation.cpp). Adds trunk / rock colliders.
         place_aa_vehicles(hm);           // before vegetation (keep-out)
@@ -447,6 +457,7 @@ void VulkanEngine::init_world() {
         sp.rock_band_h = rt_.terrain_h_dirt_rock_start;
         sp.snow_band_h = rt_.terrain_h_rock_snow_start;
         sp.road = &castle_road_;
+        sp.road2 = cave_footprint_.empty() ? nullptr : &cave_footprint_;
         sp.rm_params = &hp;   // offsets onto the raymarched surface
         scatter_ = build_scatter(device_, allocator_,
                                  graphics_queue_, graphics_queue_family_,
