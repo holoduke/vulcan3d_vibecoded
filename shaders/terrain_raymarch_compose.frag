@@ -62,7 +62,7 @@ void main() {
 
     // Sky pixels: raymarch leaves depth = 1.0 on miss. Discard preserves
     // the existing sky clear in scene_color and the cube prepass depth.
-    if (lr_depth >= 0.9999) discard;
+    if (lr_depth >= 0.99999) discard;
 
     // Depth-aware bilateral 4-tap upsample, using textureGather: one
     // instruction returns the 4 LR-depth corners surrounding `uv`,

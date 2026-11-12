@@ -98,7 +98,26 @@ layout(set = 0, binding = 13) uniform sampler2D u_grass_mask;
 layout(set = 0, binding = 14) uniform sampler2D u_fog_wisp;
 #ifndef QLIKE_WATER
 // Small-object (flowers / ferns / clutter rocks) sun shadow map, D32.
-layout(set = 0, binding = 28) uniform sampler2D u_clutter_shadow;
+layout(set = 0, binding = 28) uniform sampler2DArray u_clutter_shadow;   // layer 0 = 64 m, 1 = 16 m near
+// Smooth 3x3 PCF on one layer of the small-caster shadow map: the edge
+// taps are weighted by the sub-texel position (4x4 fetches), so the
+// result changes continuously across a texel instead of in texel-sized
+// steps - without it close shadows look like stacked blocks.
+float clutterOcc(vec2 uv, int layer, float zref) {
+    vec2 st = uv * vec2(textureSize(u_clutter_shadow, 0).xy) - 0.5;
+    ivec2 b = ivec2(floor(st));
+    vec2 fr = st - vec2(b);
+    float occ = 0.0;
+    for (int y = -1; y <= 2; ++y) {
+        float wy = (y == -1) ? 1.0 - fr.y : (y == 2 ? fr.y : 1.0);
+        for (int x = -1; x <= 2; ++x) {
+            float wx = (x == -1) ? 1.0 - fr.x : (x == 2 ? fr.x : 1.0);
+            float zc = texelFetch(u_clutter_shadow, ivec3(b + ivec2(x, y), layer), 0).r;
+            occ += (zc < zref) ? wx * wy : 0.0;
+        }
+    }
+    return occ / 9.0;
+}
 #endif /* ! QLIKE_WATER */
 const float kHeightmapSide = 2048.0;
 // Forward decl — terrainDetailNoise is defined after `noised` + `m2`
@@ -1387,7 +1406,9 @@ float grass_blade_shadow(vec3 p, vec3 L) {
         if (t > t_max) break;
         vec3 q = p + L * t;
         float d = gs_map(q, p.y);
-        res = min(res, 10.0 * max(d, 0.0) / t);
+        // Wide penumbra: the terrain is shaded at reduced resolution, where
+        // hair-thin blade shadows would average away to nothing.
+        res = min(res, 7.0 * max(d, 0.0) / t);
         if (res < 0.02) break;
         t += clamp(d, 0.015, 0.14);
     }
@@ -2722,7 +2743,7 @@ void main() {
         // threshold so far water doesn't get repainted as sky-below-
         // horizon (black). Guard against w<=0 (point behind camera) so
         // the depth divide doesn't produce NaN.
-        gl_FragDepth = min(clipW.z / max(clipW.w, 1e-4), 0.9998);
+        gl_FragDepth = min(clipW.z / max(clipW.w, 1e-4), 0.99998);
 #endif /* ! QLIKE_WATER */
         // Distance fog on the water surface too.
         {
@@ -3004,14 +3025,13 @@ void main() {
         vec2 luv = lc.xy * 0.5 + 0.5;
         if (all(greaterThan(luv, vec2(0.002))) && all(lessThan(luv, vec2(0.998))) &&
             lc.z > 0.0 && lc.z < 1.0) {
-            vec2 ts = 1.0 / vec2(textureSize(u_clutter_shadow, 0));
-            float occ = 0.0;
-            for (int y = -1; y <= 1; ++y)
-                for (int x = -1; x <= 1; ++x) {
-                    float zc = textureLod(u_clutter_shadow, luv + vec2(x, y) * ts, 0.0).r;
-                    occ += (zc < lc.z - 0.0004) ? 1.0 : 0.0;
-                }
-            occ /= 9.0;
+            float occ = clutterOcc(luv, 0, lc.z - 0.0004);
+            // Near cascade (layer 1): same centre, 4x finer (0.8 cm texels
+            // over 16 m) for crisp stem / petal shadows close by.
+            vec2 nndc = lc.xy * 4.0;
+            float nr = max(abs(nndc.x), abs(nndc.y));
+            if (nr < 0.97)
+                occ = mix(clutterOcc(nndc * 0.5 + 0.5, 1, lc.z - 0.00025), occ, smoothstep(0.80, 0.97, nr));
             float edge = min(min(luv.x, luv.y), min(1.0 - luv.x, 1.0 - luv.y));
             occ *= smoothstep(0.0, 0.08, edge) * 0.85;
             self_shadow = 1.0 - (1.0 - self_shadow) * (1.0 - occ);
@@ -3023,6 +3043,15 @@ void main() {
     if (scene.grass_rm_params2.y > 0.5 && dif > 0.0 &&
         !(scene.water_params.x > 0.5 && pos.y < scene.water_params.y + 0.05)) {
         float gp = grassEligibility(pos.xz, pos.y);
+        // Bare ground beside a grass patch is shaded by the blades that stand
+        // toward the sun, so also look for grass a blade-shadow length that way
+        // (without this the edge of a patch cast nothing onto the dirt).
+        {
+            float g_bh = clamp(scene.grass_rm_params.x, 0.05, 3.0) * 0.36;
+            vec2  g_reach = sunDir.xz * (g_bh / max(sunDir.y, 0.2));
+            gp = max(gp, max(grassEligibility(pos.xz + g_reach * 0.35, pos.y),
+                             grassEligibility(pos.xz + g_reach * 0.80, pos.y)));
+        }
         if (gp > 0.02) {
             float gstr = scene.grass_rm_params2.z;
             float cdist = distance(pos, scene.camera_pos.xyz);
@@ -3032,7 +3061,7 @@ void main() {
             float gvis = far_vis;
             if (near_w > 0.01) {
                 float exact = grass_blade_shadow(pos, sunDir);
-                gvis = mix(far_vis, mix(1.0, exact, gstr * 0.85 + 0.15), near_w);
+                gvis = mix(far_vis, mix(1.0, exact, gstr * 0.6 + 0.4), near_w);
             }
             self_shadow = 1.0 - (1.0 - self_shadow) * gvis;
         }
@@ -3675,7 +3704,7 @@ void main() {
 #endif /* QLIKE_WATER */
     vec4 clip = pc.mvp * vec4(pos, 1.0);
 #ifndef QLIKE_WATER
-    gl_FragDepth = min(clip.z / max(clip.w, 1e-4), 0.9998);
+    gl_FragDepth = min(clip.z / max(clip.w, 1e-4), 0.99998);
 #endif /* ! QLIKE_WATER */
 
     // Distance fog — final atmospheric mix, after all the other

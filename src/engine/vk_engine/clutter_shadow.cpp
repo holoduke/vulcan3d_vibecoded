@@ -103,7 +103,7 @@ void VulkanEngine::init_clutter_shadow() {
     cfg.vattrs = { a0, a2, a3, a4 };
     clutter_shadow_pipeline_ = vkpipe::build_graphics_pipeline(device_, cfg);
     {
-        VkDescriptorImageInfo ii{ clutter_shadow_sampler_, clutter_shadow_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo ii{ clutter_shadow_sampler_, clutter_shadow_array_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkWriteDescriptorSet w{};
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w.dstSet = scene_desc_set_; w.dstBinding = 28; w.descriptorCount = 1;
