@@ -2,6 +2,7 @@
 
 #include "engine/road.h"
 #include "engine/terrain.h"
+#include "engine/lsystem.h"
 
 #include <glm/geometric.hpp>
 #include <glm/common.hpp>
@@ -414,56 +415,99 @@ void build_conifer(LevelMesh& m, const PineParams& p, int lod) {
         add_limb(m, axis(ya), axis(yb), trunk_r(ya), trunk_r(yb), tsegs,
                  0.35f * glm::max(ya, 0.0f) / p.H, 0.35f * yb / p.H, 0.0f);
     }
-    // Whorls of fronds.
-    const int whorls = lod == 0 ? glm::clamp(int(p.H * 1.15f), 10, 17) : glm::clamp(int(p.H * 0.62f), 6, 9);
-    const int nb = lod == 0 ? 6 : 5;
-    const int N  = lod == 0 ? 3 : 2;
-    const float y_lo = p.H * 0.17f, y_hi = p.H * 0.95f;
-    for (int w = 0; w < whorls; ++w) {
-        const float f = (float(w) + 0.6f * U(r)) / float(whorls);          // 0 bottom .. 1 top
-        const float y = glm::mix(y_lo, y_hi, f);
-        float L = p.r0 * 1.15f * std::pow(1.0f - f, 0.8f) + 0.22f;
-        if (f < 0.14f) L *= 0.7f + 2.1f * f;                                  // shaded-out lowest branches
-        const float elev = glm::mix(-0.30f, 0.60f, f * f);                   // sag below, upswept above
-        const float sag  = glm::mix(0.50f, 0.06f, f);
-        const float a0 = U(r) * 6.2831853f;
-        const int cnt = nb + ((lod == 0 && U(r) < 0.35f) ? 1 : 0);
-        for (int b = 0; b < cnt; ++b) {
-            const float ang = a0 + 6.2831853f * float(b) / float(cnt) + (U(r) - 0.5f) * 0.55f;
-            const float Lb = L * (0.78f + 0.44f * U(r));
-            const glm::vec3 out(std::cos(ang), 0.0f, std::sin(ang));
-            const glm::vec3 side(-out.z, 0.0f, out.x);
-            const glm::vec3 base = axis(y + (U(r) - 0.5f) * 0.3f);
-            const float Wmax = (0.24f * Lb + 0.15f) * (lod == 0 ? 1.0f : 1.3f);
-            const float te = std::tan(elev);
-            glm::vec3 rib[4], lf[4], rg[4];
-            float wt[4];
-            for (int k = 0; k <= N; ++k) {
-                const float s = float(k) / float(N);
-                rib[k] = base + out * (Lb * s) + up * (te * Lb * s - sag * Lb * s * s);
-                float wk = Wmax * std::pow(1.0f - s, 0.55f) * (0.45f + 0.55f * glm::min(1.0f, s * 3.0f));
-                wk *= 0.85f + 0.3f * U(r);
-                lf[k] = rib[k] + side * wk - up * (0.42f * wk);
-                rg[k] = rib[k] - side * wk - up * (0.42f * wk);
-                wt[k] = 0.12f + 0.45f * f + 0.4f * s;
+    (void)r; (void)U;
+    // Branching (L-system, monopodial): the trunk apex T puts out a whorl
+    // of boughs Q at every node; each bough carries pairs of side
+    // branchlets, and every branchlet ends in a flat, drooping needle
+    // spray N. Boughs are long and sagging low down, short and upswept
+    // toward the top (pitch from the trunk 108 -> 52 deg).
+    //   T(w) : w < W -> [ /(a) &(pitch) $ Q(L_w) ] x n   f(dy) /(r) T(w+1)
+    //   Q(l) : F [ +N ] [ -N ] F [ +N ] [ -N ] F N
+    {
+        using namespace lsys;
+        const int whorls = lod == 0 ? glm::clamp(int(p.H * 1.05f), 10, 16) : glm::clamp(int(p.H * 0.62f), 6, 9);
+        const int nb = lod == 0 ? 7 : 5;
+        const float y_lo = p.H * 0.17f, y_hi = p.H * 0.95f;
+        Grammar g;
+        g.axiom = { { 'f', y_lo }, { 'T', 0.0f } };
+        g.rules['T'] = [&](const Module& mm, Rng& rr, Str& o) {
+            const int w = int(mm.a + 0.5f);
+            if (w >= whorls) return;
+            const float f = (float(w) + 0.5f) / float(whorls);               // 0 bottom .. 1 top
+            float L = p.r0 * 1.15f * std::pow(1.0f - f, 0.8f) + 0.22f;
+            if (f < 0.14f) L *= 0.7f + 2.1f * f;                              // shaded-out lowest boughs
+            const float pitch = glm::mix(108.0f, 52.0f, f * f);
+            const int cnt = nb + ((lod == 0 && rr.u() < 0.35f) ? 1 : 0);
+            for (int b = 0; b < cnt; ++b) {
+                o.push_back({ '[' });
+                o.push_back({ '/', 360.0f * (float(b) + 0.5f) / float(cnt) + rr.range(-16.0f, 16.0f) });
+                o.push_back({ '&', pitch + rr.range(-7.0f, 7.0f) });
+                o.push_back({ '$' });
+                o.push_back({ 'Q', L * rr.range(0.78f, 1.22f) });
+                o.push_back({ ']' });
             }
-            const glm::vec3 bias = up * 0.35f + out * 0.35f;
-            for (int k = 0; k < N; ++k) {
-                tri2(m, rib[k], rib[k + 1], lf[k], wt[k], wt[k + 1], wt[k], 1.0f, bias);
-                tri2(m, rib[k], rg[k], rib[k + 1], wt[k], wt[k], wt[k + 1], 1.0f, bias);
-                if (k + 1 < N) {
-                    tri2(m, lf[k], rib[k + 1], lf[k + 1], wt[k], wt[k + 1], wt[k + 1], 1.0f, bias);
-                    tri2(m, rg[k], rg[k + 1], rib[k + 1], wt[k], wt[k + 1], wt[k + 1], 1.0f, bias);
+            o.push_back({ 'f', (y_hi - y_lo) / float(whorls) * rr.range(0.85f, 1.15f) });
+            o.push_back({ '/', rr.range(25.0f, 85.0f) });
+            o.push_back({ 'T', float(w + 1) });
+        };
+        g.rules['Q'] = [&](const Module& mm, Rng& rr, Str& o) {
+            const float l = mm.a;
+            auto pair = [&](float ang, float len) {
+                for (int sgn = 0; sgn < 2; ++sgn) {
+                    o.push_back({ '[' });
+                    o.push_back({ sgn ? '+' : '-', ang + rr.range(-8.0f, 8.0f) });
+                    o.push_back({ 'N', len * rr.range(0.85f, 1.15f), lod == 0 ? 1.0f : 1.35f });
+                    o.push_back({ ']' });
                 }
+            };
+            o.push_back({ '!', 0.014f + 0.013f * l });
+            if (lod == 0) {
+                o.push_back({ 'F', l * 0.34f }); pair(58.0f, l * 0.42f);
+                o.push_back({ 'N', l * 0.36f, 0.8f });                     // needles on the bough itself
+                o.push_back({ 'F', l * 0.30f }); pair(52.0f, l * 0.32f);
+                o.push_back({ 'F', l * 0.20f });
+                o.push_back({ 'N', l * 0.34f, 1.0f });
+            } else {
+                o.push_back({ 'F', l * 0.50f }); pair(56.0f, l * 0.46f);
+                o.push_back({ 'F', l * 0.22f });
+                o.push_back({ 'N', l * 0.44f, 1.35f });
             }
-            // Bare branch under the inner part of the frond (near LOD only).
-            if (lod == 0 && Lb > 1.0f)
-                add_limb(m, base - up * 0.03f, glm::mix(rib[1], rib[2], 0.3f) - up * 0.04f,
-                         0.05f + 0.012f * Lb, 0.015f, 3, wt[0], wt[1], 0.0f);
+        };
+        TurtleParams tp;
+        tp.taper = 0.72f;
+        tp.bend = 0.13f;                                                      // boughs sag under their own weight
+        tp.organs = "N";
+        const Shape sh = interpret(g.derive(whorls + 2, uint32_t(p.seed * 1000.0f) + 17u), tp);
+        auto lean = [&](glm::vec3 q) { return q + glm::vec3(p.lean * q.y / p.H, 0.0f, 0.0f); };
+        auto wt = [&](glm::vec3 q) {
+            return 0.12f + 0.45f * glm::clamp(q.y / p.H, 0.0f, 1.0f) +
+                   0.4f * glm::clamp(glm::length(glm::vec2(q.x, q.z)) / (p.r0 * 1.3f), 0.0f, 1.0f);
+        };
+        if (lod == 0)
+            for (const auto& s : sh.segs)
+                add_limb(m, lean(s.a), lean(s.b), s.r0, s.r1, 3, wt(s.a), wt(s.b), 1.0f);   // needle-clad twigs
+        for (const auto& o : sh.organs) {
+            const float len = glm::max(o.a, 0.36f);                          // even the top sprays stay visible
+            glm::vec3 side = glm::cross(up, o.H);
+            side = glm::dot(side, side) > 1e-5f ? glm::normalize(side) : o.L;
+            const float w = len * 0.40f * o.b;
+            const glm::vec3 p0 = lean(o.pos);
+            const glm::vec3 p1 = lean(o.pos + o.H * (len * 0.5f) - up * (0.05f * len));
+            const glm::vec3 p2 = lean(o.pos + o.H * len - up * (0.22f * len));
+            const glm::vec3 hang = up * (0.38f * w);                          // spray sides hang below the rib
+            const glm::vec3 l1 = p1 + side * w - hang, r1 = p1 - side * w - hang;
+            const float w0 = wt(o.pos), w1 = glm::min(1.0f, w0 + 0.12f), w2 = glm::min(1.0f, w0 + 0.25f);
+            glm::vec3 out(o.pos.x, 0.0f, o.pos.z);
+            out = glm::dot(out, out) > 1e-6f ? glm::normalize(out) : glm::vec3(1.0f, 0.0f, 0.0f);
+            const glm::vec3 bias = up * 0.35f + out * 0.35f;
+            tri2(m, p0, l1, p1, w0, w1, w1, 1.0f, bias);
+            tri2(m, p0, p1, r1, w0, w1, w1, 1.0f, bias);
+            tri2(m, p1, l1, p2, w1, w1, w2, 1.0f, bias);
+            tri2(m, p1, p2, r1, w1, w2, w1, 1.0f, bias);
         }
     }
     // Leader tuft at the very top.
-    add_cone(m, axis(p.H * 0.88f), 0.34f, p.H * 0.14f + 0.5f, lod == 0 ? 6 : 5, p.seed, 0.6f, 1.0f, 1.0f);
+    add_cone(m, axis(p.H * 0.93f), 0.30f, p.H * 0.06f + 0.45f, lod == 0 ? 6 : 5, p.seed, 0.6f, 1.0f, 1.0f);
 }
 
 struct SkNode { glm::vec3 p; int parent; float r; int kids; };
@@ -718,8 +762,81 @@ void build_oak(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, const I
     }
 }
 
+// Shrub (L-system, sympodial): several woody stems fan out from the base,
+// each forking twice while bending up toward the light; leaf clumps sit
+// on the twig tips and along the second-order branches, so a bush shows
+// stems and gaps instead of being a pile of balls.
+//   axiom  : [ /(137.5 k) &(lean) A(l, 0) ] per stem
+//   A(l,o) : o < 2 -> F(l) [side leaf clump] [ /() &() A(l r, o+1) ] x n
+//            o = 2 -> T (tip leaf clump)
+void build_shrub(LevelMesh& m, const BushParams& p, int lod, const Ico& lo) {
+    using namespace lsys;
+    Grammar g;
+    {
+        Rng r{ uint32_t(p.seed * 1000.0f) + 5u };
+        const int stems = 4 + (p.blobs > 4 ? 1 : 0);
+        for (int k = 0; k < stems; ++k) {
+            g.axiom.push_back({ '[' });
+            g.axiom.push_back({ '/', 137.5f * float(k) + r.range(-20.0f, 20.0f) });
+            g.axiom.push_back({ '&', k == 0 ? r.range(4.0f, 14.0f) : r.range(40.0f, 64.0f) });
+            g.axiom.push_back({ '!', 0.034f });
+            g.axiom.push_back({ 'A', r.range(0.46f, 0.64f), 0.0f });
+            g.axiom.push_back({ ']' });
+        }
+    }
+    g.rules['A'] = [](const Module& mm, Rng& r, Str& o) {
+        const float l = mm.a;
+        const int ord = int(mm.b + 0.5f);
+        if (ord >= 2) { o.push_back({ 'F', l * 0.6f }); o.push_back({ 'T', 1.0f }); return; }
+        o.push_back({ 'F', l });
+        {   // leaves along the branch as well as at its tips (low ones hide the bare base)
+            o.push_back({ '[' }); o.push_back({ '/', r.range(1.0f, 360.0f) }); o.push_back({ '&', r.range(50.0f, 80.0f) });
+            o.push_back({ 'f', 0.08f }); o.push_back({ 'T', ord == 0 ? 0.9f : 0.75f }); o.push_back({ ']' });
+        }
+        const int n = (ord == 0 && r.u() < 0.4f) ? 3 : 2;
+        const float roll0 = r.range(1.0f, 360.0f);
+        for (int c = 0; c < n; ++c) {
+            o.push_back({ '[' });
+            o.push_back({ '/', roll0 + 360.0f * float(c) / float(n) + r.range(-25.0f, 25.0f) });
+            o.push_back({ '&', r.range(22.0f, 40.0f) });
+            o.push_back({ '!', 0.034f * std::pow(0.58f, float(ord + 1)) });
+            o.push_back({ 'A', l * r.range(0.62f, 0.80f), float(ord + 1) });
+            o.push_back({ ']' });
+        }
+    };
+    TurtleParams tp;
+    tp.radius = 0.034f; tp.taper = 0.8f;
+    tp.tropism = glm::vec3(0.0f, 1.0f, 0.0f);
+    tp.bend = 0.45f;                                         // stems curve up toward the light
+    tp.organs = "T";
+    const Shape sh = interpret(g.derive(4, uint32_t(p.seed * 1000.0f) + 23u), tp);
+    const glm::vec3 sc(p.sx, p.sy, p.sx);
+    float top = 0.5f;
+    for (const auto& o : sh.organs) top = std::max(top, o.pos.y * p.sy + 0.3f);
+    auto sway = [&](glm::vec3 q) { return 0.04f + 0.34f * glm::clamp(q.y / top, 0.0f, 1.0f); };
+    for (const auto& s : sh.segs) {
+        if (lod == 1 && s.r0 < 0.013f) continue;
+        const glm::vec3 a = s.a * sc, b = s.b * sc;
+        add_limb(m, a, b, s.r0, s.r1, s.r0 > 0.02f ? (lod == 0 ? 6 : 4) : 3, sway(a), sway(b), 0.0f);
+    }
+    std::mt19937 rr(uint32_t(p.seed * 1000.0f) + 41u);
+    std::uniform_real_distribution<float> U(0.0f, 1.0f);
+    int ci = 0;
+    for (const auto& o : sh.organs) {
+        const float u1 = U(rr), u2 = U(rr), u3 = U(rr);
+        ++ci;
+        if (lod == 1 && (ci & 1)) continue;                  // mid range: half the clumps, larger
+        const float rad = (0.25f + 0.11f * u1) * o.a * (lod == 0 ? 1.0f : 1.5f);
+        const glm::vec3 c = (o.pos + o.H * (rad * 0.45f)) * sc;
+        add_blob(m, lo, c, glm::vec3(rad * p.sx, rad * (0.74f + 0.2f * u2) * glm::mix(1.0f, p.sy, 0.5f), rad * p.sx),
+                 u3 * 6.28f, p.seed * 5.0f + float(ci) * 1.7f, 0.32f, 2.8f, 0.0f, -0.05f,
+                 glm::vec2(sway(c), 3.0f), glm::min(0.45f, sway(c) + 0.08f));
+    }
+}
+
 void build_bush(LevelMesh& m, const BushParams& p, int lod, const Ico& lo, const Ico& tiny,
                 const Ico& hi) {
+    if (lod <= 1) { build_shrub(m, p, lod, lo); return; }
     const int n = (lod == 0) ? p.blobs : (lod == 1) ? 2 : 1;
     const Ico& ico = (lod == 0) ? hi : (lod == 1) ? lo : tiny;
     for (int k = 0; k < n; ++k) {

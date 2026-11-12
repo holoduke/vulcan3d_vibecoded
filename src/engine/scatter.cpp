@@ -2,6 +2,7 @@
 #include "engine/road.h"
 #include "engine/terrain.h"
 #include "engine/log.h"
+#include "engine/lsystem.h"
 
 #include <glm/geometric.hpp>
 #include <glm/gtc/constants.hpp>
@@ -104,35 +105,6 @@ void plant_quad(std::vector<Vertex>& v, std::vector<uint32_t>& ix,
     ix.insert(ix.end(), { k, k + 1, k + 2, k, k + 2, k + 3 });
 }
 
-// Fern: 9 arching fronds, 10 segments each, folded along the rib, with a
-// serrated width profile so each frond reads as rows of leaflets.
-void build_fern(std::vector<Vertex>& v, std::vector<uint32_t>& ix) {
-    const int fronds = 9, segs = 10;
-    for (int f = 0; f < fronds; ++f) {
-        float ang = 6.2831853f * float(f) / float(fronds) + 0.35f * std::sin(float(f) * 2.1f);
-        glm::vec3 dir(std::cos(ang), 0.0f, std::sin(ang));
-        glm::vec3 side(-dir.z, 0.0f, dir.x);
-        float len = 0.80f + 0.30f * std::sin(float(f) * 1.7f);
-        float rise = 0.50f + 0.15f * std::cos(float(f) * 2.9f);
-        auto rib = [&](float t) {
-            float r = t * len;
-            return dir * r + glm::vec3(0.0f, std::sin(t * 2.2f) * rise * len - t * t * 0.28f, 0.0f);
-        };
-        auto width = [&](float t) {
-            float env = 0.17f * std::sin(3.14159f * std::min(1.0f, t * 1.05f + 0.04f));
-            return env * (0.55f + 0.45f * std::abs(std::sin(t * 3.14159f * 7.0f)));   // leaflets
-        };
-        for (int s = 0; s < segs; ++s) {
-            float t0 = float(s) / segs, t1 = float(s + 1) / segs;
-            float w0 = width(t0), w1 = width(t1);
-            glm::vec3 p0 = rib(t0), p1 = rib(t1);
-            glm::vec3 fold(0.0f, -0.035f, 0.0f);
-            plant_quad(v, ix, p0, p0 + side * w0 + fold, p1 + side * w1 + fold, p1, 0.0f, t0, t1);
-            plant_quad(v, ix, p0 - side * w0 + fold, p0, p1, p1 - side * w1 + fold, 0.0f, t0, t1);
-        }
-    }
-}
-
 // Tapered tube along `path` (stems), `sides` around, part 0 (leaf colour);
 // uv.y = sway weight w0 -> w1.
 void plant_tube(std::vector<Vertex>& v, std::vector<uint32_t>& ix, const std::vector<glm::vec3>& path,
@@ -183,10 +155,10 @@ void plant_leaf(std::vector<Vertex>& v, std::vector<uint32_t>& ix, glm::vec3 b, 
 // Flower head at hc facing `up`: segmented rounded petals that cup
 // progressively along their length, plus a domed centre.
 void plant_head(std::vector<Vertex>& v, std::vector<uint32_t>& ix, glm::vec3 hc, glm::vec3 up,
-                int petals, float head_r, float petal_cup, float petal_w, float seed) {
+                int petals, float head_r, float petal_cup, float petal_w, float seed,
+                float sway = 1.0f, int segs = 3) {
     glm::vec3 t1 = glm::normalize(glm::cross(up, std::abs(up.z) < 0.9f ? glm::vec3(0, 0, 1) : glm::vec3(1, 0, 0)));
     glm::vec3 t2 = glm::cross(up, t1);
-    const int segs = 3;
     for (int p = 0; p < petals; ++p) {
         float am = 6.2831853f * (float(p) + 0.5f) / float(petals) + seed;
         float half = 3.14159f / float(petals) * petal_w;
@@ -203,9 +175,9 @@ void plant_head(std::vector<Vertex>& v, std::vector<uint32_t>& ix, glm::vec3 hc,
             float t = float(s) / segs;
             glm::vec3 a = pt(t, -1.0f), c = pt(t, 0.0f), b = pt(t, 1.0f);
             glm::vec3 nrm = glm::normalize(glm::cross(pt(std::min(1.0f, t + 0.1f), 0.0f) - c, b - a) + up * 0.3f);
-            v.push_back({ a, nrm, { 1.0f, 1.0f } });
-            v.push_back({ c, nrm, { 1.0f, 1.0f } });
-            v.push_back({ b, nrm, { 1.0f, 1.0f } });
+            v.push_back({ a, nrm, { 1.0f, sway } });
+            v.push_back({ c, nrm, { 1.0f, sway } });
+            v.push_back({ b, nrm, { 1.0f, sway } });
         }
         for (int s = 0; s < segs; ++s) {
             uint32_t r0 = k + uint32_t(s) * 3u, r1 = r0 + 3u;
@@ -222,45 +194,192 @@ void plant_head(std::vector<Vertex>& v, std::vector<uint32_t>& ix, glm::vec3 hc,
         for (int i = 0; i < cs; ++i) {
             float a = 6.2831853f * float(i) / float(cs);
             glm::vec3 d = t1 * std::cos(a) + t2 * std::sin(a);
-            v.push_back({ hc + d * rr + up * hh, glm::normalize(up + d * 0.5f), { 2.0f, 1.0f } });
+            v.push_back({ hc + d * rr + up * hh, glm::normalize(up + d * 0.5f), { 2.0f, sway } });
         }
     }
-    v.push_back({ hc + up * 0.022f, up, { 2.0f, 1.0f } });
+    v.push_back({ hc + up * 0.022f, up, { 2.0f, sway } });
     for (int i = 0; i < cs; ++i) {
         uint32_t a = k + uint32_t(i), b = k + uint32_t((i + 1) % cs), c = a + uint32_t(cs), d = b + uint32_t(cs);
         ix.insert(ix.end(), { a, b, d, a, d, c, c, d, k + uint32_t(2 * cs) });
     }
 }
 
-// Flower: curved tube stem, curled leaves, `heads` heads (a spike if > 1).
-void build_flower(std::vector<Vertex>& v, std::vector<uint32_t>& ix,
-                  int petals, float head_r, float petal_cup, float droop, float height,
-                  float petal_w = 0.92f, int leaves = 2, int heads = 1) {
-    std::vector<glm::vec3> path;
-    const int ns = 6;
-    for (int i = 0; i <= ns; ++i) {
-        float t = float(i) / ns;
-        path.push_back(glm::vec3(droop * 0.3f * t * t + 0.012f * std::sin(t * 5.0f), height * t, 0.0f));
+// Fern (L-system): a crown of fronds in a 137.5 deg spiral. Each frond is
+// a rachis R(i) that puts out a pair of pinnae per node and arches over
+// under gravity; pinna length follows the lance-shaped outline of a real
+// frond (short at the base, longest a third up, tapering to the tip).
+//   axiom : [ /(137.5 k) &(tilt) R(0, len) ] for every frond k
+//   R(i,l): i < n -> F(l/n) [ +(a) P(w_i) ] [ -(a) P(w_i) ] R(i+1, l)
+//           i = n -> P(tip)
+void build_fern(std::vector<Vertex>& v, std::vector<uint32_t>& ix) {
+    using namespace lsys;
+    const int fronds = 8, n = 11;
+    Grammar g;
+    {
+        Rng r{ 7u };
+        for (int k = 0; k < fronds; ++k) {
+            g.axiom.push_back({ '[' });
+            g.axiom.push_back({ '/', 137.5f * float(k) + r.range(-12.0f, 12.0f) });
+            g.axiom.push_back({ '&', r.range(34.0f, 52.0f) });
+            g.axiom.push_back({ 'R', 0.0f, r.range(0.78f, 1.12f) });
+            g.axiom.push_back({ ']' });
+        }
     }
-    plant_tube(v, ix, path, 0.0065f, 0.0035f, 5, 0.0f, 1.0f);
-    for (int k = 0; k < leaves; ++k) {
-        float a = float(k) * 2.39996f + 0.7f;
-        glm::vec3 d(std::cos(a), 0.0f, std::sin(a));
-        float lh = height * (0.10f + 0.16f * float(k % 3));
-        plant_leaf(v, ix, glm::vec3(0.0f, lh, 0.0f), d, 0.20f + 0.05f * float(k % 2), 0.035f, 0.10f, 0.15f);
+    g.rules['R'] = [n](const Module& m, Rng& r, Str& o) {
+        const int i = int(m.a + 0.5f);
+        const float len = m.b;
+        if (i >= n) { o.push_back({ 'P', 0.07f * len, 1.0f }); return; }
+        const float t = (float(i) + 1.0f) / float(n);
+        const float w = len * 0.25f * std::pow(std::sin(3.14159f * (0.10f + 0.88f * t)), 0.85f);
+        const float a = 74.0f - 26.0f * t;                    // pinnae sweep forward toward the tip
+        o.push_back({ 'F', len / float(n) });
+        o.push_back({ '[' }); o.push_back({ '+', a + r.range(-5.0f, 5.0f) }); o.push_back({ 'P', w, t }); o.push_back({ ']' });
+        o.push_back({ '[' }); o.push_back({ '-', a + r.range(-5.0f, 5.0f) }); o.push_back({ 'P', w, t }); o.push_back({ ']' });
+        o.push_back({ 'R', float(i + 1), len });
+    };
+    TurtleParams tp;
+    tp.radius = 0.007f; tp.taper = 0.9f;
+    tp.bend = 1.75f;                                           // fronds arch over
+    tp.organs = "P";
+    const Shape sh = interpret(g.derive(n + 1, 11u), tp);
+    float reach = 1e-3f;
+    for (const auto& s : sh.segs) reach = std::max(reach, s.d1);
+    // Rachis: a thin ribbon facing up.
+    for (const auto& s : sh.segs) {
+        glm::vec3 d = glm::normalize(s.b - s.a);
+        glm::vec3 side = glm::normalize(glm::cross(d, glm::vec3(0.0f, 1.0f, 0.0f)));
+        plant_quad(v, ix, s.a - side * s.r0, s.a + side * s.r0, s.b + side * s.r1, s.b - side * s.r1,
+                   0.0f, s.d0 / reach, s.d1 / reach);
     }
-    glm::vec3 hc = path.back();
-    glm::vec3 up = glm::normalize(glm::vec3(droop, 1.0f - std::abs(droop) * 0.6f, 0.0f));
-    if (heads <= 1) {
-        plant_head(v, ix, hc, up, petals, head_r, petal_cup, petal_w, 0.0f);
-    } else {   // spike: smaller heads spiralling up the top third of the stem
-        for (int h = 0; h < heads; ++h) {
-            float t = 0.62f + 0.38f * float(h) / float(heads - 1);
-            float a = float(h) * 2.39996f;
-            glm::vec3 out(std::cos(a), 0.0f, std::sin(a));
-            glm::vec3 c = glm::vec3(0.0f, height * t, 0.0f) + out * (head_r * 0.6f);
-            glm::vec3 u = glm::normalize(out * 0.9f + glm::vec3(0.0f, 0.6f, 0.0f));
-            plant_head(v, ix, c, u, petals, head_r * (1.1f - 0.4f * t), petal_cup, petal_w, a);
+    // Pinnae: folded, drooping blades (two triangles each).
+    for (const auto& o : sh.organs) {
+        const float len = o.a, sw = glm::clamp(o.dist / reach, 0.0f, 1.0f);
+        const glm::vec3 droop(0.0f, -0.22f * len, 0.0f);
+        const glm::vec3 base = o.pos, tip = o.pos + o.H * len + droop;
+        const glm::vec3 mid = o.pos + o.H * (len * 0.42f) + droop * 0.3f;
+        // Width runs along the rachis (perpendicular to the pinna, in the frond plane).
+        const glm::vec3 w = glm::normalize(glm::cross(o.U, o.H)) * (len * 0.20f + 0.004f);
+        const glm::vec3 fold = o.U * (len * 0.05f);
+        glm::vec3 n1 = glm::normalize(glm::cross(mid + w - base, tip - base));
+        glm::vec3 n2 = glm::normalize(glm::cross(tip - base, mid - w - base));
+        if (n1.y < 0.0f) n1 = -n1;
+        if (n2.y < 0.0f) n2 = -n2;
+        uint32_t k = uint32_t(v.size());
+        v.push_back({ base, n1, { 0.0f, sw } }); v.push_back({ mid + w + fold, n1, { 0.0f, sw } }); v.push_back({ tip, n1, { 0.0f, sw } });
+        v.push_back({ base, n2, { 0.0f, sw } }); v.push_back({ tip, n2, { 0.0f, sw } }); v.push_back({ mid - w + fold, n2, { 0.0f, sw } });
+        ix.insert(ix.end(), { k, k + 1, k + 2, k + 3, k + 4, k + 5 });
+    }
+}
+
+// Flowering herb (L-system). One grammar covers the species; the numbers
+// pick the habit:
+//   S(i)  stem apex : i < nodes -> F [leaf] [side branch] /(137.5) S(i+1)
+//                     i = nodes -> K (single terminal head) or A(0) (raceme)
+//   B     side branch (sympodial): F [leaf] F K - or just a bud
+//   A(j)  raceme apex: F [ &(a) F(pedicel) K ] /(roll) A(j+1), flowers
+//         shrinking toward the tip (they open from the bottom up)
+// Organs: L leaf, M palmate leaf, K flower head (parameter = size).
+struct Herb {
+    float height = 0.32f;
+    int   nodes = 5;            // stem internodes
+    int   leaves = 3;           // lowest nodes carrying a leaf
+    float leaf_len = 0.20f, leaf_w = 0.035f;
+    bool  palmate = false;
+    int   branches = 0;         // side branches below the top
+    float branch_len = 0.10f;
+    int   petals = 8;
+    float head_r = 0.05f, cup = 0.1f, petal_w = 0.9f;
+    int   raceme = 0;           // flowers along the top of the stem
+    float raceme_len = 0.3f;    // fraction of the height
+    float raceme_roll = 137.5f; // 137.5 = spiral, ~0 = one-sided
+    float pedicel_pitch = 62.0f;
+    float lean = 0.0f;          // stem arches over (tropism strength)
+    uint32_t seed = 1u;
+};
+
+void build_herb(std::vector<Vertex>& v, std::vector<uint32_t>& ix, const Herb& h) {
+    using namespace lsys;
+    Grammar g;
+    g.axiom = { { '!', 0.0068f }, { 'S', 0.0f } };
+    const float stem_len = h.height * (h.raceme > 0 ? 1.0f - h.raceme_len : 1.0f);
+    g.rules['S'] = [&h, stem_len](const Module& m, Rng& r, Str& o) {
+        const int i = int(m.a + 0.5f);
+        if (i >= h.nodes) {
+            if (h.raceme > 0) o.push_back({ 'A', 0.0f }); else o.push_back({ 'K', 1.0f });
+            return;
+        }
+        o.push_back({ 'F', r.jit(stem_len / float(h.nodes), 0.18f) });
+        if (i < h.leaves) {
+            const float ll = h.leaf_len * (1.0f - 0.13f * float(i)) * r.range(0.85f, 1.15f);
+            o.push_back({ '[' }); o.push_back({ '&', r.range(52.0f, 72.0f) });
+            o.push_back({ h.palmate ? 'M' : 'L', ll }); o.push_back({ ']' });
+        }
+        if (h.branches > 0 && i >= h.nodes - 1 - h.branches && i < h.nodes - 1) {
+            o.push_back({ '[' }); o.push_back({ '/', 90.0f }); o.push_back({ '&', r.range(28.0f, 44.0f) });
+            o.push_back({ '!', 0.0042f }); o.push_back({ 'B', 1.0f }); o.push_back({ ']' });
+        }
+        o.push_back({ '/', 137.5f + r.range(-15.0f, 15.0f) });
+        o.push_back({ '^', r.range(-5.0f, 5.0f) });           // slight zig-zag between nodes
+        o.push_back({ 'S', float(i + 1) });
+    };
+    g.rules['B'] = [&h](const Module&, Rng& r, Str& o) {
+        const float bl = h.branch_len * r.range(0.75f, 1.25f);
+        o.push_back({ 'F', bl * 0.5f });
+        o.push_back({ '[' }); o.push_back({ '/', 80.0f }); o.push_back({ '&', 60.0f });
+        o.push_back({ 'L', h.leaf_len * 0.55f }); o.push_back({ ']' });
+        o.push_back({ '^', r.range(8.0f, 20.0f) });           // curves back up toward the light
+        o.push_back({ 'F', bl * 0.5f });
+        o.push_back({ 'K', r.u() < 0.3f ? 0.42f : r.range(0.7f, 0.9f) });   // bud or smaller flower
+    };
+    g.rules['A'] = [&h](const Module& m, Rng& r, Str& o) {
+        const int j = int(m.a + 0.5f);
+        if (j >= h.raceme) { o.push_back({ 'K', 0.34f }); return; }
+        const float t = float(j) / float(h.raceme);
+        o.push_back({ 'F', h.height * h.raceme_len / float(h.raceme) });
+        o.push_back({ '[' }); o.push_back({ '&', h.pedicel_pitch + r.range(-8.0f, 8.0f) });
+        o.push_back({ '!', 0.0026f }); o.push_back({ 'F', h.head_r * (0.9f - 0.4f * t) });
+        o.push_back({ 'K', 1.0f - 0.55f * t }); o.push_back({ ']' });
+        o.push_back({ '/', h.raceme_roll + r.range(-10.0f, 10.0f) });
+        o.push_back({ 'A', float(j + 1) });
+    };
+    TurtleParams tp;
+    tp.radius = 0.0068f; tp.taper = 0.93f;
+    tp.tropism = glm::normalize(glm::vec3(1.0f, -0.55f, 0.0f));
+    tp.bend = h.lean;
+    tp.organs = "LMK";
+    const Shape sh = interpret(g.derive(h.nodes + h.raceme + 3, h.seed), tp);
+    float top = 1e-3f;
+    for (const auto& s : sh.segs) top = std::max(top, s.b.y);
+    for (const auto& o : sh.organs) top = std::max(top, o.pos.y);
+    auto sway = [&](glm::vec3 p) { return glm::clamp(p.y / top, 0.0f, 1.0f); };
+    for (const auto& s : sh.segs)
+        plant_tube(v, ix, { s.a, s.b }, s.r0, s.r1, s.depth == 0 ? 5 : 4, sway(s.a), sway(s.b));
+    for (const auto& o : sh.organs) {
+        if (o.s == 'K') {
+            const bool main_head = o.a > 0.95f;
+            if (o.a < 0.5f) {                                  // closed bud: few narrow petals, strongly cupped
+                plant_head(v, ix, o.pos, o.H, 5, h.head_r * 0.42f, 2.6f, 0.9f, o.dist * 31.0f, sway(o.pos), 2);
+            } else {
+                plant_head(v, ix, o.pos, o.H, h.petals, h.head_r * o.a, h.cup, h.petal_w, o.dist * 31.0f,
+                           sway(o.pos), main_head ? 3 : 2);
+            }
+        } else {
+            glm::vec3 d = o.H;
+            if (std::abs(d.y) > 0.92f) d = glm::normalize(d + o.U * 0.5f);
+            if (o.s == 'L') {
+                plant_leaf(v, ix, o.pos, d, o.a, h.leaf_w * (o.a / h.leaf_len), o.a * 0.5f, sway(o.pos));
+            } else {                                           // palmate: leaflets fanned around a short stalk
+                const glm::vec3 hub = o.pos + d * (o.a * 0.45f);
+                plant_tube(v, ix, { o.pos, hub }, 0.0028f, 0.002f, 3, sway(o.pos), sway(hub));
+                const glm::vec3 ax = glm::normalize(d + glm::vec3(0.0f, 0.8f, 0.0f));
+                glm::vec3 t1 = glm::normalize(glm::cross(ax, glm::vec3(0.31f, 0.0f, 0.95f)));
+                glm::vec3 t2 = glm::cross(ax, t1);
+                for (int k = 0; k < 7; ++k) {
+                    float a = 6.2831853f * float(k) / 7.0f;
+                    glm::vec3 ld = glm::normalize(t1 * std::cos(a) + t2 * std::sin(a) + ax * 0.25f);
+                    plant_leaf(v, ix, hub, ld, o.a * 0.5f, h.leaf_w * 0.55f, o.a * 0.10f, sway(hub));
+                }
+            }
         }
     }
 }
@@ -382,12 +501,14 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             pv.clear(); pi.clear();
             switch (sp) {
             case 0: build_fern(pv, pi); break;
-            case 1: build_flower(pv, pi, 14, 0.060f, 0.05f, 0.0f, 0.32f, 0.70f, 3); break;   // daisy
-            case 2: build_flower(pv, pi, 5, 0.075f, 0.55f, 0.0f, 0.42f, 1.05f, 2); break;    // poppy (cup)
-            case 3: build_flower(pv, pi, 6, 0.040f, -0.9f, 0.5f, 0.30f, 0.95f, 2); break;    // bluebell (nodding)
-            case 4: build_flower(pv, pi, 16, 0.050f, 0.20f, 0.0f, 0.46f, 0.45f, 3); break;   // cornflower (thin rays)
-            case 5: build_flower(pv, pi, 5, 0.035f, 0.70f, 0.0f, 0.24f, 1.10f, 3); break;    // buttercup (small cup)
-            case 6: build_flower(pv, pi, 6, 0.028f, 0.35f, 0.0f, 0.62f, 0.95f, 4, 9); break; // lupin spike
+            // { height, nodes, leaves, leaf_len, leaf_w, palmate, branches, branch_len,
+            //   petals, head_r, cup, petal_w, raceme, raceme_len, raceme_roll, pedicel_pitch, lean, seed }
+            case 1: build_herb(pv, pi, { 0.34f, 5, 3, 0.17f, 0.030f, false, 2, 0.11f, 14, 0.058f, 0.05f, 0.70f, 0, 0.3f, 137.5f, 62.0f, 0.0f, 3u }); break;   // daisy: branched, several heads
+            case 2: build_herb(pv, pi, { 0.44f, 5, 3, 0.20f, 0.040f, false, 1, 0.13f, 5, 0.075f, 0.55f, 1.05f, 0, 0.3f, 137.5f, 62.0f, 0.25f, 5u }); break;   // poppy: cup + a bud
+            case 3: build_herb(pv, pi, { 0.34f, 3, 3, 0.24f, 0.022f, false, 0, 0.10f, 6, 0.036f, -0.9f, 0.95f, 6, 0.50f, 12.0f, 118.0f, 2.6f, 7u }); break;   // bluebell: one-sided nodding raceme
+            case 4: build_herb(pv, pi, { 0.48f, 6, 4, 0.16f, 0.018f, false, 2, 0.14f, 16, 0.050f, 0.20f, 0.45f, 0, 0.3f, 137.5f, 62.0f, 0.0f, 9u }); break;   // cornflower: thin rays, branched
+            case 5: build_herb(pv, pi, { 0.26f, 4, 3, 0.13f, 0.045f, false, 3, 0.09f, 5, 0.034f, 0.70f, 1.10f, 0, 0.3f, 137.5f, 62.0f, 0.0f, 11u }); break;  // buttercup: loose cyme of small cups
+            case 6: build_herb(pv, pi, { 0.66f, 4, 4, 0.20f, 0.040f, true, 0, 0.10f, 5, 0.030f, 0.45f, 0.95f, 12, 0.48f, 137.5f, 58.0f, 0.0f, 13u }); break;  // lupin: palmate leaves, dense spike
             }
             s.plant_mesh[sp] = create_mesh_from_data(device, alloc, queue, queue_family,
                                                      pv.data(), uint32_t(pv.size()),
