@@ -664,6 +664,7 @@ void VulkanEngine::load_terrain_pbr_overrides() {
         { kTexSnow,  "Snow006"   },
         { kTexRoof,  "RoofingTiles012A" },
         { kTexRoad,  "PavingStones131" },
+        { kTexBark,  "Bark012" },
     };
     auto resolve = [](const std::string& tail) -> std::string {
         const std::string roots[] = {

@@ -115,13 +115,32 @@ vec3 octa_decode(vec2 e) {
 // instances participate: 0x01 = brushes (default), 0x02 = terrain-only
 // shadow casters (cube.frag uses 0x02 when receiver is_terrain_pre so
 // castle walls don't shadow the open terrain plateau). 0xFF = both.
+layout(set = 0, binding = 19) uniform sampler2D u_leaf_atlas;
+#define LEAF_ATLAS u_leaf_atlas
+// Leaf-card cut-out for shadow rays. The vegetation BLAS keeps its leaf
+// cards in a non-opaque geometry (two triangles per card, corners in a
+// fixed order), so the card uv follows from the triangle's parity and the
+// barycentrics; the instance's SBT offset carries the atlas cell + 1.
+bool leaf_card_hit(rayQueryEXT rq) {
+    uint cell1 = rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT(rq, false);
+    if (cell1 == 0u) return true;
+    vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, false);
+    vec2 uv = ((rayQueryGetIntersectionPrimitiveIndexEXT(rq, false) & 1) == 0) ? vec2(b.x + b.y, b.y)
+                                                                              : vec2(b.x, b.x + b.y);
+    float cell = float(cell1 - 1u);
+    vec2 auv = vec2(mod(cell, 2.0) * 0.5 + clamp(uv.x, 0.006, 0.994) * 0.5,
+                    (cell >= 2.0 ? 0.5 : 0.0) + (1.0 - clamp(uv.y, 0.006, 0.994)) * 0.5);
+    return textureLod(LEAF_ATLAS, auv, 1.5).a > 0.33;
+}
 bool any_hit_m(vec3 origin, vec3 dir, float t_max, uint mask) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS,
-                          gl_RayFlagsTerminateOnFirstHitEXT |
-                          gl_RayFlagsOpaqueEXT,
+                          gl_RayFlagsTerminateOnFirstHitEXT,
                           mask, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+            leaf_card_hit(rq)) rayQueryConfirmIntersectionEXT(rq);
+    }
     return rayQueryGetIntersectionTypeEXT(rq, true) ==
            gl_RayQueryCommittedIntersectionTriangleEXT;
 }

@@ -269,6 +269,8 @@ game::LevelMesh& m, const EzTreeOptions& o, float max_detail, float target_heigh
 
     // ---- Leaves: cards. A second, crossed card per leaf joins in at the
     // upper half of the detail range. ----
+    m.card_index_start = uint32_t(m.idx.size());
+    m.card_cell = int(o.leaf_kind + 0.5f);
     const float mat = o.leaf_kind < 0.5f ? 7.0f : 8.0f + std::floor(o.leaf_kind + 0.5f);
     for (const Leaf& l : g.leaves) {
         const float size = l.size * sc;

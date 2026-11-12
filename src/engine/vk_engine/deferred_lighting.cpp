@@ -47,7 +47,7 @@ void VulkanEngine::init_deferred_lighting() {
         // SAD gap on indoor / shadow-side surfaces. Image is in GENERAL
         // layout when cube.frag writes via imageStore — sampler2D reads
         // are allowed from GENERAL.
-        VkDescriptorSetLayoutBinding b[19]{};
+        VkDescriptorSetLayoutBinding b[20]{};
         b[0].binding = 0;
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         b[0].descriptorCount = 1;
@@ -104,10 +104,12 @@ void VulkanEngine::init_deferred_lighting() {
             b[i].descriptorCount = 1;
             b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         }
+        b[19] = b[15];            // foliage atlas (leaf cut-outs for shadow rays)
+        b[19].binding = 19;
         VkDescriptorSetLayoutCreateInfo dlci{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr, .flags = 0,
-            .bindingCount = 19, .pBindings = b,
+            .bindingCount = 20, .pBindings = b,
         };
         vk_check(vkCreateDescriptorSetLayout(device_, &dlci, nullptr,
                                               &deferred_lighting_desc_layout_),
@@ -140,7 +142,7 @@ void VulkanEngine::init_deferred_lighting() {
         VkDescriptorPoolSize sizes[] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1 },
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     16 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     17 },
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              4 },
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             3 },
         };
@@ -278,7 +280,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         VkDescriptorImageInfo gif1_ii{ VK_NULL_HANDLE,
                                        deferred_gi_fast_view_[1],
                                        VK_IMAGE_LAYOUT_GENERAL };
-        VkWriteDescriptorSet w[19]{};
+        VkWriteDescriptorSet w[20]{};
         w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[0].dstSet = deferred_lighting_desc_set_; w[0].dstBinding = 0;
         w[0].descriptorCount = 1;
@@ -337,6 +339,11 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         w[15] = w[14];
         w[15].dstBinding = 15;
         w[15].pImageInfo = &aux_ii;
+        VkDescriptorImageInfo leaf_ii{ texture_sampler_, albedo_textures_[kTexLeaf].view,
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        w[19] = w[14];
+        w[19].dstBinding = 19;
+        w[19].pImageInfo = &leaf_ii;
         VkDescriptorBufferInfo rc_bi[3];
         for (int i = 0; i < 3; ++i) {
             rc_bi[i] = { rc_buf_[i], 0, VK_WHOLE_SIZE };
@@ -350,7 +357,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         // Only when a bound handle changed (resize, TLAS rebuild, aux re-bake):
         // 19 descriptor writes every frame were pure CPU overhead.
         uint64_t sig = 1469598103934665603ull;
-        for (int i = 0; i < 19; ++i) {
+        for (int i = 0; i < 20; ++i) {
             uint64_t h = w[i].pImageInfo ? uint64_t(reinterpret_cast<uintptr_t>(w[i].pImageInfo->imageView)) ^
                                            (uint64_t(reinterpret_cast<uintptr_t>(w[i].pImageInfo->sampler)) << 1)
                        : w[i].pBufferInfo ? uint64_t(reinterpret_cast<uintptr_t>(w[i].pBufferInfo->buffer))
@@ -359,7 +366,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
         }
         if (sig != deferred_desc_sig_) {
             wait_gpu_frames_idle();   // the in-flight frame may still use the set
-            vkUpdateDescriptorSets(device_, 19, w, 0, nullptr);
+            vkUpdateDescriptorSets(device_, 20, w, 0, nullptr);
             deferred_desc_sig_ = sig;
         }
     }

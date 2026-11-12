@@ -52,6 +52,15 @@ void main() {
     // dot — pepper, not detail.
     float reach = max_d * clamp(scale * 2.2 + 0.22, 0.22, 0.85);
     float fade = 1.0 - smoothstep(reach * 0.75, reach, dist);
+    // Plants thin out with distance instead of all vanishing at the range
+    // limit: from 35 % of the reach a growing share (up to 70 %) shrinks
+    // away, chosen by a per-plant hash, and the rest grows a little so a
+    // flower drift keeps its colour.
+    if (pc.grass_params.y > 0.5) {
+        float thin = smoothstep(reach * 0.35, reach * 0.9, dist) * 0.7;
+        float ph = fract(sin(dot(base.xz, vec2(12.9898, 78.233))) * 43758.5453);
+        fade *= smoothstep(thin - 0.10, thin + 0.02, ph + 0.02) * (1.0 + 0.6 * thin);
+    }
     vCullKill = (fade < 0.03) ? 1.0 : 0.0;
     if (vCullKill > 0.5) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);

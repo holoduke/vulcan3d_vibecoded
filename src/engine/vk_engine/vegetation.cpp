@@ -118,7 +118,8 @@ void VulkanEngine::init_vegetation_data(const Heightmap& hm) {
             vis_base += per_arch[a];
             veg_cmd_template_.push_back(c);
             veg_lod_ranges_.push_back({ uint32_t(verts.size()), uint32_t(m.verts.size()),
-                                        uint32_t(idx.size()), uint32_t(m.idx.size()) });
+                                        uint32_t(idx.size()), uint32_t(m.idx.size()),
+                                        m.card_index_start, m.card_cell });
             for (const auto& v : m.verts) verts.push_back({ v.p, v.n, glm::vec2(v.u, v.v) });
             idx.insert(idx.end(), m.idx.begin(), m.idx.end());
             if (l < kVegLods) tris_lod[l] += m.idx.size() / 3;
@@ -373,11 +374,29 @@ void VulkanEngine::build_veg_blas() {
         bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
         bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
         bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-        bgi.geometryCount = 1; bgi.pGeometries = &geom;
+        // Leaf cards go in a second, NON-opaque geometry: shadow rays then
+        // run the leaf cut-out test on them (see any_hit_m in the shaders)
+        // instead of treating every card as a solid rectangle.
+        VkAccelerationStructureGeometryKHR geoms[2] = { geom, geom };
+        VkAccelerationStructureBuildRangeInfoKHR ranges[2]{};
+        uint32_t prim_counts[2] = { r.index_count / 3, 0 };
+        uint32_t ngeo = 1;
+        if (r.card_start != 0xFFFFFFFFu && r.card_start > 0 && r.card_start < r.index_count) {
+            prim_counts[0] = r.card_start / 3;
+            prim_counts[1] = (r.index_count - r.card_start) / 3;
+            geoms[1].flags = 0;
+            ranges[1].primitiveOffset = r.card_start * uint32_t(sizeof(uint32_t));
+            ngeo = 2;
+        }
+        ranges[0].primitiveCount = prim_counts[0];
+        ranges[1].primitiveCount = prim_counts[1];
+        bgi.geometryCount = ngeo; bgi.pGeometries = geoms;
         uint32_t prims = r.index_count / 3;
+        (void)prims;
+
         VkAccelerationStructureBuildSizesInfoKHR sizes{};
         sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-        g_rt.get_as_build_sizes(device_, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, &prims, &sizes);
+        g_rt.get_as_build_sizes(device_, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, prim_counts, &sizes);
         auto& B = veg_blas_[q];
         {
             VkBufferCreateInfo bci{};
@@ -405,8 +424,8 @@ void VulkanEngine::build_veg_blas() {
         bgi.scratchData.deviceAddress = buffer_device_address(device_, scratch);
         vkinit::one_time_submit(device_, graphics_queue_, graphics_queue_family_, [&](VkCommandBuffer cb) {
             VkAccelerationStructureBuildRangeInfoKHR range{};
-            range.primitiveCount = prims;
-            const VkAccelerationStructureBuildRangeInfoKHR* pr = &range;
+            (void)range;
+            const VkAccelerationStructureBuildRangeInfoKHR* pr = ranges;
             g_rt.cmd_build_as(cb, 1, &bgi, &pr);
         });
         vmaDestroyBuffer(allocator_, scratch, salloc);

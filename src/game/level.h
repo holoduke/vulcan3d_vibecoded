@@ -48,6 +48,11 @@ struct LevelMesh {
     // World props: world-space triplanar texturing (uv_scale = repeats
     // per metre) instead of vertex UVs; the UVs then carry wind sway
     // (u = sway weight, v = phase) when `sway` is set.
+    // GPU vegetation: index of the first leaf-card triangle (cards follow the
+    // branches, two triangles each) and their foliage-atlas cell. The ray
+    // tracing BLAS puts the cards in a separate, alpha-tested geometry.
+    uint32_t card_index_start = 0xFFFFFFFFu;
+    int      card_cell = 0;
     bool  triplanar = false;
     bool  sway      = false;
     float uv_scale  = 1.0f;

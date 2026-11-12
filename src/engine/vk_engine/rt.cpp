@@ -1083,6 +1083,11 @@ void VulkanEngine::rebuild_tlas(VkCommandBuffer cmd) {
                 inst.mask = 0xFF;
                 inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
                 inst.accelerationStructureReference = veg_blas_[bq].addr;
+                {   // foliage-atlas cell + 1 for the alpha-tested leaf cards (ray queries read it back)
+                    const size_t ri = size_t(a) * size_t(kVegDrawLods) + lvl;
+                    if (ri < veg_lod_ranges_.size() && veg_lod_ranges_[ri].card_start != 0xFFFFFFFFu)
+                        inst.instanceShaderBindingTableRecordOffset = uint32_t(veg_lod_ranges_[ri].card_cell) + 1u;
+                }
                 veg_tlas_inst_.push_back(inst);
                 vmats.push_back(col);
                 vmats.push_back(glm::vec4(0.0f));

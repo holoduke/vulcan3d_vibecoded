@@ -1463,7 +1463,8 @@ private:
     // GPU-driven vegetation + rocks (vk_engine/vegetation.cpp).
     std::vector<VegArchetype> veg_arch_;
     std::vector<VegInstance>  veg_inst_cpu_;
-    struct VegLodRange { uint32_t first_vertex, vertex_count, first_index, index_count; };
+    struct VegLodRange { uint32_t first_vertex, vertex_count, first_index, index_count;
+                         uint32_t card_start = 0xFFFFFFFFu; int card_cell = 0; };
     std::vector<VegLodRange>  veg_lod_ranges_;
     std::vector<VkDrawIndexedIndirectCommand> veg_cmd_template_;
     Mesh          veg_mesh_{};
