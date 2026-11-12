@@ -13,6 +13,9 @@ layout(push_constant) uniform PC {
     vec4 p;          // .x wind time, .y plant (sway) flag, .z colour-pass draw distance
 } pc;
 void main() {
+    // Leaf blades (part 3) pack sway base + along-leaf coordinate in uv.y.
+    float plant_sway = inUv.y;
+    if (int(inUv.x + 0.5) == 3) plant_sway = floor(inUv.y * 32.0) / 32.0 + 0.25 * fract(inUv.y * 32.0) / 0.98;
     vec3 base = inPosScale.xyz;
     float s = inPosScale.w;
     vec2 d = base.xz - pc.cam.xz;
@@ -32,13 +35,13 @@ void main() {
     float c = cos(inRotTint.x), sn = sin(inRotTint.x);
     mat3 R = mat3(vec3(c, 0, sn), vec3(0, 1, 0), vec3(-sn, 0, c));
     vec3 world = R * (inPos * s * fade) + base;
-    if (pc.p.y > 0.5 && inUv.y > 0.0) {   // plant wind sway (scatter.vert)
+    if (pc.p.y > 0.5 && plant_sway > 0.0) {   // plant wind sway (scatter.vert)
         float t = pc.p.x;
         float ph = dot(base.xz, vec2(0.37, 0.23));
         vec2 wd = normalize(vec2(0.8, 0.45));
         float w = sin(t * 2.1 + ph) * 0.7 + sin(t * 4.7 + ph * 1.9) * 0.3 + 0.25;
-        world.xz += wd * (w * 0.06 * s * inUv.y * inUv.y);
-        world.y  -= abs(w) * 0.015 * s * inUv.y;
+        world.xz += wd * (w * 0.06 * s * plant_sway * plant_sway);
+        world.y  -= abs(w) * 0.015 * s * plant_sway;
     }
     gl_Position = pc.light_vp * vec4(world, 1.0);
 }

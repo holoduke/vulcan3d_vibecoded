@@ -73,6 +73,36 @@ void main() {
         vec3 leaf = fern ? vColor : vec3(0.11, 0.22, 0.05);
         leaf *= 0.8 + 0.4 * vUv.y;                // tips catch more light
         albedo = (part == 0) ? leaf : (part == 1 ? vColor : vec3(0.75, 0.55, 0.04));
+        if (part == 3) {
+            // Leaf blade with real leaf-space coordinates: u across (-1..1),
+            // t along (0 base .. 1 tip). Procedural venation - a pale midrib,
+            // side veins sweeping forward from it, fine cross-veining - plus
+            // the colour structure of a real leaf (paler along the veins and
+            // toward the base, darker blade, slightly yellowed margin) and a
+            // matching relief in the shading normal.
+            float u = clamp((vUv.x - 3.0) / 0.4, -1.0, 1.0);
+            float t = clamp(fract(vUv.y * 32.0) / 0.98, 0.0, 1.0);
+            float au = abs(u);
+            float fw = max(fwidth(u), 1e-3);
+            float mid = 1.0 - smoothstep(0.035, 0.035 + fw * 1.5 + 0.03, au);
+            float vph = t * 7.0 - au * 1.6;                       // veins angle toward the tip
+            float vd  = abs(fract(vph) - 0.5) * 1.8;
+            float vfw = max(fwidth(vph), 1e-3);
+            float side = (1.0 - smoothstep(0.03, 0.03 + vfw * 1.5 + 0.04, vd)) *
+                         smoothstep(0.02, 0.15, au) * (1.0 - smoothstep(0.75, 1.0, au)) *
+                         (1.0 - smoothstep(0.25, 0.9, vfw));     // fade out when sub-pixel
+            float fine = sin(vph * 6.2832 * 4.0 + au * 23.0) * 0.5 + 0.5;
+            fine *= 1.0 - smoothstep(0.08, 0.5, vfw * 4.0);
+            float vein = max(mid * 0.8, side * 0.38);
+            vec3 blade = vec3(0.085, 0.20, 0.045) * (0.86 + 0.20 * fine);
+            blade = mix(blade, blade * vec3(1.25, 1.12, 0.75), smoothstep(0.7, 1.0, au));   // margin
+            blade *= mix(1.15, 0.92, t);                                                   // paler base
+            albedo = mix(blade, vec3(0.30, 0.42, 0.14), vein);
+            // Relief: the blade bulges between the veins.
+            vec3 across = normalize(cross(N, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
+            float bump = (fract(vph) - 0.5) * (1.0 - vein) * (1.0 - smoothstep(0.25, 0.9, vfw));
+            N = normalize(N + across * (sign(u) * 0.10 * (1.0 - mid)) + cross(N, across) * (bump * 0.35));
+        }
     }
 
     vec3  L = normalize(scene.sun_direction.xyz);

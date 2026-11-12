@@ -166,7 +166,10 @@ void plant_leaf(std::vector<Vertex>& v, std::vector<uint32_t>& ix, glm::vec3 b, 
             float l = glm::length(n);
             n = l > 1e-9f ? n / l : glm::vec3(0.0f, 1.0f, 0.0f);
             if (n.y < 0.0f) n = -n;
-            v.push_back({ S(t, u), n, { 0.0f, w_base + 0.25f * t } });
+            // uv: part 3 (leaf blade) + the across coordinate in the fraction;
+            // sway base in 1/32 steps + the along coordinate in the fraction
+            // (decoded by scatter.vert / .frag and clutter_shadow.vert).
+            v.push_back({ S(t, u), n, { 3.0f + 0.4f * u, std::floor(w_base * 32.0f) / 32.0f + t * (0.98f / 32.0f) } });
         }
     }
     const uint32_t row = uint32_t(across + 1);
