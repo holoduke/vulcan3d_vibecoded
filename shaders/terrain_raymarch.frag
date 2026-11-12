@@ -659,16 +659,17 @@ float plateauGroundDetail(vec2 wp) {
 // below the baked heightmap that shadows / objects use) and faded out by
 // 34 m, where it is sub-pixel anyway.
 float rm_ground_detail(vec2 wp, float t, float h) {
-    float w = 1.0 - smoothstep(12.0, 34.0, t);
+    float w = 1.0 - smoothstep(10.0, 26.0, t);
     if (w <= 0.0) return 0.0;
     float lod = log2(max(t * 2.0 * scene.viewport.w * 0.45 * 2048.0, 1.0));
     float disp = textureLod(u_normal[9], wp * 0.45, lod).a;
-    vec2  q  = wp * 0.55 + vec2(noise2(wp * 0.21), noise2(wp * 0.21 + 7.3)) * 1.7;
+    float wn = noise2(wp * 0.21);                      // one noise warps both axes
+    vec2  q  = wp * 0.55 + vec2(wn, 1.0 - wn) * 1.7;
     float g1 = 1.0 - smoothstep(0.0, 0.22, abs(noise2(q) * 2.0 - 1.0));              // main rills
     float g2 = 1.0 - smoothstep(0.0, 0.25, abs(noise2(q * 2.7 + 3.1) * 2.0 - 1.0));  // side cracks
-    float d = 0.11 * (1.0 - g1) + 0.045 * (1.0 - g2) + 0.07 * disp + 0.03 * noise2(wp * 3.3);
+    float d = 0.11 * (1.0 - g1) + 0.045 * (1.0 - g2) + 0.09 * disp;
     float sand = 1.0 - smoothstep(scene.water_params.y + 0.4, scene.water_params.y + 2.5, h);
-    d += sand * 0.03 * (0.5 + 0.5 * sin(dot(wp, vec2(9.0, 3.5)) + 2.5 * noise2(wp * 0.8)));
+    d += sand * 0.03 * (0.5 + 0.5 * sin(dot(wp, vec2(9.0, 3.5)) + 6.0 * wn));
     return d * w;
 }
 

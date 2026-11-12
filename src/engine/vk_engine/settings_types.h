@@ -161,7 +161,7 @@ struct RtSettings {
         // Density: fraction of placed blades to actually draw (0..1).
         // Drives instance count in vkCmdDrawIndexed — cheap perf knob.
         float grass_density        = 0.7f;
-        float grass_near_boost     = 1.5f;   // extra blades per cell right at the camera (fades by ~16 m)
+        float grass_near_boost     = 0.8f;   // extra blades per cell right at the camera (fades by ~16 m)
         float grass_edge_softness  = 0.6f;   // 0 = hard patch border, 1 = long thinning fringe
         // Placement densities (applied when the world is built: restart).
         float forest_density       = 1.0f;

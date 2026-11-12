@@ -303,7 +303,7 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
     // Dynamic close-range density: extra blades per cell near the camera,
     // fading out smoothly (each extra blade appears by the per-cell hash,
     // so the lawn thickens gradually as you approach - no ring).
-    density_eff += scene.grass_shore_params.y * (1.0 - smoothstep(5.0, 16.0, ray_t)) *
+    density_eff += scene.grass_shore_params.y * (1.0 - smoothstep(3.5, 10.0, ray_t)) *
                    step(0.05, ctx.density_eff_near);
     // Aggressive zero-density early-out. When distance has faded
     // density to near zero, the inner 9-cell loop almost always finds
@@ -350,7 +350,7 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
             // Up to two blades per cell: density 0..1 fills cells, 1..2 adds
             // a second blade (near rings only - the far single-cell path
             // keeps one). Each blade gets its own lean and width variation.
-            const int nb = (rad > 0) ? clamp(int(ceil(density_eff)), 1, 4) : 1;
+            const int nb = (rad > 0) ? clamp(int(ceil(density_eff)), 1, 3) : 1;
             for (int bi = 0; bi < nb; ++bi) {
             vec4 r = hash42(nId + vec2(31.7, 47.3) * float(bi));
             if (r.x > (density_eff - float(bi)) * mix(0.25, 1.0, edge_k)) continue;
