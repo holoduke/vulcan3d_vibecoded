@@ -1361,7 +1361,9 @@ void main() {
         vec3  tcol  = diff_albedo * mix(vec3(1.5), vec3(1.75, 1.95, 0.45), green);
         float back  = clamp((0.25 - ndl_raw) / 1.25, 0.0, 1.0);
         float fwd   = pow(clamp(dot(-Vv, L), 0.0, 1.0), 3.0) * clamp(1.25 - abs(ndl_raw), 0.0, 1.0);
-        float thin  = mix(0.22, 1.0, lit);
+        float thin  = mix(0.08, 1.0, lit);
+        // Leaves / flowers in shadow sit under a canopy: less sky reaches them.
+        ambient_term *= mix(0.45, 1.0, lit);
         vec3  spec_keep = sun_term - diff_albedo * sun_rad;          // specular part computed above
         sun_term = max(spec_keep, vec3(0.0)) +
                    sunE * lit * (diff_albedo * nw * 0.9 + tcol * band * 0.30) +

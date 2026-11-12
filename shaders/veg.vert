@@ -102,7 +102,7 @@ void main() {
             vec3 co = vec3(cr * cw.x + sr * cw.z, cw.y, -sr * cw.x + cr * cw.z) / vec3(rsc, rsc * rys, rsc);
             float mh = 0.4 / max(rsc, 0.05), mv = 0.4 / max(rsc * rys, 0.05);
             bool cam_in = slab
-                ? (abs(co.x) < 1.55 + mh && abs(co.z) < 1.55 + mh && co.y > -0.25 - mv && co.y < 1.15 + mv)
+                ? (abs(co.x) < 2.15 + mh && abs(co.z) < 2.15 + mh && co.y > -0.45 - mv && co.y < 1.25 + mv)
                 : (distance(co, rc) < Rb + 0.35 / max(rsc, 0.05));
             if (cam_in) {
                 // Slabs: shrink the stack around the eye so that the eye sits

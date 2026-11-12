@@ -1236,11 +1236,27 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
             // Slab formation: one collider per bed, so the steps are steps.
             const float c = std::cos(rot), sn = std::sin(rot);
             for (const SlabBed& b : slab_beds(3.7f + 6.1f * float(pi))) {
-                const glm::vec2 o = b.off * s;
-                const float cx = x + c * o.x - sn * o.y, cz = z + sn * o.x + c * o.y;
-                const float he = b.r * 0.66f * s;
                 const float top = y0 + (0.35f + b.yc + b.th + 0.018f) * s * ysq;
-                cols.push_back({ glm::vec3(cx - he, std::min(gy, y0) - 1.0f, cz - he), glm::vec3(cx + he, top, cz + he) });
+                const float bot = std::min(gy, y0) - 1.0f;
+                // The bed is an irregular rotated polygon; world colliders are
+                // axis-aligned boxes. Cover it with a grid of boxes whose
+                // centres lie inside the polygon (finer for big pavements), so
+                // you stand where the rock is and nowhere else.
+                const int N = (s > 3.0f && ysq < 0.45f) ? 3 : (s > 1.6f ? 2 : 1);
+                const float R = 1.35f * b.r * s, cell = R / float(N);
+                for (int gz = 0; gz < N * 2; ++gz)
+                    for (int gx = 0; gx < N * 2; ++gx) {
+                        const float wx = (float(gx) + 0.5f) * cell - R, wz = (float(gz) + 0.5f) * cell - R;
+                        // world offset -> rock-local (inverse rotation), unit scale
+                        const glm::vec2 l = glm::vec2(c * wx + sn * wz, -sn * wx + c * wz) / s - b.off;
+                        bool in = true;
+                        for (int k = 0; k < 5 && in; ++k)
+                            in = glm::dot(l, glm::vec2(std::cos(b.ang[k]), std::sin(b.ang[k]))) <= b.rad[k];
+                        if (!in) continue;
+                        cols.push_back({ glm::vec3(x + wx - cell * 0.5f, bot, z + wz - cell * 0.5f),
+                                         glm::vec3(x + wx + cell * 0.5f, top, z + wz + cell * 0.5f) });
+                    }
+
             }
             return;
         }
