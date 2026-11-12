@@ -604,10 +604,16 @@ void main() {
     if (dot(Nf, rd) > 0.0) Nf = -Nf;
     vec3 Nb = normalize(Nf + N * 0.45);
     float ndl_b = dot(Nb, L) + blade_var * 0.3;
-    float n_dot_l_wrap = (ndl_b > 0.0) ? ndl_b : -ndl_b * 0.18;
+    // Same scattering model as the tree leaves: wrap diffuse on the lit
+    // face, and on the far face the sun transmitted through the blade
+    // (yellow-green, stronger toward the thin tip).
+    float n_dot_l_wrap = max(0.0, (ndl_b + 0.35) / 1.35);
+    float blade_back   = clamp(-ndl_b, 0.0, 1.0);
 
     vec3 sun_term = scene.sun_color.rgb * scene.sun_color.a *
-                    (n_dot_l_wrap * sun_lit);
+                    (n_dot_l_wrap * sun_lit) +
+                    scene.sun_color.rgb * scene.sun_color.a * vec3(1.25, 1.40, 0.45) *
+                    (blade_back * 0.42 * sun_lit * mix(0.45, 1.0, h_t));
     vec3 sky_term = scene.sky_color.rgb * 0.18;
     // Side-lit blade shading: sun-side brighter, away-side darker.
     // Uses RAW dot(N, L) so the sign carries direction (n_dot_l above

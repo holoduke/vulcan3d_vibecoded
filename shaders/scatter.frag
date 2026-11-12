@@ -93,7 +93,9 @@ void main() {
     // GI like the rest of the world (was pre-lit material 5 with only
     // the coarse shadow map).
     outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)), 1.0 / 255.0);
-    outGBuffer1 = vec4(_octa_encode(N), 0.6, 0.0);
+    // Plants: flagged as leaves so the deferred pass lights them with the
+    // foliage scattering model (wrap + transmission).
+    outGBuffer1 = vec4(_octa_encode(N), 0.6, plant ? 1.0 : 0.0);
     {
         vec2 current_uv = gl_FragCoord.xy * scene.viewport.zw;
         if (vPrevClip.w > 0.0) {

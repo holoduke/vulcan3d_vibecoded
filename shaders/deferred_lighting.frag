@@ -1336,7 +1336,10 @@ void main() {
         float nw    = max(0.0, (ndl_raw + kLeafWrap) / (1.0 + kLeafWrap));
         const float kSw = 0.30;
         float band  = smoothstep(0.0, kSw, nw) * smoothstep(kSw * 2.0, kSw, nw);
-        vec3  tcol  = diff_albedo * vec3(1.75, 1.95, 0.45);          // light filtered by the leaf
+        // Light filtered by the leaf: green tissue passes yellow-green,
+        // petals pass their own colour.
+        float green = clamp((diff_albedo.g - max(diff_albedo.r, diff_albedo.b)) * 8.0, 0.0, 1.0);
+        vec3  tcol  = diff_albedo * mix(vec3(1.5), vec3(1.75, 1.95, 0.45), green);
         float back  = clamp((0.25 - ndl_raw) / 1.25, 0.0, 1.0);
         float fwd   = pow(clamp(dot(-Vv, L), 0.0, 1.0), 3.0) * clamp(1.25 - abs(ndl_raw), 0.0, 1.0);
         float thin  = mix(0.22, 1.0, lit);

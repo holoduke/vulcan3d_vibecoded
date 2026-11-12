@@ -652,10 +652,70 @@ void build_broadleaf(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, c
     const size_t stride = std::max<size_t>(1, (spots.size() + want - 1) / want);
     // Fewer clumps -> each must cover more of the envelope.
     const float cover = std::sqrt(float(stride)) * (lod == 0 ? 1.0f : 1.25f);
+    // Leafy twigs (L-system), the same way the small plants are grown: a
+    // short twig with alternate leaves sticks out of every clump, so the
+    // outline of the crown is made of real leaf blades. The clumps behind
+    // them stay as the leaf mass.
+    //   A(i) : i < n -> F [ +(a) L ] /(180) A(i+1)     i = n -> L
+    lsys::Grammar twig;
+    const int tw_n = lod == 0 ? 5 : 3;
+    twig.axiom = { { '!', 0.011f }, { 'A', 0.0f, 1.0f } };
+    twig.rules['A'] = [tw_n](const lsys::Module& mm, lsys::Rng& rr, lsys::Str& o) {
+        const int i = int(mm.a + 0.5f);
+        const float sz = mm.b;
+        if (i >= tw_n) { o.push_back({ 'L', sz * rr.range(0.85f, 1.1f) }); return; }
+        o.push_back({ 'F', sz * rr.range(0.45f, 0.62f) });
+        o.push_back({ '[' }); o.push_back({ '+', rr.range(48.0f, 68.0f) });
+        o.push_back({ 'L', sz * rr.range(0.8f, 1.15f) }); o.push_back({ ']' });
+        o.push_back({ '/', 180.0f + rr.range(-25.0f, 25.0f) });
+        o.push_back({ '^', rr.range(-8.0f, 8.0f) });
+        o.push_back({ 'A', float(i + 1), sz });
+    };
+    lsys::TurtleParams twp;
+    twp.radius = 0.011f; twp.taper = 0.85f;
+    twp.bend = 0.5f;                                         // twig tips droop
+    twp.organs = "L";
+    auto leafy_twig = [&](glm::vec3 from, glm::vec3 dir, float leaf_len, uint32_t seed, float sw) {
+        const lsys::Shape sh = lsys::interpret(twig.derive(tw_n + 1, seed), twp);
+        // Turtle space (+Y forward) -> world: Y along `dir`.
+        const glm::vec3 y = glm::normalize(dir);
+        const glm::vec3 x = glm::normalize(glm::cross(std::abs(y.y) < 0.95f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0), y));
+        const glm::vec3 z = glm::cross(x, y);
+        auto W = [&](glm::vec3 q) { q *= leaf_len; return from + x * q.x + y * q.y + z * q.z; };
+        auto D = [&](glm::vec3 q) { return x * q.x + y * q.y + z * q.z; };
+        if (!sh.segs.empty()) {
+            const auto& s0 = sh.segs.front(); const auto& s1 = sh.segs.back();
+            const glm::vec3 mid = W(sh.segs[sh.segs.size() / 2].a);
+            add_limb(m, W(s0.a), mid, 0.012f, 0.008f, 3, sw, sw, 0.0f);
+            add_limb(m, mid, W(s1.b), 0.008f, 0.004f, 3, sw, sw, 0.0f);
+        }
+        const glm::vec3 bias = glm::normalize(dir) * 0.3f + glm::vec3(0.0f, 0.35f, 0.0f);
+        for (const auto& o : sh.organs) {
+            const float len = o.a * leaf_len;
+            const glm::vec3 h = D(o.H), u = D(o.U);
+            const glm::vec3 base = W(o.pos);
+            const glm::vec3 droop(0.0f, -0.16f * len, 0.0f);
+            const glm::vec3 tip = base + h * len + droop;
+            const glm::vec3 midp = base + h * (len * 0.45f) + droop * 0.3f;
+            const glm::vec3 wv = glm::normalize(glm::cross(u, h)) * (len * 0.27f);
+            const glm::vec3 fold = u * (len * 0.06f);
+            tri2(m, base, midp + wv + fold, tip, sw, sw, sw, 6.0f, bias);
+            tri2(m, base, tip, midp - wv + fold, sw, sw, sw, 6.0f, bias);
+        }
+    };
     int ci = 0;
     for (size_t i = 0; i < spots.size(); i += stride, ++ci) {
         float s = (0.50f + 0.34f * U(r)) * cover;
         glm::vec3 c = spots[i] + glm::vec3(0.0f, 0.12f * s, 0.0f);
+        {
+            const glm::vec3 out = glm::normalize(c - centre + glm::vec3(1e-3f));
+            const int twigs = lod == 0 ? 2 : 1;
+            for (int t = 0; t < twigs; ++t) {
+                glm::vec3 d = glm::normalize(out + glm::vec3(U(r) - 0.5f, U(r) - 0.35f, U(r) - 0.5f) * 1.1f);
+                leafy_twig(c + d * (s * 0.55f), d, (lod == 0 ? 0.30f : 0.46f) * (0.85f + 0.3f * U(r)),
+                           uint32_t(p.seed * 977.0f) + uint32_t(ci * 31 + t * 7), glm::min(1.0f, sway(c) + 0.2f));
+            }
+        }
         // Flattened, tilted outward from the crown centre like a leafy spray.
         add_blob(m, lo, c, glm::vec3(s, s * (0.72f + 0.2f * U(r)), s), U(r) * 6.28f,
                  p.seed * 3.0f + float(ci) * 1.37f, lod == 0 ? 0.34f : 0.22f, 2.6f, 0.0f, -1e9f,

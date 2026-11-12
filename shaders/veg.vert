@@ -74,7 +74,7 @@ void main() {
     // pile of balls. Bending the normals toward the direction from the
     // crown centre gives one smooth field across the whole crown - it
     // then shades as a single soft volume, with the clumps as detail.
-    if (mat0 >= 1 && mat0 <= 3) {
+    if ((mat0 >= 1 && mat0 <= 3) || mat0 == 6) {
         vec4  ai = arch[uint(I.rot_arch_phase.y + 0.5)];
         float H  = ai.y * 2.0 * s * ysq;
         vec3  base = I.pos_scale.xyz;
@@ -85,7 +85,7 @@ void main() {
         } else {
             dc = normalize(wp - (base + vec3(0.0, H * (mat0 == 3 ? 0.40 : 0.68), 0.0)));
         }
-        N = normalize(mix(N, dc, mat0 == 1 ? 0.45 : 0.6));
+        N = normalize(mix(N, dc, mat0 == 1 ? 0.45 : (mat0 == 6 ? 0.4 : 0.6)));
     }
     // Wind: trunk base still, crown sways; per-instance phase. The previous
     // frame's pose (time - 0.016, the CPU step) feeds the motion vector so
@@ -116,10 +116,14 @@ void main() {
     if (mat == 0)      { col = vec3(0.85, 0.66, 0.50); tp = vec4(7.0, 7.0, 1.4, 0.0); }
     else if (mat == 2) { col = vec3(0.16, 0.28, 0.07); }
     else if (mat == 3) { col = vec3(0.14, 0.24, 0.08); }
+    else if (mat == 6) {            // leaf blade (real geometry): each leaf its own tone
+        float lv = fract(sin(dot(floor(rest_wp * 2.3), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+        col = vec3(0.17, 0.31, 0.07) * (0.78 + 0.44 * lv);
+    }
     else if (mat == 4) { col = vec3(1.4, 1.34, 1.27); tp = vec4(7.0, 7.0, 0.22, 0.0); }
     // Per-instance hue jitter so a forest isn't one green.
     float hj = fract(I.rot_arch_phase.z * 0.6180339);
-    if (mat >= 1 && mat <= 3) col *= mix(vec3(0.85, 1.05, 0.8), vec3(1.15, 0.95, 1.1), hj);
+    if ((mat >= 1 && mat <= 3) || mat == 6) col *= mix(vec3(0.85, 1.05, 0.8), vec3(1.15, 0.95, 1.1), hj);
 
     gl_Position = pc.mvp * vec4(wp, 1.0);
     vPrevClip   = pc.prev_mvp * vec4(wp_prev, 1.0);
