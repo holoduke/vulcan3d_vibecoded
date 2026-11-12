@@ -1070,6 +1070,7 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
     // sub-pixel only.
     t += jitter * 0.5;
     float maxH_cap = terrainMaxHeight();
+    float t_prev = t;
     for (int i = 0; i < kSteps; i++) {
         vec3 pos = ro + t * rd;
         // Sky escape: any ray rising above the FBM ceiling with a
@@ -1109,7 +1110,12 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
             int   ofl   = int(pc.tex_params.z);
             int   omn   = max(2, min(ofl, int(pc.emissive.w)));
             float oct   = float(ofl) - lod_f * float(ofl - omn);
-            float kHmMargin = 2.0 + 2.0 * TERRAIN_HEIGHT * exp2(-min(floor(oct), 9.0));
+            // Dropped octaves only LOWER the marched surface (the noise is
+            // 0..1), so the bake plus a constant margin for the octaves above
+            // the bake (<= ~0.5 m) and interpolation error is always clear.
+            // (A margin growing with the dropped octaves reached ~17 m far
+            // out and switched the skip off exactly where it saves most.)
+            float kHmMargin = 2.0;
             float hm = 1e9;
             if (all(lessThan(abs(pos.xz), vec2(kHeightmapSide * 0.5 - 2.0))))
                 hm = pos.y - meshHeight(pos.xz) - kHmMargin;
@@ -1123,7 +1129,7 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
         // typical pixel covers 0.3-1 m of world space past 200 m, so
         // demanding sub-millimetre convergence wastes ~30 % of the
         // march steps on far rays. mix 0.0015 → 0.005 over [150, 600] m.
-        float hit_eps = mix(0.0015, 0.005, smoothstep(150.0, 600.0, t)) * t;
+        float hit_eps = mix(0.0015, 0.0025, smoothstep(150.0, 600.0, t)) * t;
 #ifndef QLIKE_WATER
         if (!coarse && abs(h) < hit_eps) break;   // only real-surface steps may hit
 #else /* QLIKE_WATER */
@@ -1153,7 +1159,21 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
         // would walk us back, and with rl > 1 the back-step grows enough to
         // ping-pong indefinitely until kSteps caps. Break out instead so
         // the caller gets the closest approach.
-        if (advance < 0.0) return t;
+        if (advance < 0.0) {
+            // Overstepped into the ground (steep slope facing the camera, or
+            // the far-distance step ramp). Returning this point put the hit
+            // INSIDE the hill: depth too far, ridges eroded, and the shadow
+            // ray started underground (black speckle). Bisect back to the
+            // surface between the last point above it and this one.
+            float ta = t_prev, tb = t;
+            for (int k = 0; k < 5; ++k) {
+                float tm = 0.5 * (ta + tb);
+                vec3  pm = ro + tm * rd;
+                if (pm.y - terrainM_lod(pm.xz, tm) > 0.0) ta = tm; else tb = tm;
+            }
+            return ta;
+        }
+        t_prev = t;
         t += advance;
     }
     // Loop exhausted without converging. The fall-through is a real
@@ -2743,7 +2763,7 @@ void main() {
         // threshold so far water doesn't get repainted as sky-below-
         // horizon (black). Guard against w<=0 (point behind camera) so
         // the depth divide doesn't produce NaN.
-        gl_FragDepth = min(clipW.z / max(clipW.w, 1e-4), 0.99998);
+        gl_FragDepth = min(clipW.z / max(clipW.w, 1e-4), 0.999989);
 #endif /* ! QLIKE_WATER */
         // Distance fog on the water surface too.
         {
@@ -2995,41 +3015,38 @@ void main() {
     // calcShadow returns lit fraction; convert to "shadow amount"
     // (0 = lit, 1 = full shadow) so we can combine it with the RT
     // result the same way cube.frag does for the rasterised path.
-    float self_shadow = (dif > 0.0)
-        ? (1.0 - calcShadow(pos + nor * 0.05, sunDir))
-        : 1.0;
-#ifndef QLIKE_WATER
-    // Near-field ground occlusion. calcShadow starts half a metre out and
-    // takes few steps, so a small rise right next to the receiver did not
-    // shade it - and the object shadows below (ray traced / small-caster
-    // map) know nothing about the terrain at all. A point just behind a
-    // bump was therefore lit, and showed the shadows of rocks, trunk bases
-    // and bushes standing on the sunny side of the bump: their outlines
-    // appeared on the ground in front of them, as if seen through it.
-    // Walk the first metres of the sun ray over the baked heightmap (the
-    // rendered surface never lies below it, so a hit is a real blocker).
-    if (dif > 0.0 && self_shadow < 0.995 && distance(pos, scene.camera_pos.xyz) < 220.0) {
+    // Ground occlusion along the sun ray over the BAKED heightmap, first:
+    // one texture fetch per step instead of an FBM evaluation, and it
+    // reaches a whole hill away (14 steps x1.5 cover the first ~19 m, 16
+    // more x1.22 carry on to ~450 m). The rendered surface never lies
+    // below the bake, so a hit is a real blocker. Without it the ground in
+    // front of a hill stayed sunlit at medium range and the ray-traced
+    // object shadows (which ignore the terrain) were drawn onto it.
+    float self_shadow = 1.0;
+    if (dif > 0.0) {
         float lit_g = 1.0;
-        float tg = 0.10;
-        // 14 steps x1.5 cover the first ~19 m finely, 16 more x1.22 carry
-        // on to ~450 m: a whole hill between this point and the sun. The
-        // FBM shadow march above runs out of steps long before that at
-        // medium range, which left the ground in front of a hill sunlit -
-        // and the ray-traced object shadows (which ignore the terrain)
-        // then drew the trees and rocks BEHIND the hill onto it.
-        float g_top = terrainMaxHeight();
-        for (int i = 0; i < 30; ++i) {
-            vec3 q = pos + sunDir * tg;
-            if (q.y > g_top) break;
-            if (any(greaterThan(abs(q.xz), vec2(kHeightmapSide * 0.5 - 2.0)))) break;
-            float hg = q.y - meshHeight(q.xz);
-            lit_g = min(lit_g, smoothstep(-(0.10 + 0.02 * tg), -(0.02 + 0.004 * tg), hg));
-            if (lit_g < 0.01) break;
-            tg *= (i < 14) ? 1.5 : 1.22;
+#ifndef QLIKE_WATER
+        if (distance(pos, scene.camera_pos.xyz) < 220.0) {
+            float tg = 0.10;
+            float g_top = terrainMaxHeight();
+            for (int i = 0; i < 30; ++i) {
+                vec3 q = pos + sunDir * tg;
+                if (q.y > g_top) break;
+                if (any(greaterThan(abs(q.xz), vec2(kHeightmapSide * 0.5 - 2.0)))) break;
+                float hg = q.y - meshHeight(q.xz);
+                lit_g = min(lit_g, smoothstep(-(0.10 + 0.02 * tg), -(0.02 + 0.004 * tg), hg));
+                if (lit_g < 0.01) break;
+                tg *= (i < 14) ? 1.5 : 1.22;
+            }
         }
-        self_shadow = max(self_shadow, 1.0 - lit_g);
-    }
 #endif /* ! QLIKE_WATER */
+        // The FBM self-shadow march (the most expensive part of terrain
+        // shading) only where the heightmap walk left the point lit.
+        self_shadow = 1.0 - lit_g;
+        if (lit_g > 0.01)
+            self_shadow = max(self_shadow, 1.0 - calcShadow(pos + nor * 0.05, sunDir));
+    }
+
 
     // Fake grass-cast shadow: probe the grass mask along the sun's
     // XZ direction from this terrain pixel; cells with grass darken
@@ -3742,7 +3759,7 @@ void main() {
 #endif /* QLIKE_WATER */
     vec4 clip = pc.mvp * vec4(pos, 1.0);
 #ifndef QLIKE_WATER
-    gl_FragDepth = min(clip.z / max(clip.w, 1e-4), 0.99998);
+    gl_FragDepth = min(clip.z / max(clip.w, 1e-4), 0.999989);
 #endif /* ! QLIKE_WATER */
 
     // Distance fog — final atmospheric mix, after all the other

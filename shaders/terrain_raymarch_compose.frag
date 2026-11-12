@@ -52,7 +52,39 @@ vec3 casSharpen(vec3 c, vec3 a, vec3 b, vec3 d, vec3 e, float strength) {
     return c + amount * (c - blur);
 }
 
+// Catmull-Rom upsample in 9 bilinear taps (the 4x4 footprint folded into
+// 3x3 fetches). Continuous across low-res texel borders and it keeps
+// edges crisp, where the old "average of the bilinear tap and the four
+// gathered corners" changed in texel-sized steps: distant mountains came
+// out as a grid of blocks.
+vec3 lrCatmullRom(vec2 uv) {
+    vec2 ts  = vec2(textureSize(u_lr_color, 0));
+    vec2 sp  = uv * ts;
+    vec2 tc1 = floor(sp - 0.5) + 0.5;
+    vec2 f   = sp - tc1;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+    vec2 t0  = (tc1 - 1.0) / ts;
+    vec2 t3  = (tc1 + 2.0) / ts;
+    vec2 t12 = (tc1 + w2 / w12) / ts;
+    vec3 r = vec3(0.0);
+    r += textureLod(u_lr_color, vec2(t0.x,  t0.y),  0.0).rgb * (w0.x  * w0.y);
+    r += textureLod(u_lr_color, vec2(t12.x, t0.y),  0.0).rgb * (w12.x * w0.y);
+    r += textureLod(u_lr_color, vec2(t3.x,  t0.y),  0.0).rgb * (w3.x  * w0.y);
+    r += textureLod(u_lr_color, vec2(t0.x,  t12.y), 0.0).rgb * (w0.x  * w12.y);
+    r += textureLod(u_lr_color, vec2(t12.x, t12.y), 0.0).rgb * (w12.x * w12.y);
+    r += textureLod(u_lr_color, vec2(t3.x,  t12.y), 0.0).rgb * (w3.x  * w12.y);
+    r += textureLod(u_lr_color, vec2(t0.x,  t3.y),  0.0).rgb * (w0.x  * w3.y);
+    r += textureLod(u_lr_color, vec2(t12.x, t3.y),  0.0).rgb * (w12.x * w3.y);
+    r += textureLod(u_lr_color, vec2(t3.x,  t3.y),  0.0).rgb * (w3.x  * w3.y);
+    return max(r, vec3(0.0));
+}
+
 void main() {
+
     // Map full-res fragment to a UV in [0, 1] and sample the LR
     // textures. The LR sampler is LINEAR, so the centre tap is a
     // free bilinear upscale — the sky-sentinel discard below
@@ -85,16 +117,18 @@ void main() {
     vec3 cBR = vec3(r4.z, g4.z, b4.z);
     vec3 cBL = vec3(r4.w, g4.w, b4.w);
 
-    const float kAlpha = 64.0;
-    vec4 dd = d4 - vec4(lr_depth);
-    vec4 w  = 1.0 / (1.0 + kAlpha * dd * dd);
-    float wsum = 1.0 + w.x + w.y + w.z + w.w;
-    vec3 c_blur = (c0 + w.x*cTL + w.y*cTR + w.z*cBR + w.w*cBL) / wsum;
-    vec3 c = c_blur;
-
+    // Smooth interior: Catmull-Rom, then an optional contrast-adaptive
+    // sharpen whose neighbours are bilinear taps one low-res texel away
+    // (continuous, unlike the gathered corners).
+    vec3 c = lrCatmullRom(uv);
     float strength = pc.color.x;
     if (strength > 0.0 && pc.color.y > 0.5 && pc.color.z > 0.5) {
-        c = casSharpen(c0, cTL, cTR, cBR, cBL, strength);
+        vec2 lt = 1.0 / vec2(textureSize(u_lr_color, 0));
+        vec3 nA = textureLod(u_lr_color, uv + vec2(-lt.x, 0.0), 0.0).rgb;
+        vec3 nB = textureLod(u_lr_color, uv + vec2( lt.x, 0.0), 0.0).rgb;
+        vec3 nD = textureLod(u_lr_color, uv + vec2(0.0, -lt.y), 0.0).rgb;
+        vec3 nE = textureLod(u_lr_color, uv + vec2(0.0,  lt.y), 0.0).rgb;
+        c = max(casSharpen(c, nA, nB, nD, nE, strength), vec3(0.0));
     }
 
     // Depth edges. Where the four low-res texels straddle a silhouette
