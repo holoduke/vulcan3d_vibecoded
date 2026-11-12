@@ -676,8 +676,8 @@ float rm_ground_detail(vec2 wp, float t, float h) {
     // rills as noise in the cobbles).
     {
         float rdist = rm_road_dist(wp);
-        float keep = scene.road_info.y + scene.road_info.z;
-        w *= smoothstep(keep + 0.2, keep + 1.6, rdist);
+        float keep = scene.road_info.y;                 // paving only; the dirt verge keeps its relief
+        w *= smoothstep(keep + 0.1, keep + 0.9, rdist);
         if (w <= 0.0) return 0.0;
     }
     float lod = log2(max(t * 2.0 * scene.viewport.w * 0.45 * 2048.0, 1.0));
@@ -1010,9 +1010,9 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
             // hump across the paving a few metres ahead.
             if (!coarse && h < 0.65 && t < 90.0 && rd.y > -0.16) {   // grazing rays only: steep ones are fixed by the slide in main()
                 float rdist = rm_road_dist(pos.xz);
-                float keep = scene.road_info.y + scene.road_info.z;
-                if (rdist < keep + 1.2)
-                    h = mix(pos.y - meshHeight(pos.xz), h, smoothstep(keep, keep + 1.2, rdist));
+                float keep = scene.road_info.y;
+                if (rdist < keep + 0.9)
+                    h = mix(pos.y - meshHeight(pos.xz), h, smoothstep(keep, keep + 0.9, rdist));
             }
         }
 #else /* QLIKE_WATER */
@@ -2837,7 +2837,7 @@ void main() {
         pos = ro + t * rd;
         rm_road = roadWeights(pos.xz, rm_road_uv, rm_road_dir);
     }
-    g_rm_detail_mul = 1.0 - max(rm_road.x, rm_road.y * 0.6);
+    g_rm_detail_mul = 1.0 - rm_road.x;
     vec3 nor = calcNormal(pos, t);
     g_rm_detail_mul = 1.0;
     if (rm_road.x > 0.001) {
@@ -2915,7 +2915,7 @@ void main() {
     // ~0.5 m one that takes over right under the camera.
     vec3 rm_det_tint = vec3(1.0);
     {
-        float dw = (1.0 - smoothstep(18.0, 45.0, t)) * (1.0 - max(rm_road.x, rm_road.y));
+        float dw = (1.0 - smoothstep(18.0, 45.0, t)) * (1.0 - rm_road.x);
         if (dw > 0.01) {
             const int kSoil = 9, kRock = 7;
             float rockw = 1.0 - smoothstep(0.5, 0.8, nor.y);
@@ -3286,7 +3286,15 @@ void main() {
     // ~0.33), so the cobble texture is scaled toward that range.
     if (rm_road.x + rm_road.y > 0.001) {
         const float kRmAlbedoScale = 0.50;
-        mate = mix(mate, vec3(0.105, 0.078, 0.052), rm_road.y);
+        // Trodden dirt verge: the scanned soil set for structure (grit,
+        // pebbles, ruts) instead of one flat colour, broken up at two scales.
+        {
+            vec3 soil = textureLod(u_albedo[9], pos.xz * 0.55, rm_road_lod).rgb /
+                        max(textureLod(u_albedo[9], pos.xz * 0.55, 12.0).rgb, vec3(0.03));
+            float vn = noise2(pos.xz * 0.9) * 0.6 + noise2(pos.xz * 3.7) * 0.4;
+            vec3 verge = vec3(0.105, 0.078, 0.052) * clamp(soil, vec3(0.45), vec3(1.8)) * mix(0.72, 1.25, vn);
+            mate = mix(mate, verge, rm_road.y);
+        }
         mate = mix(mate, textureLod(u_albedo[kRmMatRoad], rm_road_uv, rm_road_lod).rgb * kRmAlbedoScale, rm_road.x);
     }
 
@@ -3475,6 +3483,21 @@ void main() {
     lin += amb * scene.sky_color.rgb * 0.75 * ao_shaped * mix(1.0, 0.30, dyn_shadow);
     lin += fre * scene.sky_color.rgb * 0.25 * ao_shaped;
 
+    // Dynamic point light (muzzle flash or the brightest explosion, same UBO
+    // light the deferred pass applies to everything else - it skips this
+    // pre-lit material). Objects can block it; terrain occlusion is ignored.
+    if (scene.muzzle_pos.w > 0.0) {
+        vec3  lv = scene.muzzle_pos.xyz - pos;
+        float d  = length(lv);
+        float r  = max(scene.muzzle_color.w, 0.1);
+        if (d < r && distance(pos, scene.camera_pos.xyz) > 1.5) {
+            vec3  Lp  = lv / max(d, 1e-3);
+            float att = 1.0 - d / r; att *= att;
+            float ndl = max(dot(nor, Lp), 0.0) * 0.85 + 0.15;
+            if (att * scene.muzzle_pos.w > 0.01 && !any_hit_no_terrain(pos + nor * 0.1, Lp, max(d - 0.8, 0.05)))
+                lin += scene.muzzle_color.rgb * (scene.muzzle_pos.w * att * ndl);
+        }
+    }
     vec3 col = mate * lin + gi_indirect;
 
     // Final-colour AO multiplier — dampens the WHOLE pixel (sun term
