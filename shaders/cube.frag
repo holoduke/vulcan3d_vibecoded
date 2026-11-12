@@ -1375,7 +1375,22 @@ void main() {
         float fp = cam_d * 2.0 * scene.viewport.w / max(rs, 0.05);
         float fine = 1.0 - smoothstep(0.006, 0.03, fp);
         float eps = max(fp * 0.6, 0.0012);
-        float th = rock_march(ro, rdo, r_inside ? 5.5 : 3.6, seed, amp, strata, fine, eps);
+        float r_tmax = r_inside ? 5.5 : 3.6;
+        if (strata < 0.0) {
+            // Slab formations: clip the ray to the stack's bounding box first
+            // (most rays of a flat, wide pavement miss it; the slab SDF is
+            // expensive to march through empty space).
+            const vec3 bmn = vec3(-1.80, -0.02, -1.80), bmx = vec3(1.80, 1.20, 1.80);
+            vec3 inv = 1.0 / (rdo + vec3(1e-6));
+            vec3 t0s = (bmn - ro) * inv, t1s = (bmx - ro) * inv;
+            vec3 tmn = min(t0s, t1s), tmx = max(t0s, t1s);
+            float tn = max(max(tmn.x, tmn.y), max(tmn.z, 0.0));
+            float tf = min(min(tmx.x, tmx.y), min(tmx.z, r_tmax));
+            if (tf <= tn) discard;
+            ro += rdo * tn;
+            r_tmax = tf - tn;
+        }
+        float th = rock_march(ro, rdo, r_tmax, seed, amp, strata, fine, eps);
         if (th < 0.0) discard;
         vec3 po = ro + rdo * th;
         float cav;
@@ -1404,11 +1419,15 @@ void main() {
         // so the rock sits IN the terrain instead of ending at a hard line.
         {
             float hgt = textureLod(u_heightmap_full, wposr.xz / 2048.0 + 0.5, 0.0).r;
-            float above = (wposr.y - hgt) / max(rs, 0.2);
-            float gb = 1.0 - smoothstep(0.03, 0.28 + 0.10 * rk_vnoise(wposr * 3.1), above);
-            vec3 soil = texture(u_albedo[9], wposr.xz * 0.45).rgb * vec3(0.55, 0.50, 0.40);
-            alb = mix(alb, soil, gb * 0.85);
-            alb *= mix(1.0, 0.55, (1.0 - smoothstep(0.0, 0.12, above)));
+            float above = (wposr.y - hgt) / max(rs * rysq * 0.9, 0.2);   // relative to the rock height (flat pavements!)
+            float gb = 1.0 - smoothstep(0.02, 0.14 + 0.08 * rk_vnoise(wposr * 3.1), above);
+            vec3 soil = texture(u_albedo[9], wposr.xz * 0.45).rgb * vec3(0.95, 0.85, 0.68);
+            // Flat tops stay rock even when they lie flush with the ground (a
+            // limestone pavement); the soil climbs the sides and the foot only.
+            float flat_top = smoothstep(0.6, 0.9, no.y);
+            gb *= 1.0 - 0.85 * flat_top;
+            alb = mix(alb, soil, gb * 0.7);
+            alb *= mix(1.0, 0.72, (1.0 - smoothstep(0.0, 0.06, above)) * (1.0 - flat_top));
             Nr = normalize(mix(Nr, vec3(0.0, 1.0, 0.0), gb * 0.6));
         }
         g_veg_solid = true;

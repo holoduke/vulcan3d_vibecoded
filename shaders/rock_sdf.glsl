@@ -38,7 +38,9 @@ void rock_params(float v, out float seed, out float amp, out float strata) {
     // Every third variant is a SLAB formation (strata < 0 selects it).
     if (mod(v, 3.0) > 0.5 && mod(v, 3.0) < 1.5) strata = -1.0;
 }
-float rk_h1(float x) { return fract(sin(x * 127.1) * 43758.5453); }
+// Low-gain sine hash: the CPU twin in world_props.cpp must give the
+// same beds, and sin() differs between CPU and GPU.
+float rk_h1(float x) { return fract(sin(x * 12.9898) * 437.585); }   // small multiplier: CPU and GPU sin() agree to ~1e-6
 // Slab formation: three or four flat limestone beds stacked like worn
 // steps - each an irregular polygon in plan, a little smaller and shifted
 // against the one below, with flat tops and near-vertical broken edges.

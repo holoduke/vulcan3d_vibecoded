@@ -88,7 +88,10 @@ void main() {
             float ramp = 0.26 + 0.1 * fract(rv * 0.37);
             const vec3 rc = vec3(0.0, 0.35, 0.0);
             float Rb = (1.0 + ramp + 0.12) * 1.30;
-            Pl = rc + normalize(inPosition - rc) * Rb;
+            // Slab formations: the mesh is the stack of beds itself, pushed
+            // out along its corner normals. Others: a sphere.
+            bool slab = abs(mod(rv, 3.0) - 1.0) < 0.5;
+            Pl = slab ? inPosition + inNormal * 0.42 : rc + normalize(inPosition - rc) * Rb;
             // Camera inside (or touching) the hull: its front faces would be
             // clipped / culled and the rock vanished when you walked up to
             // it. Shrink the hull to a small ball around the camera instead;
@@ -97,8 +100,18 @@ void main() {
             float rsc = I.pos_scale.w, rys = I.rot_arch_phase.w > 0.0 ? I.rot_arch_phase.w : 1.0;
             vec3 cw = scene.camera_pos.xyz - I.pos_scale.xyz;
             vec3 co = vec3(cr * cw.x + sr * cw.z, cw.y, -sr * cw.x + cr * cw.z) / vec3(rsc, rsc * rys, rsc);
-            if (distance(co, rc) < Rb + 0.35 / max(rsc, 0.05)) {
-                Pl = co + normalize(inPosition - rc) * (0.2 / max(rsc, 0.05));
+            float mh = 0.4 / max(rsc, 0.05), mv = 0.4 / max(rsc * rys, 0.05);
+            bool cam_in = slab
+                ? (abs(co.x) < 1.55 + mh && abs(co.z) < 1.55 + mh && co.y > -0.25 - mv && co.y < 1.15 + mv)
+                : (distance(co, rc) < Rb + 0.35 / max(rsc, 0.05));
+            if (cam_in) {
+                // Slabs: shrink the stack around the eye so that the eye sits
+                // in the middle of the second bed (a convex prism: its back
+                // faces cover every view direction).
+                // Only that one bed is kept; the others collapse to a point.
+                bool bed1 = abs(inPosition.y - (0.35 - 0.055)) < 0.107;
+                Pl = slab ? co + (bed1 ? vec3(inPosition.x, sign(inPosition.y - 0.295) * 0.125, inPosition.z) * (2.0 / max(rsc * rys, 0.05)) * vec3(rys, 1.0, rys) : vec3(0.0))
+                          : co + normalize(inPosition - rc) * (0.2 / max(rsc, 0.05));
                 rock_tag -= 1000.0;
             }
         }

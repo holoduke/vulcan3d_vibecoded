@@ -3,6 +3,7 @@
 #include "engine/road.h"
 #include "engine/terrain.h"
 #include "engine/lsystem.h"
+#include "engine/log.h"
 #include "engine/eztree.h"
 
 #include <glm/geometric.hpp>
@@ -959,6 +960,80 @@ void build_bush(LevelMesh& m, const BushParams& p, int lod, const Ico& lo, const
 
 }  // namespace
 
+namespace {
+// ---- Slab rock formations: the CPU twin of rock_slabs() in
+// shaders/rock_sdf.glsl (same hashes, same beds). The mesh is the hull
+// the ray march starts from, the ray-traced / shadow-map shadow caster,
+// and the source of the stepped colliders. ----
+float rk_h1(float x) { return glm::fract(std::sin(x * 12.9898f) * 437.585f); }
+struct SlabBed { float yc, th; glm::vec2 off; float ang[5], rad[5]; float r; };
+std::vector<SlabBed> slab_beds(float seed) {
+    std::vector<SlabBed> beds;
+    for (int i = 0; i < 4; ++i) {
+        const float fi = float(i);
+        const float h = rk_h1(seed + fi * 7.3f);
+        if (i == 3 && h < 0.45f) break;
+        SlabBed b;
+        b.th = 0.085f + 0.04f * rk_h1(seed + fi * 2.9f);
+        b.yc = -0.27f + 0.215f * fi;
+        b.r  = 1.08f - 0.20f * fi - 0.10f * h;
+        b.off = (glm::vec2(rk_h1(seed + fi * 3.1f), rk_h1(seed + fi * 5.7f)) - 0.5f) * 0.30f * fi;
+        for (int k = 0; k < 5; ++k) {
+            b.ang[k] = h * 6.2832f + float(k) * 1.2566f + (rk_h1(seed + fi + float(k) * 1.7f) - 0.5f) * 0.5f;
+            b.rad[k] = b.r * (0.72f + 0.28f * rk_h1(seed + fi * 4.1f + float(k)));
+        }
+        beds.push_back(b);
+    }
+    return beds;
+}
+void build_slab_rock(LevelMesh& m, float seed) {
+    const glm::vec3 C(0.0f, 0.35f, 0.0f);
+    for (const SlabBed& b : slab_beds(seed)) {
+        // Polygon corners: intersections of consecutive edge lines.
+        glm::vec2 pts[5];
+        for (int k = 0; k < 5; ++k) {
+            const int k2 = (k + 1) % 5;
+            const glm::vec2 n1(std::cos(b.ang[k]), std::sin(b.ang[k])), n2(std::cos(b.ang[k2]), std::sin(b.ang[k2]));
+            const float det = n1.x * n2.y - n1.y * n2.x;
+            pts[k] = std::abs(det) > 1e-4f
+                ? glm::vec2(b.rad[k] * n2.y - b.rad[k2] * n1.y, n1.x * b.rad[k2] - n2.x * b.rad[k]) / det
+                : n1 * b.rad[k];
+            if (glm::length(pts[k]) > 1.6f) pts[k] *= 1.6f / glm::length(pts[k]);   // near-parallel edges
+        }
+        const uint32_t base = uint32_t(m.verts.size());
+        // Slightly SMALLER than the ray-marched surface (which is carved up to
+        // ~0.09 below the nominal faces): shadow / AO rays leaving the visible
+        // surface must start outside this mesh, or the rock shadows itself.
+        const float th = b.th + 0.018f - 0.10f;
+        for (auto& pt : pts) pt *= std::max(0.0f, 1.0f - 0.10f / std::max(glm::length(pt), 0.2f));
+        for (int s = 0; s < 2; ++s)                          // 0 bottom ring, 1 top ring
+            for (int k = 0; k < 5; ++k) {
+                const glm::vec2 d = glm::length(pts[k]) > 1e-4f ? glm::normalize(pts[k]) : glm::vec2(1.0f, 0.0f);
+                const glm::vec3 p = C + glm::vec3(pts[k].x + b.off.x, b.yc + (s ? th : -th), pts[k].y + b.off.y);
+                // Corner normal (shared vertices): the hull is this mesh pushed out along it.
+                push_v(m, { p, glm::normalize(glm::vec3(d.x, s ? 1.0f : -1.0f, d.y)), 0.0f, 4.0f });
+            }
+        // Orientation: make the side faces point outward whatever the corner order.
+        float area = 0.0f;
+        for (int k = 0; k < 5; ++k) area += pts[k].x * pts[(k + 1) % 5].y - pts[(k + 1) % 5].x * pts[k].y;
+        const bool ccw = area > 0.0f;
+        auto tri = [&](uint32_t a, uint32_t b2, uint32_t c) {
+            if (ccw) m.idx.insert(m.idx.end(), { base + a, base + c, base + b2 });
+            else     m.idx.insert(m.idx.end(), { base + a, base + b2, base + c });
+        };
+        for (uint32_t k = 0; k < 5; ++k) {
+            const uint32_t k2 = (k + 1) % 5;
+            tri(k, k2, 5 + k2); tri(k, 5 + k2, 5 + k);       // side
+        }
+        for (uint32_t k = 1; k + 1 < 5; ++k) {
+            tri(5, 5 + k + 1, 5 + k);                        // top (facing up)
+            tri(0, k, k + 1);                                // bottom
+        }
+    }
+}
+
+}  // namespace
+
 std::vector<VegArchetype> build_veg_archetypes(int seed) {
     std::vector<VegArchetype> out;
     std::mt19937 rng{ uint32_t(seed) };
@@ -1017,6 +1092,11 @@ std::vector<VegArchetype> build_veg_archetypes(int seed) {
         float sd = 3.7f + 6.1f * float(v);
         float strata = (v % 2 == 0) ? 0.55f : 0.0f;
         float amp = 0.26f + 0.1f * glm::fract(float(v) * 0.37f);
+        if (v % 3 == 1) {                              // slab formation (rock_params: strata < 0)
+            for (int l = 0; l < kVegLods; ++l) build_slab_rock(a.lods[l], sd);
+            finish(a); out.push_back(std::move(a));
+            continue;
+        }
         const Ico* ic[kVegLods] = { &ultra, &hi, &lo, &tiny };
         for (int l = 0; l < kVegLods; ++l)
             add_blob(a.lods[l], *ic[l], glm::vec3(0.0f, 0.35f, 0.0f), glm::vec3(1.0f), 0.0f, sd,
@@ -1138,18 +1218,38 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
     // Rocks: formations (clusters of 3-7 boulders on slopes / rock band)
     // and lone erratics. Instances of the rock archetypes with a per-
     // instance vertical squash (rot_arch_phase.w).
-    auto add_rock = [&](float x, float z, float s, float ysq) {
+    // `variant` < 0: any rock type. `sink`: fraction of the rock's height
+    // buried (0.12 normal; pavements sit almost flush).
+    auto add_rock_ex = [&](float x, float z, float s, float ysq, int variant, float sink) {
         const auto& pool = by_species[3];
-        int ai = pool[size_t(u() * float(pool.size())) % pool.size()];
+        const size_t pi = variant >= 0 ? size_t(variant) % pool.size()
+                                       : size_t(u() * float(pool.size())) % pool.size();
+        int ai = pool[pi];
         float gy = h_at(x, z);
+        const float rot = u() * 6.2831853f;
+        const float y0 = gy - s * ysq * sink;
         VegInstance vi{};
-        vi.pos_scale = glm::vec4(x, gy - s * ysq * 0.12f, z, s);
-        vi.rot_arch_phase = glm::vec4(u() * 6.2831853f, float(ai), 0.0f, ysq);
+        vi.pos_scale = glm::vec4(x, y0, z, s);
+        vi.rot_arch_phase = glm::vec4(rot, float(ai), 0.0f, ysq);
         out.push_back(vi);
+        if (pi % 3 == 1) {
+            // Slab formation: one collider per bed, so the steps are steps.
+            const float c = std::cos(rot), sn = std::sin(rot);
+            for (const SlabBed& b : slab_beds(3.7f + 6.1f * float(pi))) {
+                const glm::vec2 o = b.off * s;
+                const float cx = x + c * o.x - sn * o.y, cz = z + sn * o.x + c * o.y;
+                const float he = b.r * 0.66f * s;
+                const float top = y0 + (0.35f + b.yc + b.th + 0.018f) * s * ysq;
+                cols.push_back({ glm::vec3(cx - he, std::min(gy, y0) - 1.0f, cz - he), glm::vec3(cx + he, top, cz + he) });
+            }
+            return;
+        }
         float he = s * 0.72f;
         cols.push_back({ glm::vec3(x - he, gy - 1.0f, z - he),
                          glm::vec3(x + he, gy + s * ysq * 1.1f, z + he) });
     };
+    auto add_rock = [&](float x, float z, float s, float ysq) { add_rock_ex(x, z, s, ysq, -1, 0.12f); };
+
     for (int a = 0; a < 60000 && st.formations < P.max_formations; ++a) {
         float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
         if (std::sqrt(x * x + z * z) < P.castle_clear) continue;
@@ -1185,7 +1285,28 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
         add_rock(x, z, s, 0.6f + 0.3f * u());
         ++st.boulders;
     }
+    // Limestone pavements: wide, low slab formations lying almost flush
+    // with gently sloping ground - worn stepped beds a few metres across.
+    {
+        int pavements = 0;
+        for (int a = 0; a < 30000 && pavements < 140; ++a) {
+            float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
+            if (std::sqrt(x * x + z * z) < P.castle_clear + 6.0f) continue;
+            if (excluded(x, z) || road_d(x, z) < road_clear + 7.0f) continue;
+            float h = h_at(x, z);
+            if (h < P.water_level + 1.2f || h > P.tree_line + 20.0f) continue;
+            if (ny_at(x, z) < 0.90f) continue;
+            float s = 3.5f + 4.5f * u();
+            if (!try_mark(x, z, s * 1.25f)) continue;
+            const int variant = 1 + 3 * int(u() * 2.99f);          // 1, 4 or 7: the slab archetypes
+            add_rock_ex(x, z, s, 0.26f + 0.16f * u(), variant, 0.10f);
+            if (pavements < 4) log::infof("[rock] pavement at (%.1f, %.1f, %.1f) size %.1f", x, h, z, s);
+            ++pavements;
+        }
+        log::infof("[rock] %d limestone pavements", pavements);
+    }
     // Trees. max_trees counts trees only (out already holds the rocks).
+
     const size_t rocks_placed = out.size();
     for (int a = 0; a < P.tree_attempts && int(out.size() - rocks_placed) < P.max_trees; ++a) {
         float x = (u() * 2.0f - 1.0f) * ext, z = (u() * 2.0f - 1.0f) * ext;
