@@ -3433,7 +3433,7 @@ void main() {
     // Under trees / beside objects the sky is partly covered as well: the
     // shadow of a canopy takes most of the sky fill with it (a forest
     // floor is dark, an open slope in the shade of a hill is not).
-    lin += amb * scene.sky_color.rgb * 0.75 * ao_shaped * mix(1.0, 0.55, dyn_shadow);
+    lin += amb * scene.sky_color.rgb * 0.75 * ao_shaped * mix(1.0, 0.30, dyn_shadow);
     lin += fre * scene.sky_color.rgb * 0.25 * ao_shaped;
 
     vec3 col = mate * lin + gi_indirect;

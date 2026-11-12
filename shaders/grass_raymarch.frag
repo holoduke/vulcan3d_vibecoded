@@ -658,7 +658,7 @@ void main() {
         }
     }
     // The root darkening (ao) is gentler on the sky fill than on the sun.
-    vec3 col = grassCol * (sun_term * side_tint * ao + sky_term * mix(1.0, ao, 0.6));
+    vec3 col = grassCol * (sun_term * side_tint * ao + sky_term * mix(1.0, ao, 0.6) * mix(0.55, 1.0, sun_lit));
 
     // View-dependent backlit / translucency — sun shining THROUGH the
     // blade from behind makes the leaves glow warm. Strongest when:
