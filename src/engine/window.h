@@ -28,6 +28,7 @@ struct InputFrame {
     bool brush_mode_prev = false; // Q; engine edge-detects to cycle brush mode
     bool brush_mode_next = false; // R; engine edge-detects to cycle brush mode
     bool wireframe_key = false;   // 9; engine edge-detects to toggle terrain wireframe
+    bool fly_key = false;         // V; engine edge-detects to toggle fly mode
     bool fire = false;      // left mouse, edge-triggered (one click = one)
     bool fire_held = false; // left mouse, level (true while button is down)
     bool alt_fire_held = false; // right mouse, level (true while button is down)

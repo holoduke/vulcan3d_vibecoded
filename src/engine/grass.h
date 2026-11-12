@@ -58,7 +58,7 @@ struct GrassParams {
     // h_factor range stuck isolated 0.75 m spears above the field;
     // 0.30 m read as too short in playtesting.
     float    blade_height = 0.38f;   // base unit blade height (m)
-    float    blade_width  = 0.040f;  // base half-width (m)
+    float    blade_width  = 0.016f;  // base half-width (m): thin straight leaves
     int      seed         = 0xC0DE;
     // Rectangular keep-out zone, centered on (0, 0). Candidates with
     // |x| < keep_out_xz.x AND |z| < keep_out_xz.y are rejected — so

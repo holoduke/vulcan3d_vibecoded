@@ -321,7 +321,7 @@ layout(set = 0, binding = 30) uniform sampler2D u_skyview;
 
 // Material texture arrays (same set-0 slots as cube.frag): only the castle
 // road cobbles are sampled here - the rest of this terrain is procedural.
-const int kRmTextureCount = 18;   // = cube.frag kTextureCount
+const int kRmTextureCount = 19;   // = cube.frag kTextureCount
 const int kRmMatRoad = 14;        // = cube.frag kMatRoad (PavingStones131)
 layout(set = 0, binding = 3) uniform sampler2D u_albedo[kRmTextureCount];
 layout(set = 0, binding = 4) uniform sampler2D u_normal[kRmTextureCount];

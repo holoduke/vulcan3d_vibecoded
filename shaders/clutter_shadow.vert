@@ -15,7 +15,7 @@ layout(push_constant) uniform PC {
 void main() {
     // Leaf blades (part 3) pack sway base + along-leaf coordinate in uv.y.
     float plant_sway = inUv.y;
-    if (int(inUv.x + 0.5) == 3) plant_sway = floor(inUv.y * 32.0) / 32.0 + 0.25 * fract(inUv.y * 32.0) / 0.98;
+    if (int(inUv.x + 0.5) >= 3) plant_sway = floor(inUv.y * 32.0) / 32.0 + 0.25 * fract(inUv.y * 32.0) / 0.98;
     vec3 base = inPosScale.xyz;
     float s = inPosScale.w;
     vec2 d = base.xz - pc.cam.xz;

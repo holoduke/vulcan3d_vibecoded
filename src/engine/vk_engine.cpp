@@ -599,6 +599,12 @@ void VulkanEngine::run(const RunOptions& opts) {
         // Digit 9 -> toggle terrain wireframe. Same edge-detect pattern
         // as the E key above. Only fires while playing so a 9 in the
         // pause menu / chat input wouldn't flip it.
+        if (in.fly_key && !prev_fly_key_ && state_ == State::Playing) {
+            fly_mode_ = !fly_mode_;
+            player_.velocity = glm::vec3(0.0f);
+            log::infof("[player] fly mode %s", fly_mode_ ? "on" : "off");
+        }
+        prev_fly_key_ = in.fly_key;
         bool wire_edge = in.wireframe_key && !prev_wireframe_key_;
         prev_wireframe_key_ = in.wireframe_key;
         if (wire_edge && state_ == State::Playing) {
@@ -769,6 +775,36 @@ void VulkanEngine::run(const RunOptions& opts) {
                 rebuild_tick_aabbs();
                 glm::vec3 pre_vel = player_.velocity;
                 bool was_on_ground = player_.on_ground;
+                if (fly_mode_) {
+                    // Free flight: along the view direction, Space up, Ctrl
+                    // down, Shift for a burst. No gravity, no collision.
+                    const float cp = std::cos(player_.pitch), sp = std::sin(player_.pitch);
+                    const glm::vec3 fwd(std::sin(player_.yaw) * cp, sp, -std::cos(player_.yaw) * cp);
+                    const glm::vec3 rgt(std::cos(player_.yaw), 0.0f, std::sin(player_.yaw));
+                    glm::vec3 wish(0.0f);
+                    if (pin.fwd)   wish += fwd;
+                    if (pin.back)  wish -= fwd;
+                    if (pin.right) wish += rgt;
+                    if (pin.left)  wish -= rgt;
+                    if (pin.jump)  wish.y += 1.0f;
+                    if (pin.crawl) wish.y -= 1.0f;
+                    const float speed = pin.sprint ? 120.0f : 40.0f;   // walking is 8 m/s
+                    const glm::vec3 target = glm::dot(wish, wish) > 1e-6f ? glm::normalize(wish) * speed : glm::vec3(0.0f);
+                    player_.velocity += (target - player_.velocity) * std::min(1.0f, 8.0f * kFixedDt);
+                    player_.position += player_.velocity * kFixedDt;
+                    // Never below the ground.
+                    const float gmin = sample_terrain_height(player_.position.x, player_.position.z) + 0.95f;
+                    if (player_.position.y < gmin) { player_.position.y = gmin; player_.velocity.y = std::max(player_.velocity.y, 0.0f); }
+                    player_.on_ground = false;
+                    player_.crouch_factor = 0.0f;
+                    if (physics_) physics_->step(kFixedDt);
+                    update_projectiles(kFixedDt);
+                    update_particles(kFixedDt);
+                    update_decals(kFixedDt);
+                    physics_accumulator_ -= kFixedDt;
+                    ++last_physics_ticks_;
+                    continue;
+                }
                 game::update_player(player_, pin, tick_aabbs_, kFixedDt,
                                      world_.aabbs.size() +
                                      voxel_collision_aabbs_.size());

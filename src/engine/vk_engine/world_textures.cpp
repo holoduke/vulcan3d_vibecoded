@@ -645,12 +645,20 @@ void VulkanEngine::load_foliage_textures() {
             ++loaded;
         }
     }
+    if (std::string p = resolve("plant_atlas.png"); !p.empty()) {
+        int w = 0, h = 0, c = 0;
+        if (unsigned char* px = stbi_load(p.c_str(), &w, &h, &c, 4)) {
+            put(albedo_textures_[kTexPlant], px, w, h, VK_FORMAT_R8G8B8A8_SRGB, "foliage/plant_atlas");
+            stbi_image_free(px);
+            ++loaded;
+        }
+    }
     if (!retired.empty()) texture_upload_batch_sync(device_, allocator_, graphics_queue_);
     for (TextureSlot& s : retired) {
         if (s.view)  vkDestroyImageView(device_, s.view, nullptr);
         if (s.image) vmaDestroyImage(allocator_, s.image, s.alloc);
     }
-    log::infof("[foliage] %d/2 textures loaded (leaf atlas, timber)", loaded);
+    log::infof("[foliage] %d/3 textures loaded (leaf atlas, timber, plant atlas)", loaded);
 }
 
 void VulkanEngine::load_terrain_pbr_overrides() {
@@ -1152,6 +1160,7 @@ void VulkanEngine::bake_terrain_materials() {
         { TM_GRASS, kTexLeaf,      "foliage/leaf_placeholder" },
         { TM_ROCK,  kTexBark,      "foliage/bark_placeholder" },
         { TM_DIRT,  kTexTimber,    "foliage/timber_placeholder" },
+        { TM_GRASS, kTexPlant,     "foliage/plant_placeholder" },
     };
     // CPU generation of all materials in parallel (pure functions of
     // kind + size); uploads stay on this thread (queue owner).

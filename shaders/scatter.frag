@@ -33,7 +33,7 @@ layout(location = 1) out vec2 outMotion;
 layout(location = 2) out vec4 outGBuffer0;
 layout(location = 3) out vec4 outGBuffer1;
 
-const int kTextureCount = 18;
+const int kTextureCount = 19;
 layout(set = 0, binding = 3) uniform sampler2D u_albedo[kTextureCount];
 
 #include "scene_ubo.glsl"
@@ -118,6 +118,15 @@ void main() {
         vec3 leaf = fern ? vColor : vec3(0.11, 0.22, 0.05);
         leaf *= 0.8 + 0.4 * vUv.y;                // tips catch more light
         albedo = (part == 0) ? leaf : (part == 1 ? vColor : vec3(0.75, 0.55, 0.04));
+        if (part == 4) {
+            // Petal: the photographed petal structure (atlas right half), tinted.
+            float pu = clamp((vUv.x - 4.0) / 0.4, -1.0, 1.0);
+            float pt = clamp(fract(vUv.y * 32.0) / 0.98, 0.0, 1.0);
+            vec3 pet = texture(u_albedo[18], vec2(0.5 + (pu * 0.5 + 0.5) * 0.5, 1.0 - pt)).rgb;
+            vec3 pm  = textureLod(u_albedo[18], vec2(0.75, 0.5), 8.0).rgb;
+            albedo = vColor * clamp(pet / max(pm, vec3(0.05)), vec3(0.5), vec3(1.4));
+            albedo *= mix(0.80, 1.0, smoothstep(0.0, 0.35, pt));      // deeper toward the centre
+        }
         if (part == 3) {
             // Leaf blade with real leaf-space coordinates: u across (-1..1),
             // t along (0 base .. 1 tip). Procedural venation - a pale midrib,
@@ -143,6 +152,13 @@ void main() {
             blade = mix(blade, blade * vec3(1.25, 1.12, 0.75), smoothstep(0.7, 1.0, au));   // margin
             blade *= mix(1.15, 0.92, t);                                                   // paler base
             albedo = mix(blade, vec3(0.30, 0.42, 0.14), vein);
+            // Photographed leaf surface (atlas left half) as the fine structure.
+            {
+                vec3 lt = texture(u_albedo[18], vec2((u * 0.5 + 0.5) * 0.5, 1.0 - t)).rgb;
+                vec3 lm = textureLod(u_albedo[18], vec2(0.25, 0.5), 8.0).rgb;
+                albedo *= clamp(lt / max(lm, vec3(0.03)), vec3(0.55), vec3(1.6));
+                if (fern) albedo = albedo * (vColor / vec3(0.085, 0.20, 0.045)) * 0.9;   // ferns keep their own green
+            }
             // Relief: the blade bulges between the veins.
             vec3 across = normalize(cross(N, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
             float bump = (fract(vph) - 0.5) * (1.0 - vein) * (1.0 - smoothstep(0.25, 0.9, vfw));

@@ -54,7 +54,8 @@ void make_blade_mesh(VkDevice device, VmaAllocator alloc, VkQueue queue,
     for (int i = 0; i < 4; ++i) {
         float t = t_levels[i];
         float yw = h * t;
-        float ww = w * (1.0f - t * 0.35f);   // gentle linear taper
+        // Thin grass leaf: narrowing steadily to a fine point.
+        float ww = w * (1.0f - t * 0.80f);
         verts[v++] = { { -ww, yw, 0.0f }, { 0, 0, 1 }, { 0.0f, t } }; // left
         verts[v++] = { {  ww, yw, 0.0f }, { 0, 0, 1 }, { 1.0f, t } }; // right
     }
@@ -215,13 +216,13 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
         // few tenths of a radian — enough that a field of blades has
         // visible "leaning here, upright there" texture instead of
         // every blade pointing straight up.
-        float tilt = (u01(rng) - 0.5f) * 0.6f;       // [-0.30, 0.30] rad
+        float tilt = (u01(rng) - 0.5f) * 0.30f;      // [-0.15, 0.15] rad: mostly upright
         b.pos_pad        = glm::vec4(wx, wy, wz, tilt);
         float rotation   = rot(rng);
         // Tightened from 0.65 + 0.7u: with lawn-scale blade_height the
         // tall tail of the old range stuck isolated blades 2x above the
         // raymarched field.
-        float h_factor   = 0.75f + u01(rng) * 0.5f;
+        float h_factor   = 0.85f + u01(rng) * 0.6f;
         // Clump id: a per-blade hash that the shader blends with the
         // base tint so neighbouring blades tend to share colour, giving
         // the "patches of slightly different green" look characteristic
@@ -231,7 +232,7 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
         // Tip bend amount — how strongly the blade curves forward at
         // the top. > 1 = pronounced cane-shape; < 1 = nearly straight.
         // Stored in tint_pad.w.
-        float tip_bend = 0.55f + u01(rng) * 0.95f;   // [0.55, 1.50]
+        float tip_bend = 0.05f + u01(rng) * 0.30f;   // [0.05, 0.35]: nearly straight
         b.tint_pad       = glm::vec4(random_tint(), tip_bend);
         blades.push_back(b);
         ++kept;

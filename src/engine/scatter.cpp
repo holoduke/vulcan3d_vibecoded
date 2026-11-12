@@ -203,9 +203,12 @@ void plant_head(std::vector<Vertex>& v, std::vector<uint32_t>& ix, glm::vec3 hc,
             float t = float(s) / segs;
             glm::vec3 a = pt(t, -1.0f), c = pt(t, 0.0f), b = pt(t, 1.0f);
             glm::vec3 nrm = glm::normalize(glm::cross(pt(std::min(1.0f, t + 0.1f), 0.0f) - c, b - a) + up * 0.3f);
-            v.push_back({ a, nrm, { 1.0f, sway } });
-            v.push_back({ c, nrm, { 1.0f, sway } });
-            v.push_back({ b, nrm, { 1.0f, sway } });
+            // Part 4: petal with petal-space coordinates (across in uv.x's
+            // fraction, along packed with the sway in uv.y - see plant_leaf).
+            const float pk = std::floor(sway * 32.0f) / 32.0f + t * (0.98f / 32.0f);
+            v.push_back({ a, nrm, { 4.0f - 0.4f, pk } });
+            v.push_back({ c, nrm, { 4.0f, pk } });
+            v.push_back({ b, nrm, { 4.0f + 0.4f, pk } });
         }
         for (int s = 0; s < segs; ++s) {
             uint32_t r0 = k + uint32_t(s) * 3u, r1 = r0 + 3u;
@@ -293,8 +296,11 @@ void build_fern(std::vector<Vertex>& v, std::vector<uint32_t>& ix) {
         if (n1.y < 0.0f) n1 = -n1;
         if (n2.y < 0.0f) n2 = -n2;
         uint32_t k = uint32_t(v.size());
-        v.push_back({ base, n1, { 0.0f, sw } }); v.push_back({ mid + w + fold, n1, { 0.0f, sw } }); v.push_back({ tip, n1, { 0.0f, sw } });
-        v.push_back({ base, n2, { 0.0f, sw } }); v.push_back({ tip, n2, { 0.0f, sw } }); v.push_back({ mid - w + fold, n2, { 0.0f, sw } });
+        // Part 3 (leaf blade) with leaf-space coordinates, like plant_leaf.
+        const float sk = std::floor(sw * 32.0f) / 32.0f;
+        const float t0 = sk, tm = sk + 0.42f * (0.98f / 32.0f), t1 = sk + 0.98f / 32.0f;
+        v.push_back({ base, n1, { 3.0f, t0 } }); v.push_back({ mid + w + fold, n1, { 3.4f, tm } }); v.push_back({ tip, n1, { 3.0f, t1 } });
+        v.push_back({ base, n2, { 3.0f, t0 } }); v.push_back({ tip, n2, { 3.0f, t1 } }); v.push_back({ mid - w + fold, n2, { 2.6f, tm } });
         ix.insert(ix.end(), { k, k + 1, k + 2, k + 3, k + 4, k + 5 });
     }
 }

@@ -410,6 +410,7 @@ private:
 
     std::array<FrameData, kFrameOverlap> frames_{};
     uint64_t frame_number_ = 0;
+    bool fly_mode_ = false, prev_fly_key_ = false;   // V: free flight, no collision
     // Seconds-based animation clock (wind, water, grass sway): advanced once
     // per frame from real time so animation speed is frame-rate independent
     // (was frame_number_ * 0.016 - 2.4x too fast at 144 fps). Wrapped hourly.
@@ -677,7 +678,7 @@ private:
     // are procedurally baked seamless terrain materials, splatted in
     // cube.frag's is_terrain block by the height/slope weights.
     static constexpr int kFileTextureCount   = 7;
-    static constexpr int kTerrainMatCount    = 11;    // +ProcGrass, Roof, Road, Leaf atlas, Bark
+    static constexpr int kTerrainMatCount    = 12;    // +ProcGrass, Roof, Road, Leaf atlas, Bark
     static constexpr int kTextureCount       = kFileTextureCount +
                                                kTerrainMatCount;   // 15
     // Albedo/normal-array indices of the baked terrain materials.
@@ -702,6 +703,7 @@ private:
     static constexpr int kTexLeaf = kFileTextureCount + 8;  // 15
     static constexpr int kTexBark = kFileTextureCount + 9;  // 16
     static constexpr int kTexTimber = kFileTextureCount + 10;  // 17: weathered timber (lamp posts)
+    static constexpr int kTexPlant  = kFileTextureCount + 11;  // 18: small-plant atlas (leaf | petal)
     struct TextureSlot {
         VkImage image = VK_NULL_HANDLE;
         VmaAllocation alloc = nullptr;
