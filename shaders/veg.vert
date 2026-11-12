@@ -56,7 +56,7 @@ void main() {
     // Continuous-LOD tree elements (eztree.h). Each carries a priority; it
     // is drawn when priority <= detail and grows from nothing just above
     // that, so branches and leaves fade in and out instead of popping.
-    if (matRaw == 7 || matRaw == 9) {            // leaf card
+    if (matRaw == 7 || matRaw >= 9) {            // leaf card
         float q = floor(inUv.x * 0.25);
         float corner = inUv.x - 4.0 * q;
         float prio = q / 1023.0;
@@ -66,7 +66,7 @@ void main() {
         vec3 origin = inPosition - inNormal;
         Pl = origin + inNormal * (g * comp);
         float tone = fract(sin(dot(origin, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
-        card_uvk = vec3(mod(corner, 2.0), floor(corner * 0.5 + 0.01), (matRaw == 9 ? 1.0 : 0.0) + 0.05 + 0.9 * tone);
+        card_uvk = vec3(mod(corner, 2.0), floor(corner * 0.5 + 0.01), (matRaw == 7 ? 0.0 : float(matRaw - 8)) + 0.05 + 0.9 * tone);   // z = atlas cell + tone
         Nl = vec3(0.0, 1.0, 0.0);
         mat0 = 7;
     } else if (matRaw == 8) {                    // branch tube: thins to nothing
@@ -114,7 +114,7 @@ void main() {
         float H  = ai.y * 2.0 * s * ysq;
         vec3  base = I.pos_scale.xyz;
         vec3  dc;
-        if (mat0 == 1 || (mat0 == 7 && card_uvk.z >= 1.0)) {   // conifer: outward from the trunk, a little up
+        if (mat0 == 1 || (mat0 == 7 && mod(floor(card_uvk.z), 2.0) > 0.5)) {   // conifer: outward from the trunk, a little up
             vec2 o = wp.xz - base.xz;
             dc = normalize(vec3(o.x, 0.45 * length(o) + 0.05, o.y));
         } else {
@@ -153,7 +153,7 @@ void main() {
     else if (mat == 3) { col = vec3(0.14, 0.24, 0.08); }
     else if (mat == 7) {            // leaf card: needles darker and bluer than broad leaves
         float tone = fract(card_uvk.z);
-        col = (card_uvk.z >= 1.0 ? vec3(0.72, 0.80, 0.76) : vec3(0.60, 0.64, 0.50)) * (0.80 + 0.40 * tone);   // tint over the atlas
+        col = (mod(floor(card_uvk.z), 2.0) > 0.5 ? vec3(0.72, 0.80, 0.76) : (card_uvk.z >= 2.0 ? vec3(0.46, 0.52, 0.40) : vec3(0.60, 0.64, 0.50))) * (0.80 + 0.40 * tone);   // tint over the atlas
     }
     else if (mat == 6) {            // leaf blade (real geometry): each leaf its own tone
         float lv = fract(sin(dot(floor(rest_wp * 2.3), vec3(12.9898, 78.233, 37.719))) * 43758.5453);

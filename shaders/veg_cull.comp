@@ -93,13 +93,15 @@ void main() {
     bool has_imp = ai.z > 0.5;
     float dither = fract(I.rot_arch_phase.z * 2.7182818) * 0.25 + 0.88;
     px *= dither;
-    if (ai.w < 1.5) {
-        // Trees: CONTINUOUS detail. `detail` (0..1) is the fraction of the
+    if (ai.w < 2.5) {
+        // Trees and bushes: CONTINUOUS detail. `detail` (0..1) is the fraction of the
         // tree's branches / leaves that is drawn; the vertex shader fades
         // elements in and out around it, so nothing pops. The bucket only
         // decides how much of the (priority-ordered) mesh is submitted -
         // bucket k holds the elements with priority <= kDetail[k].
-        float detail = clamp(pow(px / 60.0, 1.2), 0.03, 1.0);
+        // Full detail from 60 px of bounding radius for trees, 25 px for the
+        // (much smaller) bushes.
+        float detail = clamp(pow(px / (ai.w > 1.5 ? 25.0 : 60.0), 1.2), 0.03, 1.0);
         uint lod = detail > 0.5 ? 0u : (detail > 0.22 ? 1u : (detail > 0.09 ? 2u : 3u));
         // Far away the mesh hands over to the billboard with a dithered blend.
         const float kImp = 7.0;

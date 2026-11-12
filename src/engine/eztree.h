@@ -43,11 +43,12 @@ struct EzTreeOptions {
     float leaf_size = 2.5f;
     float leaf_size_variance = 0.7f;
     bool  leaf_double = true;        // two crossed cards per leaf
-    float leaf_kind = 0.0f;          // 0 broadleaf spray, 1 needle spray
+    float leaf_kind = 0.0f;          // atlas cell: 0 oak, 1 spruce, 2 birch, 3 pine (odd = conifer)
 };
 
 EzTreeOptions ez_preset_oak();
 EzTreeOptions ez_preset_pine();
+EzTreeOptions ez_preset_bush();
 
 // Continuous level of detail. Every element of a tree (a branch, a leaf
 // card) has a PRIORITY in 0..1: the trunk 0, limbs low, twigs high, leaves
@@ -64,7 +65,7 @@ constexpr float kVegDetail[4] = { 1.0f, 0.5f, 0.22f, 0.09f };
 // at the origin, +Y up).
 //   branch vertex : normal = outward normal, u = floor(priority * 1023) + radius (< 1 m), v = 8
 //   leaf card     : normal = corner - leaf origin, u = 4 * floor(priority * 1023) + corner (0..3),
-//                   v = 7 (broadleaf) / 9 (needles)
+//                   v = 7 for atlas cell 0, 8 + cell otherwise (9 spruce, 10 birch, 11 pine)
 void build_ez_tree(game::LevelMesh& m, const EzTreeOptions& o, float max_detail, float target_height);
 
 }  // namespace qlike

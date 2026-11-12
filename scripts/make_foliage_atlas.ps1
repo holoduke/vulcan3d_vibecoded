@@ -4,11 +4,11 @@
 Add-Type -AssemblyName System.Drawing
 $root = 'C:\Users\gillis\dev\quake-like\assets\foliage'
 $S = 1024
-$atlas = New-Object Drawing.Bitmap (2 * $S), $S, ([Drawing.Imaging.PixelFormat]::Format32bppArgb)
-$ad = $atlas.LockBits((New-Object Drawing.Rectangle 0, 0, (2 * $S), $S), 'WriteOnly', $atlas.PixelFormat)
-$out = New-Object byte[] ($ad.Stride * $S)
+$atlas = New-Object Drawing.Bitmap (2 * $S), (2 * $S), ([Drawing.Imaging.PixelFormat]::Format32bppArgb)
+$ad = $atlas.LockBits((New-Object Drawing.Rectangle 0, 0, (2 * $S), (2 * $S)), 'WriteOnly', $atlas.PixelFormat)
+$out = New-Object byte[] ($ad.Stride * 2 * $S)
 $i = 0
-foreach ($name in 'leaf', 'needle') {
+foreach ($name in "leaf", "needle", "birch", "pine") {
     $src0 = [Drawing.Bitmap]::FromFile("$root\src\$name.png")
     $src = New-Object Drawing.Bitmap $S, $S, ([Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [Drawing.Graphics]::FromImage($src); $g.InterpolationMode = 'HighQualityBicubic'
@@ -18,14 +18,14 @@ foreach ($name in 'leaf', 'needle') {
     [Runtime.InteropServices.Marshal]::Copy($sd.Scan0, $buf, 0, $buf.Length)
     $src.UnlockBits($sd); $src.Dispose()
     # Fill colour for the transparent area (stops a magenta fringe in the mips).
-    $fill = if ($name -eq 'leaf') { @(30, 110, 50) } else { @(30, 70, 30) }   # B, G, R
+    $fill = if ($name -eq "leaf" -or $name -eq "birch") { @(30, 110, 50) } else { @(30, 70, 30) }   # B, G, R
     for ($y = 0; $y -lt $S; $y++) {
         for ($x = 0; $x -lt $S; $x++) {
             $o = $y * $sd.Stride + $x * 4
             $b = [int]$buf[$o]; $gr = [int]$buf[$o + 1]; $r = [int]$buf[$o + 2]
             $m = [Math]::Min($r, $b) - $gr              # magenta-ness
             $a = 1.0 - [Math]::Min(1.0, [Math]::Max(0.0, ($m - 25.0) / 70.0))
-            $p = $y * $ad.Stride + ($i * $S + $x) * 4
+            $p = ($y + [Math]::Floor($i / 2) * $S) * $ad.Stride + (($i % 2) * $S + $x) * 4
             if ($a -le 0.02) {
                 $out[$p] = $fill[0]; $out[$p + 1] = $fill[1]; $out[$p + 2] = $fill[2]; $out[$p + 3] = 0
             } else {

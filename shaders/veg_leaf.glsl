@@ -107,5 +107,8 @@ bool veg_card(vec2 uv, float kind, out float shade) {
 // left half, conifer spray in the right). `uv` as for veg_card. Returns
 // rgb + coverage; `lod_bias` < 0 keeps thin needles from fading with the mips.
 vec2 veg_card_uv(vec2 uv, float kind) {
-    return vec2((kind >= 1.0 ? 0.5 : 0.0) + clamp(uv.x, 0.006, 0.994) * 0.5, 1.0 - clamp(uv.y, 0.004, 0.996));
+    // 2 x 2 cells: 0 oak, 1 spruce (top row), 2 birch, 3 pine (bottom row).
+    float cell = floor(kind);
+    return vec2(mod(cell, 2.0) * 0.5 + clamp(uv.x, 0.006, 0.994) * 0.5,
+                (cell >= 2.0 ? 0.5 : 0.0) + (1.0 - clamp(uv.y, 0.006, 0.994)) * 0.5);
 }

@@ -738,6 +738,12 @@ void build_pine(LevelMesh& m, const PineParams& p, int lod, const Ico& lo, const
         // real-time triangle budget.
         EzTreeOptions o = ez_preset_pine();
         o.seed = uint32_t(p.seed * 9173.0f) + 11u;
+        if (glm::fract(p.seed * 3.7f) > 0.5f) {      // Scots-pine habit: fewer, longer, more open boughs
+            o.leaf_kind = 3.0f;
+            o.angle[1] = 84.0f;
+            o.leaf_size = 2.9f;
+            o.start[1] = 0.42f;
+        }
         o.children[0] = glm::clamp(int(p.H * 4.6f), 44, 74);
         o.sections[0] = 10; o.sections[1] = 5; o.segments[1] = 4;
         o.leaf_count = 14;
@@ -782,8 +788,10 @@ void build_oak(LevelMesh& m, const OakParams& p, int lod, const Ico& lo, const I
         (void)lo;
         EzTreeOptions o = ez_preset_oak();
         o.seed = uint32_t(p.seed * 7919.0f) + 3u;
+        const bool birch = glm::fract(p.seed * 3.7f) > 0.5f;   // birch: small leaves, lighter crown
+        if (birch) o.leaf_kind = 2.0f;
         o.leaf_count = 9;
-        o.leaf_size = 3.4f;
+        o.leaf_size = birch ? 2.9f : 3.4f;
         o.children[0] = 5 + int(p.branches % 3);
         const float wide = p.crown.x / glm::max(p.crown.y, 0.2f);      // > 1 wide, < 1 tall
         o.angle[1] = glm::clamp(54.0f * wide, 30.0f, 70.0f);
@@ -926,7 +934,17 @@ void build_shrub(LevelMesh& m, const BushParams& p, int lod, const Ico& lo) {
 
 void build_bush(LevelMesh& m, const BushParams& p, int lod, const Ico& lo, const Ico& tiny,
                 const Ico& hi) {
-    if (lod <= 1) { build_shrub(m, p, lod, lo); return; }
+    {
+        // Every LOD bucket: EZ-Tree shrub (continuous detail, like the trees).
+        (void)lo; (void)tiny; (void)hi;
+        EzTreeOptions o = ez_preset_bush();
+        o.seed = uint32_t(p.seed * 6151.0f) + 5u;
+        o.children[0] = 7 + p.blobs % 4;
+        o.angle[1] = glm::clamp(62.0f * p.sx / glm::max(p.sy, 0.3f), 40.0f, 78.0f);
+        o.leaf_kind = glm::fract(p.seed * 2.3f) > 0.5f ? 2.0f : 0.0f;
+        build_ez_tree(m, o, kVegDetail[lod], 1.25f * p.sy + 0.25f);
+        return;
+    }
     const int n = (lod == 0) ? p.blobs : (lod == 1) ? 2 : 1;
     const Ico& ico = (lod == 0) ? hi : (lod == 1) ? lo : tiny;
     for (int k = 0; k < n; ++k) {

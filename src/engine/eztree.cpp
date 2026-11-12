@@ -207,7 +207,29 @@ EzTreeOptions ez_preset_pine() {
     return o;
 }
 
-void build_ez_tree(game::LevelMesh& m, const EzTreeOptions& o, float max_detail, float target_height) {
+EzTreeOptions ez_preset_bush() {
+    // A multi-stemmed shrub: no real trunk, stems fan out from the base
+    // and fork once; leaf sprays all along the outer branches.
+    EzTreeOptions o;
+    o.seed = 4242; o.evergreen = false; o.levels = 2;
+    const float angle[4] = { 0, 62, 48, 40 };           const int children[4] = { 9, 4, 0, 0 };
+    const float gn[4] = { 0.10f, 0.18f, 0.25f, 0.0f };   const float len[4] = { 4.0f, 9.0f, 6.0f, 1.0f };
+    const float rad[4] = { 0.55f, 0.55f, 0.6f, 0.6f };   const int sec[4] = { 3, 5, 3, 1 };
+    const int seg[4] = { 5, 4, 3, 3 };                   const float st[4] = { 0, 0.0f, 0.25f, 0.3f };
+    const float tp[4] = { 0.5f, 0.6f, 0.7f, 0.7f };
+    for (int i = 0; i < 4; ++i) {
+        o.angle[i] = angle[i]; o.children[i] = children[i]; o.gnarliness[i] = gn[i]; o.length[i] = len[i];
+        o.radius[i] = rad[i]; o.sections[i] = sec[i]; o.segments[i] = seg[i]; o.start[i] = st[i];
+        o.taper[i] = tp[i]; o.twist[i] = 0.0f;
+    }
+    o.force_strength = 0.012f;
+    o.leaf_angle = 50; o.leaf_count = 5; o.leaf_start = 0.1f; o.leaf_size = 5.0f; o.leaf_size_variance = 0.4f;
+    o.leaf_double = true; o.leaf_kind = 0.0f;
+    return o;
+}
+
+void build_ez_tree(
+game::LevelMesh& m, const EzTreeOptions& o, float max_detail, float target_height) {
     Gen g{ o, Rng{ o.seed * 2654435761u + 977u }, {}, {}, {} };
     g.run();
     float top = 1e-3f;
@@ -247,7 +269,7 @@ void build_ez_tree(game::LevelMesh& m, const EzTreeOptions& o, float max_detail,
 
     // ---- Leaves: cards. A second, crossed card per leaf joins in at the
     // upper half of the detail range. ----
-    const float mat = o.leaf_kind >= 1.0f ? 9.0f : 7.0f;
+    const float mat = o.leaf_kind < 0.5f ? 7.0f : 8.0f + std::floor(o.leaf_kind + 0.5f);
     for (const Leaf& l : g.leaves) {
         const float size = l.size * sc;
         const glm::vec3 origin = l.origin * sc;
