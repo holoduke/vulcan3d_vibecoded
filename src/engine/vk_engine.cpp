@@ -599,9 +599,24 @@ void VulkanEngine::run(const RunOptions& opts) {
         // Digit 9 -> toggle terrain wireframe. Same edge-detect pattern
         // as the E key above. Only fires while playing so a 9 in the
         // pause menu / chat input wouldn't flip it.
+        if (state_ != State::Playing) fly_mode_ = false;
         if (in.fly_key && !prev_fly_key_ && state_ == State::Playing) {
             fly_mode_ = !fly_mode_;
             player_.velocity = glm::vec3(0.0f);
+            if (!fly_mode_) {
+                // Landing: if the player ended up inside a wall / post / rock,
+                // lift them clear (straight up, in 0.5 m steps) before normal
+                // collision takes over again.
+                rebuild_tick_aabbs();
+                for (int k = 0; k < 80; ++k) {
+                    const auto box = player_.shape();
+                    bool inside = false;
+                    for (const auto& a : tick_aabbs_)
+                        if (collision::aabb_overlap(collision::aabb_translate(box, player_.position), a)) { inside = true; break; }
+                    if (!inside) break;
+                    player_.position.y += 0.5f;
+                }
+            }
             log::infof("[player] fly mode %s", fly_mode_ ? "on" : "off");
         }
         prev_fly_key_ = in.fly_key;
@@ -772,7 +787,6 @@ void VulkanEngine::run(const RunOptions& opts) {
                 pin.gravity = game_.gravity;
                 pin.mouse_dx = 0.0f;  // mouse already applied above
                 pin.mouse_dy = 0.0f;
-                rebuild_tick_aabbs();
                 glm::vec3 pre_vel = player_.velocity;
                 bool was_on_ground = player_.on_ground;
                 if (fly_mode_) {
@@ -805,6 +819,7 @@ void VulkanEngine::run(const RunOptions& opts) {
                     ++last_physics_ticks_;
                     continue;
                 }
+                rebuild_tick_aabbs();
                 game::update_player(player_, pin, tick_aabbs_, kFixedDt,
                                      world_.aabbs.size() +
                                      voxel_collision_aabbs_.size());

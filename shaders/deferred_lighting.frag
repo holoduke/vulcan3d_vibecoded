@@ -1450,6 +1450,21 @@ void main() {
                       pc.light_col[i].a * pndl * fall;
     }
 
+    // Road lanterns (scene UBO), with a shadow ray: walls and posts block them.
+    for (int i = 0; i < 2; ++i) {
+        float li = scene.lamp_lights[i].w;
+        if (li < 1e-3) continue;
+        vec3 to = scene.lamp_lights[i].xyz - world_pos;
+        float d = length(to);
+        const float kLampR = 13.0;
+        if (d >= kLampR) continue;
+        vec3 ld = to / max(d, 1e-3);
+        float pndl = max(dot(N, ld), 0.0);
+        if (pndl <= 0.0) continue;
+        float fall = 1.0 - d / kLampR; fall *= fall;
+        if (any_hit_m(wp_safe + N * 0.06, ld, max(d - 0.45, 0.05), 0x01u)) continue;
+        point_term += diff_albedo * vec3(1.0, 0.62, 0.28) * (li * pndl * fall);
+    }
     vec3 lit = sun_term + ambient_term + spec_ambient + sky_fill + point_term +
                diff_albedo * gi_indirect;
 

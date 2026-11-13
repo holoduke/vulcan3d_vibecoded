@@ -74,6 +74,7 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4   grass_rm_params2;
     mat4   clutter_vp;
     vec4   atmo_params;
+    vec4   lamp_lights[2];   // xyz pos, w intensity (0 = off)
 } scene;
 
 #endif

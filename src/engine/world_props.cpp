@@ -1242,7 +1242,7 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
                 // axis-aligned boxes. Cover it with a grid of boxes whose
                 // centres lie inside the polygon (finer for big pavements), so
                 // you stand where the rock is and nowhere else.
-                const int N = (s > 3.0f && ysq < 0.45f) ? 3 : (s > 1.6f ? 2 : 1);
+                const int N = (s > 3.0f && ysq < 0.45f) ? 4 : (s > 1.6f ? 3 : 2);
                 const float R = 1.35f * b.r * s, cell = R / float(N);
                 for (int gz = 0; gz < N * 2; ++gz)
                     for (int gx = 0; gx < N * 2; ++gx) {
@@ -1251,7 +1251,8 @@ std::vector<VegInstance> place_vegetation(const Heightmap& hm, const Road* road,
                         const glm::vec2 l = glm::vec2(c * wx + sn * wz, -sn * wx + c * wz) / s - b.off;
                         bool in = true;
                         for (int k = 0; k < 5 && in; ++k)
-                            in = glm::dot(l, glm::vec2(std::cos(b.ang[k]), std::sin(b.ang[k]))) <= b.rad[k];
+                            // cell OVERLAPS the bed (centre within the polygon grown by ~half a cell)
+                            in = glm::dot(l, glm::vec2(std::cos(b.ang[k]), std::sin(b.ang[k]))) <= b.rad[k] + 0.35f * cell / s;
                         if (!in) continue;
                         cols.push_back({ glm::vec3(x + wx - cell * 0.5f, bot, z + wz - cell * 0.5f),
                                          glm::vec3(x + wx + cell * 0.5f, top, z + wz + cell * 0.5f) });

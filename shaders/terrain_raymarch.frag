@@ -3527,6 +3527,20 @@ void main() {
                 lin += scene.muzzle_color.rgb * (scene.muzzle_pos.w * att * ndl);
         }
     }
+    // Road lanterns (dusk / night): warm pools on the road and verge.
+    for (int li = 0; li < 2; ++li) {
+        float lI = scene.lamp_lights[li].w;
+        if (lI < 1e-3) continue;
+        vec3 to = scene.lamp_lights[li].xyz - pos;
+        float d = length(to);
+        if (d >= 13.0) continue;
+        vec3 ld = to / max(d, 1e-3);
+        float ndl = max(dot(nor, ld), 0.0);
+        if (ndl <= 0.0) continue;
+        float fall = 1.0 - d / 13.0; fall *= fall;
+        if (!any_hit_no_terrain(pos + nor * 0.08, ld, max(d - 0.45, 0.05)))
+            lin += vec3(1.0, 0.62, 0.28) * (lI * ndl * fall);
+    }
     vec3 col = mate * lin + gi_indirect;
 
     // Final-colour AO multiplier — dampens the WHOLE pixel (sun term

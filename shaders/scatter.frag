@@ -28,6 +28,8 @@ layout(push_constant) uniform PC {
     vec4 grass_params;   // .y = 1 for plants
 } pc;
 
+// The ray-marched stone surface always lies BEHIND its hull: keep early-Z.
+layout(depth_greater) out float gl_FragDepth;
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec2 outMotion;
 layout(location = 2) out vec4 outGBuffer0;

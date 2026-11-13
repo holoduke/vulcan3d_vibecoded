@@ -1059,7 +1059,7 @@ void VulkanEngine::record_compose_and_ui(FrameData& frame, uint32_t img_index) {
             // The push-constant block is full (256 B), so the colour-grading
             // controls ride in viewport.xy (unused by the shader): four 6-bit
             // values per float.
-            auto q6 = [](float v01) { return std::floor(glm::clamp(v01, 0.0f, 1.0f) * 63.0f + 0.5f); };
+            auto q6 = [](float v01) { return std::floor(glm::clamp(v01, 0.0f, 1.0f) * 62.0f + 0.5f); };   // 31 = exact middle
             auto pack4 = [](float a, float b, float c, float d) { return a + 64.0f * (b + 64.0f * (c + 64.0f * d)); };
             pc_data.viewport.x = pack4(q6(rt_.grade_temperature * 0.5f + 0.5f), q6(rt_.grade_saturation * 0.5f),
                                        q6(rt_.grade_vibrance), float(frame_number_ % 64u));

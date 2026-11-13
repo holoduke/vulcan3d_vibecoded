@@ -358,6 +358,22 @@ void VulkanEngine::update_scene_ubo() {
     data.clutter_vp = clutter_shadow_vp_;
     data.atmo_params = glm::vec4((rt_.sky_mode == 1 && atmo_sky_.view) ? 1.0f : 0.0f,
                                  rt_.atmosphere_intensity * 3.14159265f, 0.0f, 0.0f);
+    {
+        // Road lanterns (dusk / night only): the two nearest to the eye.
+        const float night = 1.0f - glm::smoothstep(4.0f, 16.0f, rt_.sun_pitch_deg);
+        data.lamp_lights[0] = data.lamp_lights[1] = glm::vec4(0.0f);
+        if (night > 0.01f && !lamp_lights_.empty()) {
+            const glm::vec3 eye = player_.eye_position();
+            float d0 = 1e9f, d1 = 1e9f; int i0 = -1, i1 = -1;
+            for (size_t i = 0; i < lamp_lights_.size(); ++i) {
+                const float d = glm::distance(eye, lamp_lights_[i]);
+                if (d < d0) { d1 = d0; i1 = i0; d0 = d; i0 = int(i); }
+                else if (d < d1) { d1 = d; i1 = int(i); }
+            }
+            if (i0 >= 0 && d0 < 140.0f) data.lamp_lights[0] = glm::vec4(lamp_lights_[size_t(i0)], 5.0f * night);
+            if (i1 >= 0 && d1 < 140.0f) data.lamp_lights[1] = glm::vec4(lamp_lights_[size_t(i1)], 5.0f * night);
+        }
+    }
     float pitch = glm::radians(rt_.sun_pitch_deg);
     float yaw   = glm::radians(rt_.sun_yaw_deg);
     glm::vec3 sun(std::cos(pitch) * std::sin(yaw),

@@ -415,8 +415,7 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
                              deferred_lighting_pipeline_layout_, 0, 1,
                              &deferred_lighting_desc_set_, 0, nullptr);
     // Fill the push-constant struct: inverse-VP + active point lights.
-    // The muzzle flash takes slot 0 when firing; lanterns + future
-    // dynamic lights can take 1..3 once the engine collects them.
+    // Slots 0-1: explosions (see below). Lanterns: scene UBO lamp_lights[].
     DeferredLightingPC pcd{};
     pcd.inv_vp = current_frame_view_.inv_vp;
     pcd.prev_vp = prev_view_proj_valid_ ? prev_view_proj_
@@ -450,27 +449,8 @@ void VulkanEngine::render_deferred_lighting(VkCommandBuffer cmd) {
             pcd.light_pos[s] = glm::vec4(c.pos, c.radius);
             pcd.light_col[s] = glm::vec4(1.0f, 0.52f, 0.20f, c.inten);
         }
-        // Road lanterns. The NEAREST one always owns slot 1 (it used to
-        // take whatever the explosions left free, so every bomb or jet
-        // crash switched the lantern light off and on again); the second
-        // nearest takes slot 0 while no explosion needs it.
-        // Lanterns only light their surroundings from dusk on: full below a
-        // sun elevation of 4 deg, nothing above 16 deg.
-        const float lamp_night = 1.0f - glm::smoothstep(4.0f, 16.0f, rt_.sun_pitch_deg);
-        if (!lamp_lights_.empty() && lamp_night > 0.01f) {
-            std::vector<std::pair<float, size_t>> lamps_by_d;
-            for (size_t i = 0; i < lamp_lights_.size(); ++i) {
-                const float d = glm::distance(eye, lamp_lights_[i]);
-                if (d < 120.0f) lamps_by_d.push_back({ d, i });
-            }
-            std::sort(lamps_by_d.begin(), lamps_by_d.end());
-            auto put = [&](int slot, size_t k) {
-                pcd.light_pos[slot] = glm::vec4(lamp_lights_[lamps_by_d[k].second], 13.0f);
-                pcd.light_col[slot] = glm::vec4(1.0f, 0.62f, 0.28f, 5.0f * lamp_night);
-            };
-            if (!lamps_by_d.empty()) put(1, 0);
-            if (lamps_by_d.size() > 1 && pcd.light_pos[0].w < 1e-3f) put(0, 1);
-        }
+        // (Road lanterns come from the scene UBO now - lamp_lights[] - so
+        // explosions no longer switch them off.)
     }
     // Slots 2-3 of light_pos / light_col carry the clutter shadow light-VP
     // (columns 0-1 in light_pos, 2-3 in light_col; shader loop uses 0-1).

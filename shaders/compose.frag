@@ -992,11 +992,11 @@ void main() {
         gA = vec4(mod(a, 64.0), mod(floor(a / 64.0), 64.0), mod(floor(a / 4096.0), 64.0), floor(a / 262144.0));
         gB = vec4(mod(b, 64.0), mod(floor(b / 64.0), 64.0), mod(floor(b / 4096.0), 64.0), floor(b / 262144.0));
     }
-    float g_temp  = gA.x / 63.0 * 2.0 - 1.0;
-    float g_sat   = gA.y / 63.0 * 2.0;
-    float g_vib   = gA.z / 63.0;
+    float g_temp  = gA.x / 62.0 * 2.0 - 1.0;
+    float g_sat   = gA.y / 62.0 * 2.0;
+    float g_vib   = gA.z / 62.0;
     float g_frame = gA.w;
-    float g_split = gB.x / 63.0, g_grain = gB.y / 63.0, g_vig = gB.z / 63.0;
+    float g_split = gB.x / 62.0, g_grain = gB.y / 62.0, g_vig = gB.z / 62.0;
     {
         const vec3 kL = vec3(0.2126, 0.7152, 0.0722);
         // White balance: scale red against blue, luminance preserved.

@@ -236,19 +236,23 @@ game::LevelMesh& m, const EzTreeOptions& o, float max_detail, float target_heigh
     for (const auto& b : g.branches) for (const auto& s : b.sections) top = std::max(top, s.origin.y);
     for (const auto& l : g.leaves) top = std::max(top, l.origin.y);
     const float sc = target_height / top;
+    // Priorities are compressed to 0..0.78: veg.vert grows an element over
+    // detail - prio in (0.03 + 0.25 prio), so anything above ~0.78 never
+    // reached full size even at full detail.
+    auto sp = [](float p) { return glm::clamp(p, 0.0f, 1.0f) * 0.78f; };
     auto qprio = [](float p) { return std::floor(glm::clamp(p, 0.0f, 1.0f) * 1023.0f); };
 
     // ---- Branches: tubes through the section rings ----
     const int stride = max_detail > 0.6f ? 1 : 2;
     for (const auto& b : g.branches) {
-        if (b.prio > max_detail) continue;
+        if (sp(b.prio) > max_detail) continue;
         const int segs = std::max(3, int(std::lround(float(b.segments) * glm::mix(0.5f, 1.0f, max_detail))));
         std::vector<Section> ring;
         for (size_t i = 0; i < b.sections.size(); i += size_t(stride)) ring.push_back(b.sections[i]);
         if ((b.sections.size() - 1) % size_t(stride) != 0) ring.push_back(b.sections.back());
         if (ring.size() < 2) continue;
         const uint32_t base = uint32_t(m.verts.size());
-        const float qp = qprio(b.prio);
+        const float qp = qprio(sp(b.prio));
         for (const Section& s : ring) {
             const glm::vec3 c = s.origin * sc;
             const float r = glm::clamp(std::max(s.radius, 0.004f) * sc, 0.002f, 0.98f);
@@ -278,8 +282,8 @@ game::LevelMesh& m, const EzTreeOptions& o, float max_detail, float target_heigh
         const int cards = o.leaf_double ? 2 : 1;
         for (int cIdx = 0; cIdx < cards; ++cIdx) {
             const float prio = cIdx == 0 ? l.prio : 0.5f + 0.5f * l.prio;
-            if (prio > max_detail) continue;
-            const float qp = qprio(prio) * 4.0f;
+            if (sp(prio) > max_detail) continue;
+            const float qp = qprio(sp(prio)) * 4.0f;
             const glm::quat q = l.q * axis_q(glm::vec3(0, 1, 0), cIdx == 0 ? 0.0f : kPi * 0.5f);
             const glm::vec3 x = q * glm::vec3(size * 0.5f, 0.0f, 0.0f), y = q * glm::vec3(0.0f, size, 0.0f);
             const uint32_t k = uint32_t(m.verts.size());

@@ -359,6 +359,9 @@ struct SceneUBO {
     // x = sky_mode active (sky-view LUT bound at scene binding 30),
     // y = atmosphere radiance scale (intensity * pi; times sun colour).
     glm::vec4  atmo_params;
+    // Two nearest road lanterns: xyz position, w = intensity (0 by day).
+    // Read by deferred_lighting.frag and terrain_raymarch.frag.
+    glm::vec4  lamp_lights[2];
 };
 
 // ---- KHR ray tracing entry points ----
