@@ -749,6 +749,13 @@ void VulkanEngine::build_menu_ui() {
         // uses the new ffx-api ABI through the prebuilt vendored DLL;
         // FSR2 uses the legacy static-lib path. Frame generation (FSR3
         // sessions 3-6) is NOT yet wired — this only swaps the upscaler.
+        {
+            static const char* kVendor[] = { "unknown", "NVIDIA", "AMD", "Intel", "other" };
+            ImGui::Text("GPU: %s (%s)", gpu_name_.c_str(), kVendor[int(gpu_vendor_)]);
+            ImGui::Checkbox("Auto-pick upscaler for this GPU (at start-up)", &rt_.upscaler_auto);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("NVIDIA: DLSS + Ray Reconstruction + DLSS Frame Generation + Reflex.\nAMD / Intel: FSR 3.1 + FSR Frame Generation (+ AMD Anti-Lag 2).");
+            if (anti_lag_supported_) ImGui::Checkbox("AMD Anti-Lag 2", &rt_.anti_lag);
+        }
         const char* fsr_backends[] = { "FSR2 (legacy static)", "FSR3 (ffx-api DLL)", "DLSS (NVIDIA Streamline)" };
         ImGui::Combo("Upscaler backend", &rt_.fsr_backend, fsr_backends,
                      IM_ARRAYSIZE(fsr_backends));

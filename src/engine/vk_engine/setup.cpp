@@ -21,9 +21,49 @@
 
 namespace qlike {
 
+void VulkanEngine::detect_gpu_vendor() {
+    // Throw-away instance through the plain loader: which GPU will we get?
+    // Prefers a discrete GPU, like vk-bootstrap's selector.
+    VkApplicationInfo ai{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
+    ai.apiVersion = VK_API_VERSION_1_3;
+    VkInstanceCreateInfo ici{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
+    ici.pApplicationInfo = &ai;
+    VkInstance inst = VK_NULL_HANDLE;
+    uint32_t vendor = 0;
+    if (vkCreateInstance(&ici, nullptr, &inst) == VK_SUCCESS) {
+        uint32_t n = 0;
+        vkEnumeratePhysicalDevices(inst, &n, nullptr);
+        std::vector<VkPhysicalDevice> devs(n);
+        vkEnumeratePhysicalDevices(inst, &n, devs.data());
+        int best = -1;
+        for (uint32_t i = 0; i < n; ++i) {
+            VkPhysicalDeviceProperties p{};
+            vkGetPhysicalDeviceProperties(devs[i], &p);
+            const int score = (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 : 1) *
+                              (p.apiVersion >= VK_API_VERSION_1_3 ? 1 : 0);
+            if (score > best) { best = score; vendor = p.vendorID; gpu_name_ = p.deviceName; }
+        }
+        vkDestroyInstance(inst, nullptr);
+    }
+    gpu_vendor_ = vendor == 0x10DE ? GpuVendor::Nvidia : vendor == 0x1002 ? GpuVendor::Amd
+                : vendor == 0x8086 ? GpuVendor::Intel : vendor ? GpuVendor::Other : GpuVendor::Unknown;
+    if (const char* e = std::getenv("QLIKE_FORCE_VENDOR")) {
+        const std::string v = e;
+        gpu_vendor_ = v == "amd" ? GpuVendor::Amd : v == "nvidia" ? GpuVendor::Nvidia
+                    : v == "intel" ? GpuVendor::Intel : gpu_vendor_;
+        log::warnf("[gpu] vendor forced to '%s' (QLIKE_FORCE_VENDOR)", e);
+    }
+    static const char* kNames[] = { "unknown", "NVIDIA", "AMD", "Intel", "other" };
+    log::infof("[gpu] %s (vendor %s, 0x%04x)", gpu_name_.c_str(), kNames[int(gpu_vendor_)], vendor);
+}
+
 void VulkanEngine::init_vulkan() {
+    detect_gpu_vendor();
     // Streamline must be initialised before the VkInstance (manual hooking).
-    sl_init_early();
+    // NVIDIA only: DLSS / Reflex / DLSS-G need an NVIDIA GPU, and on other
+    // vendors its instance / device / swapchain proxies only add risk.
+    if (gpu_vendor_ == GpuVendor::Nvidia || gpu_vendor_ == GpuVendor::Unknown) sl_init_early();
+    else log::info("[gpu] non-NVIDIA GPU: Streamline (DLSS) skipped - FSR 3.1 path");
     // With Streamline, vk-bootstrap goes through SL's vkGetInstanceProcAddr
     // proxy: SL adds its extensions / features / queues itself and sees the
     // swapchain.
@@ -217,6 +257,18 @@ void VulkanEngine::init_vulkan() {
             log::info("VK_EXT_device_fault supported — device-lost will dump GPU fault info");
         }
     }
+    // AMD Anti-Lag 2: the driver paces the CPU so input is sampled as late
+    // as possible (AMD's counterpart of NVIDIA Reflex).
+    VkPhysicalDeviceAntiLagFeaturesAMD anti_lag_feat{};
+    anti_lag_feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD;
+    if (vkb_phys.is_extension_present(VK_AMD_ANTI_LAG_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 f2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+        f2.pNext = &anti_lag_feat;
+        vkGetPhysicalDeviceFeatures2(physical_device_, &f2);
+        if (anti_lag_feat.antiLag == VK_TRUE && vkb_phys.enable_extension_if_present(VK_AMD_ANTI_LAG_EXTENSION_NAME))
+            anti_lag_supported_ = true;
+    }
+    log::infof("[gpu] AMD Anti-Lag 2 %s", anti_lag_supported_ ? "available" : "not available");
     if (!device_fault_supported_) {
         log::info("VK_EXT_device_fault not present — device-lost dumps CPU stack only");
     }
@@ -224,6 +276,7 @@ void VulkanEngine::init_vulkan() {
     vkb::DeviceBuilder dev_builder{ vkb_phys };
     if (vrs_supported_) dev_builder.add_pNext(&vrs_feat);
     if (device_fault_supported_) dev_builder.add_pNext(&fault_feat);
+    if (anti_lag_supported_) dev_builder.add_pNext(&anti_lag_feat);
     // FSR3 SwapChain proxy needs FOUR distinct VkQueue handles
     // (game/asyncCompute/present/imageAcquire). Request 4 queues from
     // the graphics family so we can hand 3 distinct handles plus the
@@ -284,6 +337,9 @@ void VulkanEngine::init_vulkan() {
                compute_queue_distinct_ ? "ASYNC — separate from graphics"
                                        : "shared with graphics");
     sl_set_vulkan_info();   // DLSS: hand the device to Streamline
+    if (anti_lag_supported_)
+        anti_lag_fn_ = reinterpret_cast<PFN_vkAntiLagUpdateAMD>(vkGetDeviceProcAddr(device_, "vkAntiLagUpdateAMD"));
+    anti_lag_supported_ = anti_lag_fn_ != nullptr;
 
     // Pull the extra graphics-family queues for the FSR3 SwapChain
     // proxy. Indices 1..3 are populated only when custom_queue_setup
@@ -853,3 +909,42 @@ void VulkanEngine::destroy_readback_buffer() {
 }
 
 } // namespace qlike
+
+namespace qlike {
+// Upscaler / frame generation for the detected GPU (when 'upscaler_auto').
+// Runs after load_settings: the saved choice is overridden per vendor so a
+// config moved between machines still gets the right path.
+void VulkanEngine::apply_vendor_upscaler_defaults() {
+    if (!rt_.upscaler_auto) return;
+    const bool nv = gpu_vendor_ == GpuVendor::Nvidia;
+    if (nv && dlss_supported_) {
+        rt_.fsr2_enabled = true;
+        rt_.fsr_backend = 2;          // DLSS (+ RR / DLSS-G as configured)
+        log::info("[upscaler] auto: NVIDIA -> DLSS");
+    } else {
+        rt_.fsr2_enabled = true;
+        rt_.fsr_backend = 1;          // FSR 3.1 (ffx-api)
+        rt_.dlss_rr = false;
+        // Frame generation wish carries over between vendors.
+        if (rt_.dlss_fg > 0) rt_.fg_enabled = true;
+        log::infof("[upscaler] auto: %s -> FSR 3.1%s", nv ? "NVIDIA without DLSS" : "non-NVIDIA",
+                   rt_.fg_enabled ? " + FSR frame generation" : "");
+    }
+}
+
+// AMD Anti-Lag 2: once per frame before input / simulation (INPUT stage)
+// and right before present (PRESENT stage), with the same frame index.
+void VulkanEngine::anti_lag_mark(bool present_stage) {
+    if (!anti_lag_fn_) return;
+    VkAntiLagPresentationInfoAMD pi{};
+    pi.sType = VK_STRUCTURE_TYPE_ANTI_LAG_PRESENTATION_INFO_AMD;
+    pi.stage = present_stage ? VK_ANTI_LAG_STAGE_PRESENT_AMD : VK_ANTI_LAG_STAGE_INPUT_AMD;
+    pi.frameIndex = frame_number_;
+    VkAntiLagDataAMD d{};
+    d.sType = VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD;
+    d.mode = rt_.anti_lag ? VK_ANTI_LAG_MODE_ON_AMD : VK_ANTI_LAG_MODE_OFF_AMD;
+    d.maxFPS = 0;
+    d.pPresentationInfo = &pi;
+    anti_lag_fn_(device_, &d);
+}
+}  // namespace qlike

@@ -483,18 +483,22 @@ void VulkanEngine::sl_frame_begin() {
     sl_frame_token_ = nullptr;
     dlssg_tagged_this_frame_ = false;
     if (!sl_ok_) return;
+    // FSR3's frame-generation swapchain proxy replaces swapchain_ with its
+    // own handle: Reflex sleep / latency markers act on the swapchain and
+    // crashed in the driver (vkSetLatencyMarkerNV on a foreign handle).
+    const bool reflex_ok = reflex_ok_ && !fsr3_swapchain_active_;
     sl::FrameToken* token = nullptr;
     const uint32_t frame_idx = static_cast<uint32_t>(frame_number_);
     if (slGetNewFrameToken(token, &frame_idx) != sl::Result::eOk || !token) return;
     sl_frame_token_ = token;
-    if (reflex_ok_) slReflexSleep(*token);
+    if (reflex_ok) slReflexSleep(*token);
     sl_marker(0);   // simulation start
 #endif
 }
 
 void VulkanEngine::sl_marker(int m) {
 #ifdef QLIKE_HAVE_STREAMLINE
-    if (!pcl_ok_ || !sl_frame_token_) return;
+    if (!pcl_ok_ || !sl_frame_token_ || fsr3_swapchain_active_) return;
     // Frame generation: decide right before present whether this frame
     // is a real, fully tagged game frame (menus / loading / FSR paths
     // switch it off instead of interpolating garbage).

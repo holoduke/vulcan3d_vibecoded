@@ -387,7 +387,13 @@ set(SL_ROOT "${CMAKE_SOURCE_DIR}/external/streamline")
 if(WIN32 AND EXISTS "${SL_ROOT}/lib/x64/sl.interposer.lib")
     target_include_directories(qlike_engine PUBLIC "${SL_ROOT}/include")
     target_compile_definitions(qlike_engine PUBLIC QLIKE_HAVE_STREAMLINE=1)
-    target_link_libraries(qlike_engine PUBLIC "${SL_ROOT}/lib/x64/sl.interposer.lib")
+    # vulkan-1.lib again right before the interposer: libraries linked
+    # after the first vulkan-1.lib (the FSR2 Vulkan backend) would otherwise
+    # resolve vk* imports to sl.interposer.dll's stubs, which crash when
+    # Streamline is not initialised (non-NVIDIA GPUs).
+    # (CMake de-duplicates the same path, hence a renamed copy.)
+    configure_file("${Vulkan_LIBRARY}" "${CMAKE_BINARY_DIR}/vulkan-1-before-sl.lib" COPYONLY)
+    target_link_libraries(qlike_engine PUBLIC "${CMAKE_BINARY_DIR}/vulkan-1-before-sl.lib" "${SL_ROOT}/lib/x64/sl.interposer.lib")
     set(QLIKE_HAVE_SL ON)
     message(STATUS "NVIDIA Streamline SDK found - DLSS available (fsr_backend = 2)")
 else()

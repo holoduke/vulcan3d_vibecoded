@@ -235,6 +235,7 @@ void VulkanEngine::draw(uint32_t img_index) {
     // Route through FSR3 SwapChain proxy fn when active — that path
     // internally paces real + generated frames into the present chain.
     sl_marker(4);   // PCL present start
+    anti_lag_mark(true);   // AMD Anti-Lag 2: present stage
     VkResult pres = queue_present_image(img_index, render_semaphores_[img_index]);
     sl_marker(5);   // PCL present end
     hitch_draw_[2] = dz_mark();

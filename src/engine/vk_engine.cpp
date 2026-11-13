@@ -157,6 +157,7 @@ void VulkanEngine::init() {
     texture_upload_batch_flush(device_, allocator_, graphics_queue_);
     present_loader_frame("Loading settings",      0.40f);
     load_settings();
+    apply_vendor_upscaler_defaults();
     // load_settings reads rt_.render_scale from disk, but init_swapchain
     // already ran with the default scale of 1.0 — render_extent_ is wrong
     // until something forces a recreate. If the saved scale differs from
@@ -402,9 +403,15 @@ void VulkanEngine::run(const RunOptions& opts) {
         // With DLSS Frame Generation the displayed rate is (generated + 1) x
         // the rendered one: cap rendering at refresh / multiplier so no
         // generated frame is thrown away by the mailbox swapchain.
-        pacer.set_period(frame_target * (dlss_fg_active() ? dlssg_frames_sent_ + 1 : 1));
+        {
+            int fg_mult = dlss_fg_active() ? dlssg_frames_sent_ + 1 : 1;
+            if (fsr3_swapchain_active_ && fsr3_fg_context_valid_ && rt_.fg_enabled && !fg_runtime_disabled_)
+                fg_mult = 2;   // FSR 3 frame generation: one generated frame per rendered one
+            pacer.set_period(frame_target * fg_mult);
+        }
         if (!headless) pacer.wait();
         sl_frame_begin();   // Streamline frame token, Reflex sleep, simulation-start marker
+        anti_lag_mark(false);   // AMD Anti-Lag 2: input stage
 
         auto now = std::chrono::steady_clock::now();
         float frame_dt = std::chrono::duration<float>(now - last).count();

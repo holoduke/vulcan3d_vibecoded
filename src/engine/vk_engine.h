@@ -2477,6 +2477,20 @@ private:
     // log it, so an otherwise-unreproducible intermittent device-lost
     // leaves hard diagnostic data from the actual occurrence.
     bool device_fault_supported_ = false;
+    // GPU vendor, detected before Streamline / the real instance (a throw-
+    // away Vulkan instance). Drives the upscaler / frame-generation choice:
+    // NVIDIA -> DLSS (+RR, DLSS-G, Reflex), everything else -> FSR 3.1
+    // (+ FSR frame generation, AMD Anti-Lag 2 where the driver has it).
+    // QLIKE_FORCE_VENDOR=amd|nvidia|intel overrides (testing).
+    enum class GpuVendor { Unknown, Nvidia, Amd, Intel, Other };
+    GpuVendor gpu_vendor_ = GpuVendor::Unknown;
+    std::string gpu_name_;
+    void detect_gpu_vendor();
+    void apply_vendor_upscaler_defaults();   // after load_settings (upscaler_auto)
+    // AMD Anti-Lag 2 (VK_AMD_anti_lag).
+    bool anti_lag_supported_ = false;
+    PFN_vkAntiLagUpdateAMD anti_lag_fn_ = nullptr;
+    void anti_lag_mark(bool present_stage);
     void dump_device_fault();
     // Most-recent TLAS instance count from rebuild_tlas. Surfaced in the
     // per-second telemetry log so we can correlate device-lost events with

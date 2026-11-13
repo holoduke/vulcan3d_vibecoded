@@ -672,6 +672,10 @@ struct RtSettings {
         // (generated frames per rendered frame; 3x/4x need an RTX 50).
         // Loading the feature is decided at start-up (see sl_init_early).
         int   dlss_fg            = 0;
+        // Pick the upscaler + frame generation for the GPU at start-up
+        // (NVIDIA: DLSS / DLSS-G, AMD / Intel: FSR 3.1 / FSR FG).
+        bool  upscaler_auto      = true;
+        bool  anti_lag           = true;   // AMD Anti-Lag 2 (AMD GPUs)
         float taa_spatial_strength = 0.7f;  // 0 = no à-trous, 1 = fully filtered
 
         // Bloom (single-pass spiral-tap inside the compose shader).
