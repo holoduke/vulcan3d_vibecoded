@@ -2,6 +2,10 @@
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#ifdef _WIN32
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
 
 #include <stdexcept>
 
@@ -51,6 +55,14 @@ void Window::framebuffer_size(uint32_t& w, uint32_t& h) const {
     glfwGetFramebufferSize(window_, &iw, &ih);
     w = static_cast<uint32_t>(iw);
     h = static_cast<uint32_t>(ih);
+}
+
+void* Window::native_handle() const {
+#ifdef _WIN32
+    return glfwGetWin32Window(window_);
+#else
+    return nullptr;
+#endif
 }
 
 VkSurfaceKHR_T* Window::create_surface(VkInstance_T* instance) const {

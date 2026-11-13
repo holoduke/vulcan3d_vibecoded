@@ -58,8 +58,26 @@ void VulkanEngine::init_vulkan() {
     debug_messenger_ = vkb_inst.debug_messenger;
     log::infof("vk instance created (validation=%s)", vk_validation_enabled() ? "on" : "off");
 
-    surface_ = reinterpret_cast<VkSurfaceKHR>(
-        window_->create_surface(reinterpret_cast<VkInstance_T*>(instance_)));
+    // Through Streamline's proxy when it is up: DLSS Frame Generation maps
+    // the swapchain's surface back to the window (its vkCreateSwapchainKHR
+    // hook fails with "Could not find a window" for a GLFW-made surface).
+    surface_ = VK_NULL_HANDLE;
+#ifdef _WIN32
+    if (sl_gipa_ && window_->native_handle()) {
+        auto create_fn = reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(
+            sl_gipa_(instance_, "vkCreateWin32SurfaceKHR"));
+        if (create_fn) {
+            VkWin32SurfaceCreateInfoKHR sci{};
+            sci.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+            sci.hinstance = GetModuleHandleW(nullptr);
+            sci.hwnd = static_cast<HWND>(window_->native_handle());
+            if (create_fn(instance_, &sci, nullptr, &surface_) != VK_SUCCESS) surface_ = VK_NULL_HANDLE;
+        }
+    }
+#endif
+    if (!surface_)
+        surface_ = reinterpret_cast<VkSurfaceKHR>(
+            window_->create_surface(reinterpret_cast<VkInstance_T*>(instance_)));
 
     VkPhysicalDeviceVulkan13Features f13{};
     f13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -334,8 +352,12 @@ void VulkanEngine::init_swapchain() {
         .set_desired_format(want)
         // QLIKE_PRESENT_IMMEDIATE=1: no vsync (benchmarking the GPU/CPU
         // frame cost without the refresh-rate cap). Falls back to FIFO.
-        .set_desired_present_mode(std::getenv("QLIKE_PRESENT_IMMEDIATE") ? VK_PRESENT_MODE_IMMEDIATE_KHR
-                                                                         : VK_PRESENT_MODE_FIFO_KHR)
+        // DLSS Frame Generation: no VSync on Vulkan (SDK limitation) - use
+        // mailbox (tear-free, uncapped) so generated frames are not queued
+        // behind the refresh.
+        .set_desired_present_mode((std::getenv("QLIKE_PRESENT_IMMEDIATE")) ? VK_PRESENT_MODE_IMMEDIATE_KHR
+                                  : dlssg_loaded_ ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR)
+        .add_fallback_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
         .add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR)
         .set_desired_extent(w, h)
         .add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -396,7 +418,14 @@ void VulkanEngine::destroy_swapchain() {
         if (s) vkDestroySemaphore(device_, s, nullptr);
     }
     render_semaphores_.clear();
-    if (swapchain_) vkDestroySwapchainKHR(device_, swapchain_, nullptr);
+    if (swapchain_) {
+        // Created through Streamline's proxy (vk-bootstrap got sl_gipa_):
+        // with DLSS-G loaded the handle is SL's, so destroy it there too.
+        PFN_vkDestroySwapchainKHR destroy_fn = sl_gdpa_
+            ? reinterpret_cast<PFN_vkDestroySwapchainKHR>(sl_gdpa_(device_, "vkDestroySwapchainKHR")) : nullptr;
+        if (destroy_fn) destroy_fn(device_, swapchain_, nullptr);
+        else vkDestroySwapchainKHR(device_, swapchain_, nullptr);
+    }
     swapchain_ = VK_NULL_HANDLE;
 }
 
@@ -504,6 +533,8 @@ void VulkanEngine::write_depth_copy_binding() {
 }
 
 void VulkanEngine::recreate_swapchain() {
+    dlssg_destroy_hudless();      // swapchain-sized; recreated on next use
+    sl_update_frame_gen(false);   // FG off around window / swapchain changes (SDK rule)
     deferred_desc_sig_ = 0;   // handles may be recreated (even at the same address)
     uint32_t w = 0, h = 0;
     window_->framebuffer_size(w, h);

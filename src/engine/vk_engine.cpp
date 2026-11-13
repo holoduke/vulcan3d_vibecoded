@@ -399,7 +399,12 @@ void VulkanEngine::run(const RunOptions& opts) {
 
         // Frame-rate cap (see frame_pacer.h). Skipped in headless mode
         // (max_frames / screenshot) so test runs are not throttled.
+        // With DLSS Frame Generation the displayed rate is (generated + 1) x
+        // the rendered one: cap rendering at refresh / multiplier so no
+        // generated frame is thrown away by the mailbox swapchain.
+        pacer.set_period(frame_target * (dlss_fg_active() ? dlssg_frames_sent_ + 1 : 1));
         if (!headless) pacer.wait();
+        sl_frame_begin();   // Streamline frame token, Reflex sleep, simulation-start marker
 
         auto now = std::chrono::steady_clock::now();
         float frame_dt = std::chrono::duration<float>(now - last).count();
@@ -1136,6 +1141,7 @@ void VulkanEngine::run(const RunOptions& opts) {
                 }
             }
             hz_ms[2] = hz_mark(hz_t);
+            sl_marker(1);   // PCL simulation end
             auto& frame = current_frame();
             QLIKE_VK_CHECK(vkWaitForFences(device_, 1, &frame.render_fence,
                                            VK_TRUE, UINT64_MAX),
@@ -1241,6 +1247,7 @@ void VulkanEngine::shutdown() {
     // racing with the SDK's internal allocator.
     guarded("destroy_fsr2",   [&]{ destroy_fsr2(); });
     guarded("destroy_dlss",   [&]{ destroy_dlss(); });   // while the allocator still exists
+    guarded("dlssg_hudless",  [&]{ dlssg_destroy_hudless(); });
     guarded("destroy_rr_guides", [&]{ destroy_rr_guides(); });
     // Destroy SwapChain proxy first — it holds Vulkan resources tied
     // to the FG context's pacing state.

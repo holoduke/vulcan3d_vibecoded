@@ -212,8 +212,10 @@ void VulkanEngine::draw(uint32_t img_index) {
         .pSignalSemaphoreInfos = signals,
     };
 
+    sl_marker(2);   // PCL render submit start
     vk_check(vkQueueSubmit2(graphics_queue_, 1, &submit, frame.render_fence),
              "vkQueueSubmit2");
+    sl_marker(3);   // PCL render submit end
     ++gfx_timeline_value_;
     upload_ring_.in_frame = false;
 
@@ -232,7 +234,9 @@ void VulkanEngine::draw(uint32_t img_index) {
 
     // Route through FSR3 SwapChain proxy fn when active — that path
     // internally paces real + generated frames into the present chain.
+    sl_marker(4);   // PCL present start
     VkResult pres = queue_present_image(img_index, render_semaphores_[img_index]);
+    sl_marker(5);   // PCL present end
     hitch_draw_[2] = dz_mark();
     if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) {
         resize_requested_ = true;
@@ -1162,6 +1166,7 @@ void VulkanEngine::record_compose_and_ui(FrameData& frame, uint32_t img_index) {
     // isn't active.
     prof_mark(frame.command_buffer, "compose");
     capture_hudless_snapshot(frame.command_buffer, img_index);
+    dlssg_capture_hudless(frame.command_buffer, img_index);
 
     // ---------- Pass 3: ImGui directly on swapchain (still in COLOR_ATTACHMENT) ----------
 

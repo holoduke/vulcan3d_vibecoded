@@ -244,6 +244,17 @@ void VulkanEngine::build_hud_ui() {
         draw_panel(p, "MS", last_frame_dt_ * 1000.0f, ms_min, ms_max,
                    ms_history_, kStatsHistory, stats_history_head_,
                    IM_COL32(220, 110, 180, 255));  // pink
+        if (dlss_fg_active()) {
+            // The panels count rendered frames; DLSS Frame Generation adds
+            // generated ones on top (measured presented / rendered ratio).
+            const ImVec2 q(136.0f, 8.0f);   // beside the FPS panel
+            char buf[64];
+            const float ratio = dlssg_present_ratio_ > 0.5f ? dlssg_present_ratio_ : float(dlssg_frames_sent_ + 1);
+            snprintf(buf, sizeof(buf), "%.0f FPS shown (FG %.1fx)", ema_fps_ * ratio, ratio);
+            ImDrawList* dl = ImGui::GetForegroundDrawList();
+            dl->AddRectFilled(q, ImVec2(q.x + 170.0f, q.y + 20.0f), IM_COL32(0, 0, 16, 220));
+            dl->AddText(ImVec2(q.x + 6.0f, q.y + 3.0f), IM_COL32(120, 200, 255, 255), buf);
+        }
     }
 
     // Compact gameplay info — small ImGui window below the stats
@@ -751,6 +762,29 @@ void VulkanEngine::build_menu_ui() {
             ImGui::TextDisabled("%s", dlss_rr_supported_
                 ? "AI denoiser + upscaler for the ray-traced lighting.\nReplaces DLSS Super Resolution while on."
                 : "DLSS Ray Reconstruction is not available on this GPU / driver.");
+            // DLSS Frame Generation: 1-3 AI frames between rendered ones.
+            {
+                const char* fg_modes[] = { "Off", "2x (1 generated frame)", "3x (2 generated)", "4x (3 generated)" };
+                const int max_mode = dlssg_loaded_ ? std::min(3, int(dlssg_max_frames_)) : 3;
+                int m = std::clamp(rt_.dlss_fg, 0, 3);
+                if (ImGui::BeginCombo("DLSS Frame Generation", fg_modes[m])) {
+                    for (int i = 0; i <= 3; ++i) {
+                        ImGui::BeginDisabled(dlssg_loaded_ && i > max_mode);
+                        if (ImGui::Selectable(fg_modes[i], m == i)) rt_.dlss_fg = i;
+                        ImGui::EndDisabled();
+                    }
+                    ImGui::EndCombo();
+                }
+                if (dlssg_loaded_) {
+                    ImGui::TextDisabled("%s", dlss_fg_active()
+                        ? "Frame Generation running (Reflex low latency on, VSync off)."
+                        : "Loaded - turns on in gameplay with DLSS active.");
+                } else if (rt_.dlss_fg > 0) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Restart the game to load Frame Generation.");
+                } else {
+                    ImGui::TextDisabled("Doubles+ the displayed frame rate. Needs an RTX 40/50 GPU; loads at start-up.");
+                }
+            }
         }
         if (fsr3_fatal_) {
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),

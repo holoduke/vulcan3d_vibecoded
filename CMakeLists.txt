@@ -415,7 +415,8 @@ if(TARGET ffx_sdk_vk)
         COMMENT "Staging amd_fidelityfx_vk.dll alongside quake_like.exe")
 endif()
 if(QLIKE_HAVE_SL)
-    foreach(dll sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll sl.dlss_d.dll nvngx_dlssd.dll NvLowLatencyVk.dll)
+    foreach(dll sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll sl.dlss_d.dll nvngx_dlssd.dll NvLowLatencyVk.dll
+                sl.dlss_g.dll nvngx_dlssg.dll sl.reflex.dll sl.pcl.dll)
         add_custom_command(TARGET quake_like POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${SL_ROOT}/bin/x64/${dll}" "$<TARGET_FILE_DIR:quake_like>/${dll}"

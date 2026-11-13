@@ -52,6 +52,9 @@ public:
 
     void framebuffer_size(uint32_t& w, uint32_t& h) const;
     VkSurfaceKHR_T* create_surface(VkInstance_T* instance) const;
+    // Native window handle (HWND on Windows) - for creating the surface
+    // through Streamline's proxy, which has to know the window.
+    void* native_handle() const;
 
     // Read accumulated input since the last call, then clear edge-triggered bits.
     InputFrame consume_input();

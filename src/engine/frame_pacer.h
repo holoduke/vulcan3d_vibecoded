@@ -24,6 +24,8 @@ public:
 
     // Blocks until this frame's deadline, then arms the next one.
     void wait();
+    // Change the cap (e.g. DLSS Frame Generation: refresh / multiplier).
+    void set_period(std::chrono::nanoseconds p) { period_ = p; }
 
 private:
     std::chrono::nanoseconds period_;

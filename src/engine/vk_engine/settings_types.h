@@ -659,6 +659,10 @@ struct RtSettings {
         // presenting it — sessions 4-6 wire it into the swapchain
         // proxy + UI composition. Default off; user must opt in.
         bool  fg_enabled         = false;
+        // DLSS Frame Generation (DLSS backend): 0 off, 1 = 2x, 2 = 3x, 3 = 4x
+        // (generated frames per rendered frame; 3x/4x need an RTX 50).
+        // Loading the feature is decided at start-up (see sl_init_early).
+        int   dlss_fg            = 0;
         float taa_spatial_strength = 0.7f;  // 0 = no à-trous, 1 = fully filtered
 
         // Bloom (single-pass spiral-tap inside the compose shader).

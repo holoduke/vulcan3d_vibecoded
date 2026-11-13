@@ -242,6 +242,22 @@ private:
     // backend 2 under the fsr2_enabled master toggle.
     void sl_init_early();          // before the Vulkan instance
     void sl_set_vulkan_info();     // after the device
+    // DLSS Frame Generation + Reflex + PCL (dlss.cpp). sl_frame_begin gets
+    // the frame's token (Reflex sleep, simulation-start marker); the other
+    // markers bracket submit and present. FG needs all of them.
+    void sl_frame_begin();
+    void sl_marker(int pcl_marker);
+    void sl_update_frame_gen(bool game_frame);
+    void sl_setup_latency_and_fg(const void* adapter_info);
+    // Pre-UI copy of the back buffer, tagged as DLSS-G's HUD-less colour so
+    // the frame interpolation leaves the UI (FPS overlay, menus) alone.
+    void dlssg_capture_hudless(VkCommandBuffer cmd, uint32_t img_index);
+    void dlssg_destroy_hudless();
+    VkImage       dlssg_hudless_image_ = VK_NULL_HANDLE;
+    VmaAllocation dlssg_hudless_alloc_ = nullptr;
+    VkImageView   dlssg_hudless_view_  = VK_NULL_HANDLE;
+    VkExtent2D    dlssg_hudless_extent_{ 0, 0 };
+    bool dlss_fg_active() const { return dlssg_loaded_ && dlssg_mode_on_; }
     void init_dlss();
     void destroy_dlss();
     void dispatch_dlss(VkCommandBuffer cmd);
@@ -2218,6 +2234,15 @@ private:
     glm::vec3              last_sun_rgb_{1.0f}, last_sky_rgb_{0.5f, 0.7f, 1.0f};
     // Streamline / DLSS state.
     bool                   sl_ok_ = false;
+    void*                  sl_frame_token_ = nullptr;   // sl::FrameToken* of the frame being built
+    bool                   dlssg_loaded_ = false;       // sl.dlss_g loaded + supported (start-up choice)
+    bool                   reflex_ok_ = false;
+    bool                   pcl_ok_ = false;
+    bool                   dlssg_mode_on_ = false;      // last mode sent to slDLSSGSetOptions
+    int                    dlssg_frames_sent_ = -1;
+    uint32_t               dlssg_max_frames_ = 1;       // DLSSGState::numFramesToGenerateMax
+    bool                   dlssg_tagged_this_frame_ = false;
+    float                  dlssg_present_ratio_ = 0.0f; // presented / rendered (from DLSSGState)
     bool                   dlss_supported_ = false;
     std::vector<std::string> sl_instance_exts_, sl_device_exts_;
     VkImage                dlss_output_image_ = VK_NULL_HANDLE;
