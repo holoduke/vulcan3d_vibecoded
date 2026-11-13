@@ -36,7 +36,8 @@ static_assert(sizeof(PushConstants) == 256, "push constant layout");
 //     → 6064 (road_info + road_bbox + road_pts[64], castle road polyline).
 //     → 6096 (grass_rm_params + grass_rm_params2, grass blade shadows).
 //     → 6208 (lamp_lights[2], road lanterns).
-static_assert(sizeof(SceneUBO) == 6208, "scene ubo layout");
+//     → 6272 (raymarched terrain palette, 4 x vec4).
+static_assert(sizeof(SceneUBO) == 6272, "scene ubo layout");
 
 RtFuncs g_rt;
 

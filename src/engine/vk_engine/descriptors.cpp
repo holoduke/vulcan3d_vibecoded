@@ -740,6 +740,10 @@ void VulkanEngine::update_scene_ubo() {
     data.terrain_shore_general_params = glm::vec4(std::max(0.05f, rt_.terrain_shore_general_distance),
                                                    0.0f, 0.0f, 0.0f);
     data.terrain_sand_color = glm::vec4(rt_.terrain_sand_color, 0.0f);
+    data.rm_ground_dry   = glm::vec4(rt_.rm_ground_dry, glm::clamp(rt_.rm_green_amount, 0.0f, 1.0f));
+    data.rm_ground_green = glm::vec4(rt_.rm_ground_green, glm::clamp(rt_.rm_red_sand_amount, 0.0f, 1.0f));
+    data.rm_red_sand     = glm::vec4(rt_.rm_red_sand, glm::clamp(rt_.rm_red_sand_scale, 0.2f, 5.0f));
+    data.rm_rock         = glm::vec4(rt_.rm_rock_color, glm::clamp(rt_.rm_ground_saturation, 0.0f, 2.0f));
     {
         const float deg2rad = 3.14159265358979f / 180.0f;
         if (rt_.water_style == 2) {

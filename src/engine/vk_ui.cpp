@@ -1229,6 +1229,23 @@ void VulkanEngine::build_menu_ui() {
             ImGui::TextDisabled("Beach base material (slope-driven):");
             ImGui::ColorEdit3("sand colour",
                               &rt_.terrain_sand_color.x);
+            ImGui::SeparatorText("Raymarched ground palette");
+            ImGui::ColorEdit3("dry ground", &rt_.rm_ground_dry.x);
+            ImGui::ColorEdit3("green ground", &rt_.rm_ground_green.x);
+            ImGui::SliderFloat("green amount", &rt_.rm_green_amount, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = mostly dry brown earth, 1 = green everywhere it is flat enough");
+            ImGui::ColorEdit3("red sand", &rt_.rm_red_sand.x);
+            ImGui::SliderFloat("red sand amount", &rt_.rm_red_sand_amount, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("red sand patch size", &rt_.rm_red_sand_scale, 0.2f, 5.0f, "%.2f");
+            ImGui::ColorEdit3("rock colour", &rt_.rm_rock_color.x);
+            ImGui::SliderFloat("ground saturation", &rt_.rm_ground_saturation, 0.0f, 2.0f, "%.2f");
+            if (ImGui::Button("Reset ground palette")) {
+                const RtSettings d{};
+                rt_.rm_ground_dry = d.rm_ground_dry; rt_.rm_ground_green = d.rm_ground_green;
+                rt_.rm_green_amount = d.rm_green_amount; rt_.rm_red_sand = d.rm_red_sand;
+                rt_.rm_red_sand_amount = d.rm_red_sand_amount; rt_.rm_red_sand_scale = d.rm_red_sand_scale;
+                rt_.rm_rock_color = d.rm_rock_color; rt_.rm_ground_saturation = d.rm_ground_saturation;
+            }
             ImGui::TreePop();
         }
 

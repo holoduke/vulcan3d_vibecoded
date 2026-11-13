@@ -362,6 +362,12 @@ struct SceneUBO {
     // Two nearest road lanterns: xyz position, w = intensity (0 by day).
     // Read by deferred_lighting.frag and terrain_raymarch.frag.
     glm::vec4  lamp_lights[2];
+    // Raymarched terrain palette: dry.rgb + green amount, green.rgb + red
+    // sand amount, red sand.rgb + patch scale, rock.rgb + saturation.
+    glm::vec4  rm_ground_dry;
+    glm::vec4  rm_ground_green;
+    glm::vec4  rm_red_sand;
+    glm::vec4  rm_rock;
 };
 
 // ---- KHR ray tracing entry points ----

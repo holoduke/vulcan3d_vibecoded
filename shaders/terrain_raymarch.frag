@@ -1479,9 +1479,11 @@ vec3 getMaterial(vec3 pos, vec3 nor) {
     float slope = nor.y;
     float h = pos.y;
     float nz = noise2(pos.xz * 0.04) * noise2(pos.xz * 0.005);
-    vec3 rock  = vec3(0.10, 0.09, 0.08);
-    vec3 grass = mix(vec3(0.10, 0.08, 0.04),
-                     vec3(0.05, 0.09, 0.02), nz);
+    vec3 rock  = scene.rm_rock.rgb;
+    // Dry earth .. green ground (settings palette). `green amount` pushes
+    // the noise toward green (0 = the old mostly-brown mix).
+    float gmix = clamp(mix(nz, 1.0, scene.rm_ground_dry.w) + (nz - 0.25) * 0.5, 0.0, 1.0);
+    vec3 grass = mix(scene.rm_ground_dry.rgb, scene.rm_ground_green.rgb, gmix);
     vec3 snow  = vec3(0.62, 0.65, 0.70);
     vec3 sand  = scene.terrain_sand_color.rgb;
     vec3 col = rock;
@@ -1498,6 +1500,24 @@ vec3 getMaterial(vec3 pos, vec3 nor) {
     // muted hue at distance (or whatever the user picks).
     float grass_amt = grassEligibility(pos.xz, pos.y);
     float cam_d     = distance(pos, scene.camera_pos.xyz);
+    // Red sand (terra rossa): irregular patches on flats and gentle slopes
+    // below the snow, thinner where grass grows thick; a reddish stain
+    // also creeps onto the dry slopes around them.
+    float red_amt = scene.rm_ground_green.w;
+    if (red_amt > 1e-3) {
+        float rs = 1.0 / max(scene.rm_red_sand.w, 0.2);
+        vec2  rq = pos.xz * rs;
+        float rn = noise2(rq * 0.018 + 41.0) * 0.6 + noise2(rq * 0.071 + 7.0) * 0.28 + noise2(rq * 0.31) * 0.12;
+        float patchm = smoothstep(0.66 - 0.16 * red_amt, 0.80 - 0.14 * red_amt, rn);
+        float flat_w = smoothstep(0.55, 0.85, slope);
+        float alt_w  = 1.0 - smoothstep(55.0, 80.0, h);
+        float red_w  = patchm * flat_w * alt_w * (1.0 - 0.65 * grass_amt) * min(1.0, red_amt * 1.4) * 0.85;
+        vec3 red = scene.rm_red_sand.rgb * mix(0.85, 1.15, noise2(pos.xz * 0.9));
+        col = mix(col, red, red_w);
+        // Stain on the bare dry ground around the patches.
+        col = mix(col, col * mix(vec3(1.0), scene.rm_red_sand.rgb / max(dot(scene.rm_red_sand.rgb, vec3(0.333)), 1e-3), 0.35),
+                  smoothstep(0.45, 0.65, rn) * (1.0 - grass_amt) * alt_w * red_amt * 0.35);
+    }
     // Same anchor distances the grass-blade alpha ramp uses, so the
     // blade-fade and the ground-tint transition stay aligned.
     // Far anchor from rt_.grass_ground_tint_far_distance (UI slider,
@@ -1537,6 +1557,9 @@ vec3 getMaterial(vec3 pos, vec3 nor) {
                       gt_w * gt_strength * (1.0 - grass_amt));
         }
     }
+    // Ground saturation (settings).
+    float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    col = max(mix(vec3(lum), col, scene.rm_rock.w), vec3(0.0));
     return col;
 }
 

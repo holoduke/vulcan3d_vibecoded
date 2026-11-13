@@ -430,6 +430,14 @@ void VulkanEngine::visit_settings(Self& s, F&& f) {
     f("terrain_shore_general_strength", s.rt_.terrain_shore_general_strength);
     f("terrain_shore_general_distance", s.rt_.terrain_shore_general_distance);
     f("terrain_sand_color", s.rt_.terrain_sand_color);
+    f("rm_ground_dry", s.rt_.rm_ground_dry);
+    f("rm_ground_green", s.rt_.rm_ground_green);
+    f("rm_green_amount", s.rt_.rm_green_amount);
+    f("rm_red_sand", s.rt_.rm_red_sand);
+    f("rm_red_sand_amount", s.rt_.rm_red_sand_amount);
+    f("rm_red_sand_scale", s.rt_.rm_red_sand_scale);
+    f("rm_rock_color", s.rt_.rm_rock_color);
+    f("rm_ground_saturation", s.rt_.rm_ground_saturation);
     f("shadow_near_mult", s.rt_.shadow_near_mult);
     f("gi_strength", s.rt_.gi_strength);
     f("gi_radius", s.rt_.gi_radius);

@@ -555,6 +555,15 @@ struct RtSettings {
         // the slope-driven beachMask reveals near water level on the
         // raymarched terrain. Was hardcoded; now slider-tunable.
         glm::vec3 terrain_sand_color = glm::vec3(0.50f, 0.45f, 0.35f);
+        // Raymarched terrain ground palette (was hard-coded brown).
+        glm::vec3 rm_ground_dry   = glm::vec3(0.10f, 0.08f, 0.04f);    // dry / bare earth
+        glm::vec3 rm_ground_green = glm::vec3(0.055f, 0.105f, 0.022f); // green ground
+        float     rm_green_amount = 0.55f;   // 0 = old mostly-brown mix .. 1 = all green
+        glm::vec3 rm_red_sand     = glm::vec3(0.25f, 0.145f, 0.09f);    // terra rossa patches
+        float     rm_red_sand_amount = 0.40f;
+        float     rm_red_sand_scale  = 1.0f;  // patch size (bigger = larger patches)
+        glm::vec3 rm_rock_color   = glm::vec3(0.10f, 0.09f, 0.08f);
+        float     rm_ground_saturation = 1.05f;
         // Shadow casting on water: when true, the water surface
         // dims its specular and base tint where the sun shadow map
         // says it's occluded by terrain / castle / dyn-props.

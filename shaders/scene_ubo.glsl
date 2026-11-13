@@ -75,6 +75,10 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     mat4   clutter_vp;
     vec4   atmo_params;
     vec4   lamp_lights[2];   // xyz pos, w intensity (0 = off)
+    vec4   rm_ground_dry;    // rgb, w = green amount
+    vec4   rm_ground_green;  // rgb, w = red sand amount
+    vec4   rm_red_sand;      // rgb, w = patch scale
+    vec4   rm_rock;          // rgb, w = ground saturation
 } scene;
 
 #endif
