@@ -669,14 +669,29 @@ float rm_road_dist(vec2 q) {         // distance to the road centreline (1e9 out
     }
     return sqrt(best);
 }
+// Per-pixel cache: road distance is 1-Lipschitz, so d(q) >= d(q0) - |q - q0|.
+// Callers only need the exact value below `thr`; anything provably >= thr
+// skips the 63-segment loop (most march steps on most pixels).
+vec2  g_rd_q = vec2(1e9);
+float g_rd_v = -1e9;
+float rm_road_dist_thr(vec2 q, float thr) {
+    float lb = g_rd_v - length(q - g_rd_q);
+    if (lb >= thr) return lb;
+    float d = rm_road_dist(q);
+    // Outside the bbox rm_road_dist says 1e9 (not a distance): cache the
+    // distance to the box instead, a valid lower bound for re-entry.
+    vec2 ob = max(max(scene.road_bbox.xy - q, q - scene.road_bbox.zw), vec2(0.0));
+    g_rd_q = q; g_rd_v = d > 1e8 ? length(ob) : d;
+    return d;
+}
 float rm_ground_detail(vec2 wp, float t, float h) {
     float w = 1.0 - smoothstep(10.0, 26.0, t);
     if (w <= 0.0) return 0.0;
     // Not on the road: the paving is flat (crouching on it showed the
     // rills as noise in the cobbles).
     {
-        float rdist = rm_road_dist(wp);
-        float keep = scene.road_info.y;                 // paving only; the dirt verge keeps its relief
+        float keep = scene.road_info.y;
+        float rdist = rm_road_dist_thr(wp, keep + 0.9);                 // paving only; the dirt verge keeps its relief
         w *= smoothstep(keep + 0.1, keep + 0.9, rdist);
         if (w <= 0.0) return 0.0;
     }
@@ -1013,8 +1028,8 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
             // from a low eye along the road they formed a lumpy, spiky
             // hump across the paving a few metres ahead.
             if (!coarse && h < 0.65 && t < 90.0 && rd.y > -0.16) {   // grazing rays only: steep ones are fixed by the slide in main()
-                float rdist = rm_road_dist(pos.xz);
                 float keep = scene.road_info.y;
+                float rdist = rm_road_dist_thr(pos.xz, keep + 0.9);
                 if (rdist < keep + 0.9)
                     h = mix(pos.y - meshHeight(pos.xz), h, smoothstep(keep, keep + 0.9, rdist));
             }
