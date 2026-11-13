@@ -303,14 +303,16 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
     // Dynamic close-range density: extra blades per cell near the camera,
     // fading out smoothly (each extra blade appears by the per-cell hash,
     // so the lawn thickens gradually as you approach - no ring).
-    density_eff += scene.grass_shore_params.y * (1.0 - smoothstep(3.5, 10.0, ray_t)) *
-                   step(0.05, ctx.density_eff_near);
+    // (Applied per blade below from the blade cell's own distance - it used
+    // to depend on the march sample, so blades shimmered in and out.)
+    float near_boost = scene.grass_shore_params.y * step(0.05, ctx.density_eff_near);
+    float density_max = density_eff + near_boost * (1.0 - smoothstep(3.5, 10.0, ray_t - 1.0));
     // Aggressive zero-density early-out. When distance has faded
     // density to near zero, the inner 9-cell loop almost always finds
     // every cell rejected by `r.x > density_eff` — cost without
     // benefit. 0.03 cutoff keeps a few stragglers visible past the
     // soft fade so it doesn't read as a hard ring.
-    if (density_eff < 0.03) return distToTerrain;
+    if (density_max < 0.03) return distToTerrain;
     const float kEligThresh = 0.10;
     // Eligibility (presence mask x slope) ONCE per map() call, at the
     // centre cell. The mask is 2 m per texel and bilinear; the 3x3 cell
@@ -327,15 +329,8 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
     // wall of full-height grass next to bare ground. A low-frequency noise
     // frays the outline, and toward it the grass thins out and shortens.
     float edge_soft = scene.grass_side_lit_params.w;
-    {
-        vec2 nc = floor(p.xz / 0.9);
-        float en = hash12(nc) * 0.6 + hash12(floor(p.xz / 2.7) + 17.0) * 0.4;
-        // Only where there is grass at all: on cleared ground (the road,
-        // rock) the noise alone used to push bare cells over the threshold.
-        elig += (en - 0.5) * 0.35 * edge_soft * smoothstep(0.04, 0.30, elig);
-    }
-    if (elig < kEligThresh) return distToTerrain;
-    float edge_k = mix(1.0, smoothstep(kEligThresh, kEligThresh + 0.55, elig), edge_soft);
+    float elig_gate = smoothstep(0.04, 0.30, elig);     // no noise on cleared ground (road, rock)
+    if (elig + 0.175 * edge_soft * elig_gate < kEligThresh) return distToTerrain;
     // Drop the 8 neighbour cells past ~35 % of kMaxDist — at that
     // distance blades are sub-pixel and the neighbour offsets
     // contribute < 1 pixel of silhouette difference. Keeps centre
@@ -352,10 +347,19 @@ float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
             // Up to two blades per cell: density 0..1 fills cells, 1..2 adds
             // a second blade (near rings only - the far single-cell path
             // keeps one). Each blade gets its own lean and width variation.
-            const int nb = (rad > 0) ? clamp(int(ceil(density_eff)), 1, 3) : 1;
+            // Per-BLADE-CELL edge noise and near boost (stable: they depend on
+            // the cell, not on where along the ray this sample is).
+            vec2  cw = nId * kPeriod;
+            float en = hash12(floor(cw / 0.9)) * 0.6 + hash12(floor(cw / 2.7) + 17.0) * 0.4;
+            float elig_n = elig + (en - 0.5) * 0.35 * edge_soft * elig_gate;
+            if (elig_n < kEligThresh) continue;
+            float edge_k = mix(1.0, smoothstep(kEligThresh, kEligThresh + 0.55, elig_n), edge_soft);
+            float cdist = distance(vec3(cw.x, p.y, cw.y), scene.camera_pos.xyz);
+            float dens_n = density_eff + near_boost * (1.0 - smoothstep(3.5, 10.0, cdist));
+            const int nb = (rad > 0) ? clamp(int(ceil(dens_n)), 1, 3) : 1;
             for (int bi = 0; bi < nb; ++bi) {
             vec4 r = hash42(nId + vec2(31.7, 47.3) * float(bi));
-            if (r.x > (density_eff - float(bi)) * mix(0.25, 1.0, edge_k)) continue;
+            if (r.x > (dens_n - float(bi)) * mix(0.25, 1.0, edge_k)) continue;
             vec3 np = lp - vec3(float(dx), 0.0, float(dy)) * kPeriod;
             // Per-blade rotation + sub-cell xy offset.
             np.xz = rotate2d(r.z * kPi2) * np.xz;

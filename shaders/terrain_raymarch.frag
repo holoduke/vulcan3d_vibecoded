@@ -950,10 +950,10 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
             if (any(greaterThan(abs(p.xz), vec2(kHeightmapSide * 0.5 - 2.0)))) return -1.0;
             float hh = p.y - meshHeight(p.xz);
             if (hh < 0.002 * th + 0.004) return th;
-            th += max(hh * 0.6, 0.01 + 0.004 * th);
+            th += max(hh * 0.6, 0.02 + 0.02 * th);     // grows with distance: reaches the horizon
             if (th > t_limit) return -1.0;
         }
-        return th;
+        return -1.0;                                  // never reached the ground: sky, not a fake hit
     }
 #endif
     float t_prev = t;
@@ -2262,7 +2262,7 @@ void main() {
             int   r_inst = 0, r_prim = 0;
             bool  tlas_hit = closest_hit_material_no_terrain(r_ro, refl, min(kReflRange, refl_terrain_t), t_tlas, r_inst, r_prim);
             bool  vox_hit  = water_vox_march(r_ro, refl,
-                                              tlas_hit ? min(t_tlas, 200.0) : 200.0,
+                                              min(tlas_hit ? t_tlas : 200.0, min(200.0, refl_terrain_t)),
                                               t_vox, vox_pal);
             bool  use_vox  = vox_hit && (!tlas_hit || t_vox < t_tlas);
             if (tlas_hit || vox_hit) {
@@ -3230,7 +3230,7 @@ void main() {
     // hard shadow ray per pixel keeps them - a penumbra is sub-pixel there
     // anyway - blended in across the band.
     if (dif > 0.0 && scene.rt_flags.x != 0 && scene.rt_params.w > 1e-3 &&
-        rt_lod_t < 0.999 && cam_dist_pos < 900.0) {
+        rt_lod_t < 0.999 && cam_dist_pos < 900.0 && self_shadow < 0.99) {
         float far_w = 1.0 - smoothstep(700.0, 900.0, cam_dist_pos);
         vec3  fo = pos + nor * (0.15 + cam_dist_pos * 0.002) + sunDir * (0.3 + cam_dist_pos * 0.002);
         float far_sh = any_hit_no_terrain(fo, sunDir, 220.0) ? scene.rt_params.w * far_w : 0.0;
@@ -3522,8 +3522,8 @@ void main() {
         if (d < r && distance(pos, scene.camera_pos.xyz) > 1.5) {
             vec3  Lp  = lv / max(d, 1e-3);
             float att = 1.0 - d / r; att *= att;
-            float ndl = max(dot(nor, Lp), 0.0) * 0.85 + 0.15;
-            if (att * scene.muzzle_pos.w > 0.01 && !any_hit_no_terrain(pos + nor * 0.1, Lp, max(d - 0.8, 0.05)))
+            float ndl = max(dot(nor, Lp), 0.0);     // no light on slopes facing away (hills behind a blast)
+            if (ndl > 0.0 && att * scene.muzzle_pos.w > 0.01 && !any_hit_no_terrain(pos + nor * 0.1, Lp, max(d - 0.8, 0.05)))
                 lin += scene.muzzle_color.rgb * (scene.muzzle_pos.w * att * ndl);
         }
     }
