@@ -891,7 +891,7 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scatter_plant_pipeline_);
             PushConstants ppc = spc;
             ppc.grass_params = glm::vec4(std::max(45.0f, rt_.grass_distance * 0.9f), 1.0f,
-                                         anim_time_, 0.0f);
+                                         anim_time_, rt_.terrain_raymarch_enabled ? 1.0f : 0.0f);
             vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages,
                                0, sizeof(PushConstants), &ppc);
             for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {

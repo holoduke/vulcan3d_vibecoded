@@ -209,9 +209,12 @@ bool any_hit_no_terrain(vec3 origin, vec3 dir, float t_max) {
 bool closest_hit_no_terrain(vec3 origin, vec3 dir, float t_max,
                              out float out_t) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
+    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsNoneEXT,
                           0x02, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+            leaf_card_hit(rq)) rayQueryConfirmIntersectionEXT(rq);
+    }
     if (rayQueryGetIntersectionTypeEXT(rq, true) !=
         gl_RayQueryCommittedIntersectionTriangleEXT) {
         return false;
@@ -228,9 +231,12 @@ bool closest_hit_material_no_terrain(vec3 origin, vec3 dir, float t_max,
                                      out int out_inst,
                                      out int out_prim) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
+    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsNoneEXT,
                           0x02, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+            leaf_card_hit(rq)) rayQueryConfirmIntersectionEXT(rq);
+    }
     if (rayQueryGetIntersectionTypeEXT(rq, true) !=
         gl_RayQueryCommittedIntersectionTriangleEXT) {
         return false;

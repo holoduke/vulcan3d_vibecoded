@@ -70,6 +70,13 @@ Heightmap generate_heightmap_raymarch(const HeightmapParams& p);
 float raymarch_fine_correction(const Heightmap& hm, const HeightmapParams& p,
                                float x, float z, int octaves);
 
+// The close-range ground relief terrain_raymarch.frag's rm_ground_detail()
+// raises the surface by (rills, side cracks, sand ripples; the dirt
+// texture's displacement taken at its mean), BEFORE the distance fade and
+// the road mask. Always >= 0: up to ~0.25 m. Small plants are lifted by it
+// so the relief doesn't swallow them near the camera.
+float raymarch_ground_relief(float x, float z, float h, float water_level);
+
 // Builds a single triangulated terrain mesh covering the whole heightmap.
 // Used by the merged BLAS for ray traversal — RT shadows / GI / AO see
 // the full-resolution surface regardless of raster LOD.

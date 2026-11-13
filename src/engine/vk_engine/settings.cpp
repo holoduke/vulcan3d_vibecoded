@@ -310,6 +310,7 @@ void VulkanEngine::visit_settings(Self& s, F&& f) {
     f("forest_density", s.rt_.forest_density);
     f("bush_density", s.rt_.bush_density);
     f("flower_density", s.rt_.flower_density);
+    f("ground_density", s.rt_.ground_density);
     f("grass_height_scale", s.rt_.grass_height_scale);
     f("grass_alpha_cutoff", s.rt_.grass_alpha_cutoff);
     f("grass_cutoff_soft_dist", s.rt_.grass_cutoff_soft_dist);
@@ -524,7 +525,8 @@ void VulkanEngine::save_settings() const {
     // them overwrite the player's saved cfg (pose, toggles).
     static const bool test_run = [this] {
         for (const char* e : { "QLIKE_TEST_HOLD", "QLIKE_TEST_PAN", "QLIKE_TEST_SHOOTDOWN",
-                               "QLIKE_TEST_BOOM", "QLIKE_TEST_BLAST", "QLIKE_TEST_FIRE", "QLIKE_TEST_CHUTE", "QLIKE_TEST_SAM" })
+                               "QLIKE_TEST_BOOM", "QLIKE_TEST_BLAST", "QLIKE_TEST_FIRE", "QLIKE_TEST_CHUTE", "QLIKE_TEST_SAM",
+                               "QLIKE_TEST_CRAWL", "QLIKE_TEST_FLARE" })
             if (std::getenv(e)) return true;
         return opts_.max_frames > 0 || !opts_.screenshot_path.empty() ||
                opts_.autodemo_seconds > 0.0f || opts_.scene != 0;

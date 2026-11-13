@@ -210,6 +210,7 @@ void VulkanEngine::render_clutter_shadow(VkCommandBuffer cmd) {
         }
         if (scatter_.plant_buffer) {
             pc.p.y = 1.0f;
+            pc.p.w = rt_.terrain_raymarch_enabled ? 1.0f : 0.0f;
             pc.p.z = std::max(45.0f, rt_.grass_distance * 0.9f);
             vkCmdPushConstants(cmd, clutter_shadow_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
             for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {

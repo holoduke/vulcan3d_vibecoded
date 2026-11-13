@@ -585,3 +585,20 @@ void rebuild_chunk_vertices(VkDevice device, VmaAllocator alloc, VkQueue queue,
 }
 
 } // namespace qlike
+
+namespace qlike {
+float raymarch_ground_relief(float x, float z, float h, float water_level) {
+    // Mirror of terrain_raymarch.frag rm_ground_detail() (keep in sync).
+    auto noise2 = [](glm::vec2 p) { glm::vec2 d; return rm_noised(p, d); };
+    auto sstep = [](float a, float b, float v) { float t = std::clamp((v - a) / (b - a), 0.0f, 1.0f); return t * t * (3.0f - 2.0f * t); };
+    const glm::vec2 wp(x, z);
+    const float wn = noise2(wp * 0.21f);
+    const glm::vec2 q = wp * 0.55f + glm::vec2(wn, 1.0f - wn) * 1.7f;
+    const float g1 = 1.0f - sstep(0.0f, 0.22f, std::abs(noise2(q) * 2.0f - 1.0f));
+    const float g2 = 1.0f - sstep(0.0f, 0.25f, std::abs(noise2(q * 2.7f + glm::vec2(3.1f)) * 2.0f - 1.0f));
+    float d = 0.11f * (1.0f - g1) + 0.045f * (1.0f - g2) + 0.09f * 0.5f;
+    const float sand = 1.0f - sstep(water_level + 0.4f, water_level + 2.5f, h);
+    d += sand * 0.03f * (0.5f + 0.5f * std::sin(glm::dot(wp, glm::vec2(9.0f, 3.5f)) + 6.0f * wn));
+    return d;
+}
+}  // namespace qlike

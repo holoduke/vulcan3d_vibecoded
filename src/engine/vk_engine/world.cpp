@@ -468,6 +468,15 @@ void VulkanEngine::init_world() {
         ScatterParams sp{};
         sp.water_level = rt_.water_level;
         sp.flower_density = glm::clamp(rt_.flower_density, 0.0f, 2.0f);
+        sp.ground_density = glm::clamp(rt_.ground_density, 0.0f, 3.0f);
+        // Tree crowns for forest-floor vs meadow ground cover.
+        std::vector<glm::vec3> tree_crowns;
+        for (const auto& vi : veg_inst_cpu_) {
+            const size_t a = size_t(vi.rot_arch_phase.y + 0.5f);
+            if (vi.pos_scale.w <= 0.0f || a >= veg_arch_.size() || veg_arch_[a].species > 1) continue;
+            tree_crowns.push_back(glm::vec3(vi.pos_scale.x, vi.pos_scale.z, veg_arch_[a].radius * vi.pos_scale.w * 0.75f));
+        }
+        sp.trees = &tree_crowns;
         sp.rock_band_h = rt_.terrain_h_dirt_rock_start;
         sp.snow_band_h = rt_.terrain_h_rock_snow_start;
         sp.road = &castle_road_;

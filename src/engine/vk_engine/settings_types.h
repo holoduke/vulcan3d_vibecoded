@@ -167,6 +167,7 @@ struct RtSettings {
         float forest_density       = 1.0f;
         float bush_density         = 1.0f;
         float flower_density       = 1.0f;
+        float ground_density       = 1.0f;   // ground cover: clover, weeds, nettles, fungi (0..3, restart)
         // Vegetation LOD bias: >1 keeps higher LODs further out.
         float veg_lod_bias         = 1.0f;
         // Per-blade Y multiplier (0.3..2.0). 1.0 = built-in 0.55 m blades.

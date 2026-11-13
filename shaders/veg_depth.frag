@@ -37,6 +37,6 @@ void main() {
     } else {
         int vm = int(vUv.y + 0.5);
         if ((vm == 2 || vm == 3) && veg_leaf_cut(vObjectPos, vWorldPos, vNormal, scene.camera_pos.xyz)) discard;
-        if (vm == 7 && texture(u_albedo[15], veg_card_uv(vObjectNormal.xy, vObjectNormal.z), -0.7).a < 0.33) discard;
+        if (vm == 7 && texture(u_albedo[15], veg_card_uv(vObjectNormal.xy, vObjectNormal.z, 0.5 * max(fwidth(vObjectNormal.x), fwidth(vObjectNormal.y))), -0.7).a < 0.33) discard;
     }
 }

@@ -151,9 +151,12 @@ bool any_hit(vec3 origin, vec3 dir, float t_max) {
 // Closest-hit with t-value — used by the PCSS blocker search.
 bool closest_hit_m(vec3 origin, vec3 dir, float t_max, uint mask, out float out_t) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
+    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsNoneEXT,
                           mask, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+            leaf_card_hit(rq)) rayQueryConfirmIntersectionEXT(rq);
+    }
     if (rayQueryGetIntersectionTypeEXT(rq, true) ==
         gl_RayQueryCommittedIntersectionTriangleEXT) {
         out_t = rayQueryGetIntersectionTEXT(rq, true);

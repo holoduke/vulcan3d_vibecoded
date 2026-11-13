@@ -1256,6 +1256,8 @@ void VulkanEngine::build_menu_ui() {
             ImGui::SliderFloat("forest density", &rt_.forest_density, 0.0f, 2.0f, "%.2f");
             ImGui::SliderFloat("bush density", &rt_.bush_density, 0.0f, 2.0f, "%.2f");
             ImGui::SliderFloat("flower density", &rt_.flower_density, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("ground plant density", &rt_.ground_density, 0.0f, 3.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clover, plantain, dandelions, nettles, foxgloves, thistles and mushrooms. 0 = none, 1 = normal, 3 = lush. Restart to apply.");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blades per ground cell: 1 = every cell, 2 = two blades per cell (denser, a bit slower)");
             ImGui::SliderFloat("height scale",   &rt_.grass_height_scale, 0.30f, 2.0f);
             ImGui::SliderFloat("distance (m)",   &rt_.grass_distance,   10.0f, 200.0f);

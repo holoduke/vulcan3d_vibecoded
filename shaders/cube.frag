@@ -160,6 +160,8 @@ const int kMatRoof  = 13;   // ambientCG RoofingTiles012A (castle roofs)
 const int kMatRoad  = 14;   // ambientCG PavingStones131 (castle road)
 layout(set = 0, binding = 3) uniform sampler2D u_albedo[kTextureCount];
 layout(set = 0, binding = 4) uniform sampler2D u_normal[kTextureCount];
+#define LEAF_ATLAS u_albedo[15]
+#include "leaf_rt.glsl"
 // Pre-baked heightmap sun-shadow texture (R8, 0 = lit, 255 = shadowed).
 // Sampled here as a distance fallback for terrain self-shadow — the
 // BLAS holds the full heightmap detail, so RT shadow rays from a low-
@@ -988,10 +990,9 @@ bool vox_march(vec3 origin_w, vec3 dir_w, float t_max,
 bool any_hit(vec3 origin, vec3 dir, float t_max) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS,
-                          gl_RayFlagsTerminateOnFirstHitEXT |
-                          gl_RayFlagsOpaqueEXT,
+                          gl_RayFlagsTerminateOnFirstHitEXT,
                           0x01, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    RQ_PROCEED_LEAVES(rq)
     if (rayQueryGetIntersectionTypeEXT(rq, true) ==
         gl_RayQueryCommittedIntersectionTriangleEXT) return true;
     return voxel_any_hit(origin, dir, t_max);
@@ -1006,10 +1007,9 @@ bool any_hit(vec3 origin, vec3 dir, float t_max) {
 bool any_hit_no_terrain(vec3 origin, vec3 dir, float t_max) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS,
-                          gl_RayFlagsTerminateOnFirstHitEXT |
-                          gl_RayFlagsOpaqueEXT,
+                          gl_RayFlagsTerminateOnFirstHitEXT,
                           0x02, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    RQ_PROCEED_LEAVES(rq)
     if (rayQueryGetIntersectionTypeEXT(rq, true) ==
         gl_RayQueryCommittedIntersectionTriangleEXT) return true;
     return voxel_any_hit(origin, dir, t_max);
@@ -1020,9 +1020,9 @@ bool any_hit_no_terrain(vec3 origin, vec3 dir, float t_max) {
 bool closest_hit_no_terrain(vec3 origin, vec3 dir, float t_max,
                              out float out_t) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
+    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsNoneEXT,
                           0x02, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    RQ_PROCEED_LEAVES(rq)
     bool tlas = rayQueryGetIntersectionTypeEXT(rq, true) ==
                 gl_RayQueryCommittedIntersectionTriangleEXT;
     float tt = tlas ? rayQueryGetIntersectionTEXT(rq, true) : t_max;
@@ -1067,10 +1067,9 @@ vec3 sample_sky(vec3 dir) {
 bool any_hit_m(vec3 origin, vec3 dir, float t_max, uint mask) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS,
-                          gl_RayFlagsTerminateOnFirstHitEXT |
-                          gl_RayFlagsOpaqueEXT,
+                          gl_RayFlagsTerminateOnFirstHitEXT,
                           mask, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    RQ_PROCEED_LEAVES(rq)
     if (rayQueryGetIntersectionTypeEXT(rq, true) ==
         gl_RayQueryCommittedIntersectionTriangleEXT) return true;
     return voxel_any_hit(origin, dir, t_max);
@@ -1078,9 +1077,9 @@ bool any_hit_m(vec3 origin, vec3 dir, float t_max, uint mask) {
 bool closest_hit_m(vec3 origin, vec3 dir, float t_max, uint mask,
                    out float out_t) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
+    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsNoneEXT,
                           mask, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    RQ_PROCEED_LEAVES(rq)
     bool tlas = rayQueryGetIntersectionTypeEXT(rq, true) ==
                 gl_RayQueryCommittedIntersectionTriangleEXT;
     float tt = tlas ? rayQueryGetIntersectionTEXT(rq, true) : t_max;
@@ -1100,9 +1099,9 @@ bool closest_hit_m(vec3 origin, vec3 dir, float t_max, uint mask,
 bool closest_hit(vec3 origin, vec3 dir, float t_max,
                  out float out_t) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
+    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsNoneEXT,
                           0xFF, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    RQ_PROCEED_LEAVES(rq)
     bool tlas = rayQueryGetIntersectionTypeEXT(rq, true) ==
                 gl_RayQueryCommittedIntersectionTriangleEXT;
     float tt = tlas ? rayQueryGetIntersectionTEXT(rq, true) : t_max;
@@ -1122,9 +1121,9 @@ bool closest_hit(vec3 origin, vec3 dir, float t_max,
 bool closest_hit_material(vec3 origin, vec3 dir, float t_max,
                           out float out_t, out int out_inst, out int out_prim) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT,
+    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsNoneEXT,
                           0xFF, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    RQ_PROCEED_LEAVES(rq)
     if (rayQueryGetIntersectionTypeEXT(rq, true) !=
         gl_RayQueryCommittedIntersectionTriangleEXT) {
         return false;
@@ -1460,7 +1459,7 @@ void main() {
         int vm = int(vUv.y + 0.5);
         if ((vm == 2 || vm == 3) && veg_leaf_cut(vObjectPos, vWorldPos, vNormal, scene.camera_pos.xyz)) discard;
         if (vm == 7) {
-            g_card_tex = texture(u_albedo[15], veg_card_uv(vObjectNormal.xy, vObjectNormal.z), -0.7);
+            g_card_tex = texture(u_albedo[15], veg_card_uv(vObjectNormal.xy, vObjectNormal.z, 0.5 * max(fwidth(vObjectNormal.x), fwidth(vObjectNormal.y))), -0.7);
             if (g_card_tex.a < 0.33) discard;
         }
     }

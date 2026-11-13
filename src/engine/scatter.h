@@ -45,7 +45,9 @@ struct ScatterSet {
     // Small plants (flowers / ferns): one mesh per species, instances in
     // one buffer sorted by species. Vertex uv.x = part (0 leaf / stem,
     // 1 petal, 2 flower centre), uv.y = wind sway weight.
-    static constexpr int kPlantSpecies = 8;      // fern, daisy, poppy, bluebell, cornflower, buttercup, lupin, reed
+    // fern, daisy, poppy, bluebell, cornflower, buttercup, lupin, reed,
+    // clover, plantain, dandelion, nettle, foxglove, thistle, mushrooms
+    static constexpr int kPlantSpecies = 15;
     Mesh          plant_mesh[kPlantSpecies]{};
     uint32_t      plant_first[kPlantSpecies]{};
     uint32_t      plant_count[kPlantSpecies]{};
@@ -73,6 +75,9 @@ struct ScatterParams {
     // Rules (heights in world Y, matching the splat bands).
     float water_level   = 20.9f;    // reject below water + margin
     float flower_density = 1.0f;    // ferns + flowers multiplier (0..2)
+    float ground_density = 1.0f;    // ground cover (clover, weeds, nettles, fungi) multiplier (0..3)
+    // Tree crowns (x, z, crown radius) - forest-floor vs meadow placement.
+    const std::vector<glm::vec3>* trees = nullptr;
     float rock_band_h   = 60.0f;    // boulders favoured above this
     float snow_band_h   = 110.0f;   // density tapers off into snow
     // Castle keep-out (same as grass).

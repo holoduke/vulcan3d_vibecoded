@@ -21,6 +21,9 @@
 #include "scene_ubo.glsl"
 
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
+layout(set = 0, binding = 3) uniform sampler2D u_albedo[19];
+#define LEAF_ATLAS u_albedo[15]
+#include "leaf_rt.glsl"
 
 layout(location = 0) in  vec3 vNormal;
 layout(location = 2) in  vec3 vWorldPos;
@@ -36,10 +39,9 @@ float hash12(vec2 p) {
 bool any_hit_shadow(vec3 origin, vec3 dir, float t_max) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, topLevelAS,
-                          gl_RayFlagsOpaqueEXT |
                           gl_RayFlagsTerminateOnFirstHitEXT,
                           0x01u, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
+    RQ_PROCEED_LEAVES(rq)
     return rayQueryGetIntersectionTypeEXT(rq, true) ==
            gl_RayQueryCommittedIntersectionTriangleEXT;
 }

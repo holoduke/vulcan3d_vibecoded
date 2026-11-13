@@ -675,13 +675,13 @@ private:
     float sample_terrain_height(float x, float z) const;
 
     // PBR-ish material textures. kTextureCount must match the size of the
-    // sampler arrays in cube.frag. Slots 0-6 are file-loaded; slots 7-11
-    // are procedurally baked seamless terrain materials, splatted in
-    // cube.frag's is_terrain block by the height/slope weights.
+    // sampler arrays in cube.frag. Slots 0-6 are file-loaded; 7-14 are the
+    // terrain PBR materials (incl. proc grass, roof, road), 15 the leaf
+    // atlas, 16 bark, 17 lamp timber, 18 the small-plant atlas.
     static constexpr int kFileTextureCount   = 7;
     static constexpr int kTerrainMatCount    = 12;    // +ProcGrass, Roof, Road, Leaf atlas, Bark
     static constexpr int kTextureCount       = kFileTextureCount +
-                                               kTerrainMatCount;   // 15
+                                               kTerrainMatCount;   // 19
     // Albedo/normal-array indices of the baked terrain materials.
     static constexpr int kTexRock  = kFileTextureCount + 0;  // 7
     static constexpr int kTexGrass = kFileTextureCount + 1;  // 8 (stylized PNG)

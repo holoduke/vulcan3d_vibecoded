@@ -135,16 +135,23 @@ void plant_tube(std::vector<Vertex>& v, std::vector<uint32_t>& ix, const std::ve
 
 // Curved, folded leaf blade from `b` along `dir` (4 segments).
 void plant_leaf(std::vector<Vertex>& v, std::vector<uint32_t>& ix, glm::vec3 b, glm::vec3 dir,
-                float len, float wid, float lift, float w_base) {
+                float len, float wid, float lift, float w_base, int segs = 8, int across = 4, float round = 0.0f, float teeth = 0.0f) {
     // A smooth curved surface S(t, u): t along the midrib, u across the
     // blade. Shared vertices with analytic (finite-difference) normals, so
     // the leaf shades as one continuous, gently cupped surface instead of
     // a strip of flat facets.
     const glm::vec3 side = glm::normalize(glm::vec3(-dir.z, 0.0f, dir.x));
-    const int segs = 8, across = 4;                       // 9 x 5 vertices
+    // (default 9 x 5 vertices; small, numerous leaves pass fewer.)
+    // `round` 0 = lance shape with a pointed tip, 1 = obovate (clover,
+    // plantain): widest past the middle, blunt tip.
     auto half_w = [&](float t) {                          // rounded base, widest at 40 %, pointed tip
-        float a = std::pow(std::sin(3.14159f * std::pow(glm::clamp(t, 0.0f, 1.0f), 0.75f)), 0.8f);
-        return wid * (0.06f + 0.94f * a) * (t > 0.999f ? 0.0f : 1.0f);
+        float tc = glm::clamp(t, 0.0f, 1.0f);
+        float a = std::pow(std::sin(3.14159f * std::pow(tc, 0.75f)), 0.8f);
+        float ob = std::sqrt(std::max(0.0f, std::sin(3.14159f * std::pow(tc, 1.6f))));
+        a = a + (ob - a) * round;
+        // Saw-toothed margin (dandelion, nettle): `teeth` notches along the blade.
+        if (teeth > 0.0f) a *= 1.0f - 0.42f * glm::fract(tc * teeth) * (1.0f - tc * 0.5f);
+        return wid * (0.06f + 0.94f * a) * (t > 0.999f ? (round > 0.5f ? 0.35f : 0.0f) : 1.0f);
     };
     auto S = [&](float t, float u) {                      // u in -1..1
         glm::vec3 rib = b + dir * (len * t) +
@@ -510,6 +517,180 @@ void build_reed(std::vector<Vertex>& v, std::vector<uint32_t>& ix) {
     }
 }
 
+// ---- Ground cover (the low layer open-world games fill their ground
+// with: clover, plantain, dandelion, nettle, foxglove, thistle, fungi).
+// Kept low-poly per leaf - they are scattered by the ten thousand. ----
+
+// Surface of revolution around `axis` through `base`: profile (r, y)
+// pairs bottom to top, `part` written to every vertex (uv.y = 0: no sway).
+void plant_lathe(std::vector<Vertex>& v, std::vector<uint32_t>& ix, glm::vec3 base, glm::vec3 axis,
+                 const std::vector<glm::vec2>& prof, int sides, float part) {
+    const glm::vec3 up = glm::normalize(axis);
+    const glm::vec3 t1 = glm::normalize(glm::cross(up, std::abs(up.z) < 0.9f ? glm::vec3(0, 0, 1) : glm::vec3(1, 0, 0)));
+    const glm::vec3 t2 = glm::cross(up, t1);
+    const uint32_t b0 = uint32_t(v.size());
+    const size_t n = prof.size();
+    for (size_t i = 0; i < n; ++i) {
+        // Profile tangent -> outward normal (dr, dy) rotated by -90 deg.
+        glm::vec2 d = prof[std::min(i + 1, n - 1)] - prof[i > 0 ? i - 1 : 0];
+        glm::vec2 pn = glm::normalize(glm::vec2(d.y, -d.x) + glm::vec2(1e-6f));
+        for (int s = 0; s < sides; ++s) {
+            const float a = 6.2831853f * float(s) / float(sides);
+            const glm::vec3 radial = t1 * std::cos(a) + t2 * std::sin(a);
+            v.push_back({ base + radial * prof[i].x + up * prof[i].y,
+                          glm::normalize(radial * pn.x + up * pn.y), { part, 0.0f } });
+        }
+    }
+    for (size_t i = 0; i + 1 < n; ++i)
+        for (int s = 0; s < sides; ++s) {
+            const uint32_t a = b0 + uint32_t(i) * uint32_t(sides) + uint32_t(s);
+            const uint32_t b = b0 + uint32_t(i) * uint32_t(sides) + uint32_t((s + 1) % sides);
+            ix.insert(ix.end(), { a, b, b + uint32_t(sides), a, b + uint32_t(sides), a + uint32_t(sides) });
+        }
+}
+
+// Brown seed spike (plantain): a thin cylinder in part 5 (the cattail
+// head material) from `a` to `b`.
+void seed_spike(std::vector<Vertex>& v, std::vector<uint32_t>& ix, glm::vec3 a, glm::vec3 b, float r) {
+    const glm::vec3 ax = b - a;
+    const float L = glm::length(ax);
+    plant_lathe(v, ix, a, ax, { { r * 0.5f, 0.0f }, { r, L * 0.15f }, { r, L * 0.75f }, { r * 0.4f, L } }, 6, 5.0f);
+    // plant_lathe writes sway 0; spikes sit high on a flexible stalk.
+    for (size_t i = v.size() - 24; i < v.size(); ++i) v[i].uv.y = 1.0f;
+}
+
+uint32_t g_seed = 1u;
+float grnd() { g_seed = g_seed * 1664525u + 1013904223u; return float((g_seed >> 8) & 0xFFFFu) / 65535.0f; }
+
+// White clover (Trifolium repens): a creeping patch of trifoliate leaves
+// on petioles of different lengths, a few round white flower heads.
+void build_clover(std::vector<Vertex>& v, std::vector<uint32_t>& ix) {
+    g_seed = 0xC10Fu;
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    for (int i = 0; i < 11; ++i) {
+        const float a = 6.2831853f * grnd(), r = 0.20f * std::sqrt(grnd());
+        const glm::vec3 b(std::cos(a) * r, -0.01f, std::sin(a) * r);
+        const float hgt = 0.035f + 0.075f * grnd();
+        const glm::vec3 top = b + up * hgt + glm::vec3(grnd() - 0.5f, 0.0f, grnd() - 0.5f) * 0.03f;
+        plant_tube(v, ix, { b, top }, 0.0016f, 0.0013f, 3, 0.0f, 0.6f);
+        const float roll = 6.2831853f * grnd(), size = 0.018f + 0.012f * grnd();
+        for (int k = 0; k < 3; ++k) {
+            const float la = roll + 2.0944f * float(k);
+            const glm::vec3 d = glm::normalize(glm::vec3(std::cos(la), 0.12f, std::sin(la)));
+            plant_leaf(v, ix, top, d, size, size * 0.55f, size * 0.12f, 0.6f, 3, 2, 1.0f);
+        }
+    }
+    for (int i = 0; i < 3; ++i) {                       // flower heads on taller stalks
+        const float a = 6.2831853f * grnd(), r = 0.14f * std::sqrt(grnd());
+        const glm::vec3 b(std::cos(a) * r, -0.01f, std::sin(a) * r);
+        const glm::vec3 top = b + up * (0.10f + 0.05f * grnd());
+        plant_tube(v, ix, { b, top }, 0.0016f, 0.0012f, 3, 0.0f, 1.0f);
+        plant_head(v, ix, top, up, 14, 0.011f, 2.4f, 0.75f, grnd() * 6.0f, 1.0f, 2);
+    }
+}
+
+// Greater plantain (Plantago major): a flat rosette of broad, ribbed,
+// spoon-shaped leaves pressed to the ground and slim brown seed spikes.
+void build_plantain(std::vector<Vertex>& v, std::vector<uint32_t>& ix) {
+    g_seed = 0x91A7u;
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    const int n = 8;
+    for (int i = 0; i < n; ++i) {
+        const float a = 6.2831853f * (float(i) + 0.3f * grnd()) / float(n) + float(i % 2) * 0.3f;
+        const glm::vec3 d = glm::normalize(glm::vec3(std::cos(a), 0.22f + 0.15f * grnd(), std::sin(a)));
+        const float len = 0.13f + 0.07f * grnd();
+        plant_leaf(v, ix, glm::vec3(0.0f, 0.005f, 0.0f), d, len, len * 0.36f, len * 0.08f, 0.2f, 5, 2, 0.85f);
+    }
+    for (int i = 0; i < 3; ++i) {
+        const float a = 6.2831853f * grnd();
+        const glm::vec3 lean = glm::vec3(std::cos(a), 0.0f, std::sin(a)) * (0.02f + 0.03f * grnd());
+        const float H = 0.16f + 0.10f * grnd();
+        const glm::vec3 b(0.0f, 0.0f, 0.0f), m = b + up * (H * 0.55f) + lean, t = b + up * H + lean * 1.8f;
+        plant_tube(v, ix, { b, m }, 0.0018f, 0.0015f, 3, 0.0f, 0.6f);
+        seed_spike(v, ix, m, t, 0.0035f);
+    }
+}
+
+// Dandelion: a rosette of deeply toothed leaves, hollow stalks with
+// yellow heads (many strap florets) and a closed bud.
+void build_dandelion(std::vector<Vertex>& v, std::vector<uint32_t>& ix) {
+    g_seed = 0xDA4Du;
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    for (int i = 0; i < 8; ++i) {
+        const float a = 6.2831853f * (float(i) + 0.4f * grnd()) / 8.0f;
+        const glm::vec3 d = glm::normalize(glm::vec3(std::cos(a), 0.30f + 0.2f * grnd(), std::sin(a)));
+        const float len = 0.12f + 0.06f * grnd();
+        plant_leaf(v, ix, glm::vec3(0.0f, 0.004f, 0.0f), d, len, len * 0.17f, len * 0.10f, 0.25f, 10, 2, 0.0f, 4.0f);
+    }
+    for (int i = 0; i < 2; ++i) {
+        const float a = 6.2831853f * grnd();
+        const glm::vec3 lean = glm::vec3(std::cos(a), 0.0f, std::sin(a)) * 0.03f;
+        const float H = 0.14f + 0.10f * grnd();
+        const glm::vec3 m = up * (H * 0.5f) + lean * 0.4f, t = up * H + lean;
+        plant_tube(v, ix, { glm::vec3(0.0f), m, t }, 0.0024f, 0.0020f, 4, 0.0f, 1.0f);
+        const glm::vec3 face = glm::normalize(up + lean * 6.0f);
+        if (i == 0) plant_head(v, ix, t, face, 24, 0.020f, 0.35f, 0.55f, grnd() * 6.0f, 1.0f, 2);
+        else        plant_head(v, ix, t, face, 6, 0.010f, 2.6f, 0.9f, grnd() * 6.0f, 1.0f, 2);   // bud
+    }
+}
+
+// Stinging nettle: a few upright square-ish stems with opposite,
+// decussate pairs of heart-shaped, serrated leaves angled down, smaller
+// toward the tip. Grows in clumps along forest edges.
+void build_nettle(std::vector<Vertex>& v, std::vector<uint32_t>& ix) {
+    g_seed = 0x2E77u;
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    for (int s = 0; s < 4; ++s) {
+        const float a = 6.2831853f * grnd(), r = 0.10f * std::sqrt(grnd());
+        const glm::vec3 b(std::cos(a) * r, -0.02f, std::sin(a) * r);
+        const float H = 0.45f + 0.35f * grnd();
+        const glm::vec3 lean = glm::vec3(std::cos(a), 0.0f, std::sin(a)) * (0.04f + 0.05f * grnd());
+        auto P = [&](float t) { return b + up * (H * t) + lean * (t * t); };
+        std::vector<glm::vec3> path;
+        for (int k = 0; k <= 6; ++k) path.push_back(P(float(k) / 6.0f));
+        plant_tube(v, ix, path, 0.0035f, 0.0016f, 4, 0.0f, 1.0f);
+        const int nodes = 6;
+        float roll = grnd() * 3.14159f;
+        for (int k = 1; k <= nodes; ++k) {
+            const float t = float(k) / float(nodes + 1);
+            const glm::vec3 p = P(t);
+            const float len = (0.10f - 0.055f * t) * (0.85f + 0.3f * grnd());
+            for (int side = 0; side < 2; ++side) {
+                const float la = roll + 3.14159f * float(side);
+                const glm::vec3 d = glm::normalize(glm::vec3(std::cos(la), -0.15f - 0.25f * t, std::sin(la)));
+                plant_leaf(v, ix, p, d, len, len * 0.38f, len * 0.05f, t, 8, 2, 0.35f, 5.0f);
+            }
+            roll += 1.5708f;                              // decussate
+        }
+    }
+}
+
+// Mushrooms: a small cluster of capped fungi (stem + gills part 6, cap
+// part 7 = instance colour). Rigid - no sway.
+void build_mushrooms(std::vector<Vertex>& v, std::vector<uint32_t>& ix) {
+    g_seed = 0xF0461u;
+    const int n = 5;
+    for (int i = 0; i < n; ++i) {
+        const float a = 6.2831853f * grnd(), r = i == 0 ? 0.0f : 0.05f + 0.08f * grnd();
+        const glm::vec3 b(std::cos(a) * r, -0.01f, std::sin(a) * r);
+        const float s = (i == 0 ? 1.25f : 0.55f + 0.6f * grnd());
+        const glm::vec3 ax = glm::normalize(glm::vec3(std::cos(a) * 0.18f * r / 0.13f, 1.0f, std::sin(a) * 0.18f * r / 0.13f));
+        const float sh = 0.055f * s * (0.8f + 0.4f * grnd());   // stem height
+        const float cr = 0.026f * s * (0.8f + 0.5f * grnd());   // cap radius
+        // Stem: slightly bulbous foot, tapering up.
+        plant_lathe(v, ix, b, ax, { { 0.0f, -0.004f }, { 0.0075f * s, 0.0f }, { 0.0068f * s, sh * 0.4f },
+                                    { 0.0056f * s, sh } }, 8, 6.0f);
+        // Gills: the cap underside, from the stem out to the rim.
+        const glm::vec3 c = b + ax * sh;
+        plant_lathe(v, ix, c, ax, { { 0.0056f * s, 0.0f }, { cr * 0.6f, -0.002f }, { cr, -0.004f } }, 12, 6.0f);
+        // Cap: rim curled under, domed top (flatter on older ones).
+        const float dome = 0.55f + 0.35f * grnd();
+        plant_lathe(v, ix, c, ax, { { cr, -0.0042f }, { cr * 1.03f, 0.0f }, { cr * 0.93f, cr * 0.32f * dome },
+                                    { cr * 0.68f, cr * 0.62f * dome }, { cr * 0.32f, cr * 0.80f * dome },
+                                    { 0.0f, cr * 0.84f * dome } }, 12, 7.0f);
+    }
+}
+
 // Sort instances by 32 m ground cell and emit one contiguous range per
 // cell with a conservative AABB (instance size + raymarch-surface offset).
 void sort_into_cells(std::vector<ScatterInstance>& v, uint32_t base,
@@ -635,6 +816,14 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             case 4: build_herb(pv, pi, { 0.48f, 6, 4, 0.16f, 0.018f, false, 2, 0.14f, 16, 0.050f, 0.20f, 0.45f, 0, 0.3f, 137.5f, 62.0f, 0.0f, 9u }); break;   // cornflower: thin rays, branched
             case 5: build_herb(pv, pi, { 0.26f, 4, 3, 0.13f, 0.045f, false, 3, 0.09f, 5, 0.034f, 0.70f, 1.10f, 0, 0.3f, 137.5f, 62.0f, 0.0f, 11u }); break;  // buttercup: loose cyme of small cups
             case 7: build_reed(pv, pi); break;
+            case 8:  build_clover(pv, pi); break;
+            case 9:  build_plantain(pv, pi); break;
+            case 10: build_dandelion(pv, pi); break;
+            case 11: build_nettle(pv, pi); break;
+            // foxglove: tall one-sided spike of drooping bells; thistle: branched, purple tufts
+            case 12: build_herb(pv, pi, { 0.95f, 4, 4, 0.24f, 0.060f, false, 0, 0.10f, 6, 0.030f, -1.2f, 1.0f, 14, 0.55f, 22.0f, 105.0f, 0.35f, 17u }); break;
+            case 13: build_herb(pv, pi, { 0.62f, 6, 5, 0.17f, 0.030f, false, 2, 0.12f, 30, 0.026f, 2.4f, 0.35f, 0, 0.3f, 137.5f, 62.0f, 0.0f, 19u }); break;
+            case 14: build_mushrooms(pv, pi); break;
             case 6: build_herb(pv, pi, { 0.66f, 4, 4, 0.20f, 0.040f, true, 0, 0.10f, 5, 0.030f, 0.45f, 0.95f, 12, 0.48f, 137.5f, 58.0f, 0.0f, 13u }); break;  // lupin: palmate leaves, dense spike
             }
             s.plant_mesh[sp] = create_mesh_from_data(device, alloc, queue, queue_family,
@@ -721,6 +910,113 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             }
         }
 
+        // ---- Ground cover. Ecology, the way open-world games layer it:
+        // meadows get clover drifts, plantain and dandelions (plantain also
+        // crowds trampled path edges); forest edges nettle clumps and
+        // foxgloves; the shaded forest floor mushroom clusters; thistles
+        // stand alone in rough grass. `cover` = how much tree crown is
+        // overhead (0 open .. 1 under a canopy), from a 4 m grid. ----
+        {
+            const float gd = glm::clamp(params.ground_density, 0.0f, 3.0f);
+            const int G = int(std::ceil(2.0f * ext / 4.0f));
+            std::vector<float> cover(size_t(G) * size_t(G), 0.0f);
+            if (params.trees) {
+                for (const glm::vec3& t : *params.trees) {
+                    const float R = t.z * 1.35f + 2.0f;
+                    const int x0 = std::max(0, int((t.x - R + ext) / 4.0f)), x1 = std::min(G - 1, int((t.x + R + ext) / 4.0f));
+                    const int z0 = std::max(0, int((t.y - R + ext) / 4.0f)), z1 = std::min(G - 1, int((t.y + R + ext) / 4.0f));
+                    for (int gz = z0; gz <= z1; ++gz)
+                        for (int gx = x0; gx <= x1; ++gx) {
+                            const float cx = -ext + (float(gx) + 0.5f) * 4.0f, cz = -ext + (float(gz) + 0.5f) * 4.0f;
+                            const float d = std::sqrt((cx - t.x) * (cx - t.x) + (cz - t.y) * (cz - t.y));
+                            float& c = cover[size_t(gz) * size_t(G) + size_t(gx)];
+                            c = std::min(1.0f, c + std::max(0.0f, 1.0f - d / R));
+                        }
+                }
+            }
+            auto cover_at = [&](float x, float z) {
+                const float fx = (x + ext) / 4.0f - 0.5f, fz = (z + ext) / 4.0f - 0.5f;
+                const int ix0 = std::clamp(int(std::floor(fx)), 0, G - 2), iz0 = std::clamp(int(std::floor(fz)), 0, G - 2);
+                const float tx = glm::clamp(fx - float(ix0), 0.0f, 1.0f), tz = glm::clamp(fz - float(iz0), 0.0f, 1.0f);
+                auto C = [&](int a, int b) { return cover[size_t(b) * size_t(G) + size_t(a)]; };
+                return glm::mix(glm::mix(C(ix0, iz0), C(ix0 + 1, iz0), tx), glm::mix(C(ix0, iz0 + 1), C(ix0 + 1, iz0 + 1), tx), tz);
+            };
+            auto gpatch = [&](float x, float z, float f, float seed) {
+                return hash31(glm::vec3(std::floor(x * f), seed, std::floor(z * f))) * 0.6f +
+                       hash31(glm::vec3(std::floor(x * f * 3.1f), seed + 9.0f, std::floor(z * f * 3.1f))) * 0.4f;
+            };
+            const int tries = int(520000.0f * gd);
+            for (int i = 0; i < tries; ++i) {
+                const float wx = (u01(rng) * 2.0f - 1.0f) * ext;
+                const float wz = (u01(rng) * 2.0f - 1.0f) * ext;
+                if (std::abs(wx) < params.keep_out_xz.x && std::abs(wz) < params.keep_out_xz.y) continue;
+                float road_d = 1e9f;
+                if (params.road && wx > params.road->bb_min.x - 4.0f && wx < params.road->bb_max.x + 4.0f &&
+                    wz > params.road->bb_min.y - 4.0f && wz < params.road->bb_max.y + 4.0f)
+                    road_d = params.road->distance(wx, wz) - params.road->half_width;
+                if (road_d < 0.35f) continue;                                      // never on the paving
+                const float h = h_at(wx, wz);
+                if (h < params.water_level + 0.5f || h > params.rock_band_h + 3.0f) continue;
+                if (n_y_at(wx, wz) < 0.80f) continue;
+                const float cv = cover_at(wx, wz);
+                const float edge = std::max(0.0f, 1.0f - std::abs(cv - 0.35f) / 0.35f);   // forest margin, peaks at cover 0.35
+                const float verge = 1.0f - glm::smoothstep(0.4f, 3.0f, road_d);           // trampled path edge
+                const float r = u01(rng);
+                int sp = -1;
+                // Weighted pick (probability per try; the try count carries
+                // the density slider): the weights encode where each grows.
+                float w[7];
+                w[0] = (cv < 0.30f && gpatch(wx, wz, 0.07f, 21.0f) > 0.45f) ? 0.40f : 0.0f;                 // clover drifts
+                w[1] = (gpatch(wx, wz, 0.09f, 22.0f) > 0.35f ? 0.06f : 0.015f) * (1.0f - cv) + 0.30f * verge;  // plantain (+ path edges)
+                w[2] = (cv < 0.35f && gpatch(wx, wz, 0.06f, 23.0f) > 0.30f) ? 0.05f : 0.0f;               // dandelion
+                w[3] = gpatch(wx, wz, 0.12f, 24.0f) > 0.45f ? 0.07f * edge : 0.0f;                        // nettle clumps
+                w[4] = 0.014f * edge;                                                                   // foxglove
+                w[5] = cv < 0.2f ? 0.0035f : 0.0f;                                                      // lone thistles
+                w[6] = (cv > 0.45f && gpatch(wx, wz, 0.15f, 25.0f) > 0.58f) ? 0.035f * cv : 0.0f;          // fungi
+                float acc = 0.0f;
+                for (int k = 0; k < 7; ++k) { acc += w[k]; if (r < acc) { sp = 8 + k; break; } }
+                if (sp < 0) continue;
+                ScatterInstance si{};
+                float sc = 0.85f + 0.4f * u01(rng);
+                if (sp == 8) sc = 0.8f + 0.5f * u01(rng);
+                if (sp == 11 || sp == 12) sc = 0.8f + 0.45f * u01(rng);
+                si.pos_scale = glm::vec4(wx, h - (sp == 14 ? 0.01f : 0.015f), wz, sc);
+                glm::vec3 col;
+                switch (sp) {
+                case 8:  col = u01(rng) < 0.8f ? glm::vec3(0.88f, 0.86f, 0.80f) : glm::vec3(0.85f, 0.55f, 0.65f); break;   // white / pink clover
+                case 10: col = glm::vec3(0.98f, 0.74f, 0.04f) * (0.9f + 0.15f * u01(rng)); break;
+                case 12: col = glm::mix(glm::vec3(0.80f, 0.32f, 0.62f), glm::vec3(0.62f, 0.25f, 0.70f), u01(rng)); break;
+                case 13: col = glm::vec3(0.58f, 0.22f, 0.62f) * (0.85f + 0.3f * u01(rng)); break;
+                case 14: {
+                    const float k = u01(rng);
+                    col = k < 0.08f ? glm::vec3(0.72f, 0.10f, 0.05f)                        // the odd red one
+                        : glm::mix(glm::vec3(0.50f, 0.33f, 0.18f), glm::vec3(0.68f, 0.56f, 0.40f), u01(rng));
+                    break;
+                }
+                default: col = glm::vec3(0.6f, 0.6f, 0.6f); break;                          // leaf-only: tint unused
+                }
+                si.rot_tint = glm::vec4(u01(rng) * glm::two_pi<float>(), col.x, col.y, col.z);
+                per[sp].push_back(si);
+            }
+        }
+
+        // Lift for the raymarched ground relief (raymarch_ground_relief):
+        // packed as whole turns of the Y rotation (4 mm steps), which the
+        // vertex shaders read back with floor(rot / 2 pi) and fade with
+        // distance exactly like the relief itself (10 - 26 m). Without it the
+        // relief (~0.17 m on average) swallowed clover and plantain close by.
+        for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp)
+            for (ScatterInstance& si : per[sp]) {
+                const float x = si.pos_scale.x, z = si.pos_scale.z;
+                float d = raymarch_ground_relief(x, z, h_at(x, z), params.water_level);
+                if (params.road && x > params.road->bb_min.x - 2.0f && x < params.road->bb_max.x + 2.0f &&
+                    z > params.road->bb_min.y - 2.0f && z < params.road->bb_max.y + 2.0f)
+                    d *= glm::smoothstep(params.road->half_width + 0.1f, params.road->half_width + 0.9f,
+                                         params.road->distance(x, z));
+                const float q = std::clamp(std::floor(d / 0.004f + 0.5f), 0.0f, 120.0f);
+                si.rot_tint.x = std::fmod(si.rot_tint.x, glm::two_pi<float>()) + glm::two_pi<float>() * q;
+            }
+
         std::vector<ScatterInstance> all;
         for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {
             s.plant_first[sp] = uint32_t(all.size());
@@ -753,6 +1049,9 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
         log::infof("[scatter] plants: %u ferns, %u daisies, %u poppies, %u bluebells, %u cornflowers, %u buttercups, %u lupins, %u reeds",
                    s.plant_count[0], s.plant_count[1], s.plant_count[2], s.plant_count[3],
                    s.plant_count[4], s.plant_count[5], s.plant_count[6], s.plant_count[7]);
+        log::infof("[scatter] ground: %u clover, %u plantain, %u dandelion, %u nettle, %u foxglove, %u thistle, %u fungi",
+                   s.plant_count[8], s.plant_count[9], s.plant_count[10], s.plant_count[11],
+                   s.plant_count[12], s.plant_count[13], s.plant_count[14]);
     }
 
     if (inst.empty()) return s;

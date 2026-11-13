@@ -10,7 +10,7 @@ layout(location = 4) in vec4 inRotTint;
 layout(push_constant) uniform PC {
     mat4 light_vp;
     vec4 cam;        // .xyz camera, .w radius
-    vec4 p;          // .x wind time, .y plant (sway) flag, .z colour-pass draw distance
+    vec4 p;          // .x wind time, .y plant (sway) flag, .z colour-pass draw distance, .w raymarched-terrain lift
 } pc;
 void main() {
     // Leaf blades (part 3) pack sway base + along-leaf coordinate in uv.y.
@@ -28,6 +28,8 @@ void main() {
     float max_d = max(pc.p.z, 10.0);
     float reach = max_d * clamp(s * 2.2 + 0.22, 0.22, 0.85);
     float fade = 1.0 - smoothstep(reach * 0.75, reach, dist);
+    if (pc.p.y > 0.5 && pc.p.w > 0.5)   // ground-relief lift (scatter.vert)
+        base.y += floor(inRotTint.x / 6.2831853) * 0.004 * (1.0 - smoothstep(10.0, 26.0, dist));
     if (fade < 0.03) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;

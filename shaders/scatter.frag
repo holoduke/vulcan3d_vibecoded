@@ -112,15 +112,31 @@ void main() {
         albedo *= 1.0 - 0.5 * clamp(stone_cav, 0.0, 1.0);
         albedo = mix(albedo, albedo * vec3(0.52, 0.47, 0.38), stone_ground * 0.85);
     }
+    int part = plant ? int(vUv.x + 0.5) : -1;
     if (plant) {
         // Part colours: stems / leaves green (ferns carry their own
         // tint), petals = instance colour, flower centre golden.
-        int part = int(vUv.x + 0.5);
         bool fern = vColor.g > vColor.r * 1.5 && vColor.g > vColor.b * 1.5 && vColor.g < 0.35;
         bool reed = vColor.r > 0.28 && vColor.r < 0.5 && vColor.g > 0.3 && vColor.b < 0.25 && vColor.g < vColor.r * 1.25;
         vec3 leaf = fern ? vColor : vec3(0.11, 0.22, 0.05);
         leaf *= 0.8 + 0.4 * vUv.y;                // tips catch more light
         albedo = (part == 0) ? leaf : (part == 1 ? vColor : vec3(0.75, 0.55, 0.04));
+        if (part == 6) {
+            // Mushroom stem + gills: pale cream, fibrous streaks, gills darker.
+            float gn = fract(sin(dot(floor(wpos * vec3(420.0, 60.0, 420.0)), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+            albedo = vec3(0.70, 0.64, 0.52) * (0.85 + 0.25 * gn);
+            albedo *= mix(0.55, 1.0, smoothstep(-0.3, 0.6, N.y + 0.6));   // undersides (gills) in their own shade
+        }
+        if (part == 7) {
+            // Mushroom cap: instance colour, paler toward the rim, fine
+            // mottling; red ones get the white flecks of a fly agaric.
+            float m1 = fract(sin(dot(floor(wpos * 160.0), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+            albedo = vColor * (0.88 + 0.22 * m1) * mix(1.0, 1.25, smoothstep(0.55, 1.0, N.y < 0.9 ? 1.0 - N.y : 0.0));
+            if (vColor.r > 0.6 && vColor.g < 0.2) {
+                float fl = fract(sin(dot(floor(wpos * 70.0), vec3(7.13, 157.1, 113.7))) * 43758.5453);
+                albedo = mix(albedo, vec3(0.86, 0.84, 0.78), step(0.86, fl) * smoothstep(0.2, 0.6, N.y));
+            }
+        }
         if (part == 5) {
             // Cattail head: dense, velvety, dark chocolate brown with fine
             // vertical grain and a slightly lighter, worn top.
@@ -195,6 +211,7 @@ void main() {
         vec2  Lh  = L.xz / max(length(L.xz), 1e-3);
         float side = rl > 1e-4 ? dot(rel / rl, Lh) : 0.0;  // +1 sun side .. -1 shade side
         float k    = smoothstep(0.0, 0.05 * sc, rl);
+        if (part >= 6) k *= 0.25;                         // mushrooms: solid caps keep their own shape
         float lit_side = mix(0.38, 1.10, smoothstep(-0.8, 0.7, side));
         float h01  = clamp((wpos.y - vInst.y) / (0.45 * sc), 0.0, 1.0);
         // Plant-level normal (the crown trick of the trees): bend the
@@ -224,7 +241,8 @@ void main() {
     outGBuffer0 = vec4(clamp(albedo, vec3(0.0), vec3(1.0)), 1.0 / 255.0);
     // Plants: flagged as leaves so the deferred pass lights them with the
     // foliage scattering model (wrap + transmission).
-    outGBuffer1 = vec4(_octa_encode(N), 0.6, plant ? 1.0 : 0.0);
+    // Mushrooms (parts 6 / 7) are solid vegetation: no leaf transmission.
+    outGBuffer1 = vec4(_octa_encode(N), 0.6, plant ? (part >= 6 ? 1.0 / 3.0 : 1.0) : 0.0);
     {
         vec2 current_uv = gl_FragCoord.xy * scene.viewport.zw;
         if (vPrevClip.w > 0.0) {

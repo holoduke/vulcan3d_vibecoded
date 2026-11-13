@@ -122,6 +122,11 @@ void main() {
     // sharpen whose neighbours are bilinear taps one low-res texel away
     // (continuous, unlike the gathered corners).
     vec3 c = lrCatmullRom(uv);
+    // Anti-ringing: clamp to the 2x2 bilinear neighbourhood. The 4x4
+    // Catmull-Rom footprint reaches sky texels two texels out (which the
+    // 2x2 depth-edge test below doesn't see); its negative outer lobes
+    // then overshot into a bright / dark halo along ridges against the sky.
+    c = clamp(c, min(min(cTL, cTR), min(cBR, cBL)), max(max(cTL, cTR), max(cBR, cBL)));
     float strength = pc.color.x;
     if (strength > 0.0 && pc.color.y > 0.5 && pc.color.z > 0.5) {
         vec2 lt = 1.0 / vec2(textureSize(u_lr_color, 0));

@@ -37,6 +37,9 @@ layout(set = 0, binding = 7) uniform sampler2DShadow u_sun_shadow_map;
 // Scene TLAS - RT sun shadow on blades (trees / castle / props are not
 // all in the raster shadow map).
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
+layout(set = 0, binding = 3) uniform sampler2D u_albedo[19];
+#define LEAF_ATLAS u_albedo[15]
+#include "leaf_rt.glsl"
 
 // Grass eligibility mask. R8 1024² — single source of truth shared
 // with terrain_raymarch.frag. CPU-baked from the same FBM (presence)
@@ -187,8 +190,26 @@ float terrainH_lod(vec2 wp, float ray_t) {
 
 // Backwards-compat: rest of the shader still calls sampleHeight.
 float sampleHeight(vec2 wp_xz) { return pc.emissive.x > 0.5 ? terrainH_mesh(wp_xz) : terrainH(wp_xz); }
+// Close-range ground relief of terrain_raymarch.frag (rm_ground_detail:
+// rills + side cracks + sand ripples, the dirt texture's displacement at
+// its mean; CPU twin raymarch_ground_relief). The raymarched ground
+// rises by it within 26 m, so the blades must too - otherwise their
+// lower ~17 cm vanished into the ground close to the camera.
+float grass_ground_relief(vec2 wp, float t, float h) {
+    float w = 1.0 - smoothstep(10.0, 26.0, t);
+    if (w <= 0.0 || pc.emissive.x > 0.5) return 0.0;   // mesh terrain: no relief
+    float wn = noised(wp * 0.21).x;
+    vec2  q  = wp * 0.55 + vec2(wn, 1.0 - wn) * 1.7;
+    float g1 = 1.0 - smoothstep(0.0, 0.22, abs(noised(q).x * 2.0 - 1.0));
+    float g2 = 1.0 - smoothstep(0.0, 0.25, abs(noised(q * 2.7 + 3.1).x * 2.0 - 1.0));
+    float d = 0.11 * (1.0 - g1) + 0.045 * (1.0 - g2) + 0.045;
+    float sand = 1.0 - smoothstep(scene.water_params.y + 0.4, scene.water_params.y + 2.5, h);
+    d += sand * 0.03 * (0.5 + 0.5 * sin(dot(wp, vec2(9.0, 3.5)) + 6.0 * wn));
+    return d * w;
+}
 float sampleHeight_lod(vec2 wp_xz, float ray_t) {
-    return terrainH_lod(wp_xz, ray_t);
+    float h = terrainH_lod(wp_xz, ray_t);
+    return h + grass_ground_relief(wp_xz, ray_t, h);
 }
 
 // Hash helper still used by per-cell blade variation.
@@ -573,9 +594,9 @@ void main() {
     if (sun_lit > 0.0 && L.y > 0.0) {
         rayQueryEXT rq;
         rayQueryInitializeEXT(rq, topLevelAS,
-                              gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                              gl_RayFlagsTerminateOnFirstHitEXT,
                               0x01u, p + vec3(0.0, 0.04, 0.0), 0.3, L, 300.0);
-        while (rayQueryProceedEXT(rq)) {}
+        RQ_PROCEED_LEAVES(rq)
         if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT)
             sun_lit = 0.0;
     }

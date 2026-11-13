@@ -496,8 +496,15 @@ void VulkanEngine::collect_veg_rt_instances(glm::vec3 eye, uint32_t cap,
         const auto& v = veg_inst_cpu_[c.second];
         const size_t a = size_t(v.rot_arch_phase.y + 0.5f);
         const float ysq = v.rot_arch_phase.w > 0.0f ? v.rot_arch_phase.w : 1.0f;
+        // Exactly veg_cull.comp's measure: 3D distance to the crown centre
+        // and the same per-instance dither, so the shadow shape is the
+        // bucket that is drawn (horizontal distance picked a finer one
+        // looking down from hills, the missing dither one off at edges).
+        const float hh = a < veg_arch_.size() ? veg_arch_[a].height * 0.5f : 0.0f;
         const float r = (a < veg_arch_.size() ? veg_arch_[a].radius : 1.0f) * v.pos_scale.w * std::max(ysq, 1.0f) + 0.6f;
-        const float px = r / std::max(std::sqrt(c.first), 0.1f) * ppr;
+        const glm::vec3 cc = glm::vec3(v.pos_scale) + glm::vec3(0.0f, hh * v.pos_scale.w * ysq, 0.0f);
+        const float dither = glm::fract(v.rot_arch_phase.z * 2.7182818f) * 0.25f + 0.88f;
+        const float px = r / std::max(glm::distance(cc, eye), 0.1f) * ppr * dither;
         uint32_t lvl = px > 85.0f ? 0u : px > 40.0f ? 1u : px > 16.0f ? 2u : 3u;
         if (a < veg_arch_.size() && veg_arch_[a].species <= 2) {     // trees / bushes: same detail curve as veg_cull.comp
             const float detail = std::clamp(std::pow(px / (veg_arch_[a].species == 2 ? 25.0f : 60.0f), 1.2f), 0.03f, 1.0f);

@@ -48,6 +48,11 @@ void main() {
     float rot   = inRotTint.x;
 
     float dist = distance(base, scene.camera_pos.xyz);
+    // Plants on raymarched terrain: rise with its close-range ground
+    // relief (whole turns of `rot` = lift in 4 mm steps, scatter.cpp),
+    // faded over the same 10 - 26 m as terrain_raymarch.frag.
+    if (pc.grass_params.y > 0.5 && pc.grass_params.w > 0.5)
+        base.y += floor(rot / 6.2831853) * 0.004 * (1.0 - smoothstep(10.0, 26.0, dist));
     float max_d = max(pc.grass_params.x, 10.0);
     // Smooth shrink over the last 25% so the cull never pops; small
     // pebbles fade earlier than boulders (they're sub-pixel sooner).

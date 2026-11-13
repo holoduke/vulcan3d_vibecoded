@@ -484,13 +484,14 @@ void VulkanEngine::init_fog() {
         vkCmdClearColorImage(cb, fog_integ_.image, VK_IMAGE_LAYOUT_GENERAL, &clr, 1, &r);
         vkCmdPipelineBarrier2(cb, &di);
     });
-    const VkDescriptorType types[5] = {
+    const VkDescriptorType types[6] = {
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR };
+        VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER };   // 5: leaf atlas (card cut-outs)
     {
-        VkDescriptorSetLayoutBinding b[5]{};
-        for (int i = 0; i < 5; ++i) {
+        VkDescriptorSetLayoutBinding b[6]{};
+        for (int i = 0; i < 6; ++i) {
             b[i].binding = uint32_t(i);
             b[i].descriptorType = types[i];
             b[i].descriptorCount = 1;
@@ -498,11 +499,11 @@ void VulkanEngine::init_fog() {
         }
         VkDescriptorSetLayoutCreateInfo lci{};
         lci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        lci.bindingCount = 5; lci.pBindings = b;
+        lci.bindingCount = 6; lci.pBindings = b;
         vk_check(vkCreateDescriptorSetLayout(device_, &lci, nullptr, &fog_set_layout_), "fog set layout");
         VkDescriptorPoolSize sizes[] = {
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 },
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
         };
         VkDescriptorPoolCreateInfo pci{};
@@ -580,7 +581,17 @@ void VulkanEngine::dispatch_fog(VkCommandBuffer cmd) {
         w.pNext = &as;
         w.dstSet = fog_set_; w.dstBinding = 4; w.descriptorCount = 1;
         w.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+        // Leaf atlas (binding 5) rides along: it is loaded long before the
+        // first TLAS, and the shader alpha-tests leaf cards with it.
+        VkDescriptorImageInfo leaf_ii{ texture_sampler_, albedo_textures_[kTexLeaf].view,
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet wl{};
+        wl.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wl.dstSet = fog_set_; wl.dstBinding = 5; wl.descriptorCount = 1;
+        wl.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wl.pImageInfo = &leaf_ii;
+        const VkWriteDescriptorSet ws[2] = { w, wl };
+        vkUpdateDescriptorSets(device_, 2, ws, 0, nullptr);
         fog_tlas_bound_ = tlas_;
     }
     const FrameView& fv = current_frame_view_;

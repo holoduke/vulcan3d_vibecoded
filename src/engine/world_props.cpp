@@ -965,7 +965,7 @@ namespace {
 // shaders/rock_sdf.glsl (same hashes, same beds). The mesh is the hull
 // the ray march starts from, the ray-traced / shadow-map shadow caster,
 // and the source of the stepped colliders. ----
-float rk_h1(float x) { return glm::fract(std::sin(x * 12.9898f) * 437.585f); }
+float rk_h1(float x) { float p = glm::fract(x * 0.1031f); p *= p + 33.33f; p *= p + p; return glm::fract(p); }   // = rock_sdf.glsl
 struct SlabBed { float yc, th; glm::vec2 off; float ang[5], rad[5]; float r; };
 std::vector<SlabBed> slab_beds(float seed) {
     std::vector<SlabBed> beds;

@@ -9,6 +9,7 @@
 //   1 integrate - front-to-back along each froxel column -> (L, T)
 // compose.frag applies the integrated volume to every pixel by distance.
 #extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -17,6 +18,9 @@ layout(set = 0, binding = 1) uniform sampler3D u_inject;
 layout(set = 0, binding = 2, rgba16f) uniform writeonly image3D o_integ;
 layout(set = 0, binding = 3) uniform sampler3D u_noise;      // tileable Worley (cloud detail)
 layout(set = 0, binding = 4) uniform accelerationStructureEXT topLevelAS;
+layout(set = 0, binding = 5) uniform sampler2D u_leaf_atlas;   // leaf-card cut-outs (light shafts through canopies)
+#define LEAF_ATLAS u_leaf_atlas
+#include "leaf_rt.glsl"
 
 layout(push_constant) uniform PC {
     mat4 inv_vp;
@@ -64,9 +68,9 @@ void inject(ivec3 c) {
     vec3 sun = normalize(pc.sun.xyz);
     if (sun.y > -0.05 && dens > 1e-6) {
         rayQueryEXT rq;
-        rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+        rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsTerminateOnFirstHitEXT,
                               0x01u, p, 0.05, sun, 600.0);
-        while (rayQueryProceedEXT(rq)) {}
+        RQ_PROCEED_LEAVES(rq)
         vis = (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.0;
     }
     float ph = hg(dot(rd, sun), pc.params.z);
