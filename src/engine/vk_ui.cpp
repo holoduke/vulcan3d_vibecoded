@@ -1303,6 +1303,9 @@ void VulkanEngine::build_menu_ui() {
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Extra blades close to the camera; fades out by about 10 m.");
             ImGui::SliderFloat("grass edge softness", &rt_.grass_edge_softness, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("How gradually grass thins out and shortens at the border of a patch.");
+            ImGui::SeparatorText("Tree detail");
+            ImGui::SliderFloat("tree / bush detail", &rt_.veg_lod_bias, 0.5f, 4.0f, "%.2fx");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How far out trees and bushes keep their full branches and leaves.\n1 = default, 2 = full detail twice as far (more triangles), <1 = faster.");
             ImGui::SeparatorText("Plant draw distance");
             ImGui::SliderFloat("flowers + ferns (m)", &rt_.flower_draw_distance, 10.0f, 200.0f, "%.0f");
             ImGui::SliderFloat("ground plants (m)", &rt_.ground_draw_distance, 10.0f, 200.0f, "%.0f");

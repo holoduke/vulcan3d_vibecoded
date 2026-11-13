@@ -311,6 +311,7 @@ void VulkanEngine::visit_settings(Self& s, F&& f) {
     f("bush_density", s.rt_.bush_density);
     f("flower_density", s.rt_.flower_density);
     f("ground_density", s.rt_.ground_density);
+    f("veg_lod_bias", s.rt_.veg_lod_bias);
     f("flower_draw_distance", s.rt_.flower_draw_distance);
     f("ground_draw_distance", s.rt_.ground_draw_distance);
     f("reed_draw_distance", s.rt_.reed_draw_distance);
