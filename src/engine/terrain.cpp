@@ -587,6 +587,12 @@ void rebuild_chunk_vertices(VkDevice device, VmaAllocator alloc, VkQueue queue,
 } // namespace qlike
 
 namespace qlike {
+float road_edge_jitter(float x, float z) {
+    // = terrain_raymarch.frag road weights: jit (keep in sync).
+    glm::vec2 d;
+    const glm::vec2 q(x, z);
+    return (rm_noised(q * 1.7f, d) - 0.5f) * 0.45f + (rm_noised(q * 0.31f + glm::vec2(17.0f), d) - 0.5f) * 0.6f;
+}
 float raymarch_ground_relief(float x, float z, float h, float water_level) {
     // Mirror of terrain_raymarch.frag rm_ground_detail() (keep in sync).
     auto noise2 = [](glm::vec2 p) { glm::vec2 d; return rm_noised(p, d); };

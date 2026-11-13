@@ -169,7 +169,8 @@ GrassMesh build_grass(VkDevice device, VmaAllocator alloc, VkQueue queue,
         if (params.road && !params.road->empty() &&
             wx > params.road->bb_min.x && wx < params.road->bb_max.x &&
             wz > params.road->bb_min.y && wz < params.road->bb_max.y &&
-            params.road->distance(wx, wz) < params.road->half_width + params.road->shoulder + 0.5f) {
+            params.road->distance(wx, wz) + 1.6f * road_edge_jitter(wx, wz) <
+                params.road->half_width + params.road->shoulder + 0.5f) {
             continue;
         }
 

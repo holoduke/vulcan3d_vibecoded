@@ -760,7 +760,7 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             std::abs(wz) < params.keep_out_xz.y) continue;
         if (params.road && wx > params.road->bb_min.x && wx < params.road->bb_max.x &&
             wz > params.road->bb_min.y && wz < params.road->bb_max.y &&
-            params.road->distance(wx, wz) <
+            params.road->distance(wx, wz) + 1.6f * road_edge_jitter(wx, wz) <
                 params.road->half_width + params.road->shoulder + 0.6f) continue;
         float h = h_at(wx, wz);
         if (h < params.water_level + 0.4f) continue;     // not in/at water
@@ -838,7 +838,7 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
             if (std::abs(wx) < params.keep_out_xz.x && std::abs(wz) < params.keep_out_xz.y) continue;
             if (params.road && wx > params.road->bb_min.x && wx < params.road->bb_max.x &&
                 wz > params.road->bb_min.y && wz < params.road->bb_max.y &&
-                params.road->distance(wx, wz) < params.road->half_width + 0.4f) continue;
+                params.road->distance(wx, wz) + road_edge_jitter(wx, wz) < params.road->half_width + 0.4f) continue;
             float h = h_at(wx, wz);
             if (h < params.water_level + 0.6f || h > params.rock_band_h + 5.0f) continue;
             float ny = n_y_at(wx, wz);
@@ -953,7 +953,7 @@ ScatterSet build_scatter(VkDevice device, VmaAllocator alloc, VkQueue queue,
                 float road_d = 1e9f;
                 if (params.road && wx > params.road->bb_min.x - 4.0f && wx < params.road->bb_max.x + 4.0f &&
                     wz > params.road->bb_min.y - 4.0f && wz < params.road->bb_max.y + 4.0f)
-                    road_d = params.road->distance(wx, wz) - params.road->half_width;
+                    road_d = params.road->distance(wx, wz) + road_edge_jitter(wx, wz) - params.road->half_width;
                 if (road_d < 0.35f) continue;                                      // never on the paving
                 const float h = h_at(wx, wz);
                 if (h < params.water_level + 0.5f || h > params.rock_band_h + 3.0f) continue;

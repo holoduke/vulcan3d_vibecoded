@@ -243,10 +243,16 @@ game::LevelMesh& m, const EzTreeOptions& o, float max_detail, float target_heigh
     auto qprio = [](float p) { return std::floor(glm::clamp(p, 0.0f, 1.0f) * 1023.0f); };
 
     // ---- Branches: tubes through the section rings ----
-    const int stride = max_detail > 0.6f ? 1 : 2;
+    // Trunk and main limbs (levels 0-1) keep their full tessellation in
+    // every detail bucket: they are the big silhouettes, so losing sides or
+    // rings at a bucket switch was a visible pop (and they are cheap next
+    // to the leaves). Only thin twigs get coarser.
     for (const auto& b : g.branches) {
         if (sp(b.prio) > max_detail) continue;
-        const int segs = std::max(3, int(std::lround(float(b.segments) * glm::mix(0.5f, 1.0f, max_detail))));
+        const bool major = b.level <= 1;
+        const int stride = (major || max_detail > 0.6f) ? 1 : 2;
+        const int segs = major ? b.segments
+                               : std::max(3, int(std::lround(float(b.segments) * glm::mix(0.5f, 1.0f, max_detail))));
         std::vector<Section> ring;
         for (size_t i = 0; i < b.sections.size(); i += size_t(stride)) ring.push_back(b.sections[i]);
         if ((b.sections.size() - 1) % size_t(stride) != 0) ring.push_back(b.sections.back());

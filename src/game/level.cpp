@@ -759,9 +759,22 @@ glm::vec3 append_lamp_post(Level& lv, glm::vec3 base, glm::vec3 arm_dir, uint32_
     lp_beam(glass, lb + up * 0.004f, lt - up * 0.004f, lw * 0.93f, lw * 0.93f, 4, A, 1.0f, false);   // panes
     lp_beam(glass, lb + up * 0.02f, lb + up * 0.13f, 0.022f, 0.004f, 6, A, 1.0f, true);              // flame
 
-    lv.meshes.push_back(std::move(wood));
-    lv.meshes.push_back(std::move(iron));
-    lv.meshes.push_back(std::move(glass));
+    // All posts share three meshes (wood / iron / glass): 3 draws and 3
+    // BLAS geometries for the whole road instead of 3 per post.
+    auto merge = [&](LevelMesh&& m, auto same) {
+        for (LevelMesh& e : lv.meshes) {
+            if (!same(e)) continue;
+            const uint32_t off = uint32_t(e.verts.size());
+            e.verts.insert(e.verts.end(), m.verts.begin(), m.verts.end());
+            for (uint32_t i : m.idx) e.idx.push_back(i + off);
+            e.bmin = glm::min(e.bmin, m.bmin); e.bmax = glm::max(e.bmax, m.bmax);
+            return;
+        }
+        lv.meshes.push_back(std::move(m));
+    };
+    merge(std::move(wood),  [](const LevelMesh& e) { return e.tex_albedo == kWood && !e.full_emissive; });
+    merge(std::move(iron),  [](const LevelMesh& e) { return e.tex_albedo == kMetal && e.tint == glm::vec3(0.16f, 0.15f, 0.14f); });
+    merge(std::move(glass), [](const LevelMesh& e) { return e.full_emissive && e.emissive == glm::vec3(3.2f, 2.0f, 0.75f); });
     lv.aabbs.push_back({ base - glm::vec3(0.13f, 0.3f, 0.13f), base + glm::vec3(0.13f, H, 0.13f) });
     return lb + up * (lh * 0.5f);
 }

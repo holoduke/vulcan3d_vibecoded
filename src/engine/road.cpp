@@ -170,7 +170,8 @@ void clear_grass_mask(const Road& road, std::vector<uint8_t>& mask, int dim,
         for (int x = x0; x <= x1; ++x) {
             float wx = (x + 0.5f) * texel - world_side * 0.5f;
             float d = road.distance(wx, wz);
-            if (d > outer) continue;
+            if (d > outer + 1.0f) continue;
+            d += 1.6f * road_edge_jitter(wx, wz);       // follow the drawn verge edge
             float keep = smooth01(inner, outer, d);
             uint8_t& r = mask[(size_t(z) * dim + x) * 2];
             r = static_cast<uint8_t>(r * keep);

@@ -48,6 +48,14 @@ void carve_heights(const Road& road, Heightmap& hm);
 void clear_grass_mask(const Road& road, std::vector<uint8_t>& mask, int dim,
                       float world_side);
 
+// The noisy wobble terrain_raymarch.frag puts on the drawn road edges
+// (`jit` in its road weights): the paving ends where distance + jitter =
+// half_width, the dirt verge where distance + 1.6 * jitter ~ half_width +
+// shoulder. Placement (grass, plants, rocks) adds it to the plain centre-
+// line distance so nothing grows on the visible paving and the grass meets
+// the drawn verge. Defined in terrain.cpp (shares the shader noise twin).
+float road_edge_jitter(float x, float z);
+
 // Polyline for the shader: (x, y, z, 0) per point, at most `max_pts`
 // (re-sampled evenly along the length if the road has more).
 std::vector<glm::vec4> road_gpu_points(const Road& road, int max_pts);
