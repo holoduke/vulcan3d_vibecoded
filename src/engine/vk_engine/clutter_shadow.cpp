@@ -215,6 +215,8 @@ void VulkanEngine::render_clutter_shadow(VkCommandBuffer cmd) {
             vkCmdPushConstants(cmd, clutter_shadow_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
             for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {
                 if (!scatter_.plant_count[sp]) continue;
+                pc.p.z = plant_max_d(sp);   // same fade as the colour pass
+                vkCmdPushConstants(cmd, clutter_shadow_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                 VkBuffer b[2] = { scatter_.plant_mesh[sp].vertex_buffer, scatter_.plant_buffer };
                 vkCmdBindVertexBuffers(cmd, 0, 2, b, offs);
                 vkCmdBindIndexBuffer(cmd, scatter_.plant_mesh[sp].index_buffer, 0, VK_INDEX_TYPE_UINT32);

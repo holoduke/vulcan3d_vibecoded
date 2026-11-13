@@ -1252,6 +1252,12 @@ void VulkanEngine::build_menu_ui() {
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Extra blades close to the camera; fades out by about 10 m.");
             ImGui::SliderFloat("grass edge softness", &rt_.grass_edge_softness, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("How gradually grass thins out and shortens at the border of a patch.");
+            ImGui::SeparatorText("Plant draw distance");
+            ImGui::SliderFloat("flowers + ferns (m)", &rt_.flower_draw_distance, 10.0f, 200.0f, "%.0f");
+            ImGui::SliderFloat("ground plants (m)", &rt_.ground_draw_distance, 10.0f, 200.0f, "%.0f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clover, plantain, dandelions, nettles, foxgloves, thistles, mushrooms");
+            ImGui::SliderFloat("reeds (m)", &rt_.reed_draw_distance, 10.0f, 300.0f, "%.0f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Plants thin out over the last part of the range instead of all vanishing at once. Longer = slower.");
             ImGui::SeparatorText("Foliage density (restart to apply)");
             ImGui::SliderFloat("forest density", &rt_.forest_density, 0.0f, 2.0f, "%.2f");
             ImGui::SliderFloat("bush density", &rt_.bush_density, 0.0f, 2.0f, "%.2f");

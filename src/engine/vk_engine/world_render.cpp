@@ -896,6 +896,8 @@ void VulkanEngine::render_world(VkCommandBuffer cmd) {
                                0, sizeof(PushConstants), &ppc);
             for (int sp = 0; sp < ScatterSet::kPlantSpecies; ++sp) {
                 if (scatter_.plant_count[sp] == 0) continue;
+                ppc.grass_params.x = plant_max_d(sp);   // per-group draw distance (settings)
+                vkCmdPushConstants(cmd, pipeline_layout_, kPushConstantStages, 0, sizeof(PushConstants), &ppc);
                 VkBuffer pb[2] = { scatter_.plant_mesh[sp].vertex_buffer, scatter_.plant_buffer };
                 VkDeviceSize po[2] = { 0, 0 };
                 vkCmdBindVertexBuffers(cmd, 0, 2, pb, po);

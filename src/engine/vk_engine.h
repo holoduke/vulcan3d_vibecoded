@@ -1550,6 +1550,13 @@ private:
     void draw_vegetation(VkCommandBuffer cmd, bool depth_only);
     void destroy_vegetation();
     void collect_veg_rt_instances(glm::vec3 eye, uint32_t cap, std::vector<uint32_t>& out) const;
+    // Small-plant species draw distance for scatter.vert / clutter_shadow.vert
+    // (`max_d`: the shader fades plants out by 0.85 x max_d).
+    float plant_max_d(int species) const {
+        const float d = species == 7 ? rt_.reed_draw_distance
+                      : species >= 8 ? rt_.ground_draw_distance : rt_.flower_draw_distance;
+        return std::max(10.0f, d) / 0.85f;
+    }
     void init_castle_meshes();       // GPU upload (init_world)
     void build_castle_mesh_blas();   // BLAS per part (init_rt)
     void build_mesh_part_blas(std::vector<CastleMeshGpu>& parts);

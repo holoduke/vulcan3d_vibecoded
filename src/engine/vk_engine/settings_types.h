@@ -167,6 +167,10 @@ struct RtSettings {
         float forest_density       = 1.0f;
         float bush_density         = 1.0f;
         float flower_density       = 1.0f;
+        // Draw distances (m) of the small-plant groups (live).
+        float flower_draw_distance = 50.0f;    // ferns + flowers
+        float ground_draw_distance = 35.0f;    // clover, weeds, nettles, fungi
+        float reed_draw_distance   = 120.0f;   // shore reeds (tall: seen from afar)
         float ground_density       = 1.0f;   // ground cover: clover, weeds, nettles, fungi (0..3, restart)
         // Vegetation LOD bias: >1 keeps higher LODs further out.
         float veg_lod_bias         = 1.0f;
