@@ -676,20 +676,54 @@ float rm_road_dist(vec2 q) {         // distance to the road centreline (1e9 out
     return sqrt(best);
 }
 // Per-pixel cache: road distance is 1-Lipschitz, so d(q) >= d(q0) - |q - q0|.
-// Callers only need the exact value below `thr`; anything provably >= thr
-// skips the 63-segment loop (most march steps on most pixels).
+// Callers only need the exact value below `thr`:
+//  * far from the road: anything provably >= thr skips the loop;
+//  * near / on the road (the eye standing on it: every near-ground march
+//    step used to run all 63 segments): only the window of segments around
+//    the last nearest one is tested. That is exact as long as it beats
+//    the Lipschitz lower bound of every segment outside the window
+//    (g_rd_out - |q - q0|); otherwise the full loop runs and re-anchors.
 vec2  g_rd_q = vec2(1e9);
 float g_rd_v = -1e9;
-float rm_road_dist_thr(vec2 q, float thr) {
-    float lb = g_rd_v - length(q - g_rd_q);
-    if (lb >= thr) return lb;
-    float d = rm_road_dist(q);
-    // Outside the bbox rm_road_dist says 1e9 (not a distance): cache the
-    // distance to the box instead, a valid lower bound for re-entry.
-    vec2 ob = max(max(scene.road_bbox.xy - q, q - scene.road_bbox.zw), vec2(0.0));
-    g_rd_q = q; g_rd_v = d > 1e8 ? length(ob) : d;
-    return d;
+int   g_rd_i = -1;          // nearest segment at g_rd_q
+float g_rd_out = 0.0;       // min distance at g_rd_q to segments outside the window
+float rm_road_seg_d2(vec2 q, int i) {
+    vec2 a = scene.road_pts[i].xz, ab = scene.road_pts[i + 1].xz - a;
+    vec2 dv = q - (a + ab * clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0));
+    return dot(dv, dv);
 }
+float rm_road_dist_thr(vec2 q, float thr) {
+    float moved = length(q - g_rd_q);
+    float lb = g_rd_v - moved;
+    if (lb >= thr) return lb;
+    int rn = int(scene.road_info.x + 0.5);
+    const int kWin = 2;
+    if (g_rd_i >= 0) {
+        float d2 = 1e18;
+        for (int i = max(g_rd_i - kWin, 0); i <= min(g_rd_i + kWin, rn - 2); ++i) d2 = min(d2, rm_road_seg_d2(q, i));
+        float dl = sqrt(d2);
+        if (dl <= g_rd_out - moved) return dl;        // provably the true nearest
+    }
+    g_rd_i = -1;
+    if (rn < 2 || any(lessThan(q, scene.road_bbox.xy)) || any(greaterThan(q, scene.road_bbox.zw))) {
+        // Outside the bbox: cache the distance to the box, a valid lower
+        // bound for re-entry.
+        vec2 ob = max(max(scene.road_bbox.xy - q, q - scene.road_bbox.zw), vec2(0.0));
+        g_rd_q = q; g_rd_v = length(ob);
+        return 1e9;
+    }
+    float best = 1e18; int bi = 0;
+    for (int i = 0; i + 1 < rn && i < 63; ++i) {
+        float d2 = rm_road_seg_d2(q, i);
+        if (d2 < best) { best = d2; bi = i; }
+    }
+    float outd = 1e18;
+    for (int i = 0; i + 1 < rn && i < 63; ++i)
+        if (abs(i - bi) > kWin) outd = min(outd, rm_road_seg_d2(q, i));
+    g_rd_q = q; g_rd_v = sqrt(best); g_rd_i = bi; g_rd_out = sqrt(outd);
+    return g_rd_v;
+}
+float g_rm_ray_y = -1e9;   // see terrainM_lod
 float rm_ground_detail(vec2 wp, float t, float h) {
     float w = 1.0 - smoothstep(10.0, 26.0, t);
     if (w <= 0.0) return 0.0;
@@ -701,11 +735,17 @@ float rm_ground_detail(vec2 wp, float t, float h) {
         w *= smoothstep(keep + 0.1, keep + 0.9, rdist);
         if (w <= 0.0) return 0.0;
     }
-    float lod = log2(max(t * 2.0 * scene.viewport.w * 0.45 * 2048.0, 1.0));
-    float disp = textureLod(u_normal[9], wp * 0.45, lod).a;
     float wn = noise2(wp * 0.21);                      // one noise warps both axes
     vec2  q  = wp * 0.55 + vec2(wn, 1.0 - wn) * 1.7;
     float g1 = 1.0 - smoothstep(0.0, 0.22, abs(noise2(q) * 2.0 - 1.0));              // main rills
+    // While MARCHING (g_rm_ray_y set by raymarch()): the main rills only,
+    // side cracks / soil displacement at their means - two noise taps
+    // instead of three plus a texture fetch on every near-ground step. The
+    // hit point lands within ~5 cm of the full surface; the normal and the
+    // shading (called without the flag) still use the full relief.
+    if (g_rm_ray_y > -1e8) return (0.11 * (1.0 - g1) + 0.045 * 0.86 + 0.045) * w;
+    float lod = log2(max(t * 2.0 * scene.viewport.w * 0.45 * 2048.0, 1.0));
+    float disp = textureLod(u_normal[9], wp * 0.45, lod).a;
     float g2 = 1.0 - smoothstep(0.0, 0.25, abs(noise2(q * 2.7 + 3.1) * 2.0 - 1.0));  // side cracks
     float d = 0.11 * (1.0 - g1) + 0.045 * (1.0 - g2) + 0.09 * disp;
     float sand = 1.0 - smoothstep(scene.water_params.y + 0.4, scene.water_params.y + 2.5, h);
@@ -772,6 +812,12 @@ float terrainM(vec2 p) {
 //   emissive.z = lod_far_m  (lod_min_oct octaves above this distance)
 //   emissive.w = lod_min_oct (floor, typically 2..8)
 // Smoothstep ramp between the two endpoints.
+// Height of the primary ray at the point being evaluated (set by raymarch()
+// around its terrainM_lod calls, -1e9 otherwise = always exact). The close-
+// range ground relief is at most ~0.275 m: while the ray is further above
+// the base surface than that, its exact value cannot change the outcome,
+// so a constant upper bound replaces the 3 noise taps + texture fetch
+// (most march steps are in open air; this was ~40 % of the pass).
 float terrainM_lod(vec2 p, float ray_t) {
     vec2 wp = p;
     p *= TERRAIN_SCALE;
@@ -816,7 +862,11 @@ float terrainM_lod(vec2 p, float ray_t) {
     // ring. Skip the texture tap on far raymarch steps — biggest
     // single texture-bandwidth win on terrain pixels.
     h += sampleHeightDelta(wp);   // (reverted 80 m gate — no near/far seam)
-    h += rm_ground_detail(wp, ray_t, h) * (1.0 - tpl);
+    if (g_rm_ray_y - h > 0.34) {
+        h += 0.30 * (1.0 - smoothstep(10.0, 26.0, ray_t)) * (1.0 - tpl);   // conservative bound
+    } else {
+        h += rm_ground_detail(wp, ray_t, h) * (1.0 - tpl);
+    }
     return h;
 }
 
@@ -1028,7 +1078,9 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
             if (all(lessThan(abs(pos.xz), vec2(kHeightmapSide * 0.5 - 2.0))))
                 hm = pos.y - meshHeight(pos.xz) - kHmMargin;
             coarse = hm > 0.75;
+            if (!coarse) g_rm_ray_y = pos.y;
             h = coarse ? hm : pos.y - terrainM_lod(pos.xz, t);
+            g_rm_ray_y = -1e9;
             // On the road the marched surface IS the baked (levelled) one.
             // The FBM's extra octaves stand up to ~0.5 m proud of it; seen
             // from a low eye along the road they formed a lumpy, spiky
@@ -1041,7 +1093,9 @@ float raymarch(vec3 ro, vec3 rd, float t_max) {
             }
         }
 #else /* QLIKE_WATER */
+        g_rm_ray_y = pos.y;
         float h = pos.y - terrainM_lod(pos.xz, t);
+        g_rm_ray_y = -1e9;
 #endif /* QLIKE_WATER */
         // P7: loosen the hit threshold with distance. At grazing angle a
         // typical pixel covers 0.3-1 m of world space past 200 m, so

@@ -211,6 +211,14 @@ float sampleHeight_lod(vec2 wp_xz, float ray_t) {
     float h = terrainH_lod(wp_xz, ray_t);
     return h + grass_ground_relief(wp_xz, ray_t, h);
 }
+// March variant: while the ray is well above anything the relief (max
+// ~0.275 m) or a blade on it could reach, a constant upper bound replaces
+// the three noise taps (most steps are in open air).
+float sampleHeight_lod_ray(vec2 wp_xz, float ray_t, float ray_y) {
+    float h = terrainH_lod(wp_xz, ray_t);
+    if (ray_y - h > 1.6) return h + ((pc.emissive.x > 0.5) ? 0.0 : 0.30 * (1.0 - smoothstep(10.0, 26.0, ray_t)));
+    return h + grass_ground_relief(wp_xz, ray_t, h);
+}
 
 // Hash helper still used by per-cell blade variation.
 float hash12(vec2 p) {
@@ -284,7 +292,7 @@ struct MapCtx {
 float g_blade_rot = 0.0;
 float map(vec3 p, float ray_t, MapCtx ctx, out bool out_blade_hit) {
     out_blade_hit = false;
-    float terrainY = sampleHeight_lod(p.xz, ray_t);
+    float terrainY = sampleHeight_lod_ray(p.xz, ray_t, p.y);
     float distToTerrain = 0.5 * (p.y - terrainY);
 
     // Coarse guard: if we're far above terrain, skip the per-cell SDF
