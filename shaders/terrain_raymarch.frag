@@ -3209,6 +3209,10 @@ void main() {
         uvec3 seed_base = rm_pcg3d(uvec3(rm_q) +
                                    uvec3(0u, 0u, uint(int(log2(rm_cell)) + 64) * 7919u));
         seed_base.z = 0u;
+        // ...except under DLSS Ray Reconstruction (rt_flags.x bit 1): a
+        // temporal denoiser needs noise that changes every frame; the
+        // frozen grain read as texture and stayed as a blocky speckle.
+        if ((scene.rt_flags.x & 2) != 0) seed_base = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
 #else /* QLIKE_WATER */
         uvec3 seed_base = uvec3(gl_FragCoord.xy, scene.rt_flags.w);
 #endif /* QLIKE_WATER */

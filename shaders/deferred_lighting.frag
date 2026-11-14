@@ -425,6 +425,13 @@ void main() {
         seed_stable = pcg3d(uvec3(q) + uvec3(0u, 0u, uint(int(lvl) + 64) * 7919u));
         seed_stable.z = 0u;
     }
+    // DLSS Ray Reconstruction (rt_flags.x bit 1) is a temporal denoiser: it
+    // needs white noise that changes every frame. The frozen world grain
+    // above looked like surface texture to it, so the 1-2 sample shadows
+    // came out as a blocky speckle (spiky penumbra edges) that never
+    // converged. Per-pixel, per-frame seed there.
+    if ((scene.rt_flags.x & 2) != 0)
+        seed_stable = uvec3(uint(gl_FragCoord.x), uint(gl_FragCoord.y), uint(scene.rt_flags.w));
 
     // ---------------------------------------------------------------
     //  Sun direct
@@ -542,6 +549,8 @@ void main() {
             // the two halves alternated every frame and, without a TAA to
             // merge them under DLSS, the penumbra re-rolled each frame).
             int   parity  = int(seed_stable.y & 1u);
+            // Ray Reconstruction: alternate the halves per pixel AND per frame.
+            if ((scene.rt_flags.x & 2) != 0) parity = (ip2.x + ip2.y + scene.rt_flags.w) & 1;
             int   N_s_eff = max(1, (N_s + (parity == 0 ? 1 : 0)) / 2);
             N_s = N_s_eff;
             int taken = 0;
